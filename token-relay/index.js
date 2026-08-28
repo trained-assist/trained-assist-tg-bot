@@ -134,15 +134,27 @@ const server = http.createServer(async (req, res) => {
     const { code } = body;
     if (!code) return send(400, { error: 'code required' });
 
-    cleanupExpired();
     const normalized = String(code).replace(/\s/g, '');
+    const now = Date.now();
 
+    // Find before cleanup so we can distinguish expired vs never-existed
     let userId = null;
+    let foundExpired = false;
     for (const [uid, entry] of pairCodes) {
-      if (entry.code === normalized) { userId = uid; break; }
+      if (entry.code === normalized) {
+        if (entry.expiresAt > now) userId = uid;
+        else foundExpired = true;
+        break;
+      }
     }
 
-    if (!userId) return send(400, { error: 'Invalid or expired code' });
+    cleanupExpired();
+
+    if (!userId) {
+      return foundExpired
+        ? send(410, { error: 'code_expired' })
+        : send(400, { error: 'invalid_code' });
+    }
 
     const pairingToken = generatePairingToken();
     pairCodes.delete(userId);
