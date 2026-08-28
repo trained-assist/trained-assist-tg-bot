@@ -55,7 +55,8 @@ class SessionManager {
     } catch (e) { console.error('sessions persist error:', e.message); }
   }
 
-  // Create and launch a new tmux+claude session. Returns session name.
+  // Register a new session and create a tmux shell for terminal access.
+  // Does NOT invoke Claude — the caller (runner.js via runTask) handles that.
   async create(user, taskDescription) {
     const name = `s${user.id}-${Date.now()}`;
     const env = this.authManager.getSessionEnv();
@@ -63,16 +64,9 @@ class SessionManager {
 
     fs.mkdirSync(user.workDir, { recursive: true });
 
-    const taskFile = `/tmp/${name}.txt`;
-    fs.writeFileSync(taskFile, taskDescription);
-
     spawn('tmux', ['new-session', '-d', '-s', name, '-x', '220', '-y', '50',
       '-c', user.workDir,
     ], { env });
-
-    await this._sleep(300);
-    this._tmux(name, `claude --dangerously-skip-permissions < ${taskFile}`);
-    this._watchSession(name, user);
 
     if (!this._sessions.has(user.id)) this._sessions.set(user.id, new Map());
     this._sessions.get(user.id).set(name, {
@@ -132,6 +126,8 @@ class SessionManager {
     const tasks = [...userSessions.values()].map(s => s.taskDescription);
     for (const name of userSessions.keys()) {
       try { execSync(`tmux kill-session -t ${name} 2>/dev/null`); } catch {}
+      const iv = this._watchIntervals.get(name);
+      if (iv) { clearInterval(iv); this._watchIntervals.delete(name); }
     }
     userSessions.clear();
     const user = this._userRefs.get(userId);
