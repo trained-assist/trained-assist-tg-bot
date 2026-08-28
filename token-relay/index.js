@@ -6,6 +6,9 @@
  *   POST /pair                ← вызывает расширение (с кодом из Telegram)
  *   POST /save-token          ← вызывает расширение (токен сервиса → GCP Secret Manager)
  *   GET  /status/:userId      ← вызывает бот (auth: BOT_SECRET)
+ *   POST /queue-command       ← вызывает бот (auth: BOT_SECRET) — ставит команду в очередь расширению
+ *   HEAD /poll/:userId        ← вызывает расширение (auth: pairingToken) — 204 пусто / 200 есть команда
+ *   GET  /poll/:userId        ← вызывает расширение (auth: pairingToken) — забирает команду из очереди
  */
 
 const http = require('http');
@@ -22,6 +25,10 @@ if (!TELEGRAM_BOT_TOKEN) console.warn('WARNING: TELEGRAM_BOT_TOKEN not set — u
 const pairCodes = new Map();
 // userId → { token, createdAt }
 const pairTokens = new Map();
+// userId → Array<{ command, payload, createdAt, expiresAt }>
+const commandQueues = new Map();
+
+const COMMAND_TTL_MS = 30 * 60 * 1000; // команды живут 30 минут
 
 function generateCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
@@ -63,6 +70,27 @@ function readBody(req) {
 
 function isBotAuthed(req) {
   return BOT_SECRET && req.headers.authorization === `Bearer ${BOT_SECRET}`;
+}
+
+// Найти userId по pairingToken из Authorization header расширения
+function userIdByPairingToken(req) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return null;
+  const token = auth.slice(7);
+  for (const [uid, entry] of pairTokens) {
+    if (entry.token === token) return uid;
+  }
+  return null;
+}
+
+// Убрать истёкшие команды из очереди пользователя
+function pruneCommands(userId) {
+  const queue = commandQueues.get(userId);
+  if (!queue) return;
+  const now = Date.now();
+  const fresh = queue.filter(c => c.expiresAt > now);
+  if (fresh.length) commandQueues.set(userId, fresh);
+  else commandQueues.delete(userId);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -165,10 +193,67 @@ const server = http.createServer(async (req, res) => {
     return send(200, { connected });
   }
 
+  // ── POST /queue-command (bot → relay) ─────────────────────────────────────
+  // Ставит команду в очередь для расширения. Расширение заберёт при следующем poll.
+  // Body: { userId, command, payload? }
+  // Команды: fetch_token (payload: { site, description }), refresh_session, etc.
+
+  if (req.method === 'POST' && req.url === '/queue-command') {
+    if (!isBotAuthed(req)) return send(401, { error: 'Unauthorized' });
+
+    const { userId, command, payload } = body;
+    if (!userId || !command) return send(400, { error: 'userId and command required' });
+    if (!pairTokens.has(String(userId))) return send(404, { error: 'User not paired' });
+
+    if (!commandQueues.has(String(userId))) commandQueues.set(String(userId), []);
+    commandQueues.get(String(userId)).push({
+      command,
+      payload: payload || {},
+      createdAt: Date.now(),
+      expiresAt: Date.now() + COMMAND_TTL_MS,
+    });
+
+    console.log(`[relay] queued command="${command}" for userId=${userId}`);
+    return send(200, { ok: true, queued: commandQueues.get(String(userId)).length });
+  }
+
+  // ── HEAD /poll  GET /poll (extension → relay) ────────────────────────────
+  // Лёгкая проверка: есть ли команда в очереди?
+  // Auth: Authorization: Bearer {pairingToken}  — userId определяется по токену
+  // HEAD 204 = ничего нет (остаться в idle)
+  // HEAD 200 = есть команда (переключиться в fast mode, затем сделать GET /poll)
+  // GET  200 = { command, payload } — забирает и удаляет первую команду
+  // GET  204 = очередь пуста — вернуться в idle
+
+  if ((req.method === 'HEAD' || req.method === 'GET') && (req.url === '/poll' || req.url.startsWith('/poll?'))) {
+    const userId = userIdByPairingToken(req);
+    if (!userId) return send(401, { error: 'Unauthorized' });
+
+    pruneCommands(userId);
+    const queue = commandQueues.get(userId);
+    const hasPending = queue && queue.length > 0;
+
+    if (req.method === 'HEAD') {
+      // HEAD: только статус, без тела — минимальный трафик
+      res.writeHead(hasPending ? 200 : 204, {
+        'Access-Control-Allow-Origin': '*',
+        'X-Pending': hasPending ? '1' : '0',
+      });
+      return res.end();
+    }
+
+    // GET: вернуть и удалить первую команду из очереди
+    if (!hasPending) return send(204, null);
+    const cmd = queue.shift();
+    if (!queue.length) commandQueues.delete(userId);
+    console.log(`[relay] command delivered command="${cmd.command}" to userId=${userId}`);
+    return send(200, { command: cmd.command, payload: cmd.payload });
+  }
+
   // ── GET /healthz ────────────────────────────────────────────────────────────
 
   if (req.method === 'GET' && req.url === '/healthz') {
-    return send(200, { ok: true, pairs: pairTokens.size, pending: pairCodes.size });
+    return send(200, { ok: true, pairs: pairTokens.size, pendingCodes: pairCodes.size, commandQueues: commandQueues.size });
   }
 
   send(404, { error: 'Not found' });
