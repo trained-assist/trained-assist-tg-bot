@@ -1,0 +1,23 @@
+[Unit]
+Description=Chrome for vova (DevTools port 9222, display :99)
+After=xvfb-vova.service
+Requires=xvfb-vova.service
+
+[Service]
+Type=simple
+User=vova
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/google-chrome \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/home/vova/users/vova/chrome \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-extensions-except=/home/vova/users/vova/claude-in-chrome \
+  --load-extension=/home/vova/users/vova/claude-in-chrome
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

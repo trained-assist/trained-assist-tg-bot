@@ -1,0 +1,16 @@
+{
+  "name": "alesa-session-manager",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node tests/isolation.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@google-cloud/secret-manager": "^5.6.0",
+    "axios": "^1.7.0",
+    "telegraf": "^4.16.0"
+  }
+}

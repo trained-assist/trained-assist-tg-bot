@@ -1,0 +1,23 @@
+[Unit]
+Description=Chrome for alesa (DevTools port 9223, display :100)
+After=xvfb-alesa.service
+Requires=xvfb-alesa.service
+
+[Service]
+Type=simple
+User=vova
+Environment=DISPLAY=:100
+ExecStart=/usr/bin/google-chrome \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --remote-debugging-port=9223 \
+  --user-data-dir=/home/vova/users/alesa/chrome \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-extensions-except=/home/vova/users/alesa/claude-in-chrome \
+  --load-extension=/home/vova/users/alesa/claude-in-chrome
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

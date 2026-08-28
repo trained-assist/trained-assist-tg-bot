@@ -1,0 +1,13 @@
+[Unit]
+Description=Xvfb virtual display for alesa (display :100)
+After=network.target
+
+[Service]
+Type=simple
+User=vova
+ExecStart=/usr/bin/Xvfb :100 -screen 0 1920x1080x24
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
