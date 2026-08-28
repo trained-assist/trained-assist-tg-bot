@@ -6,7 +6,7 @@ const logBuffer = require('./log-buffer');
 const MAX_LEN = 3800;
 const EDIT_INTERVAL = 3000;
 
-async function runTask({ user, task, authManager, telegram, chatId, context }) {
+async function runTask({ user, task, authManager, telegram, chatId, context, filesToCleanup = [] }) {
   const taskId = randomBytes(4).toString('hex');
   logBuffer.createTask(taskId, task.slice(0, 80));
 
@@ -101,6 +101,10 @@ async function runTask({ user, task, authManager, telegram, chatId, context }) {
 
       for (let i = 1; i < chunks.length; i++) {
         await telegram.sendMessage(chatId, chunks[i]);
+      }
+
+      for (const f of filesToCleanup) {
+        try { require('fs').unlinkSync(f); } catch {}
       }
 
       resolve(result);

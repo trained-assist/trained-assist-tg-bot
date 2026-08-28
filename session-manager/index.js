@@ -106,7 +106,7 @@ async function main() {
     ctx.reply(
       `👋 Привет, ${ctx.alesakUser.name}!\n\n` +
       `Просто пиши задачи — я запущу Claude Code и верну результат.\n\n` +
-      `Команды:\n/sessions — управление сессиями\n/me — твой профиль\n/terminal — веб-терминал\n/status — текущий статус\n/privacy — как хранятся твои данные`
+      `Команды:\n/sessions — управление сессиями\n/me — твой профиль\n/terminal — веб-терминал\n/status — текущий статус\n/version — версия бота\n/privacy — как хранятся твои данные`
     );
   });
 
@@ -165,6 +165,24 @@ async function main() {
     const profile = profiles.load(user);
     profiles.save(user, { ...profile, preferences: text });
     ctx.reply('✅ Предпочтения сохранены.');
+  });
+
+  // ── /version ───────────────────────────────────────────────────────────────
+
+  const BOOT_TIME = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const GIT_HASH = (() => {
+    try { return require('child_process').execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim(); }
+    catch { return 'unknown'; }
+  })();
+
+  bot.command('version', (ctx) => {
+    ctx.reply(
+      `🤖 *Alesa*\n` +
+      `Commit: \`${GIT_HASH}\`\n` +
+      `Запущен: ${BOOT_TIME} UTC\n` +
+      `Auth: ${auth.currentMode() === MODE.APIKEY ? '💳 API Key' : '👤 OAuth'}`,
+      { parse_mode: 'Markdown' }
+    );
   });
 
   // ── /privacy ───────────────────────────────────────────────────────────────
@@ -321,7 +339,7 @@ async function main() {
         const fullText = imageFilePath ? `${text}\n\n[Изображение: ${imageFilePath}]` : text;
         const sessData = sessions.list(user.id).find(([n]) => n === sessionName)?.[1];
         const context = buildSessionContext(user, sessData);
-        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context });
+        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context, filesToCleanup: imageFilePath ? [imageFilePath] : [] });
         saveExchange(user.id, sessionName, text, result);
         return;
       }
@@ -333,7 +351,7 @@ async function main() {
         const fullText = imageFilePath ? `${text}\n\n[Изображение сохранено в: ${imageFilePath}]` : text;
         const sessionName = await sessions.create(user, fullText);
         const context = buildSessionContext(user, null);
-        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context });
+        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context, filesToCleanup: imageFilePath ? [imageFilePath] : [] });
         saveExchange(user.id, sessionName, text, result);
         await bot.telegram.sendMessage(chatId, `📁 Сессия: \`${sessionName}\``, { parse_mode: 'Markdown' });
         return;
@@ -344,7 +362,7 @@ async function main() {
         const fullText = imageFilePath ? `${text}\n\n[Изображение: ${imageFilePath}]` : text;
         const sessData = sessions.list(user.id).find(([n]) => n === sessionName)?.[1];
         const context = buildSessionContext(user, sessData);
-        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context });
+        const result = await runTask({ user, task: fullText, authManager: auth, telegram: bot.telegram, chatId, context, filesToCleanup: imageFilePath ? [imageFilePath] : [] });
         saveExchange(user.id, sessionName, text, result);
         return;
       }
