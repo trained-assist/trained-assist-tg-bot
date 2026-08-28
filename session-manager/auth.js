@@ -25,11 +25,12 @@ const AUTH_URL_RE = /https:\/\/claude\.ai\/[^\s\n]+/;
 const AUTH_FAIL_RE = /not logged in|please run.*\/login|authentication (failed|required)|invalid.*api.?key|please log in|unauthorized|401/i;
 
 class AuthManager {
-  constructor({ bot, chatId, apiKey, authSyncUrl, onAuthRestored }) {
+  constructor({ bot, chatId, apiKey, authSyncUrl, authSyncSecret, onAuthRestored }) {
     this.bot = bot;
     this.chatId = chatId;
     this.apiKey = apiKey;
     this.authSyncUrl = authSyncUrl || null; // URL of local Mac sync server
+    this.authSyncSecret = authSyncSecret || null;
     this.onAuthRestored = onAuthRestored;
 
     this.mode = MODE.OAUTH;
@@ -76,7 +77,8 @@ class AuthManager {
       try {
         const url = new URL(this.authSyncUrl);
         const mod = url.protocol === 'https:' ? https : http;
-        const body = JSON.stringify({ secret: 'alesa-sync-2026' });
+        if (!this.authSyncSecret) { resolve(false); return; }
+        const body = JSON.stringify({ secret: this.authSyncSecret });
         const req = mod.request({
           hostname: url.hostname,
           port: url.port || (url.protocol === 'https:' ? 443 : 80),

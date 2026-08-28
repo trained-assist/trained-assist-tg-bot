@@ -138,8 +138,8 @@ function createServer() {
     res.end(HTML);
   });
 
-  server.listen(PORT, () => {
-    console.log(`Log server: :${PORT}`);
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`Log server: 127.0.0.1:${PORT}`);
   });
 
   return server;

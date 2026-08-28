@@ -15,27 +15,28 @@ async function getSecret(name) {
   return version.payload.data.toString('utf8').trim();
 }
 
+const REQUIRED = ['TELEGRAM_BOT_TOKEN', 'ANTHROPIC_API_KEY'];
+const OPTIONAL = ['TELEGRAM_CHAT_ID', 'DEEPGRAM_API_KEY', 'AUTH_SYNC_URL', 'AUTH_SYNC_SECRET'];
+
 async function loadSecrets() {
-  const [
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID,
-    ANTHROPIC_API_KEY,
-    DEEPGRAM_API_KEY,
-    AUTH_SYNC_URL,
-  ] = await Promise.allSettled([
-    getSecret('TELEGRAM_BOT_TOKEN'),
-    getSecret('TELEGRAM_CHAT_ID'),
-    getSecret('ANTHROPIC_API_KEY'),
-    getSecret('DEEPGRAM_API_KEY'),
-    getSecret('AUTH_SYNC_URL'),
-  ]).then(results => results.map(r => r.status === 'fulfilled' ? r.value : null));
+  const names = [...REQUIRED, ...OPTIONAL];
+  const results = await Promise.allSettled(names.map(n => getSecret(n)));
+  const values = Object.fromEntries(names.map((n, i) => [
+    n,
+    results[i].status === 'fulfilled' ? results[i].value : null,
+  ]));
+
+  for (const name of REQUIRED) {
+    if (!values[name]) throw new Error(`Required secret missing from Secret Manager: ${name}`);
+  }
 
   return {
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID: Number(TELEGRAM_CHAT_ID),
-    ANTHROPIC_API_KEY,
-    DEEPGRAM_API_KEY,
-    AUTH_SYNC_URL, // null if not configured yet — that's OK
+    TELEGRAM_BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID: Number(values.TELEGRAM_CHAT_ID),
+    ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY,
+    DEEPGRAM_API_KEY: values.DEEPGRAM_API_KEY,
+    AUTH_SYNC_URL: values.AUTH_SYNC_URL,         // null if not configured
+    AUTH_SYNC_SECRET: values.AUTH_SYNC_SECRET,   // null if not configured
   };
 }
 
