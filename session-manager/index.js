@@ -59,7 +59,10 @@ async function main() {
     process.exit(1);
   });
 
-  const { TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, AUTH_SYNC_URL, AUTH_SYNC_SECRET } = secrets;
+  const { TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, AUTH_SYNC_URL, AUTH_SYNC_SECRET, BOT_SECRET } = secrets;
+
+  // token-relay address (runs locally on same VM, port 8081)
+  const RELAY_URL = 'http://localhost:8081';
 
   const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
@@ -106,7 +109,16 @@ async function main() {
     ctx.reply(
       `👋 Привет, ${ctx.alesakUser.name}!\n\n` +
       `Просто пиши задачи — я запущу Claude Code и верну результат.\n\n` +
-      `Команды:\n/sessions — управление сессиями\n/me — твой профиль\n/terminal — веб-терминал\n/status — текущий статус\n/version — версия бота\n/privacy — как хранятся твои данные`
+      `Основные команды:\n` +
+      `/sessions — управление сессиями\n` +
+      `/me — твой профиль\n` +
+      `/terminal — веб-терминал\n` +
+      `/status — текущий статус\n` +
+      `/version — версия бота\n` +
+      `/privacy — как хранятся твои данные\n\n` +
+      `Chrome-расширение:\n` +
+      `/chromeext_connect — подключить браузер\n` +
+      `/chromeext_status — статус подключения`
     );
   });
 
@@ -212,6 +224,75 @@ async function main() {
     ctx.reply('🖥 Веб-терминал (alesa / alesa123):', {
       reply_markup: { inline_keyboard: [[{ text: '🔗 Открыть', url: tunnelUrl }]] },
     });
+  });
+
+  // ── /chromeext_connect ─────────────────────────────────────────────────────
+  // Генерирует 6-значный код для привязки Chrome-расширения через token-relay.
+
+  bot.command('chromeext_connect', async (ctx) => {
+    if (!BOT_SECRET) {
+      return ctx.reply('⚠️ Chrome-расширение не настроено на этом сервере.\nОбратись к администратору.');
+    }
+
+    try {
+      const res = await fetch(`${RELAY_URL}/generate-pair-code`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${BOT_SECRET}`,
+        },
+        body: JSON.stringify({ userId: ctx.alesakUser.id }),
+      });
+
+      if (!res.ok) throw new Error(`relay HTTP ${res.status}`);
+
+      const { code } = await res.json();
+      const formatted = code.slice(0, 3) + ' ' + code.slice(3); // narrow no-break space
+
+      await ctx.reply(
+        `🔑 <b>Подключить Chrome-расширение</b>\n\n` +
+        `Если расширение ещё не установлено:\n` +
+        `→ github.com/trained-assist/alesa-auth-extension\n\n` +
+        `Откройте расширение в браузере и введите код:\n` +
+        `<code>${formatted}</code>\n\n` +
+        `<i>Код действителен 10 минут.</i>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) {
+      console.error('chromeext_connect error:', e.message);
+      await ctx.reply('❌ Ошибка генерации кода. Попробуй позже или убедись, что token-relay запущен.');
+    }
+  });
+
+  // ── /chromeext_status ──────────────────────────────────────────────────────
+
+  bot.command('chromeext_status', async (ctx) => {
+    if (!BOT_SECRET) {
+      return ctx.reply('⚠️ Chrome-расширение не настроено на этом сервере.');
+    }
+
+    try {
+      const res = await fetch(`${RELAY_URL}/status/${ctx.alesakUser.id}`, {
+        headers: { 'Authorization': `Bearer ${BOT_SECRET}` },
+      });
+
+      if (!res.ok) throw new Error(`relay HTTP ${res.status}`);
+
+      const { connected } = await res.json();
+
+      if (connected) {
+        await ctx.reply(
+          '✅ Chrome-расширение подключено.\nТокены передаются автоматически.'
+        );
+      } else {
+        await ctx.reply(
+          '⚠️ Chrome-расширение не подключено.\n\nЧтобы подключить:\n/chromeext_connect'
+        );
+      }
+    } catch (e) {
+      console.error('chromeext_status error:', e.message);
+      await ctx.reply('❌ Не удалось проверить статус. Убедись, что token-relay запущен.');
+    }
   });
 
   // ── /reauth ────────────────────────────────────────────────────────────────

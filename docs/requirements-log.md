@@ -27,7 +27,15 @@
 
 
 
-- [планируется] `/version` команда — показывает версию бота (дату деплоя или git hash). Нужно чтобы было понятно, какой код сейчас запущен на VM
+- [реализовано] `/version` команда — показывает git hash и время запуска
+
+- [реализовано] **Chrome-расширение: бот-сторона** — команды `/chromeext_connect` (генерирует 6-значный код через token-relay, 10 мин TTL) и `/chromeext_status` (проверяет, подключено ли расширение). Намеренно длинные имена команд — без конфликта с `/reauth` и системным `/status`.
+
+- [реализовано] **token-relay** — отдельный HTTP-сервис (`token-relay/index.js`, порт 8081). Эндпоинты: `POST /generate-pair-code` (бот → relay, auth BOT_SECRET), `POST /pair` (расширение → relay, по коду), `POST /save-token` (расширение → relay, паринг-токен + label), `GET /status/:userId` (бот → relay). Уведомляет пользователя через Telegram API напрямую.
+
+- [планируется] **Chrome-расширение: клиентская часть** — MV3 расширение в отдельном репо `trained-assist/alesa-auth-extension`. Popup с полем для кода (паринг), затем авто-перехват токенов сервисов (cookies/headers) и отправка через `POST /save-token` в relay.
+
+- [планируется] `BOT_SECRET` в GCP Secret Manager — нужно добавить вручную через `gcloud secrets create BOT_SECRET --data-file=-` на VM
 
 - [планируется] **State management при deploy** — три части:
   1. **Deploy health-check скрипт** (`deploy-check.sh`): после каждого деплоя проверяет что все сервисы живые — `alesa.service` active, `ttyd.service` active, `cloudflared-tunnel.service` active, лог-сервер отвечает на :8080, OAuth-токен валиден (`claude --version` не падает). Результат → одно сообщение в admin group.
