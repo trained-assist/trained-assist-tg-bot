@@ -52,11 +52,11 @@ async function runTask({ user, task, authManager, telegram, chatId, context, fil
       } else {
         // Still thinking — update elapsed time every 10s
         if (now - lastElapsedUpdate < 10000) return;
-        lastElapsedUpdate = now;
         const thinking = `⏳ Думаю… ${elapsed}`;
         lastEdited = thinking;
         try {
           await telegram.editMessageText(chatId, msgId, null, thinking);
+          lastElapsedUpdate = now; // advance only on success
         } catch (e) {
           const retryAfter = e?.response?.parameters?.retry_after;
           if (retryAfter) backoffUntil = Date.now() + retryAfter * 1000;

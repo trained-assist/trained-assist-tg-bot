@@ -51,13 +51,13 @@ function getState(taskId) {
 
 function _cleanup() {
   if (tasks.size <= MAX_TASKS) return;
-  const sorted = [...tasks.entries()].sort((a, b) => a[1].lastActive - b[1].lastActive);
-  // Prefer evicting finished tasks first
-  for (const [id, t] of sorted) {
+  // Sort by lastActive ascending (oldest first). Re-snapshot each pass so
+  // deletions from the finished-task loop don't leave stale IDs in the running-task loop.
+  const byAge = () => [...tasks.entries()].sort((a, b) => a[1].lastActive - b[1].lastActive);
+  for (const [id, t] of byAge()) {
     if (!t.isRunning) { tasks.delete(id); if (tasks.size <= MAX_TASKS) return; }
   }
-  // If all tasks are still running, evict oldest by lastActive to stay within limit
-  for (const [id] of sorted) {
+  for (const [id] of byAge()) {
     tasks.delete(id);
     if (tasks.size <= MAX_TASKS) return;
   }

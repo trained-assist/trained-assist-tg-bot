@@ -32,7 +32,7 @@ async function loadSecrets() {
 
   return {
     TELEGRAM_BOT_TOKEN: values.TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID: Number(values.TELEGRAM_CHAT_ID),
+    TELEGRAM_CHAT_ID: values.TELEGRAM_CHAT_ID ? Number(values.TELEGRAM_CHAT_ID) : null,
     ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY,
     DEEPGRAM_API_KEY: values.DEEPGRAM_API_KEY,
     AUTH_SYNC_URL: values.AUTH_SYNC_URL,         // null if not configured
