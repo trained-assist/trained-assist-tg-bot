@@ -2,17 +2,13 @@ const { spawn } = require('child_process');
 const { randomBytes } = require('crypto');
 const { AUTH_FAIL_RE } = require('./auth');
 const logBuffer = require('./log-buffer');
-const { TOKEN: LOG_TOKEN, PORT: LOG_PORT } = require('./log-server');
 
-const VM_IP = process.env.VM_IP || '136.65.7.197';
 const MAX_LEN = 3800;
 const EDIT_INTERVAL = 3000;
 
 async function runTask({ user, task, authManager, telegram, chatId, context }) {
   const taskId = randomBytes(4).toString('hex');
   logBuffer.createTask(taskId, task.slice(0, 80));
-
-  const logUrl = `http://${VM_IP}:${LOG_PORT}/?t=${LOG_TOKEN}&id=${taskId}`;
 
   const initial = await telegram.sendMessage(chatId, '⏳ Думаю…');
   const msgId = initial.message_id;
@@ -32,9 +28,12 @@ async function runTask({ user, task, authManager, telegram, chatId, context }) {
     let lastEdited = '';
     const startMs = Date.now();
     let lastElapsedUpdate = 0;
+    let backoffUntil = 0; // ms timestamp: skip edits until after this
 
     const tryEdit = async () => {
       const now = Date.now();
+      if (now < backoffUntil) return; // rate-limit backoff active
+
       const sec = Math.round((now - startMs) / 1000);
       const m = Math.floor(sec / 60), s = sec % 60;
       const elapsed = m > 0 ? `${m}м ${s}с` : `${s}с`;
@@ -44,14 +43,24 @@ async function runTask({ user, task, authManager, telegram, chatId, context }) {
         const snippet = output.slice(-MAX_LEN).trim();
         if (snippet === lastEdited) return;
         lastEdited = snippet;
-        try { await telegram.editMessageText(chatId, msgId, null, snippet); } catch {}
+        try {
+          await telegram.editMessageText(chatId, msgId, null, snippet);
+        } catch (e) {
+          const retryAfter = e?.response?.parameters?.retry_after;
+          if (retryAfter) backoffUntil = Date.now() + retryAfter * 1000;
+        }
       } else {
         // Still thinking — update elapsed time every 10s
         if (now - lastElapsedUpdate < 10000) return;
         lastElapsedUpdate = now;
         const thinking = `⏳ Думаю… ${elapsed}`;
         lastEdited = thinking;
-        try { await telegram.editMessageText(chatId, msgId, null, thinking); } catch {}
+        try {
+          await telegram.editMessageText(chatId, msgId, null, thinking);
+        } catch (e) {
+          const retryAfter = e?.response?.parameters?.retry_after;
+          if (retryAfter) backoffUntil = Date.now() + retryAfter * 1000;
+        }
       }
     };
 

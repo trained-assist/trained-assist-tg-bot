@@ -12,6 +12,7 @@ class SessionManager {
     this.bot = bot;
     this._sessions = new Map(); // userId → Map(sessionName → { taskDescription, summary, createdAt })
     this._userRefs = new Map();
+    this._watchIntervals = new Map(); // sessionName → intervalId
   }
 
   // Load saved sessions from disk. tmux may be dead after restart — that's fine,
@@ -100,6 +101,8 @@ class SessionManager {
     const userSessions = this._sessions.get(userId);
     if (!userSessions?.has(sessionName)) return false;
     try { execSync(`tmux kill-session -t ${sessionName} 2>/dev/null`); } catch {}
+    const iv = this._watchIntervals.get(sessionName);
+    if (iv) { clearInterval(iv); this._watchIntervals.delete(sessionName); }
     userSessions.delete(sessionName);
     this.persist();
     return true;
@@ -152,10 +155,12 @@ class SessionManager {
         const log = fs.readFileSync(`/tmp/${name}.log`, 'utf8');
         if (AUTH_FAIL_RE.test(log)) {
           clearInterval(interval);
+          this._watchIntervals.delete(name);
           await this.authManager.handleAuthFailure(name);
         }
       } catch {}
     }, 5000);
+    this._watchIntervals.set(name, interval);
   }
 
   _tmux(session, cmd) {
