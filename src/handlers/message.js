@@ -49,14 +49,14 @@ async function transcribeVoice(fileId, env) {
   }
   const audioBuffer = await audioRes.arrayBuffer();
 
-  // Transcribe via Deepgram
+  // Transcribe via Deepgram — OGG/OPUS is Telegram's voice format
   const dgRes = await fetch(
     'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
     {
       method: 'POST',
       headers: {
         'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
-        'Content-Type': 'audio/ogg',
+        'Content-Type': 'audio/ogg; codecs=opus',
       },
       body: audioBuffer,
     }
@@ -68,7 +68,8 @@ async function transcribeVoice(fileId, env) {
   const dgData = JSON.parse(dgText);
   const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
   if (!transcript) {
-    return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b)` };
+    const confidence = dgData?.results?.channels?.[0]?.alternatives?.[0]?.confidence;
+    return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b, confidence: ${confidence}, words: ${dgData?.results?.channels?.[0]?.alternatives?.[0]?.words?.length})` };
   }
   return { transcript, error: null };
 }
