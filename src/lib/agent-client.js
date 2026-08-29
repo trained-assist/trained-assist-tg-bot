@@ -23,6 +23,19 @@ export async function getSessions(env, { username, limit = 10 }) {
   return sessions;
 }
 
+export async function classifyMessage(env, { message, sessions }) {
+  const res = await fetch(`${env.AGENT_URL}/classify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ message, sessions }),
+  });
+  if (!res.ok) return { sessionId: null, confidence: 'low' }; // fail safe
+  return res.json();
+}
+
 export async function setUserToken(env, { userId, label, value }) {
   const res = await fetch(`${env.AGENT_URL}/tokens`, {
     method: 'POST',

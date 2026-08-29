@@ -1,6 +1,6 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession } from '../lib/kv.js';
-import { runTask, getSessions } from '../lib/agent-client.js';
+import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -113,7 +113,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: session.lastSessionId };
   }
 
-  // 5. Last session is old — check how many sessions exist
+  // 5. Last session is old — fetch session list and ask Claude Haiku to classify
   let recentSessions;
   try {
     recentSessions = await getSessions(env, { username: session.username, limit: 5 });
@@ -122,12 +122,23 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: session.lastSessionId };
   }
 
-  // Only 1 session or none → continue it
+  // Only 1 session → continue it (no need to classify)
   if (!recentSessions || recentSessions.length <= 1) {
     return { type: 'run', sessionId: session.lastSessionId };
   }
 
-  // Multiple sessions, last message was old → show disambiguation
+  // Multiple sessions → ask Claude Haiku which one this message belongs to
+  let classification = { sessionId: null, confidence: 'low' };
+  try {
+    classification = await classifyMessage(env, { message: text, sessions: recentSessions });
+  } catch { /* fallback to picker */ }
+
+  if (classification.confidence === 'high' && classification.sessionId) {
+    // Clear match — route automatically, user won't notice any friction
+    return { type: 'run', sessionId: classification.sessionId };
+  }
+
+  // Ambiguous — show picker with all recent sessions
   return { type: 'disambiguate', sessions: recentSessions.slice(0, 4) };
 }
 
