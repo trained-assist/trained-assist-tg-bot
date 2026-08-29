@@ -29,6 +29,7 @@ async function dispatch(update, env) {
 
   const chatId = msg.chat.id;
   const text = msg.text || '';
+  const isGroup = ['group', 'supergroup'].includes(msg.chat.type);
 
   // Admin group: only user-mgmt commands pass through
   if (String(chatId) === env.ADMIN_GROUP_ID) {
@@ -36,7 +37,21 @@ async function dispatch(update, env) {
     return;
   }
 
-  // Personal chat: commands vs messages
+  // Other groups: log silently, respond only on mention or command
+  if (isGroup) {
+    const mentioned = text.includes(`@${env.BOT_USERNAME}`);
+    const isCommand = text.startsWith('/');
+    console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
+    if (!mentioned && !isCommand) return;
+    // Strip mention from text before handling
+    const cleanText = text.replace(`@${env.BOT_USERNAME}`, '').trim();
+    const cleanMsg = { ...msg, text: cleanText };
+    if (isCommand) await handleCommand(cleanMsg, env);
+    else await handleMessage(cleanMsg, env);
+    return;
+  }
+
+  // Private chat: commands vs messages
   if (text.startsWith('/')) {
     await handleCommand(msg, env);
   } else {
