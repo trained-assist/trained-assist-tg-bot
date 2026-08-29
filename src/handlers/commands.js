@@ -15,7 +15,8 @@ export async function handleCommand(msg, env) {
     case '/logout':  return cmdLogout(chatId, env);
     case '/status':  return cmdStatus(chatId, env);
     case '/version': return cmdVersion(chatId, env);
-    case '/privacy': return cmdPrivacy(chatId, env);
+    case '/privacy':          return cmdPrivacy(chatId, env);
+    case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
     // TODO: /sessions, /me, /setabout, /setprefs, /terminal, /chromeext_connect, /chromeext_status
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
@@ -95,6 +96,21 @@ async function cmdVersion(chatId, env) {
   // TODO: fetch version from agent
   return sendMessage(env.BOT_TOKEN, chatId,
     `🤖 <b>Alesa Bot</b>\nWorker — Cloudflare\nAgent — GCP VM\n\nTODO: показывать git hash`
+  );
+}
+
+async function cmdChromeExtInstall(chatId, env) {
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `🧩 <b>Установка Cloud Auth Bridge</b>\n\n` +
+    `<b>Шаг 1.</b> Скачай расширение:\n` +
+    `<a href="https://github.com/trained-assist/cloud-auth-bridge/releases/latest/download/alesa-auth-extension-v1.2.0.zip">📦 alesa-auth-extension-v1.2.0.zip</a>\n\n` +
+    `<b>Шаг 2.</b> Распакуй ZIP в любую папку (запомни куда).\n\n` +
+    `<b>Шаг 3.</b> Открой Chrome → <code>chrome://extensions</code>\n` +
+    `Включи <b>Режим разработчика</b> (переключатель справа вверху).\n` +
+    `Нажми <b>Загрузить распакованное</b> → выбери папку из шага 2.\n\n` +
+    `<b>Шаг 4.</b> Отправь /chromeext_connect — получишь 6-значный код.\n` +
+    `Кликни на иконку расширения → введи код → <b>Подключить</b>.\n\n` +
+    `Готово! Расширение будет автоматически переносить токены авторизации на VM.`
   );
 }
 
