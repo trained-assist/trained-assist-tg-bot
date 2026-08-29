@@ -1,0 +1,17 @@
+{
+  "name": "alesa-bot",
+  "version": "0.1.0",
+  "description": "Alesa — Telegram bot (Cloudflare Worker)",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "node --check src/index.js src/handlers/message.js src/handlers/commands.js src/handlers/user-mgmt.js src/lib/telegram.js src/lib/kv.js src/lib/agent-client.js"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
