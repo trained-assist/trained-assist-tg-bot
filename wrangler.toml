@@ -1,4 +1,4 @@
-name = "alesa-bot"
+name = "trained-assist-tg-bot"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -9,15 +9,13 @@ ADMIN_GROUP_ID = "-5308931318"
 # Secrets (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
 #   BOT_SECRET     — shared secret for Chrome extension
-#   AGENT_URL      — URL of alesa-agent HTTP API
+#   AGENT_URL      — URL of trained-assist-agent HTTP API
 #   AGENT_SECRET   — shared secret for bot↔agent auth
 
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+id = "5753e58c86c14550930106cf9248eb72"
 
 [[kv_namespaces]]
 binding = "USERS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+id = "74c1930ed8464f4889c056031f0d42f8"
