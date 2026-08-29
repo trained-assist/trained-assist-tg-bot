@@ -23,6 +23,24 @@ export async function getSessions(env, { username, limit = 10 }) {
   return sessions;
 }
 
+export async function getFiles(env, { username, path = '' }) {
+  const qs = `username=${encodeURIComponent(username)}&path=${encodeURIComponent(path)}`;
+  const res = await fetch(`${env.AGENT_URL}/files?${qs}`, {
+    headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+  });
+  if (!res.ok) throw new Error(`agent /files HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function readFile(env, { username, path }) {
+  const qs = `username=${encodeURIComponent(username)}&path=${encodeURIComponent(path)}`;
+  const res = await fetch(`${env.AGENT_URL}/files/read?${qs}`, {
+    headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+  });
+  if (!res.ok) throw new Error(`agent /files/read HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function classifyMessage(env, { message, sessions }) {
   const res = await fetch(`${env.AGENT_URL}/classify`, {
     method: 'POST',

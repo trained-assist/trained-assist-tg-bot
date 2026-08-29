@@ -1,7 +1,8 @@
 import { getSession, setSession } from '../lib/kv.js';
 import { sendMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask } from '../lib/agent-client.js';
+import { runTask, readFile } from '../lib/agent-client.js';
+import { cmdFiles } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
@@ -85,6 +86,52 @@ export async function handleCallbackQuery(cq, env) {
       await sendMessage(env.BOT_TOKEN, chatId,
         '📌 <b>Продолжаю этот диалог</b>\n\nПиши следующее сообщение — отвечу с учётом контекста.'
       );
+    }
+    return;
+  }
+
+  // ── File browser: navigate into folder ───────────────────────────────────
+  if (data?.startsWith('fl:')) {
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    const relPath = data.slice(3); // may be empty string = root
+    await cmdFiles(chatId, env, relPath);
+    return;
+  }
+
+  // ── File browser: read file ───────────────────────────────────────────────
+  if (data?.startsWith('fr:')) {
+    const relPath = data.slice(3);
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+
+    let fileData;
+    try {
+      fileData = await readFile(env, { username: session.username, path: relPath });
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось прочитать файл: ${e.message}`);
+      return;
+    }
+
+    const { content, truncated, size } = fileData;
+    const fileName = relPath.split('/').pop();
+    const ext = fileName.split('.').pop().toLowerCase();
+
+    // Pretty-print JSON
+    let display = content;
+    if (ext === 'json') {
+      try { display = JSON.stringify(JSON.parse(content), null, 2); } catch {}
+    }
+
+    const header = `📄 <code>${relPath}</code>${truncated ? ` (первые 3.5кб из ${Math.round(size/1024)}кб)` : ''}`;
+    const body = `<pre>${display.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>`;
+    const fullMsg = `${header}\n\n${body}`;
+
+    // Telegram message limit 4096 chars
+    if (fullMsg.length <= 4096) {
+      await sendMessage(env.BOT_TOKEN, chatId, fullMsg);
+    } else {
+      await sendMessage(env.BOT_TOKEN, chatId, header);
+      await sendMessage(env.BOT_TOKEN, chatId, `<pre>${display.slice(0, 3800).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>`);
     }
     return;
   }

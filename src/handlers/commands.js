@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { getUser } from '../lib/kv.js';
-import { getAgentHealth, getSessions } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -23,6 +23,8 @@ export async function handleCommand(msg, env) {
     case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
     case '/sessions':
     case '/диалоги':           return cmdSessions(chatId, env);
+    case '/files':
+    case '/папки':             return cmdFiles(chatId, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -232,6 +234,58 @@ async function cmdSessions(chatId, env) {
     : `💬 <b>Диалоги</b>\n\nВыбери диалог для продолжения:`;
 
   return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, header, buttons);
+}
+
+export async function cmdFiles(chatId, env, relPath = '') {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  let data;
+  try {
+    data = await getFiles(env, { username: session.username, path: relPath });
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+  }
+
+  const { entries, path: currentPath } = data;
+
+  if (!entries || entries.length === 0) {
+    return sendMessage(env.BOT_TOKEN, chatId, `📂 <code>${currentPath || '/'}</code>\n\n(пусто)`);
+  }
+
+  function fmtSize(bytes) {
+    if (bytes < 1024) return `${bytes}б`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}кб`;
+    return `${(bytes / 1024 / 1024).toFixed(1)}мб`;
+  }
+
+  const buttons = [];
+
+  // Back button (not at root)
+  if (currentPath) {
+    const parent = currentPath.includes('/') ? currentPath.slice(0, currentPath.lastIndexOf('/')) : '';
+    buttons.push([{ text: '⬆️ Назад', callback_data: `fl:${parent}` }]);
+  }
+
+  // Directory and file entries
+  for (const e of entries) {
+    const entryPath = currentPath ? `${currentPath}/${e.name}` : e.name;
+    // callback_data max 64 bytes — truncate path if needed
+    const pathKey = entryPath.slice(0, 58);
+
+    if (e.type === 'dir') {
+      const label = `📁 ${e.name}  (${e.count})`;
+      buttons.push([{ text: label, callback_data: `fl:${pathKey}` }]);
+    } else {
+      const ext = e.name.split('.').pop().toLowerCase();
+      const icon = ext === 'md' ? '📄' : ext === 'json' ? '📋' : '📃';
+      const label = `${icon} ${e.name}  ${fmtSize(e.size)}`;
+      buttons.push([{ text: label, callback_data: `fr:${pathKey}` }]);
+    }
+  }
+
+  const title = currentPath ? `📂 <code>${currentPath}</code>` : '📂 <b>Файлы</b>';
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons);
 }
 
 async function cmdPrivacy(chatId, env) {
