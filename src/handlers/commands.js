@@ -17,7 +17,9 @@ export async function handleCommand(msg, env) {
     case '/version': return cmdVersion(chatId, env);
     case '/privacy':          return cmdPrivacy(chatId, env);
     case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
-    // TODO: /sessions, /me, /setabout, /setprefs, /terminal, /chromeext_connect, /chromeext_status
+    case '/chromeext_connect': return cmdChromeExtConnect(chatId, env);
+    case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
+    // TODO: /sessions, /me, /setabout, /setprefs, /terminal
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -97,6 +99,46 @@ async function cmdVersion(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `🤖 <b>Alesa Bot</b>\nWorker — Cloudflare\nAgent — GCP VM\n\nTODO: показывать git hash`
   );
+}
+
+async function cmdChromeExtConnect(chatId, env) {
+  try {
+    const res = await fetch(`${env.RELAY_URL}/generate-pair-code`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.RELAY_BOT_SECRET}`,
+      },
+      body: JSON.stringify({ userId: chatId }),
+    });
+    if (!res.ok) throw new Error(`relay ${res.status}`);
+    const { code } = await res.json();
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `🔗 <b>Код подключения расширения</b>\n\n` +
+      `<code>${code}</code>\n\n` +
+      `Действует 10 минут. Введи его в попапе расширения Cloud Auth Bridge → <b>Подключить</b>.\n\n` +
+      `Расширение не установлено? → /chromeext_install`
+    );
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка генерации кода: ${e.message}`);
+  }
+}
+
+async function cmdChromeExtStatus(chatId, env) {
+  try {
+    const res = await fetch(`${env.RELAY_URL}/status/${chatId}`, {
+      headers: { 'Authorization': `Bearer ${env.RELAY_BOT_SECRET}` },
+    });
+    if (!res.ok) throw new Error(`relay ${res.status}`);
+    const { connected } = await res.json();
+    return sendMessage(env.BOT_TOKEN, chatId,
+      connected
+        ? '✅ Chrome-расширение подключено и активно.'
+        : '❌ Расширение не подключено. Используй /chromeext_connect для привязки.'
+    );
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка проверки статуса: ${e.message}`);
+  }
 }
 
 async function cmdChromeExtInstall(chatId, env) {

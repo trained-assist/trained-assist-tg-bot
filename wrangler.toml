@@ -6,6 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
+RELAY_URL = "https://136-65-7-197.sslip.io"
 
 # Secrets (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
