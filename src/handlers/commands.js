@@ -40,7 +40,14 @@ async function cmdStart(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
     `Просто пиши задачи — я передам их Claude Code.\n\n` +
-    `Команды:\n/sessions — диалоги\n/status — статус\n/logout — выйти`
+    `<b>Команды:</b>\n` +
+    `/sessions — мои диалоги\n` +
+    `/files — файлы и папки\n` +
+    `/status — статус агента\n` +
+    `/settoken — сохранить токен сервиса\n` +
+    `/chromeext_connect — подключить Chrome-расширение\n` +
+    `/chromeext_install — установить расширение\n` +
+    `/logout — выйти`
   );
 }
 
