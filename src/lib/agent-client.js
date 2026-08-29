@@ -1,13 +1,13 @@
 // HTTP client for alesa-agent
 
-export async function runTask(env, { userId, username, task, context, sessionId }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession }) {
   const res = await fetch(`${env.AGENT_URL}/run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ userId, username, task, context, sessionId }),
+    body: JSON.stringify({ userId, username, task, context, sessionId, contextFromSession }),
   });
   if (!res.ok) throw new Error(`agent /run HTTP ${res.status}`);
   return res.json();

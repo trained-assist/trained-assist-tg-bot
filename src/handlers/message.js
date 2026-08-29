@@ -62,10 +62,10 @@ async function handleText(chatId, session, text, env) {
       task: text,
       context: null,
       sessionId,
+      contextFromSession: session.contextFromSession || null,
     });
 
-    // Update KV — always clear activeSessionId after use so routing stays dynamic.
-    // lastSessionId + lastMessageAt carry forward for the <2h auto-continue path.
+    // Update KV — clear transient flags, carry forward lastSessionId for auto-continue
     await setSession(env.SESSIONS, chatId, {
       ...session,
       lastSessionId: sessionId,
@@ -73,6 +73,7 @@ async function handleText(chatId, session, text, env) {
       pendingMessage: null,
       pendingMessageAt: null,
       activeSessionId: null,
+      contextFromSession: null, // consumed — clear after first use
     });
   } catch (err) {
     await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`);

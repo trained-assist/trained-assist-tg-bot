@@ -23,6 +23,8 @@ export async function handleCommand(msg, env) {
     case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
     case '/sessions':
     case '/диалоги':           return cmdSessions(chatId, env);
+    case '/new_dialog':
+    case '/новый_диалог':      return cmdNewDialog(chatId, env);
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     default:
@@ -197,6 +199,17 @@ async function cmdChromeExtInstall(chatId, env) {
   );
 }
 
+export function timeAgo(ts) {
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return 'только что';
+  if (m < 60) return `${m}м`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}ч`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}д`;
+  return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
 async function cmdSessions(chatId, env) {
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
@@ -214,33 +227,32 @@ async function cmdSessions(chatId, env) {
     );
   }
 
-  const active = session.activeSessionId;
-
-  // Format time ago
-  function timeAgo(ts) {
-    const diff = Date.now() - ts;
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return 'только что';
-    if (m < 60) return `${m}м`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}ч`;
-    return `${Math.floor(h / 24)}д`;
-  }
-
+  // Tapping a session opens action submenu, not immediate continue
   const buttons = list.map(s => {
-    const marker = s.id === active ? '🔵 ' : '';
-    const label = `${marker}${s.topic.slice(0, 30)} · ${timeAgo(s.lastAt)}`;
-    return [{ text: label, callback_data: `s:${s.id}` }];
+    const label = `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`;
+    return [{ text: label, callback_data: `sd:${s.id}` }];
   });
+  buttons.push([{ text: '✨ Новый диалог', callback_data: 'nd:' }]);
 
-  // New session button
-  buttons.push([{ text: '✨ Новый диалог', callback_data: 's:new' }]);
+  return sendMessageWithKeyboard(
+    env.BOT_TOKEN, chatId,
+    '💬 <b>Диалоги</b>\n\nВыбери диалог:',
+    buttons
+  );
+}
 
-  const header = active
-    ? `💬 <b>Диалоги</b>\n🔵 = активный\n\nВыбери диалог или начни новый:`
-    : `💬 <b>Диалоги</b>\n\nВыбери диалог для продолжения:`;
+async function cmdNewDialog(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, header, buttons);
+  return sendMessageWithKeyboard(
+    env.BOT_TOKEN, chatId,
+    '✨ <b>Новый диалог</b>\n\nМожете просто начать писать — или загрузить контекст из одного из прошлых диалогов:',
+    [
+      [{ text: '✏️ Чистый лист — просто начну писать', callback_data: 'nd:clean' }],
+      [{ text: '📚 Выбрать диалог и загрузить контекст', callback_data: 'nd:ctx' }],
+    ]
+  );
 }
 
 export async function cmdFiles(chatId, env, relPath = '') {
