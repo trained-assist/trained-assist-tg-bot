@@ -76,8 +76,6 @@ async function transcribeVoice(fileId, env) {
 }
 
 async function handleText(chatId, session, text, env) {
-  const thinkingMsg = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Думаю…');
-
   try {
     await runTask(env, {
       userId: chatId,
@@ -85,7 +83,7 @@ async function handleText(chatId, session, text, env) {
       task: text,
       context: session.context || null,
     });
-    // Agent streams result directly to Telegram; thinkingMsg will be edited by agent
+    // Agent sends and edits its own "⏳ Думаю…" — Worker must not send a duplicate
   } catch (err) {
     await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`);
   }
