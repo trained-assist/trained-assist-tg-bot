@@ -18,6 +18,7 @@ export async function handleMessage(msg, env) {
   } else if (voice) {
     const { transcript, error } = await transcribeVoice(voice.file_id, env);
     if (transcript) {
+      await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
       await handleText(chatId, session, transcript, env);
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
