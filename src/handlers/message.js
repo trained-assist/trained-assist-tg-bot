@@ -37,13 +37,20 @@ async function transcribeVoice(fileId, env) {
     `https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
   );
   const fileData = await fileRes.json();
-  if (!fileData.ok) return null;
+  if (!fileData.ok) {
+    console.error('[voice] getFile failed:', JSON.stringify(fileData));
+    return null;
+  }
 
   // Download OGG audio
   const audioUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
   const audioRes = await fetch(audioUrl);
-  if (!audioRes.ok) return null;
+  if (!audioRes.ok) {
+    console.error('[voice] audio download failed:', audioRes.status);
+    return null;
+  }
   const audioBuffer = await audioRes.arrayBuffer();
+  console.log('[voice] audio size bytes:', audioBuffer.byteLength);
 
   // Transcribe via Deepgram
   const dgRes = await fetch(
@@ -57,9 +64,15 @@ async function transcribeVoice(fileId, env) {
       body: audioBuffer,
     }
   );
-  if (!dgRes.ok) return null;
-  const dgData = await dgRes.json();
-  return dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || null;
+  const dgText = await dgRes.text();
+  if (!dgRes.ok) {
+    console.error('[voice] deepgram error:', dgRes.status, dgText);
+    return null;
+  }
+  const dgData = JSON.parse(dgText);
+  const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
+  console.log('[voice] transcript:', transcript);
+  return transcript || null;
 }
 
 async function handleText(chatId, session, text, env) {
