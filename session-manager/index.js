@@ -59,7 +59,7 @@ async function main() {
     process.exit(1);
   });
 
-  const { TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, AUTH_SYNC_URL, AUTH_SYNC_SECRET, BOT_SECRET } = secrets;
+  const { TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, BOT_SECRET } = secrets;
 
   // token-relay address (runs locally on same VM, port 8081)
   const RELAY_URL = 'http://localhost:8081';
@@ -69,8 +69,6 @@ async function main() {
   const auth = new AuthManager({
     bot,
     apiKey: ANTHROPIC_API_KEY,
-    authSyncUrl: AUTH_SYNC_URL,
-    authSyncSecret: AUTH_SYNC_SECRET,
     chatId: ADMIN_GROUP_ID,   // auth уведомления → группа
     onAuthRestored: (m) => {
       bot.telegram.sendMessage(ADMIN_GROUP_ID,
