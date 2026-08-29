@@ -8,6 +8,7 @@
 - [реализовано] Dual-auth: OAuth (первичный) → API Key (fallback). При сбое — автоматический recovery
 - [реализовано] Mac Keychain sync: auth-sync-server на Mac + cloudflare tunnel → SCP токена на VM
 - [реализовано] Admin group (`-5308931318`): уведомления о запуске и auth, только `/reauth` в группе
+- [реализовано] **Мульти-профильная система**: динамический реестр пользователей (user-registry.js, хранит в `~/.../alesa-sessions/.registry.json`). Admin-команды в группе: `/um` (гайд), `/adduser`, `/deluser`, `/listusers`, `/resetpass`. Новые юзеры аутентифицируются через `/login username password` в личке. Legacy-юзеры (Vladimir, Mariam) входят автоматически по chat_id. Пароли — crypto.scryptSync с солью.
 - [реализовано] Профиль пользователя: `/me`, `/setabout`, `/setprefs` → JSON в workDir
 - [реализовано] Per-user task queue: пока Claude думает, новые сообщения встают в очередь, не запускают параллельный процесс
 - [реализовано] Live log viewer: каждая задача получает уникальный taskId, ссылка в кнопке "👀 Следить за процессом" на сообщении "⏳ Думаю…". Страница `http://136.65.7.197:8080/?t=alesa2026&id=TASK_ID` показывает живой вывод Claude. Изолирована per-task, per-user.
@@ -33,7 +34,7 @@
 
 - [реализовано] **token-relay** — отдельный HTTP-сервис (`token-relay/index.js`, порт 8081). Эндпоинты: `POST /generate-pair-code` (бот → relay, auth BOT_SECRET), `POST /pair` (расширение → relay, по коду), `POST /save-token` (расширение → relay, паринг-токен + label), `GET /status/:userId` (бот → relay). Уведомляет пользователя через Telegram API напрямую.
 
-- [планируется] **Chrome-расширение: клиентская часть** — MV3 расширение в отдельном репо `trained-assist/alesa-auth-extension`. Popup с полем для кода (паринг), затем авто-перехват токенов сервисов (cookies/headers) и отправка через `POST /save-token` в relay.
+- [реализовано] **Chrome-расширение: Cloud Auth Bridge v1.2** — репо `alesa-auth-extension`. Переименовано из "Alesa Auth". Фичи: per-service cookie extractors (Figma/Notion/GitHub/Linear/Tilda — только нужные cookies), 20 Jest mock-тестов, мульти-профиль (profileName авто-детектится из `chrome.identity` по email, prefix на relay: `vladimir.figma`), quick-capture кнопки для всех сервисов, popup показывает badge с именем профиля. Linear и Tilda — fullDump (cookie names не верифицированы, нужно проверить в DevTools).
 
 - [планируется] `BOT_SECRET` в GCP Secret Manager — нужно добавить вручную через `gcloud secrets create BOT_SECRET --data-file=-` на VM
 

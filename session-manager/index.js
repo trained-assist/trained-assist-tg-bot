@@ -5,7 +5,7 @@ const axios = require('axios');
 const { AuthManager, MODE } = require('./auth');
 const { SessionManager } = require('./sessions');
 const { loadSecrets } = require('./secrets');
-const { getUserByChatId } = require('./users');
+const { getUserByChatId, loginUser, logoutUser, addUser, removeUser, resetPassword, listUsers } = require('./user-registry');
 const { routeMessage } = require('./router');
 const { runTask } = require('./runner');
 const { ProfileManager } = require('./profile');
@@ -82,21 +82,27 @@ async function main() {
 
   // ── Middleware: guard ──────────────────────────────────────────────────────
 
+  const ADMIN_COMMANDS = ['/reauth', '/um', '/adduser', '/deluser', '/listusers', '/resetpass'];
+
   bot.use((ctx, next) => {
     const chatId = ctx.chat?.id;
 
-    // Группа — принимаем ТОЛЬКО /reauth, всё остальное игнорируем
+    // Admin group — allow only designated admin commands, silence everything else
     if (chatId === ADMIN_GROUP_ID) {
       const text = ctx.message?.text || '';
-      if (text.startsWith('/reauth')) return next();
-      return; // тишина
+      const isAdmin = ADMIN_COMMANDS.some(cmd => text.startsWith(cmd));
+      if (isAdmin) return next();
+      return;
     }
 
-    // Личные чаты — проверяем регистрацию
+    // Personal chats — /login is always open for unauthenticated users
+    const text = ctx.message?.text || '';
+    if (text.startsWith('/login') || text.startsWith('/logout')) return next();
+
     const user = getUserByChatId(chatId);
     if (!user) {
       console.log(`UNKNOWN_USER chat_id=${chatId} @${ctx.from?.username}`);
-      return;
+      return ctx.reply('👋 Чтобы начать работу, введи:\n/login <username> <password>');
     }
     ctx.alesakUser = user;
     sessions.setUserRef(user);
@@ -247,7 +253,7 @@ async function main() {
       if (!res.ok) throw new Error(`relay HTTP ${res.status}`);
 
       const { code } = await res.json();
-      const formatted = code.slice(0, 3) + ' ' + code.slice(3); // narrow no-break space
+      const formatted = code;
 
       await ctx.reply(
         `🔑 <b>Подключить Chrome-расширение</b>\n\n` +
@@ -295,12 +301,194 @@ async function main() {
     }
   });
 
+  // ── /chromeext_openurl ────────────────────────────────────────────────────
+  // Открывает URL в браузере и захватывает данные после навигации.
+  // Использование: /chromeext_openurl <url> [after:<captureAfterUrl>] [type:cookies|url_params] [label:<имя>]
+  // Пример: /chromeext_openurl https://github.com/login after:github.com label:github
+
+  bot.command('chromeext_openurl', async (ctx) => {
+    if (!BOT_SECRET) return ctx.reply('⚠️ BOT_SECRET не задан.');
+
+    const args = ctx.message.text.replace(/^\/chromeext_openurl\s*/, '').trim().split(/\s+/);
+    const url = args[0];
+    if (!url || !url.startsWith('http')) {
+      return ctx.reply('Использование: /chromeext_openurl <url> [after:<url>] [type:cookies|url_params] [label:<имя>]');
+    }
+
+    let captureAfterUrl = url;
+    let captureType = 'cookies';
+    let label = new URL(url).hostname;
+
+    for (const arg of args.slice(1)) {
+      if (arg.startsWith('after:')) captureAfterUrl = arg.slice(6);
+      else if (arg.startsWith('type:')) captureType = arg.slice(5);
+      else if (arg.startsWith('label:')) label = arg.slice(6);
+    }
+
+    const connected = await fetch(`${RELAY_URL}/status/${ctx.alesakUser.id}`, {
+      headers: { 'Authorization': `Bearer ${BOT_SECRET}` },
+    }).then(r => r.json()).then(j => j.connected).catch(() => false);
+
+    if (!connected) {
+      return ctx.reply('⚠️ Расширение не подключено. Сначала: /chromeext_connect');
+    }
+
+    await fetch(`${RELAY_URL}/queue-command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${BOT_SECRET}` },
+      body: JSON.stringify({
+        userId: ctx.alesakUser.id,
+        command: 'open_url',
+        payload: { url, captureAfterUrl, captureType, label },
+      }),
+    });
+
+    await ctx.reply(
+      `🌐 Открываю <b>${label}</b> в браузере.\n\n` +
+      `Залогинься — токен обычно приходит в течение минуты после входа.\n` +
+      `<i>(Ожидание до 10 минут.)</i>`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
   // ── /reauth ────────────────────────────────────────────────────────────────
   // Запускаем без await — иначе блокируем Telegraf polling на 5 мин и получаем crash
 
   bot.command('reauth', (ctx) => {
     ctx.reply('🔄 Запускаю OAuth…');
     auth.forceReauth(); // fire-and-forget
+  });
+
+  // ── /login (personal chat) ─────────────────────────────────────────────────
+
+  bot.command('login', (ctx) => {
+    const args = ctx.message.text.trim().split(/\s+/);
+    // args: ['/login', 'username', 'password']
+    if (args.length < 3) {
+      return ctx.reply('Использование: /login <username> <password>');
+    }
+    const [, username, password] = args;
+    const chatId = ctx.chat.id;
+    const user = loginUser(chatId, username, password);
+    if (!user) return ctx.reply('❌ Неверный логин или пароль.');
+
+    ctx.alesakUser = user;
+    sessions.setUserRef(user);
+    ctx.reply(
+      `✅ Ты вошёл как *${user.name}* (\`${username}\`).\n\n` +
+      `Просто пиши задачи — я запущу Claude Code и верну результат.\n\n` +
+      `Основные команды:\n` +
+      `/sessions — управление сессиями\n` +
+      `/me — твой профиль\n` +
+      `/logout — выйти`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  // ── /logout (personal chat) ────────────────────────────────────────────────
+
+  bot.command('logout', (ctx) => {
+    logoutUser(ctx.chat.id);
+    ctx.reply('👋 Ты вышел из профиля. Для входа: /login <username> <password>');
+  });
+
+  // ── /um — user management guide (admin group only, hidden from command list) ─
+
+  bot.command('um', (ctx) => {
+    if (ctx.chat.id !== ADMIN_GROUP_ID) return;
+    ctx.reply(
+      `👤 <b>Управление пользователями Alesa</b>\n\n` +
+
+      `<b>Создать пользователя</b>\n` +
+      `<code>/adduser username [Имя Фамилия]</code>\n` +
+      `→ Бот создаёт профиль и генерирует пароль.\n` +
+      `→ Скопируй логин и пароль и передай пользователю.\n\n` +
+
+      `<b>Сбросить пароль</b>\n` +
+      `<code>/resetpass username</code>\n` +
+      `→ Генерирует новый пароль для существующего пользователя.\n\n` +
+
+      `<b>Удалить пользователя</b>\n` +
+      `<code>/deluser username</code>\n` +
+      `→ Удаляет профиль и все активные сессии.\n\n` +
+
+      `<b>Список пользователей</b>\n` +
+      `<code>/listusers</code>\n` +
+      `→ Показывает всех зарегистрированных пользователей и статус.\n\n` +
+
+      `<b>Что делает пользователь</b>\n` +
+      `1. Пишет боту: <code>/login username password</code>\n` +
+      `2. Дальше общается как обычно.\n` +
+      `3. Выход: <code>/logout</code>\n\n` +
+
+      `<b>Legacy-пользователи</b> (Vladimir, Mariam) входят автоматически без пароля — их chat_id захардкожен.`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // ── /adduser (admin group) ─────────────────────────────────────────────────
+
+  bot.command('adduser', (ctx) => {
+    if (ctx.chat.id !== ADMIN_GROUP_ID) return;
+    const parts = ctx.message.text.trim().split(/\s+/).slice(1);
+    const username = parts[0];
+    if (!username) return ctx.reply('Использование: /adduser username [Имя Фамилия]');
+    const displayName = parts.slice(1).join(' ') || username;
+
+    try {
+      const { password } = addUser(username, displayName);
+      ctx.reply(
+        `✅ Пользователь создан:\n\n` +
+        `Логин: <code>${username}</code>\n` +
+        `Пароль: <code>${password}</code>\n\n` +
+        `Передай пользователю — он вводит: <code>/login ${username} ${password}</code>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) {
+      ctx.reply(`❌ ${e.message}`);
+    }
+  });
+
+  // ── /deluser (admin group) ─────────────────────────────────────────────────
+
+  bot.command('deluser', (ctx) => {
+    if (ctx.chat.id !== ADMIN_GROUP_ID) return;
+    const username = ctx.message.text.trim().split(/\s+/)[1];
+    if (!username) return ctx.reply('Использование: /deluser username');
+
+    const ok = removeUser(username);
+    ctx.reply(ok ? `✅ Пользователь @${username} удалён.` : `❌ Пользователь "${username}" не найден.`);
+  });
+
+  // ── /resetpass (admin group) ───────────────────────────────────────────────
+
+  bot.command('resetpass', (ctx) => {
+    if (ctx.chat.id !== ADMIN_GROUP_ID) return;
+    const username = ctx.message.text.trim().split(/\s+/)[1];
+    if (!username) return ctx.reply('Использование: /resetpass username');
+
+    const newPass = resetPassword(username);
+    if (!newPass) return ctx.reply(`❌ Пользователь "${username}" не найден.`);
+
+    ctx.reply(
+      `🔑 Новый пароль для <code>${username}</code>:\n<code>${newPass}</code>\n\n` +
+      `Для входа: <code>/login ${username} ${newPass}</code>`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // ── /listusers (admin group) ───────────────────────────────────────────────
+
+  bot.command('listusers', (ctx) => {
+    if (ctx.chat.id !== ADMIN_GROUP_ID) return;
+    const users = listUsers();
+    if (!users.length) return ctx.reply('Нет зарегистрированных пользователей.');
+
+    const lines = users.map(u =>
+      `• <b>${u.name}</b> (@${u.username})` +
+      (u.activeSessions !== '—' ? ` — ${u.activeSessions} сессий` : ' — legacy')
+    );
+    ctx.reply(`👥 <b>Пользователи (${users.length})</b>\n\n${lines.join('\n')}`, { parse_mode: 'HTML' });
   });
 
   // ── Callback queries (inline keyboard actions) ─────────────────────────────
