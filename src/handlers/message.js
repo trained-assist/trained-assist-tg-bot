@@ -16,11 +16,11 @@ export async function handleMessage(msg, env) {
   if (text) {
     await handleText(chatId, session, text, env);
   } else if (voice) {
-    const transcript = await transcribeVoice(voice.file_id, env);
+    const { transcript, error } = await transcribeVoice(voice.file_id, env);
     if (transcript) {
       await handleText(chatId, session, transcript, env);
     } else {
-      await sendMessage(env.BOT_TOKEN, chatId, '❌ Не удалось расшифровать голосовое сообщение');
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
   } else if (photo) {
     // TODO: download highest-res photo, save to agent workDir
@@ -38,19 +38,16 @@ async function transcribeVoice(fileId, env) {
   );
   const fileData = await fileRes.json();
   if (!fileData.ok) {
-    console.error('[voice] getFile failed:', JSON.stringify(fileData));
-    return null;
+    return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
   }
 
   // Download OGG audio
   const audioUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
   const audioRes = await fetch(audioUrl);
   if (!audioRes.ok) {
-    console.error('[voice] audio download failed:', audioRes.status);
-    return null;
+    return { transcript: null, error: `audio download ${audioRes.status}` };
   }
   const audioBuffer = await audioRes.arrayBuffer();
-  console.log('[voice] audio size bytes:', audioBuffer.byteLength);
 
   // Transcribe via Deepgram
   const dgRes = await fetch(
@@ -66,13 +63,14 @@ async function transcribeVoice(fileId, env) {
   );
   const dgText = await dgRes.text();
   if (!dgRes.ok) {
-    console.error('[voice] deepgram error:', dgRes.status, dgText);
-    return null;
+    return { transcript: null, error: `deepgram ${dgRes.status}: ${dgText.slice(0, 200)}` };
   }
   const dgData = JSON.parse(dgText);
   const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-  console.log('[voice] transcript:', transcript);
-  return transcript || null;
+  if (!transcript) {
+    return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b)` };
+  }
+  return { transcript, error: null };
 }
 
 async function handleText(chatId, session, text, env) {
