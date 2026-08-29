@@ -1,16 +1,26 @@
 // HTTP client for alesa-agent
 
-export async function runTask(env, { userId, username, task, context }) {
+export async function runTask(env, { userId, username, task, context, sessionId }) {
   const res = await fetch(`${env.AGENT_URL}/run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ userId, username, task, context }),
+    body: JSON.stringify({ userId, username, task, context, sessionId }),
   });
   if (!res.ok) throw new Error(`agent /run HTTP ${res.status}`);
   return res.json();
+}
+
+export async function getSessions(env, { username, limit = 10 }) {
+  const res = await fetch(
+    `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}`,
+    { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` } }
+  );
+  if (!res.ok) throw new Error(`agent /sessions HTTP ${res.status}`);
+  const { sessions } = await res.json();
+  return sessions;
 }
 
 export async function setUserToken(env, { userId, label, value }) {

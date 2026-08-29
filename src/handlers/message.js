@@ -82,6 +82,7 @@ async function handleText(chatId, session, text, env) {
       username: session.username,
       task: text,
       context: session.context || null,
+      sessionId: session.activeSessionId || null,
     });
     // Agent sends and edits its own "⏳ Думаю…" — Worker must not send a duplicate
   } catch (err) {

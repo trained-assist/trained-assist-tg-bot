@@ -1,7 +1,7 @@
-import { sendMessage } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { getUser } from '../lib/kv.js';
-import { getAgentHealth } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -21,7 +21,8 @@ export async function handleCommand(msg, env) {
     case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
     case '/chromeext_connect': return cmdChromeExtConnect(chatId, env);
     case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
-    // TODO: /sessions, /me, /setabout, /setprefs, /terminal
+    case '/sessions':
+    case '/диалоги':           return cmdSessions(chatId, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -37,7 +38,7 @@ async function cmdStart(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
     `Просто пиши задачи — я передам их Claude Code.\n\n` +
-    `Команды:\n/status — статус\n/logout — выйти`
+    `Команды:\n/sessions — диалоги\n/status — статус\n/logout — выйти`
   );
 }
 
@@ -185,6 +186,52 @@ async function cmdChromeExtInstall(chatId, env) {
     `Кликни на иконку расширения → введи код → <b>Подключить</b>.\n\n` +
     `Готово! Расширение будет автоматически переносить токены авторизации на VM.`
   );
+}
+
+async function cmdSessions(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  let list;
+  try {
+    list = await getSessions(env, { username: session.username, limit: 8 });
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить диалоги: ${e.message}`);
+  }
+
+  if (!list || list.length === 0) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '📭 Нет сохранённых диалогов.\n\nПросто напиши задачу — она станет первым диалогом.'
+    );
+  }
+
+  const active = session.activeSessionId;
+
+  // Format time ago
+  function timeAgo(ts) {
+    const diff = Date.now() - ts;
+    const m = Math.floor(diff / 60000);
+    if (m < 1) return 'только что';
+    if (m < 60) return `${m}м`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}ч`;
+    return `${Math.floor(h / 24)}д`;
+  }
+
+  const buttons = list.map(s => {
+    const marker = s.id === active ? '🔵 ' : '';
+    const label = `${marker}${s.topic.slice(0, 30)} · ${timeAgo(s.lastAt)}`;
+    return [{ text: label, callback_data: `s:${s.id}` }];
+  });
+
+  // New session button
+  buttons.push([{ text: '✨ Новый диалог', callback_data: 's:new' }]);
+
+  const header = active
+    ? `💬 <b>Диалоги</b>\n🔵 = активный\n\nВыбери диалог или начни новый:`
+    : `💬 <b>Диалоги</b>\n\nВыбери диалог для продолжения:`;
+
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, header, buttons);
 }
 
 async function cmdPrivacy(chatId, env) {

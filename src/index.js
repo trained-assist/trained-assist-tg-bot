@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { handleMessage } from './handlers/message.js';
 import { handleCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
+import { handleCallbackQuery } from './handlers/callbacks.js';
 
 const app = new Hono();
 
@@ -24,6 +25,11 @@ app.post('/webhook', async (c) => {
 });
 
 async function dispatch(update, env) {
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query, env);
+    return;
+  }
+
   const msg = update.message;
   if (!msg) return;
 

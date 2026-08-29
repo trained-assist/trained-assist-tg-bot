@@ -18,6 +18,12 @@ export async function editMessage(token, chatId, messageId, text, extra = {}) {
   return res.json();
 }
 
+export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboard) {
+  return sendMessage(token, chatId, text, {
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
+}
+
 export async function answerCallbackQuery(token, callbackQueryId, text = '') {
   await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
     method: 'POST',
