@@ -3,6 +3,7 @@ import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { getUser } from '../lib/kv.js';
 import { getAgentHealth } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
+import { setUserToken } from '../lib/agent-client.js';
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
@@ -16,6 +17,7 @@ export async function handleCommand(msg, env) {
     case '/status':  return cmdStatus(chatId, env);
     case '/version': return cmdVersion(chatId, env);
     case '/privacy':          return cmdPrivacy(chatId, env);
+    case '/settoken':          return cmdSetToken(msg, env);
     case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
     case '/chromeext_connect': return cmdChromeExtConnect(chatId, env);
     case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
@@ -99,6 +101,35 @@ async function cmdVersion(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `🤖 <b>Alesa Bot</b>\nWorker — Cloudflare\nAgent — GCP VM\n\nTODO: показывать git hash`
   );
+}
+
+async function cmdSetToken(msg, env) {
+  const { chat, text } = msg;
+  const chatId = chat.id;
+  const session = await import('../lib/kv.js').then(m => m.getSession(env.SESSIONS, chatId));
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  const args = text.trim().split(/\s+/);
+  if (args.length < 3) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '📝 Использование: <code>/settoken &lt;сервис&gt; &lt;токен&gt;</code>\n\n' +
+      'Примеры:\n' +
+      '<code>/settoken github ghp_xxxxxxxxxxxx</code>\n' +
+      '<code>/settoken figma xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code>\n' +
+      '<code>/settoken notion secret_xxxxxx</code>\n\n' +
+      'GitHub PAT: <a href="https://github.com/settings/tokens/new">создать токен</a> (нужны scope: repo, read:org)'
+    );
+  }
+  const [, label, value] = args;
+
+  try {
+    await setUserToken(env, { userId: chatId, label: label.toLowerCase(), value });
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `✅ Токен <b>${label}</b> сохранён. Клод увидит его в следующей задаче.`
+    );
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+  }
 }
 
 async function cmdChromeExtConnect(chatId, env) {

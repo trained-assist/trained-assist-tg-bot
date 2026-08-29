@@ -13,6 +13,19 @@ export async function runTask(env, { userId, username, task, context }) {
   return res.json();
 }
 
+export async function setUserToken(env, { userId, label, value }) {
+  const res = await fetch(`${env.AGENT_URL}/tokens`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ userId, label, value }),
+  });
+  if (!res.ok) throw new Error(`agent /tokens HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {
