@@ -36,6 +36,8 @@
 
 - [реализовано] **Chrome-расширение: Cloud Auth Bridge v1.2** — репо `alesa-auth-extension`. Переименовано из "Alesa Auth". Фичи: per-service cookie extractors (Figma/Notion/GitHub/Linear/Tilda — только нужные cookies), 20 Jest mock-тестов, мульти-профиль (profileName авто-детектится из `chrome.identity` по email, prefix на relay: `vladimir.figma`), quick-capture кнопки для всех сервисов, popup показывает badge с именем профиля. Linear и Tilda — fullDump (cookie names не верифицированы, нужно проверить в DevTools).
 
+- [реализовано] **`/sessions` команда** — показывает последние диалоги пользователя с темой и относительным временем. Inline keyboard: тап на сессию → следующее сообщение продолжает этот диалог с контекстом. Кнопка "✨ Новый диалог" — сбрасывает активную сессию. Сессии сохраняются агентом: `~/users/{username}/sessions/{id}.json`. Агент: session-store.js + /sessions API; бот: callbacks.js handler + sendMessageWithKeyboard.
+
 - [планируется] `BOT_SECRET` в GCP Secret Manager — нужно добавить вручную через `gcloud secrets create BOT_SECRET --data-file=-` на VM
 
 - [планируется] **State management при deploy** — три части:
