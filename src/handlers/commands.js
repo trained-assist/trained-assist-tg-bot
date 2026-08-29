@@ -103,7 +103,7 @@ async function cmdChromeExtInstall(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `🧩 <b>Установка Cloud Auth Bridge</b>\n\n` +
     `<b>Шаг 1.</b> Скачай расширение:\n` +
-    `<a href="https://github.com/trained-assist/cloud-auth-bridge/releases/latest/download/alesa-auth-extension-v1.2.0.zip">📦 alesa-auth-extension-v1.2.0.zip</a>\n\n` +
+    `<a href="https://github.com/trained-assist/cloud-auth-bridge/releases/latest/download/cloud-auth-bridge.zip">📦 cloud-auth-bridge.zip</a>\n\n` +
     `<b>Шаг 2.</b> Распакуй ZIP в любую папку (запомни куда).\n\n` +
     `<b>Шаг 3.</b> Открой Chrome → <code>chrome://extensions</code>\n` +
     `Включи <b>Режим разработчика</b> (переключатель справа вверху).\n` +
