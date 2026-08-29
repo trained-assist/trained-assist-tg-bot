@@ -25,7 +25,7 @@ export async function handleCallbackQuery(cq, env) {
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
 
-    if (!pending || (Date.now() - (session.pendingMessageAt || 0)) > 10 * 60 * 1000) {
+    if (!pending || !session.pendingMessageAt || (Date.now() - session.pendingMessageAt) > 10 * 60 * 1000) {
       await answerCallbackQuery(env.BOT_TOKEN, id, '⏱ Сообщение устарело — отправь снова');
       return;
     }

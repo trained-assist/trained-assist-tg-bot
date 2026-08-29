@@ -64,14 +64,15 @@ async function handleText(chatId, session, text, env) {
       sessionId,
     });
 
-    // Update KV with last session info (used for routing next message)
+    // Update KV — always clear activeSessionId after use so routing stays dynamic.
+    // lastSessionId + lastMessageAt carry forward for the <2h auto-continue path.
     await setSession(env.SESSIONS, chatId, {
       ...session,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
       pendingMessage: null,
-      // Keep activeSessionId if user explicitly chose it; clear otherwise
-      activeSessionId: route.clearActive ? null : session.activeSessionId,
+      pendingMessageAt: null,
+      activeSessionId: null,
     });
   } catch (err) {
     await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`);
@@ -89,15 +90,10 @@ async function resolveSessionRoute(chatId, session, text, env) {
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {
     const newId = `s-${chatId}-${Date.now()}`;
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      activeSessionId: null,
-      lastSessionId: null,
-    });
-    return { type: 'run', sessionId: newId, clearActive: true };
+    return { type: 'run', sessionId: newId, forceNew: true };
   }
 
-  // 2. User explicitly chose a session via /sessions button → use it
+  // 2. User explicitly chose a session via /sessions button → use it once, then clear
   if (session.activeSessionId) {
     return { type: 'run', sessionId: session.activeSessionId };
   }
