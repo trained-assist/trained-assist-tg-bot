@@ -1,7 +1,7 @@
 import { sendMessage } from '../lib/telegram.js';
 import { getUser, setUser, deleteUser, listUsernames } from '../lib/kv.js';
 
-const ADMIN_COMMANDS = ['/reauth', '/um', '/adduser', '/deluser', '/listusers', '/resetpass'];
+const ADMIN_COMMANDS = ['/reauth', '/um', '/adduser', '/deluser', '/listusers', '/resetpass', '/stats'];
 
 export function isUserMgmtCommand(text) {
   return ADMIN_COMMANDS.some(cmd => text.startsWith(cmd));
@@ -19,6 +19,7 @@ export async function handleUserMgmt(msg, env) {
     case '/deluser':   return cmdDelUser(chatId, parts, env);
     case '/listusers': return cmdListUsers(chatId, env);
     case '/resetpass': return cmdResetPass(chatId, parts, env);
+    case '/stats':     return cmdStats(chatId, env);
     // /reauth is handled by agent directly — TODO
   }
 }
@@ -116,6 +117,30 @@ async function cmdListUsers(chatId, env) {
   await sendMessage(env.BOT_TOKEN, chatId,
     `👥 <b>Пользователи (${usernames.length})</b>\n\n${lines.join('\n')}`
   );
+}
+
+async function cmdStats(chatId, env) {
+  let text;
+  try {
+    const res = await fetch(`${env.AGENT_URL}/stats`, {
+      headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const s = await res.json();
+    const memPct = Math.round(s.memory.usedMb / s.memory.totalMb * 100);
+    const diskPct = s.disk ? Math.round(s.disk.usedMb / s.disk.totalMb * 100) : null;
+    const uptimH = Math.floor(s.uptime / 3600);
+    const uptimM = Math.floor((s.uptime % 3600) / 60);
+    text =
+      `🖥 <b>Ресурсы VM</b>\n\n` +
+      `<b>CPU:</b> ${s.cpu.cores} ядра · нагрузка ${s.cpu.load1m.toFixed(2)} / ${s.cpu.load5m.toFixed(2)}\n` +
+      `<b>RAM:</b> ${s.memory.usedMb} / ${s.memory.totalMb} МБ (${memPct}%)\n` +
+      (diskPct !== null ? `<b>Диск:</b> ${s.disk.usedMb} / ${s.disk.totalMb} МБ (${diskPct}%)\n` : '') +
+      `<b>Uptime агента:</b> ${uptimH}ч ${uptimM}м`;
+  } catch (e) {
+    text = `❌ Не удалось получить статистику: ${e.message}`;
+  }
+  await sendMessage(env.BOT_TOKEN, chatId, text);
 }
 
 async function cmdResetPass(chatId, parts, env) {
