@@ -1,6 +1,8 @@
 import { sendMessage } from '../lib/telegram.js';
-import { getSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getUser } from '../lib/kv.js';
 import { getAgentHealth } from '../lib/agent-client.js';
+import { verifyPassword } from '../lib/auth.js';
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
@@ -36,25 +38,44 @@ async function cmdStart(chatId, env) {
 
 async function cmdLogin(msg, env) {
   const { chat, text } = msg;
+  const chatId = chat.id;
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
-    return sendMessage(env.BOT_TOKEN, chat.id, 'Использование: /login username password');
+    return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /login username password');
   }
   const [, username, password] = args;
 
-  // TODO: verify password against USERS KV (scrypt hash check via agent or locally)
-  // For now: delegate auth to agent
-  // const user = await verifyLogin(env.USERS, username, password);
+  const existing = await getSession(env.SESSIONS, chatId);
+  if (existing) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `✅ Ты уже вошёл как ${existing.name}. /logout чтобы выйти.`
+    );
+  }
 
-  return sendMessage(env.BOT_TOKEN, chat.id,
-    '⚠️ Авторизация через агент — TODO: реализовать проверку пароля из USERS KV.'
+  const user = await getUser(env.USERS, username);
+  if (!user) {
+    return sendMessage(env.BOT_TOKEN, chatId, '❌ Пользователь не найден.');
+  }
+
+  const ok = await verifyPassword(password, user.passwordHash, user.salt);
+  if (!ok) {
+    return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
+  }
+
+  await setSession(env.SESSIONS, chatId, { username, name: user.name });
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
 }
 
 async function cmdLogout(chatId, env) {
-  // TODO: delete from env.SESSIONS
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) {
+    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
+  }
+  await deleteSession(env.SESSIONS, chatId);
   return sendMessage(env.BOT_TOKEN, chatId,
-    '👋 Выход. Для входа: /login username password'
+    `👋 До встречи, ${session.name}! Для входа: /login username password`
   );
 }
 
