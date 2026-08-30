@@ -1,4 +1,4 @@
-import { getSession, setSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile } from '../lib/agent-client.js';
@@ -223,6 +223,29 @@ export async function handleCallbackQuery(cq, env) {
     }
 
     await answerCallbackQuery(env.BOT_TOKEN, id);
+    return;
+  }
+
+  // ── Profile actions ───────────────────────────────────────────────────────
+  if (data === 'prof:logout') {
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты уже не авторизован.'); return; }
+    const name = session.name;
+    await deleteSession(env.SESSIONS, chatId);
+    await sendMessage(env.BOT_TOKEN, chatId,
+      `👋 До встречи, ${name}!\n\nДля входа: <code>/login username password</code>`
+    );
+    return;
+  }
+
+  if (data === 'prof:switch') {
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.'); return; }
+    await deleteSession(env.SESSIONS, chatId);
+    await sendMessage(env.BOT_TOKEN, chatId,
+      `🔄 Выход из профиля <b>${session.name}</b> выполнен.\n\n` +
+      `Войди под другим логином:\n<code>/login username password</code>`
+    );
     return;
   }
 
