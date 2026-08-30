@@ -1,7 +1,26 @@
 // HTTP client for alesa-agent
 
 // Russian geo-blocked services — route to RU VM automatically
-const RU_SERVICE_KEYWORDS = ['nalog', 'налог', 'нпд', 'gosuslugi', 'госуслуги', 'mos.ru', 'мос.ру', 'sbis', 'сбис'];
+// These are typically blocked from GCP (EU). Western services stay on GCP by default.
+const RU_SERVICE_KEYWORDS = [
+  // Налоги
+  'nalog', 'налог', 'нпд', 'фнс', 'fns.ru',
+  // Госуслуги и ведомства
+  'gosuslugi', 'госуслуги', 'esia', 'есиа',
+  'mos.ru', 'мос.ру',
+  'pfr', 'пфр', 'sfr', 'сфр',
+  'rosreestr', 'росреестр',
+  'mvd.gov', 'мвд',
+  'cbr.ru', 'цб.рф', 'центробанк',
+  // Российские банки
+  'сбербанк', 'sberbank', 'сбер', 'sber',
+  'тинькофф', 'tinkoff',
+  'втб', 'vtb',
+  'альфабанк', 'alfabank', 'альфа-банк',
+  'газпромбанк', 'raiffeisen',
+  // Другое РФ
+  'sbis', 'сбис', 'kontur', 'контур',
+];
 
 export function needsRuAgent(task) {
   const lc = task.toLowerCase();
