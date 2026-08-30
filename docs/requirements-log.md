@@ -50,9 +50,25 @@
 - [реализовано] Playwright MCP на каждом VM — per-user Chrome profiles
 - [реализовано] ~/.claude/scripts/pw.sh — автодетект аккаунта по CWD
 
+## CI/CD
+
+- [реализовано] GitHub Actions CI для trained-assist-tg-bot — npm ci, syntax check, vitest unit tests
+- [реализовано] GitHub Actions CI для trained-assist-agent — npm ci, syntax check, 16 vitest tests (browser + session-store)
+- [реализовано] deploy-gcp job: SSH → git reset --hard → deploy.sh → systemd restart assist-agent
+- [реализовано] deploy-ru job: SSH password auth → git safe.directory → git reset --hard → deploy.sh
+- [реализовано] Все три job (ci, deploy-gcp, deploy-ru) проходят для trained-assist-agent
+
+## Нейминг (Alesa → trained-assist)
+
+- [реализовано] trained-assist-agent.service → assist-agent.service (systemd)
+- [реализовано] alesa-agent-ru.service → assist-agent-ru.service
+- [реализовано] package.json name: trained-assist-agent / trained-assist-tg-bot
+- [реализовано] Удалено "Алеса" из cmdVersion, cmdPrivacy
+
 ## Безопасность
 
 - [реализовано] AGENT_SECRET — Bearer auth между CF Worker и агентами
 - [реализовано] BOT_SECRET — auth между ботом и token-relay
 - [реализовано] RELAY_BOT_SECRET — auth для команд через relay
 - [реализовано] Пароли пользователей — scrypt hash в Cloudflare KV
+- [реализовано] Исправлен path traversal в /files и /files/read (startsWith → !== + startsWith+sep)
