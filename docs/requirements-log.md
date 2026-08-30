@@ -50,6 +50,20 @@
 - [реализовано] Playwright MCP на каждом VM — per-user Chrome profiles
 - [реализовано] ~/.claude/scripts/pw.sh — автодетект аккаунта по CWD
 
+## Remote Browser Session (noVNC)
+
+- [реализовано] Persistent Chrome on GCP VM: Xvfb :99 + Chrome (CDP :9222) + x11vnc + noVNC
+  - Сервисы: xvfb-browser, chrome-browser, vnc-browser, novnc-browser (systemd, autostart)
+  - URL: https://136-65-7-197.sslip.io/browser/
+  - Chrome profile: ~/chrome-profiles/browser-session (сессии сохраняются)
+- [реализовано] browser-session MCP skill (21-browser-session.js):
+  - browser_session_url — ссылка для пользователя
+  - browser_session_capture_cookies — захват кук через CDP (~/browser-session/capture-cookies.js)
+  - browser_session_navigate — навигация удалённого Chrome
+  - browser_session_status — проверка состояния
+- [реализовано] Tilda skill обновлён: при session_expired → guided flow через browser session
+- [планируется] Per-user display isolation (сейчас один дисплей :99 для всех пользователей)
+
 ## CI/CD
 
 - [реализовано] GitHub Actions CI для trained-assist-tg-bot — npm ci, syntax check, vitest unit tests
