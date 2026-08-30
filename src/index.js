@@ -3,6 +3,7 @@ import { handleMessage } from './handlers/message.js';
 import { handleCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
+import { getSession } from './lib/kv.js';
 
 const app = new Hono();
 
@@ -43,12 +44,21 @@ async function dispatch(update, env) {
     return;
   }
 
-  // Other groups: log silently, respond only on mention or command
+  // Other groups: commands and mentions always handled;
+  // regular messages/voice handled if user has an active session (logged in)
   if (isGroup) {
     const mentioned = text.includes(`@${env.BOT_USERNAME}`);
     const isCommand = text.startsWith('/');
+    const hasContent = !!(msg.voice || msg.audio || msg.document || msg.photo || text);
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
-    if (!mentioned && !isCommand) return;
+
+    if (!isCommand && !mentioned) {
+      // Skip if no content, or no active session in this chat
+      if (!hasContent) return;
+      const session = await getSession(env.SESSIONS, chatId);
+      if (!session) return;
+    }
+
     // Strip mention from text before handling
     const cleanText = text.replace(`@${env.BOT_USERNAME}`, '').trim();
     const cleanMsg = { ...msg, text: cleanText };
