@@ -164,15 +164,17 @@ async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) 
 }
 
 async function transcribeVoice(fileId, env) {
+  const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
   const fileRes = await fetch(
-    `https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
+    `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
   );
   const fileData = await fileRes.json();
   if (!fileData.ok) {
     return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
   }
 
-  const audioUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
+  // File download always goes through api.telegram.org/file/ — use same proxy base
+  const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
   const audioRes = await fetch(audioUrl);
   if (!audioRes.ok) {
     return { transcript: null, error: `audio download ${audioRes.status}` };

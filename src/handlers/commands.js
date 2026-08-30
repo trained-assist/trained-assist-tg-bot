@@ -160,16 +160,15 @@ async function cmdRu(msg, env) {
 }
 
 async function cmdVersion(chatId, env) {
-  // TODO: fetch version from agent
   return sendMessage(env.BOT_TOKEN, chatId,
-    `🤖 <b>Alesa Bot</b>\nWorker — Cloudflare\nAgent — GCP VM\n\nTODO: показывать git hash`
+    `🤖 <b>Trained Assist Bot</b>\nWorker — Cloudflare\nAgent — GCP VM`
   );
 }
 
 async function cmdSetToken(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await import('../lib/kv.js').then(m => m.getSession(env.SESSIONS, chatId));
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const args = text.trim().split(/\s+/);
@@ -360,11 +359,11 @@ export async function cmdFiles(chatId, env, relPath = '') {
 
 async function cmdPrivacy(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
-    `🔒 <b>Как Алеса работает с данными</b>\n\n` +
+    `🔒 <b>Приватность</b>\n\n` +
     `Сообщения → Claude Code на GCP VM.\n` +
     `Сессии → Cloudflare KV (зашифровано).\n` +
-    `Файлы → временная папка на VM, удаляются после обработки.\n` +
+    `Файлы → папка на VM, не передаются третьим сторонам.\n` +
     `Пароли → Cloudflare KV (scrypt hash).\n\n` +
-    `Написать "удали мои данные" — Алеса очистит всё.`
+    `Напиши "удали мои данные" — всё будет очищено.`
   );
 }
