@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { getUser } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -27,6 +27,7 @@ export async function handleCommand(msg, env) {
     case '/новый_диалог':      return cmdNewDialog(chatId, env);
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
+    case '/ru':                return cmdRu(msg, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -46,6 +47,7 @@ async function cmdStart(chatId, env) {
     `/sessions — мои диалоги\n` +
     `/files — файлы и папки\n` +
     `/status — статус агента\n` +
+    `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
     `/settoken — сохранить токен сервиса\n` +
     `/chromeext_connect — подключить Chrome-расширение\n` +
     `/chromeext_install — установить расширение\n` +
@@ -100,12 +102,61 @@ async function cmdStatus(chatId, env) {
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован. /login username password');
 
-  const agentOk = await getAgentHealth(env);
+  const [agentOk, agentRuOk] = await Promise.all([
+    getAgentHealth(env),
+    env.AGENT_RU_URL ? getAgentHealth({ ...env, AGENT_URL: env.AGENT_RU_URL }) : Promise.resolve(null),
+  ]);
+
+  const ruLine = agentRuOk !== null
+    ? `\nRU-агент: ${agentRuOk ? '✅ онлайн' : '❌ офлайн'} (nalog.ru, РФ-сервисы)`
+    : '';
+
   return sendMessage(env.BOT_TOKEN, chatId,
     `📊 <b>${session.name}</b>\n` +
-    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}\n\n` +
-    `TODO: показать активные сессии`
+    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}` +
+    ruLine
   );
+}
+
+async function cmdRu(msg, env) {
+  const { chat, text } = msg;
+  const chatId = chat.id;
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  const task = text.replace(/^\/ru\s*/i, '').trim();
+  if (!task) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '🇷🇺 <b>Российский IP агент</b>\n\n' +
+      'Используй: <code>/ru ваша задача</code>\n\n' +
+      'Задачи, переданные через /ru, выполняются на VM с российским IP-адресом.\n' +
+      'Нужно для: nalog.ru, gosuslugi.ru и других РФ-сервисов.\n\n' +
+      'Пример: <code>/ru проверь мои доходы на nalog.ru</code>'
+    );
+  }
+
+  if (!env.AGENT_RU_URL) {
+    return sendMessage(env.BOT_TOKEN, chatId, '❌ RU-агент не настроен.');
+  }
+
+  try {
+    const sessionId = `s-${chatId}-${Date.now()}`;
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      task,
+      context: null,
+      sessionId,
+      forceRu: true,
+    });
+    await setSession(env.SESSIONS, chatId, {
+      ...session,
+      lastSessionId: sessionId,
+      lastMessageAt: Date.now(),
+    });
+  } catch (err) {
+    await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка RU-агента: ${err.message}`);
+  }
 }
 
 async function cmdVersion(chatId, env) {

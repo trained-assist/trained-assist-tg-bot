@@ -1,7 +1,21 @@
 // HTTP client for alesa-agent
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession }) {
-  const res = await fetch(`${env.AGENT_URL}/run`, {
+// Russian geo-blocked services — route to RU VM automatically
+const RU_SERVICE_KEYWORDS = ['nalog', 'налог', 'нпд', 'gosuslugi', 'госуслуги', 'mos.ru', 'мос.ру', 'sbis', 'сбис'];
+
+export function needsRuAgent(task) {
+  const lc = task.toLowerCase();
+  return RU_SERVICE_KEYWORDS.some(kw => lc.includes(kw));
+}
+
+export function pickAgentUrl(env, task, forceRu = false) {
+  if ((forceRu || needsRuAgent(task)) && env.AGENT_RU_URL) return env.AGENT_RU_URL;
+  return env.AGENT_URL;
+}
+
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu }) {
+  const agentUrl = pickAgentUrl(env, task, forceRu);
+  const res = await fetch(`${agentUrl}/run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
