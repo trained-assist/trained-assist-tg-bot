@@ -45,13 +45,14 @@ export async function handleCallbackQuery(cq, env) {
         activeSessionId: null,
         pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
       });
-      await runTask(env, {
+      runTask(env, {
         userId: chatId,
         username: session.username,
         task: pending,
         context: null,
         sessionId: resolvedId,
         initialMsgId,
+        pinnedMsgId: initialMsgId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
       // KV stale or message expired — switch to the chosen session and ask to resend
