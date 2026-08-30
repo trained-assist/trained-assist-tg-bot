@@ -3,11 +3,11 @@
 ## Инфраструктура
 
 - [реализовано] Cloudflare Worker (Hono) — Telegram webhook handler, stateless, без состояния
-- [реализовано] GCP VM 136.65.7.197 — основной агент (alesa-agent), запускает Claude сессии через `claude --dangerously-skip-permissions`
-- [реализовано] Hostland VM 178.212.14.192 — RU IP агент (alesa-agent та же кодовая база), для российских гео-блокированных сервисов
+- [реализовано] GCP VM 136.65.7.197 — основной агент (trained-assist-agent), запускает Claude сессии через `claude --dangerously-skip-permissions`
+- [реализовано] Hostland VM 178.212.14.192 — RU IP агент (trained-assist-agent та же кодовая база), для российских гео-блокированных сервисов
   - 8GB RAM, 4 vCore, 60GB NVMe, Москва, 862₽/мес
   - HTTPS: https://178-212-14-192.sslip.io
-  - Запускается как systemd сервис alesa-agent (SECRETS_SOURCE=env)
+  - Запускается как systemd сервис assist-agent (SECRETS_SOURCE=env)
 - [реализовано] nginx + Let's Encrypt на обоих VM
 - [реализовано] Per-user изоляция: ~/users/{username}/ на каждом VM
 
@@ -61,7 +61,7 @@
 ## Нейминг (Alesa → trained-assist)
 
 - [реализовано] trained-assist-agent.service → assist-agent.service (systemd)
-- [реализовано] alesa-agent-ru.service → assist-agent-ru.service
+- [реализовано] переименован в assist-agent-ru.service (ранее alesa-agent-ru.service)
 - [реализовано] package.json name: trained-assist-agent / trained-assist-tg-bot
 - [реализовано] Удалено "Алеса" из cmdVersion, cmdPrivacy
 

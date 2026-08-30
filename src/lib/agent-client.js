@@ -1,4 +1,4 @@
-// HTTP client for alesa-agent
+// HTTP client for trained-assist-agent
 
 // Russian geo-blocked services — route to RU VM automatically
 // These are typically blocked from GCP (EU). Western services stay on GCP by default.
