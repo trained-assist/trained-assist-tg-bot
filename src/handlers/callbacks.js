@@ -22,31 +22,43 @@ export async function handleCallbackQuery(cq, env) {
 
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-
-    if (!pending || !session.pendingMessageAt || (Date.now() - session.pendingMessageAt) > 10 * 60 * 1000) {
-      await answerCallbackQuery(env.BOT_TOKEN, id, '⏱ Сообщение устарело — отправь снова');
-      return;
-    }
+    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
 
     const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
-    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
 
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      lastSessionId: resolvedId,
-      lastMessageAt: Date.now(),
-      pendingMessage: null,
-      pendingMessageAt: null,
-      activeSessionId: null,
-    });
-
-    runTask(env, {
-      userId: chatId,
-      username: session.username,
-      task: pending,
-      context: null,
-      sessionId: resolvedId,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    if (pendingFresh) {
+      // Happy path: pending message exists and is fresh — run it
+      await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+      await setSession(env.SESSIONS, chatId, {
+        ...session,
+        lastSessionId: resolvedId,
+        lastMessageAt: Date.now(),
+        pendingMessage: null,
+        pendingMessageAt: null,
+        activeSessionId: null,
+      });
+      runTask(env, {
+        userId: chatId,
+        username: session.username,
+        task: pending,
+        context: null,
+        sessionId: resolvedId,
+      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    } else {
+      // KV stale or message expired — switch to the chosen session and ask to resend
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await setSession(env.SESSIONS, chatId, {
+        ...session,
+        activeSessionId: sessionId === 'new' ? null : resolvedId,
+        lastSessionId: sessionId === 'new' ? null : resolvedId,
+        pendingMessage: null,
+        pendingMessageAt: null,
+      });
+      const where = sessionId === 'new' ? 'Новый диалог начат' : 'Диалог выбран';
+      await sendMessage(env.BOT_TOKEN, chatId,
+        `✅ ${where}. Отправь своё сообщение ещё раз — теперь оно попадёт куда нужно.`
+      );
+    }
     return;
   }
 
