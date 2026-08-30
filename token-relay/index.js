@@ -17,6 +17,9 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 8081;
 const BOT_SECRET = process.env.BOT_SECRET;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const AGENT_RU_URL = process.env.AGENT_RU_URL || 'https://178-212-14-192.sslip.io';
+const AGENT_SECRET = process.env.AGENT_SECRET || '1ea8378c5ab06cb9f003118ffde024265f263edb307a014a';
+
 
 if (!BOT_SECRET)   console.warn('WARNING: BOT_SECRET not set — bot endpoints will reject all requests');
 if (!TELEGRAM_BOT_TOKEN) console.warn('WARNING: TELEGRAM_BOT_TOKEN not set — user notifications disabled');
@@ -27,6 +30,29 @@ const pairCodes = new Map();
 const pairTokens = new Map();
 // userId → Array<{ command, payload, createdAt, expiresAt }>
 const commandQueues = new Map();
+
+// ── Persistence: save/load pairTokens to file ─────────────────────────────
+const fs = require('fs');
+const TOKENS_FILE = '/home/vova/token-relay/pair-tokens.json';
+
+function saveTokens() {
+  try {
+    const obj = {};
+    for (const [uid, entry] of pairTokens) obj[uid] = entry;
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) { console.error('[relay] saveTokens error:', e.message); }
+}
+
+function loadTokens() {
+  try {
+    if (!fs.existsSync(TOKENS_FILE)) return;
+    const obj = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
+    for (const [uid, entry] of Object.entries(obj)) pairTokens.set(uid, entry);
+    console.log(`[relay] loaded ${pairTokens.size} pairing token(s) from disk`);
+  } catch (e) { console.error('[relay] loadTokens error:', e.message); }
+}
+
+loadTokens();
 
 const COMMAND_TTL_MS = 30 * 60 * 1000; // команды живут 30 минут
 
@@ -159,8 +185,19 @@ const server = http.createServer(async (req, res) => {
     const pairingToken = generatePairingToken();
     pairCodes.delete(userId);
     pairTokens.set(userId, { token: pairingToken, createdAt: Date.now() });
+    saveTokens();
 
     console.log(`[relay] paired userId=${userId}`);
+        // Forward token to RU VM (geo-blocked services like nalog.ru)
+    if (AGENT_RU_URL && AGENT_SECRET) {
+      fetch(`${AGENT_RU_URL}/tokens`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+        body: JSON.stringify({ userId, label, value: tokenValue }),
+      }).then(r => console.log(`[relay] RU VM token sync: ${r.status}`))
+        .catch(e => console.warn('[relay] RU VM token sync failed:', e.message));
+    }
+
     await notifyUser(Number(userId),
       '🔗 <b>Chrome-расширение подключено!</b>\nТеперь могу получать токены авторизации из браузера.'
     );
@@ -185,11 +222,43 @@ const server = http.createServer(async (req, res) => {
 
     if (!userId) return send(401, { error: 'Invalid pairing token' });
 
-    // TODO v2: save to GCP Secret Manager as `tg_{userId}__token-{label}`
-    // For MVP: just notify user; actual saving happens when user asks Claude
     console.log(`[relay] token received label="${label}" for userId=${userId}`);
+
+    // Save token to disk — agent reads before launching Claude
+    try {
+      const dir = `/home/vova/agent-tokens/${userId}`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(`${dir}/${label}`, String(tokenValue), { mode: 0o600 });
+      console.log(`[relay] saved token disk: ${dir}/${label}`);
+    } catch (e) {
+      console.error('[relay] failed to save token:', e.message);
+    }
+
+    // Forward claude auth code to bot log-server (bypasses Telegram)
+    if (label === 'claude_auth_code') {
+      try {
+        let code = tokenValue;
+        try { code = JSON.parse(tokenValue).code || tokenValue; } catch {}
+        const http2 = require('http');
+        const fwdBody = JSON.stringify({ code });
+        const fwdReq = http2.request({
+          hostname: 'localhost', port: 8080,
+          path: '/api/auth-code?t=alesa2026',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(fwdBody) }
+        }, (r) => { r.resume(); });
+        fwdReq.on('error', () => {});
+        fwdReq.write(fwdBody);
+        fwdReq.end();
+        console.log(`[relay] forwarded claude_auth_code to bot log-server`);
+        return send(200, { ok: true });
+      } catch (e) {
+        console.error('[relay] auth-code forward error:', e.message);
+      }
+    }
+
     await notifyUser(Number(userId),
-      `🔒 Токен <b>${escapeHtml(label)}</b> получен.\nАлеса сохранит его по запросу.`
+      `🔒 Токен <b>${escapeHtml(label)}</b> получен.\nСохраню по запросу.`
     );
 
     return send(200, { ok: true });
@@ -260,6 +329,20 @@ const server = http.createServer(async (req, res) => {
     if (!queue.length) commandQueues.delete(userId);
     console.log(`[relay] command delivered command="${cmd.command}" to userId=${userId}`);
     return send(200, { command: cmd.command, payload: cmd.payload });
+  }
+
+
+  // ── POST /debug (extension → relay) ──────────────────────────────────────
+  // Silent debug logging from extension SW — no Telegram notification
+  if (req.method === 'POST' && req.url === '/debug') {
+    const { pairingToken, step, detail } = body;
+    let userId = null;
+    for (const [uid, entry] of pairTokens) {
+      if (entry.token === pairingToken) { userId = uid; break; }
+    }
+    if (!userId) return send(401, { error: 'Unauthorized' });
+    console.log(`[ext-debug] userId=${userId} step=${step} ${detail}`);
+    return send(200, { ok: true });
   }
 
   // ── GET /healthz ────────────────────────────────────────────────────────────
