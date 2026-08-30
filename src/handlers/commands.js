@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { getUser } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles, runTask } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask, getSkills } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -28,6 +28,8 @@ export async function handleCommand(msg, env) {
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     case '/ru':                return cmdRu(msg, env);
+    case '/skills':
+    case '/скиллы':            return cmdSkills(chatId, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -44,6 +46,7 @@ async function cmdStart(chatId, env) {
     `👋 Привет, ${session.name}!\n\n` +
     `Просто пиши задачи — я передам их Claude Code.\n\n` +
     `<b>Команды:</b>\n` +
+    `/skills — что умеет агент (список скиллов)\n` +
     `/sessions — мои диалоги\n` +
     `/files — файлы и папки\n` +
     `/status — статус агента\n` +
@@ -355,6 +358,28 @@ export async function cmdFiles(chatId, env, relPath = '') {
 
   const title = currentPath ? `📂 <code>${currentPath}</code>` : '📂 <b>Файлы</b>';
   return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons);
+}
+
+async function cmdSkills(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  let skills;
+  try {
+    skills = await getSkills(env);
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить список скиллов: ${e.message}`);
+  }
+
+  const lines = skills.map(s => {
+    const reqLine = s.requires ? `\n   ⚙️ <i>${s.requires}</i>` : '';
+    return `<b>${s.name}</b>${reqLine}\n   ${s.description}`;
+  });
+
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `🛠 <b>Доступные скиллы</b>\n\n${lines.join('\n\n')}\n\n` +
+    `<i>Просто напиши задачу — Клод сам выберет нужный скилл.</i>`
+  );
 }
 
 async function cmdPrivacy(chatId, env) {

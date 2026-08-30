@@ -100,6 +100,15 @@ export async function setUserToken(env, { userId, label, value }) {
   return res.json();
 }
 
+export async function getSkills(env) {
+  const res = await fetch(`${env.AGENT_URL}/skills`, {
+    headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+  });
+  if (!res.ok) throw new Error(`agent /skills HTTP ${res.status}`);
+  const { skills } = await res.json();
+  return skills;
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {
