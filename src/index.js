@@ -44,23 +44,28 @@ async function dispatch(update, env) {
     return;
   }
 
-  // Other groups: commands and mentions always handled;
-  // regular messages/voice handled if user has an active session (logged in)
+  // Other groups: commands and mentions/replies always handled;
+  // regular messages handled based on group size
   if (isGroup) {
-    const mentioned = text.includes(`@${env.BOT_USERNAME}`);
+    const isMentioned = text.includes(`@${env.BOT_USERNAME}`);
+    const isReplyToBot = msg.reply_to_message?.from?.username === env.BOT_USERNAME;
+    const isAddressedToBot = isMentioned || isReplyToBot;
     const isCommand = text.startsWith('/');
     const hasContent = !!(msg.voice || msg.audio || msg.document || msg.photo || text);
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
 
-    if (!isCommand && !mentioned) {
+    if (!isCommand && !isAddressedToBot) {
       // Skip if no content, or no active session in this chat
       if (!hasContent) return;
       const session = await getSession(env.SESSIONS, chatId);
       if (!session) return;
+      // In groups with 3+ members require explicit mention or reply
+      const memberCount = await getGroupMemberCount(env, chatId);
+      if (memberCount > 2) return;
     }
 
     // Strip mention from text before handling
-    const cleanText = text.replace(`@${env.BOT_USERNAME}`, '').trim();
+    const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
     const cleanMsg = { ...msg, text: cleanText };
     if (isCommand) await handleCommand(cleanMsg, env);
     else await handleMessage(cleanMsg, env);
@@ -73,6 +78,25 @@ async function dispatch(update, env) {
   } else {
     await handleMessage(msg, env);
   }
+}
+
+/** Returns cached Telegram chat member count (TTL 1h). Fails safe to 999. */
+async function getGroupMemberCount(env, chatId) {
+  const cacheKey = `mc:${chatId}`;
+  try {
+    const cached = await env.SESSIONS.get(cacheKey, { type: 'json' });
+    if (cached && Date.now() - cached.ts < 60 * 60 * 1000) return cached.count;
+
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/getChatMemberCount?chat_id=${chatId}`
+    );
+    const data = await res.json();
+    if (data.ok) {
+      await env.SESSIONS.put(cacheKey, JSON.stringify({ count: data.result, ts: Date.now() }));
+      return data.result;
+    }
+  } catch { /* ignore */ }
+  return 999; // fail-safe: treat as large group
 }
 
 export default app;

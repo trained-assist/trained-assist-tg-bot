@@ -28,7 +28,7 @@ export async function handleMessage(msg, env) {
     const { transcript, error } = await transcribeVoice(voice.file_id, env);
     if (transcript) {
       await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
-      await handleText(chatId, session, transcript, env);
+      await handleText(chatId, session, transcript, env, { isVoice: true });
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
@@ -39,7 +39,7 @@ export async function handleMessage(msg, env) {
   }
 }
 
-async function handleText(chatId, session, text, env) {
+async function handleText(chatId, session, text, env, opts = {}) {
   try {
     const route = await resolveSessionRoute(chatId, session, text, env);
 
@@ -56,11 +56,12 @@ async function handleText(chatId, session, text, env) {
 
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
+    const context = opts.isVoice ? '[voice-message]' : null;
     await runTask(env, {
       userId: chatId,
       username: session.username,
       task: text,
-      context: null,
+      context,
       sessionId,
       contextFromSession: session.contextFromSession || null,
     });
