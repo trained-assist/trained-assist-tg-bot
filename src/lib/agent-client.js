@@ -3,8 +3,9 @@
 // Russian geo-blocked services — route to RU VM automatically
 // These are typically blocked from GCP (EU). Western services stay on GCP by default.
 const RU_SERVICE_KEYWORDS = [
-  // Налоги
-  'nalog', 'налог', 'нпд', 'фнс', 'fns.ru',
+  // Налоги и НПД-операции
+  'nalog', 'налог', 'нпд', 'фнс', 'fns.ru', 'lknpd',
+  'чек нпд', 'выбить чек', 'пробить чек', 'самозанят',
   // Госуслуги и ведомства
   'gosuslugi', 'госуслуги', 'esia', 'есиа',
   'mos.ru', 'мос.ру',
@@ -23,7 +24,8 @@ const RU_SERVICE_KEYWORDS = [
 ];
 
 export function needsRuAgent(task) {
-  const lc = task.toLowerCase();
+  // Normalize: collapse spaces around dots to catch STT errors like "na log.ru" → "nalog.ru"
+  const lc = task.toLowerCase().replace(/\s*\.\s*/g, '.').replace(/\bna\s+log\b/g, 'nalog');
   return RU_SERVICE_KEYWORDS.some(kw => lc.includes(kw));
 }
 
