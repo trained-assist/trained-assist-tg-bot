@@ -1,4 +1,4 @@
-import { getSession, setSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile } from '../lib/agent-client.js';
@@ -8,10 +8,10 @@ export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
   const chatId = message?.chat?.id || from?.id;
 
-  if (!chatId) {
-    await answerCallbackQuery(env.BOT_TOKEN, id);
-    return;
-  }
+  // Immediately acknowledge — removes the loading spinner before any async work
+  answerCallbackQuery(env.BOT_TOKEN, id).catch(() => {});
+
+  if (!chatId) return;
 
   const session = await getSession(env.SESSIONS, chatId);
 
@@ -22,31 +22,43 @@ export async function handleCallbackQuery(cq, env) {
 
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-
-    if (!pending || !session.pendingMessageAt || (Date.now() - session.pendingMessageAt) > 10 * 60 * 1000) {
-      await answerCallbackQuery(env.BOT_TOKEN, id, '⏱ Сообщение устарело — отправь снова');
-      return;
-    }
+    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
 
     const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
-    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
 
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      lastSessionId: resolvedId,
-      lastMessageAt: Date.now(),
-      pendingMessage: null,
-      pendingMessageAt: null,
-      activeSessionId: null,
-    });
-
-    runTask(env, {
-      userId: chatId,
-      username: session.username,
-      task: pending,
-      context: null,
-      sessionId: resolvedId,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    if (pendingFresh) {
+      // Happy path: pending message exists and is fresh — run it
+      await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+      await setSession(env.SESSIONS, chatId, {
+        ...session,
+        lastSessionId: resolvedId,
+        lastMessageAt: Date.now(),
+        pendingMessage: null,
+        pendingMessageAt: null,
+        activeSessionId: null,
+      });
+      runTask(env, {
+        userId: chatId,
+        username: session.username,
+        task: pending,
+        context: null,
+        sessionId: resolvedId,
+      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    } else {
+      // KV stale or message expired — switch to the chosen session and ask to resend
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await setSession(env.SESSIONS, chatId, {
+        ...session,
+        activeSessionId: sessionId === 'new' ? null : resolvedId,
+        lastSessionId: sessionId === 'new' ? null : resolvedId,
+        pendingMessage: null,
+        pendingMessageAt: null,
+      });
+      const where = sessionId === 'new' ? 'Новый диалог начат' : 'Диалог выбран';
+      await sendMessage(env.BOT_TOKEN, chatId,
+        `✅ ${where}. Отправь своё сообщение ещё раз — теперь оно попадёт куда нужно.`
+      );
+    }
     return;
   }
 
@@ -223,6 +235,29 @@ export async function handleCallbackQuery(cq, env) {
     }
 
     await answerCallbackQuery(env.BOT_TOKEN, id);
+    return;
+  }
+
+  // ── Profile actions ───────────────────────────────────────────────────────
+  if (data === 'prof:logout') {
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты уже не авторизован.'); return; }
+    const name = session.name;
+    await deleteSession(env.SESSIONS, chatId);
+    await sendMessage(env.BOT_TOKEN, chatId,
+      `👋 До встречи, ${name}!\n\nДля входа: <code>/login username password</code>`
+    );
+    return;
+  }
+
+  if (data === 'prof:switch') {
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.'); return; }
+    await deleteSession(env.SESSIONS, chatId);
+    await sendMessage(env.BOT_TOKEN, chatId,
+      `🔄 Выход из профиля <b>${session.name}</b> выполнен.\n\n` +
+      `Войди под другим логином:\n<code>/login username password</code>`
+    );
     return;
   }
 

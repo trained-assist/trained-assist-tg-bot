@@ -62,6 +62,19 @@ npm run dev    # local dev via wrangler
 npm run deploy # deploy to Cloudflare
 ```
 
+## Development workflow
+
+All changes go through PRs — no direct pushes to `main`.
+
+```bash
+git checkout -b fix/description   # or feat/description
+# make changes, commit
+git push origin fix/description
+gh pr create --fill               # CI runs, auto-merges on green
+```
+
+CI runs on every PR (`npm run check` + `npm test`). On merge to `main`, the worker deploys to Cloudflare and a smoke test verifies `/health` + a fake webhook round-trip. Auto-merge is enabled via `.github/workflows/auto-merge.yml` — PRs squash-merge automatically when CI passes.
+
 ## Claude Code Instructions
 
 ### Architecture rules

@@ -1,6 +1,6 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
-import { getUser } from '../lib/kv.js';
+import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
@@ -13,7 +13,8 @@ export async function handleCommand(msg, env) {
   switch (cmd) {
     case '/start':   return cmdStart(chatId, env);
     case '/login':   return cmdLogin(msg, env);
-    case '/logout':  return cmdLogout(chatId, env);
+    case '/logout':   return cmdLogout(chatId, env);
+    case '/profile':  return cmdProfile(chatId, env);
     case '/status':  return cmdStatus(chatId, env);
     case '/version': return cmdVersion(chatId, env);
     case '/privacy':          return cmdPrivacy(chatId, env);
@@ -98,6 +99,32 @@ async function cmdLogout(chatId, env) {
   await deleteSession(env.SESSIONS, chatId);
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 До встречи, ${session.name}! Для входа: /login username password`
+  );
+}
+
+async function cmdProfile(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '👤 <b>Профиль</b>\n\nТы не авторизован.\n\n<code>/login username password</code>'
+    );
+  }
+
+  const allUsernames = await listUsernames(env.USERS);
+  const others = allUsernames.filter(u => u !== session.username);
+
+  const buttons = [];
+  if (others.length > 0) {
+    buttons.push([{ text: '🔄 Сменить профиль', callback_data: 'prof:switch' }]);
+  }
+  buttons.push([{ text: '🚪 Выйти', callback_data: 'prof:logout' }]);
+
+  return sendMessageWithKeyboard(
+    env.BOT_TOKEN, chatId,
+    `👤 <b>Профиль</b>\n\n` +
+    `Имя: <b>${session.name}</b>\n` +
+    `Логин: <code>${session.username}</code>`,
+    buttons
   );
 }
 
