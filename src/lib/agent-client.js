@@ -45,15 +45,18 @@ export async function pickAgentUrl(env, userId, task, forceRu = false) {
   return env.AGENT_URL;
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu }) {
-  const agentUrl = await pickAgentUrl(env, userId, task, forceRu);
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude }) {
+  const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
+  const body = { userId, username, context, sessionId, contextFromSession };
+  if (task) body.task = task;
+  if (forceClaude) body.forceClaude = true;
   const res = await fetch(`${agentUrl}/run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ userId, username, task, context, sessionId, contextFromSession }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`agent /run HTTP ${res.status}`);
   return res.json();

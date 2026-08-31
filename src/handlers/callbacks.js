@@ -300,5 +300,21 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Expand quick answer — ask Claude for full answer ─────────────────────
+  // ask_claude|{sessionId} — user tapped "↗️ Спросить Клода подробнее"
+  if (data?.startsWith('ask_claude|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
+
+    const sessionId = data.slice('ask_claude|'.length);
+    runTask(env, {
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      forceClaude: true,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
   await answerCallbackQuery(env.BOT_TOKEN, id);
 }
