@@ -1,41 +1,52 @@
 // HTTP client for trained-assist-agent
 
-// Russian geo-blocked services — route to RU VM automatically
-// These are typically blocked from GCP (EU). Western services stay on GCP by default.
-const RU_SERVICE_KEYWORDS = [
-  // Налоги и НПД-операции
-  'nalog', 'налог', 'нпд', 'фнс', 'fns.ru', 'lknpd',
-  'чек нпд', 'выбить чек', 'пробить чек', 'самозанят',
-  // Госуслуги и ведомства
-  'gosuslugi', 'госуслуги', 'esia', 'есиа',
-  'mos.ru', 'мос.ру',
-  'pfr', 'пфр', 'sfr', 'сфр',
-  'rosreestr', 'росреестр',
-  'mvd.gov', 'мвд',
-  'cbr.ru', 'цб.рф', 'центробанк',
-  // Российские банки
-  'сбербанк', 'sberbank', 'сбер', 'sber',
-  'тинькофф', 'tinkoff',
-  'втб', 'vtb',
-  'альфабанк', 'alfabank', 'альфа-банк',
-  'газпромбанк', 'raiffeisen',
-  // Другое РФ
-  'sbis', 'сбис', 'kontur', 'контур',
-];
+// Services that only work from Russian IP — routing based on which VM holds the token,
+// not on keyword-matching the task text.
+// Each entry: service name (matches filename in ~/agent-tokens/{userId}/) → task aliases
+const RU_ONLY_SERVICES = {
+  nalog:     ['nalog', 'налог', 'нпд', 'lknpd', 'самозанят', 'чек нпд', 'выбить чек', 'пробить чек', 'fns.ru'],
+  gosuslugi: ['gosuslugi', 'госуслуги', 'esia', 'есиа', 'mos.ru'],
+};
 
-export function needsRuAgent(task) {
-  // Normalize: collapse spaces around dots to catch STT errors like "na log.ru" → "nalog.ru"
-  const lc = task.toLowerCase().replace(/\s*\.\s*/g, '.').replace(/\bna\s+log\b/g, 'nalog');
-  return RU_SERVICE_KEYWORDS.some(kw => lc.includes(kw));
+// Fetch what services this user has tokens for on a given agent VM.
+// Returns [] on timeout or error (fail-open: route to GCP by default).
+async function getCapabilities(agentUrl, secret, userId) {
+  try {
+    const res = await fetch(`${agentUrl}/capabilities?userId=${userId}`, {
+      headers: { 'Authorization': `Bearer ${secret}` },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.capabilities || [];
+  } catch {
+    return [];
+  }
 }
 
-export function pickAgentUrl(env, task, forceRu = false) {
-  if ((forceRu || needsRuAgent(task)) && env.AGENT_RU_URL) return env.AGENT_RU_URL;
+// Returns the agent URL to use for this task.
+// Queries RU VM capabilities first; falls back to GCP on error/timeout.
+export async function pickAgentUrl(env, userId, task, forceRu = false) {
+  if (forceRu && env.AGENT_RU_URL) return env.AGENT_RU_URL;
+  if (!env.AGENT_RU_URL) return env.AGENT_URL;
+
+  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+  if (ruCaps.length === 0) return env.AGENT_URL;
+
+  // Normalize task for matching (collapse STT dot-splitting like "na log.ru" → "nalog.ru")
+  const lc = task.toLowerCase().replace(/\s*\.\s*/g, '.').replace(/\bna\s+log\b/g, 'nalog');
+
+  for (const cap of ruCaps) {
+    const aliases = RU_ONLY_SERVICES[cap];
+    if (!aliases) continue; // service isn't RU-only, skip
+    if (aliases.some(kw => lc.includes(kw))) return env.AGENT_RU_URL;
+  }
+
   return env.AGENT_URL;
 }
 
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu }) {
-  const agentUrl = pickAgentUrl(env, task, forceRu);
+  const agentUrl = await pickAgentUrl(env, userId, task, forceRu);
   const res = await fetch(`${agentUrl}/run`, {
     method: 'POST',
     headers: {
