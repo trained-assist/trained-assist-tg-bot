@@ -1,55 +1,69 @@
-import { describe, it, expect } from 'vitest';
-import { needsRuAgent, pickAgentUrl } from '../src/lib/agent-client.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { pickAgentUrl } from '../src/lib/agent-client.js';
 
-describe('needsRuAgent', () => {
-  it.each([
-    ['налог'],
-    ['nalog'],
-    ['госуслуги'],
-    ['тинькофф'],
-    ['NALOG'],
-    ['на nalog.ru'],
-    ['проверь мои доходы на nalog.ru'],
-    ['fns.ru'],
-    ['sberbank'],
-    ['сбер'],
-  ])('returns true for RU keyword: %s', (task) => {
-    expect(needsRuAgent(task)).toBe(true);
-  });
+const BASE = 'https://gcp.example.com';
+const RU   = 'https://ru.example.com';
+const USER = 42;
 
-  it.each([
-    ['hello world'],
-    ['github'],
-    ['обычная задача'],
-    ['напиши код'],
-    ['что такое typescript'],
-  ])('returns false for non-RU task: %s', (task) => {
-    expect(needsRuAgent(task)).toBe(false);
-  });
+function mockCapabilities(caps) {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ capabilities: caps }),
+  }));
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('pickAgentUrl', () => {
-  const BASE = 'https://gcp.example.com';
-  const RU   = 'https://ru.example.com';
-
-  it('returns AGENT_URL when no AGENT_RU_URL configured', () => {
+  it('returns AGENT_URL when AGENT_RU_URL not configured', async () => {
     const env = { AGENT_URL: BASE };
-    expect(pickAgentUrl(env, 'nalog task')).toBe(BASE);
-    expect(pickAgentUrl(env, 'nalog task', true)).toBe(BASE);
+    expect(await pickAgentUrl(env, USER, 'nalog task')).toBe(BASE);
+    expect(await pickAgentUrl(env, USER, 'nalog task', true)).toBe(BASE);
   });
 
-  it('returns AGENT_URL for non-RU task', () => {
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU };
-    expect(pickAgentUrl(env, 'write some code')).toBe(BASE);
+  it('returns AGENT_URL for non-RU task when user has no RU capabilities', async () => {
+    mockCapabilities([]);
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'write some code')).toBe(BASE);
   });
 
-  it('returns AGENT_RU_URL for RU keyword in task', () => {
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU };
-    expect(pickAgentUrl(env, 'проверь налоги')).toBe(RU);
+  it('returns AGENT_URL for RU-keyword task when user has no nalog token', async () => {
+    mockCapabilities([]); // user has no RU-only services connected
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(BASE);
   });
 
-  it('returns AGENT_RU_URL when forceRu=true regardless of task', () => {
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU };
-    expect(pickAgentUrl(env, 'написать тест', true)).toBe(RU);
+  it('returns AGENT_RU_URL for nalog task when user has nalog capability', async () => {
+    mockCapabilities(['nalog']);
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(RU);
+    expect(await pickAgentUrl(env, USER, 'nalog.ru отчёт')).toBe(RU);
+    expect(await pickAgentUrl(env, USER, 'чек нпд')).toBe(RU);
+  });
+
+  it('returns AGENT_RU_URL for forceRu=true without fetching capabilities', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'написать тест', true)).toBe(RU);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to AGENT_URL when capabilities endpoint is unreachable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')));
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(BASE);
+  });
+
+  it('handles STT dot-splitting: "na log.ru" routes to RU if user has nalog', async () => {
+    mockCapabilities(['nalog']);
+    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
+    expect(await pickAgentUrl(env, USER, 'зайди на na log.ru')).toBe(RU);
   });
 });
