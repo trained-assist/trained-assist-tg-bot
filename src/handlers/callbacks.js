@@ -329,7 +329,7 @@ export async function handleCallbackQuery(cq, env) {
       setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: initialMsgId }).catch(() => {});
     }
 
-    const sessionId = data.slice('ask_claude|'.length);
+    const sessionId = data.slice('ask_claude|'.length) || session.activeSessionId || session.lastSessionId;
     await runTask(env, {
       userId: chatId,
       username: session.username,
