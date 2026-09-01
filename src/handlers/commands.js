@@ -215,7 +215,7 @@ async function cmdSetToken(msg, env) {
   const [, label, value] = args;
 
   try {
-    await setUserToken(env, { userId: chatId, label: label.toLowerCase(), value });
+    await setUserToken(env, { userId: session.username, label: label.toLowerCase(), value });
     return sendMessage(env.BOT_TOKEN, chatId,
       `✅ Токен <b>${label}</b> сохранён. Клод увидит его в следующей задаче.`
     );
