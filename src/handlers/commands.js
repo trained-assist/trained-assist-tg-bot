@@ -20,8 +20,8 @@ export async function handleCommand(msg, env) {
     case '/privacy':          return cmdPrivacy(chatId, env);
     case '/settoken':          return cmdSetToken(msg, env);
     case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
-    case '/chromeext_connect': return cmdChromeExtConnect(chatId, env);
-    case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
+    case '/chromeext_connect': return cmdChromeExtConnect(msg, env);
+    case '/chromeext_status':  return cmdChromeExtStatus(msg, env);
     case '/sessions':
     case '/диалоги':           return cmdSessions(chatId, env);
     case '/new_dialog':
@@ -60,7 +60,7 @@ async function cmdStart(chatId, env) {
 }
 
 async function cmdLogin(msg, env) {
-  const { chat, text } = msg;
+  const { chat, text, from } = msg;
   const chatId = chat.id;
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
@@ -85,7 +85,7 @@ async function cmdLogin(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
   }
 
-  await setSession(env.SESSIONS, chatId, { username, name: user.name });
+  await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
   return sendMessage(env.BOT_TOKEN, chatId,
     `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
@@ -224,7 +224,9 @@ async function cmdSetToken(msg, env) {
   }
 }
 
-async function cmdChromeExtConnect(chatId, env) {
+async function cmdChromeExtConnect(msg, env) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id || chatId;
   try {
     const res = await fetch(`${env.RELAY_URL}/generate-pair-code`, {
       method: 'POST',
@@ -232,7 +234,7 @@ async function cmdChromeExtConnect(chatId, env) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${env.RELAY_BOT_SECRET}`,
       },
-      body: JSON.stringify({ userId: chatId }),
+      body: JSON.stringify({ userId }),
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);
     const { code } = await res.json();
@@ -247,9 +249,11 @@ async function cmdChromeExtConnect(chatId, env) {
   }
 }
 
-async function cmdChromeExtStatus(chatId, env) {
+async function cmdChromeExtStatus(msg, env) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id || chatId;
   try {
-    const res = await fetch(`${env.RELAY_URL}/status/${chatId}`, {
+    const res = await fetch(`${env.RELAY_URL}/status/${userId}`, {
       headers: { 'Authorization': `Bearer ${env.RELAY_BOT_SECRET}` },
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);

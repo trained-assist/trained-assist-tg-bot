@@ -72,6 +72,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       sessionId,
       contextFromSession: session.contextFromSession || null,
       initialMsgId,
+      telegramUserId: session.telegramUserId,
     });
 
     // Update KV — clear transient flags, carry forward lastSessionId for auto-continue

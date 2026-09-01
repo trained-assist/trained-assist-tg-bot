@@ -53,6 +53,7 @@ export async function handleCallbackQuery(cq, env) {
         sessionId: resolvedId,
         initialMsgId,
         pinnedMsgId: initialMsgId,
+        telegramUserId: session.telegramUserId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
       // KV stale or message expired — switch to the chosen session and ask to resend
@@ -335,7 +336,11 @@ export async function handleCallbackQuery(cq, env) {
       username: session.username,
       sessionId,
       forceClaude: true,
+<<<<<<< HEAD
       initialMsgId,
+=======
+      telegramUserId: session.telegramUserId,
+>>>>>>> 23e8b4f (fix(chrome-ext): bind Chrome extension pairing to Telegram user ID, not group chat ID)
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }
