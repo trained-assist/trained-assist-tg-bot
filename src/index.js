@@ -34,6 +34,12 @@ async function dispatch(update, env) {
   const msg = update.message;
   if (!msg) return;
 
+  // Invalidate member count cache when group membership changes
+  if (msg.new_chat_members || msg.left_chat_member) {
+    await env.SESSIONS.delete(`mc:${msg.chat.id}`);
+    return;
+  }
+
   const chatId = msg.chat.id;
   const text = msg.text || '';
   const isGroup = ['group', 'supergroup'].includes(msg.chat.type);
