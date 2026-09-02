@@ -37,7 +37,7 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessageAt: null,
         activeSessionId: null,
       });
-      runTask(env, {
+      await runTask(env, {
         userId: chatId,
         username: session.username,
         task: pending,
@@ -307,7 +307,7 @@ export async function handleCallbackQuery(cq, env) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
 
     const sessionId = data.slice('ask_claude|'.length);
-    runTask(env, {
+    await runTask(env, {
       userId: chatId,
       username: session.username,
       sessionId,

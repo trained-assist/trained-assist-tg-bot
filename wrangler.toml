@@ -21,3 +21,27 @@ id = "5753e58c86c14550930106cf9248eb72"
 [[kv_namespaces]]
 binding = "USERS"
 id = "74c1930ed8464f4889c056031f0d42f8"
+
+# ── Staging environment (auto-deployed from feature branches) ──────────────
+[env.staging]
+name = "trained-assist-tg-bot-staging"
+
+[env.staging.vars]
+ADMIN_GROUP_ID = "-5308931318"
+BOT_USERNAME = "super_personal_assistant_bot"
+RELAY_URL = "https://136-65-7-197.sslip.io"
+
+# Staging uses same KV namespaces as prod (OK for integration testing)
+[[env.staging.kv_namespaces]]
+binding = "SESSIONS"
+id = "5753e58c86c14550930106cf9248eb72"
+
+[[env.staging.kv_namespaces]]
+binding = "USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+# Secrets for staging — set once via:
+#   wrangler secret put BOT_TOKEN --env staging
+#   wrangler secret put BOT_SECRET --env staging
+#   wrangler secret put AGENT_URL --env staging
+#   wrangler secret put AGENT_SECRET --env staging
