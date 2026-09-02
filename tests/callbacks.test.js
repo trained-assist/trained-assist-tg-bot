@@ -86,14 +86,12 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
         return;
       }
 
-      // Every real handler calls answerCallbackQuery at least twice:
-      // once eagerly at line 12 (for all requests), and once explicitly in its branch.
-      // A silently-ignored callback only gets that one eager call at line 12.
-      // So >1 calls = the handler branch ran.
+      // Every real handler calls answerCallbackQuery at least once explicitly in its branch.
+      // A silently-ignored callback would call nothing at all.
       const { sendMessageWithKeyboard } = await import('../src/lib/telegram.js');
       const { cmdFiles } = await import('../src/handlers/commands.js');
       const didSomething =
-        answerCallbackQuery.mock.calls.length > 1 ||
+        answerCallbackQuery.mock.calls.length > 0 ||
         sendMessage.mock.calls.length > 0 ||
         sendMessageWithKeyboard.mock.calls.length > 0 ||
         runTask.mock.calls.length > 0 ||

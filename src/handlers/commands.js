@@ -26,6 +26,8 @@ export async function handleCommand(msg, env) {
     case '/диалоги':           return cmdSessions(chatId, env);
     case '/new_dialog':
     case '/новый_диалог':      return cmdNewDialog(chatId, env);
+    case '/close':
+    case '/закрыть':           return cmdClose(chatId, env);
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     case '/ru':                return cmdRu(msg, env);
@@ -322,6 +324,23 @@ async function cmdSessions(chatId, env) {
     env.BOT_TOKEN, chatId,
     '💬 <b>Диалоги</b>\n\nВыбери диалог:',
     buttons
+  );
+}
+
+async function cmdClose(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  await setSession(env.SESSIONS, chatId, {
+    ...session,
+    activeSessionId: null,
+    lastSessionId: null,
+    pendingMessage: null,
+    pendingMessageAt: null,
+    contextFromSession: null,
+  });
+  return sendMessage(env.BOT_TOKEN, chatId,
+    '🔚 <b>Диалог закрыт.</b>\n\nСледующее сообщение начнёт новый диалог с чистого листа.'
   );
 }
 

@@ -8,9 +8,6 @@ export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
   const chatId = message?.chat?.id || from?.id;
 
-  // Immediately acknowledge — removes the loading spinner before any async work
-  answerCallbackQuery(env.BOT_TOKEN, id).catch(() => {});
-
   if (!chatId) return;
 
   const session = await getSession(env.SESSIONS, chatId);
