@@ -1,4 +1,4 @@
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { getSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
 
@@ -57,6 +57,13 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
     const context = opts.isVoice ? '[voice-message]' : null;
+
+    // Send placeholder, swap pinned message (unpin old, pin new)
+    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+    const initialMsgId = placeholderRes?.result?.message_id ?? null;
+    if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
+    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+
     await runTask(env, {
       userId: chatId,
       username: session.username,
@@ -64,6 +71,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       context,
       sessionId,
       contextFromSession: session.contextFromSession || null,
+      initialMsgId,
     });
 
     // Update KV — clear transient flags, carry forward lastSessionId for auto-continue
@@ -75,6 +83,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pendingMessageAt: null,
       activeSessionId: null,
       contextFromSession: null, // consumed — clear after first use
+      pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
     });
   } catch (err) {
     await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`);

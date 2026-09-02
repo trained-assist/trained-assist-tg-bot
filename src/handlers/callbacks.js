@@ -1,5 +1,5 @@
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo } from './commands.js';
@@ -29,6 +29,13 @@ export async function handleCallbackQuery(cq, env) {
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
       await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+
+      // Send placeholder, swap pinned message
+      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      const initialMsgId = placeholderRes?.result?.message_id ?? null;
+      if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
+      if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+
       await setSession(env.SESSIONS, chatId, {
         ...session,
         lastSessionId: resolvedId,
@@ -36,6 +43,7 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
         activeSessionId: null,
+        pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
       });
       await runTask(env, {
         userId: chatId,
@@ -43,6 +51,7 @@ export async function handleCallbackQuery(cq, env) {
         task: pending,
         context: null,
         sessionId: resolvedId,
+        initialMsgId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
       // KV stale or message expired — switch to the chosen session and ask to resend
@@ -204,11 +213,15 @@ export async function handleCallbackQuery(cq, env) {
         lastSessionId: null,
         contextFromSession: null,
       });
-      await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Чистый лист');
-      if (sub === 'clean') {
-        await sendMessage(env.BOT_TOKEN, chatId,
-          '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.'
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      const msgId = message?.message_id;
+      const text = '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.';
+      if (msgId) {
+        await editMessage(env.BOT_TOKEN, chatId, msgId, text).catch(() =>
+          sendMessage(env.BOT_TOKEN, chatId, text)
         );
+      } else {
+        await sendMessage(env.BOT_TOKEN, chatId, text);
       }
       return;
     }
@@ -308,7 +321,12 @@ export async function handleCallbackQuery(cq, env) {
 
     // Send placeholder immediately so user sees feedback before agent starts
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
-    const initialMsgId = thinkMsg?.result?.message_id;
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
+    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+    if (initialMsgId) {
+      setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: initialMsgId }).catch(() => {});
+    }
 
     const sessionId = data.slice('ask_claude|'.length);
     await runTask(env, {
