@@ -342,11 +342,9 @@ export async function handleCallbackQuery(cq, env) {
       username: session.username,
       sessionId,
       forceClaude: true,
-<<<<<<< HEAD
       initialMsgId,
-=======
+      pinnedMsgId: initialMsgId,
       telegramUserId: session.telegramUserId,
->>>>>>> 23e8b4f (fix(chrome-ext): bind Chrome extension pairing to Telegram user ID, not group chat ID)
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }
