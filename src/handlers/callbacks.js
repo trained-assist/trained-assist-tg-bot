@@ -205,11 +205,9 @@ export async function handleCallbackQuery(cq, env) {
         contextFromSession: null,
       });
       await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Чистый лист');
-      if (sub === 'clean') {
-        await sendMessage(env.BOT_TOKEN, chatId,
-          '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.'
-        );
-      }
+      await sendMessage(env.BOT_TOKEN, chatId,
+        '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.'
+      );
       return;
     }
 
