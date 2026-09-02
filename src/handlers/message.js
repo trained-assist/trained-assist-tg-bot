@@ -82,7 +82,11 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
     });
   } catch (err) {
-    await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`);
+    const isAgentDown = /HTTP 50[23]/.test(err.message) || err.name === 'TimeoutError';
+    const userMsg = isAgentDown
+      ? '⏸ Агент временно недоступен. Попробуй через минуту.'
+      : `❌ Ошибка: ${err.message}`;
+    await sendMessage(env.BOT_TOKEN, chatId, userMsg);
   }
 }
 
