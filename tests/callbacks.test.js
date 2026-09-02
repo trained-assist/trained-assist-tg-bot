@@ -32,6 +32,7 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
   sendMessageWithKeyboard: vi.fn().mockResolvedValue({}),
   answerCallbackQuery: vi.fn().mockResolvedValue({}),
+  editMessage: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock('../src/lib/agent-client.js', () => ({

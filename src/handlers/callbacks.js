@@ -23,6 +23,8 @@ export async function handleCallbackQuery(cq, env) {
 
     const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
 
+    const msgId = message?.message_id;
+
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
       await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
@@ -42,6 +44,9 @@ export async function handleCallbackQuery(cq, env) {
         activeSessionId: null,
         pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
       });
+      // Replace the keyboard message with a status line so the user knows it's running
+      const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
+      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       runTask(env, {
         userId: chatId,
         username: session.username,
@@ -53,7 +58,7 @@ export async function handleCallbackQuery(cq, env) {
         telegramUserId: session.telegramUserId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
-      // KV stale or message expired — switch to the chosen session and ask to resend
+      // KV stale or message expired — replace keyboard with prompt to write
       await answerCallbackQuery(env.BOT_TOKEN, id);
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -62,12 +67,14 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
       });
-      const where = sessionId === 'new' ? '✅ Новый диалог начат' : '✅ Диалог выбран';
-      await sendMessage(env.BOT_TOKEN, chatId,
-        sessionId === 'new'
-          ? `${where}. Напиши свою задачу!`
-          : `${where}. Напиши следующее сообщение — отвечу с учётом контекста.`
-      );
+      const promptText = sessionId === 'new'
+        ? '✨ Новый диалог — напиши свою задачу!'
+        : '↩️ Диалог выбран — напиши следующее сообщение.';
+      if (msgId) {
+        editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      } else {
+        await sendMessage(env.BOT_TOKEN, chatId, promptText);
+      }
     }
     return;
   }
