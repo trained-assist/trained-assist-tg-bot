@@ -31,3 +31,19 @@ export async function answerCallbackQuery(token, callbackQueryId, text = '') {
     body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
   });
 }
+
+export async function pinChatMessage(token, chatId, messageId) {
+  await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, disable_notification: true }),
+  });
+}
+
+export async function unpinChatMessage(token, chatId, messageId) {
+  await fetch(`https://api.telegram.org/bot${token}/unpinChatMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+}
