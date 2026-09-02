@@ -20,12 +20,14 @@ export async function handleCommand(msg, env) {
     case '/privacy':          return cmdPrivacy(chatId, env);
     case '/settoken':          return cmdSetToken(msg, env);
     case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
-    case '/chromeext_connect': return cmdChromeExtConnect(chatId, env);
-    case '/chromeext_status':  return cmdChromeExtStatus(chatId, env);
+    case '/chromeext_connect': return cmdChromeExtConnect(msg, env);
+    case '/chromeext_status':  return cmdChromeExtStatus(msg, env);
     case '/sessions':
     case '/диалоги':           return cmdSessions(chatId, env);
     case '/new_dialog':
     case '/новый_диалог':      return cmdNewDialog(chatId, env);
+    case '/close':
+    case '/закрыть':           return cmdClose(chatId, env);
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     case '/ru':                return cmdRu(msg, env);
@@ -60,7 +62,7 @@ async function cmdStart(chatId, env) {
 }
 
 async function cmdLogin(msg, env) {
-  const { chat, text } = msg;
+  const { chat, text, from } = msg;
   const chatId = chat.id;
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
@@ -85,7 +87,7 @@ async function cmdLogin(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
   }
 
-  await setSession(env.SESSIONS, chatId, { username, name: user.name });
+  await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
   return sendMessage(env.BOT_TOKEN, chatId,
     `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
@@ -215,7 +217,7 @@ async function cmdSetToken(msg, env) {
   const [, label, value] = args;
 
   try {
-    await setUserToken(env, { userId: chatId, label: label.toLowerCase(), value });
+    await setUserToken(env, { userId: session.username, label: label.toLowerCase(), value });
     return sendMessage(env.BOT_TOKEN, chatId,
       `✅ Токен <b>${label}</b> сохранён. Клод увидит его в следующей задаче.`
     );
@@ -224,7 +226,9 @@ async function cmdSetToken(msg, env) {
   }
 }
 
-async function cmdChromeExtConnect(chatId, env) {
+async function cmdChromeExtConnect(msg, env) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id || chatId;
   try {
     const res = await fetch(`${env.RELAY_URL}/generate-pair-code`, {
       method: 'POST',
@@ -232,7 +236,7 @@ async function cmdChromeExtConnect(chatId, env) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${env.RELAY_BOT_SECRET}`,
       },
-      body: JSON.stringify({ userId: chatId }),
+      body: JSON.stringify({ userId }),
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);
     const { code } = await res.json();
@@ -247,9 +251,11 @@ async function cmdChromeExtConnect(chatId, env) {
   }
 }
 
-async function cmdChromeExtStatus(chatId, env) {
+async function cmdChromeExtStatus(msg, env) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id || chatId;
   try {
-    const res = await fetch(`${env.RELAY_URL}/status/${chatId}`, {
+    const res = await fetch(`${env.RELAY_URL}/status/${userId}`, {
       headers: { 'Authorization': `Bearer ${env.RELAY_BOT_SECRET}` },
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);
@@ -318,6 +324,23 @@ async function cmdSessions(chatId, env) {
     env.BOT_TOKEN, chatId,
     '💬 <b>Диалоги</b>\n\nВыбери диалог:',
     buttons
+  );
+}
+
+async function cmdClose(chatId, env) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  await setSession(env.SESSIONS, chatId, {
+    ...session,
+    activeSessionId: null,
+    lastSessionId: null,
+    pendingMessage: null,
+    pendingMessageAt: null,
+    contextFromSession: null,
+  });
+  return sendMessage(env.BOT_TOKEN, chatId,
+    '🔚 <b>Диалог закрыт.</b>\n\nСледующее сообщение начнёт новый диалог с чистого листа.'
   );
 }
 

@@ -8,9 +8,6 @@ export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
   const chatId = message?.chat?.id || from?.id;
 
-  // Immediately acknowledge — removes the loading spinner before any async work
-  answerCallbackQuery(env.BOT_TOKEN, id).catch(() => {});
-
   if (!chatId) return;
 
   const session = await getSession(env.SESSIONS, chatId);
@@ -25,6 +22,8 @@ export async function handleCallbackQuery(cq, env) {
     const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
 
     const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
+
+    const msgId = message?.message_id;
 
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
@@ -45,16 +44,21 @@ export async function handleCallbackQuery(cq, env) {
         activeSessionId: null,
         pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
       });
-      await runTask(env, {
+      // Replace the keyboard message with a status line so the user knows it's running
+      const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
+      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      runTask(env, {
         userId: chatId,
         username: session.username,
         task: pending,
         context: null,
         sessionId: resolvedId,
         initialMsgId,
+        pinnedMsgId: initialMsgId,
+        telegramUserId: session.telegramUserId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
-      // KV stale or message expired — switch to the chosen session and ask to resend
+      // KV stale or message expired — replace keyboard with prompt to write
       await answerCallbackQuery(env.BOT_TOKEN, id);
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -63,10 +67,14 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
       });
-      const where = sessionId === 'new' ? 'Новый диалог начат' : 'Диалог выбран';
-      await sendMessage(env.BOT_TOKEN, chatId,
-        `✅ ${where}. Отправь своё сообщение ещё раз — теперь оно попадёт куда нужно.`
-      );
+      const promptText = sessionId === 'new'
+        ? '✨ Новый диалог — напиши свою задачу!'
+        : '↩️ Диалог выбран — напиши следующее сообщение.';
+      if (msgId) {
+        editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      } else {
+        await sendMessage(env.BOT_TOKEN, chatId, promptText);
+      }
     }
     return;
   }
@@ -328,13 +336,17 @@ export async function handleCallbackQuery(cq, env) {
       setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: initialMsgId }).catch(() => {});
     }
 
-    const sessionId = data.slice('ask_claude|'.length);
+    const sessionId = data.slice('ask_claude|'.length) || session.activeSessionId || session.lastSessionId;
     await runTask(env, {
       userId: chatId,
       username: session.username,
       sessionId,
       forceClaude: true,
+<<<<<<< HEAD
       initialMsgId,
+=======
+      telegramUserId: session.telegramUserId,
+>>>>>>> 23e8b4f (fix(chrome-ext): bind Chrome extension pairing to Telegram user ID, not group chat ID)
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }

@@ -15,11 +15,14 @@
 
 - [реализовано] Chrome extension (cloud-auth-bridge) — захватывает куки и sessionStorage с сайтов
 - [реализовано] Token relay (GCP VM :8081) — паринг расширения с ботом по 6-значному коду
-- [реализовано] Автоматическое сохранение токенов в ~/agent-tokens/{userId}/{label} на GCP VM
+- [реализовано] Токены хранятся в ~/agent-tokens/{username}/{label} (ключ = имя пользователя, не chatId)
+- [реализовано] Миграция: при первом запуске из новой группы токены копируются из ~/agent-tokens/{chatId}/ в ~/agent-tokens/{username}/
+- [реализовано] .chatid файл — runner.js записывает текущий chatId для уведомлений TG (истечение nalog и connect-форм)
 - [реализовано] Форвардинг токенов на RU VM — token-relay дублирует все токены на https://178-212-14-192.sslip.io/tokens
 - [реализовано] nalog.ru sessionStorage захват — Chrome extension читает auth.token и refresh.token через chrome.scripting.executeScript
-- [реализовано] /settoken — ручное сохранение токена через Telegram команду
+- [реализовано] /settoken — ручное сохранение токена через Telegram команду (ключ = username)
 - [реализовано] /chromeext_connect — паринг Chrome расширения через 6-значный код
+- [реализовано] Connect-формы (/connect/getcourse, /connect/nalog и т.д.) — токены привязаны к username
 
 ## Маршрутизация задач
 
