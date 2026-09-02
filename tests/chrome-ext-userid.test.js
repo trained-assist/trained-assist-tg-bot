@@ -7,6 +7,8 @@ vi.mock('../src/lib/kv.js', () => ({
   deleteSession: vi.fn(),
   getUser: vi.fn(),
   listUsernames: vi.fn(),
+  getChatProfileFromMapping: vi.fn().mockReturnValue(null),
+  getOrCreateMappedSession: vi.fn().mockResolvedValue({ username: 'testuser', name: 'Test' }),
 }));
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
