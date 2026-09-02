@@ -26,7 +26,7 @@ export async function handleUserMgmt(msg, env) {
 
 async function cmdGuide(chatId, env) {
   await sendMessage(env.BOT_TOKEN, chatId,
-    `👤 <b>Управление пользователями Alesa</b>\n\n` +
+    `👤 <b>Управление пользователями</b>\n\n` +
 
     `<b>Создать пользователя</b>\n` +
     `<code>/adduser username [Имя Фамилия]</code>\n` +
