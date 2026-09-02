@@ -33,7 +33,7 @@ export async function handleCallbackQuery(cq, env) {
       const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
       if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
-      if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+      if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId, { silent: !!session.pinnedMsgId }).catch(() => {});
 
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -331,7 +331,7 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
-    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId, { silent: !!session.pinnedMsgId }).catch(() => {});
     if (initialMsgId) {
       setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: initialMsgId }).catch(() => {});
     }

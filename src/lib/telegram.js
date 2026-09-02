@@ -32,11 +32,11 @@ export async function answerCallbackQuery(token, callbackQueryId, text = '') {
   });
 }
 
-export async function pinChatMessage(token, chatId, messageId) {
+export async function pinChatMessage(token, chatId, messageId, { silent = false } = {}) {
   await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, message_id: messageId, disable_notification: true }),
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, disable_notification: silent }),
   });
 }
 

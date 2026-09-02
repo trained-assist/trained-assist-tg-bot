@@ -62,7 +62,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
     const initialMsgId = placeholderRes?.result?.message_id ?? null;
     if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
-    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
+    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId, { silent: !!session.pinnedMsgId }).catch(() => {});
 
     await runTask(env, {
       userId: chatId,
