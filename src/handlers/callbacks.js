@@ -1,5 +1,5 @@
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo } from './commands.js';
@@ -204,10 +204,16 @@ export async function handleCallbackQuery(cq, env) {
         lastSessionId: null,
         contextFromSession: null,
       });
-      await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Чистый лист');
-      await sendMessage(env.BOT_TOKEN, chatId,
-        '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.'
-      );
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      const msgId = message?.message_id;
+      const text = '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.';
+      if (msgId) {
+        await editMessage(env.BOT_TOKEN, chatId, msgId, text).catch(() =>
+          sendMessage(env.BOT_TOKEN, chatId, text)
+        );
+      } else {
+        await sendMessage(env.BOT_TOKEN, chatId, text);
+      }
       return;
     }
 
