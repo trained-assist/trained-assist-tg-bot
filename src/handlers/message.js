@@ -72,6 +72,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       sessionId,
       contextFromSession: session.contextFromSession || null,
       initialMsgId,
+      pinnedMsgId: initialMsgId,
       telegramUserId: session.telegramUserId,
     });
 
