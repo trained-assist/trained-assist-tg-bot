@@ -33,11 +33,14 @@ export async function answerCallbackQuery(token, callbackQueryId, text = '') {
 }
 
 export async function pinChatMessage(token, chatId, messageId, { silent = false } = {}) {
-  await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, message_id: messageId, disable_notification: silent }),
   });
+  const data = await res.json();
+  if (!data.ok) console.error(`[pin] failed chat=${chatId} msg=${messageId}:`, JSON.stringify(data));
+  else console.log(`[pin] ok chat=${chatId} msg=${messageId} silent=${silent}`);
 }
 
 export async function unpinChatMessage(token, chatId, messageId) {
