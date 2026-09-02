@@ -65,9 +65,11 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
       });
-      const where = sessionId === 'new' ? 'Новый диалог начат' : 'Диалог выбран';
+      const where = sessionId === 'new' ? '✅ Новый диалог начат' : '✅ Диалог выбран';
       await sendMessage(env.BOT_TOKEN, chatId,
-        `✅ ${where}. Отправь своё сообщение ещё раз — теперь оно попадёт куда нужно.`
+        sessionId === 'new'
+          ? `${where}. Напиши свою задачу!`
+          : `${where}. Напиши следующее сообщение — отвечу с учётом контекста.`
       );
     }
     return;
