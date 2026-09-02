@@ -1,7 +1,7 @@
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask, getSessions, readFile } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
@@ -29,11 +29,8 @@ export async function handleCallbackQuery(cq, env) {
       // Happy path: pending message exists and is fresh — run it
       await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
 
-      // Send placeholder, swap pinned message
       const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
-      if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
-      if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
 
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -42,9 +39,7 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
         activeSessionId: null,
-        pinnedMsgId: initialMsgId ?? session.pinnedMsgId,
       });
-      // Replace the keyboard message with a status line so the user knows it's running
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
       if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       runTask(env, {
@@ -54,7 +49,6 @@ export async function handleCallbackQuery(cq, env) {
         context: null,
         sessionId: resolvedId,
         initialMsgId,
-        pinnedMsgId: initialMsgId,
         telegramUserId: session.telegramUserId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
@@ -93,6 +87,7 @@ export async function handleCallbackQuery(cq, env) {
         [{ text: '▶️ Продолжить',                       callback_data: `sc:${sessionId}` }],
         [{ text: '📋 Сохранённая информация',            callback_data: `si:${sessionId}` }],
         [{ text: '✨ Новый диалог с этим контекстом',    callback_data: `sn:${sessionId}` }],
+        [{ text: '🗑 Архивировать этот диалог',          callback_data: `sa:${sessionId}` }],
         [{ text: '← Назад к списку',                    callback_data: 'sl:' }],
       ]
     );
@@ -198,7 +193,10 @@ export async function handleCallbackQuery(cq, env) {
       text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
       callback_data: `sd:${s.id}`,
     }]));
-    buttons.push([{ text: '✨ Новый диалог', callback_data: 'nd:' }]);
+    buttons.push([
+      { text: '✨ Новый диалог', callback_data: 'nd:' },
+      { text: '🗂 Архивировать', callback_data: 'ar:menu' },
+    ]);
     await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, '💬 <b>Диалоги</b>\n\nВыбери диалог:', buttons);
     return;
   }
@@ -321,20 +319,126 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Archive sessions menu ─────────────────────────────────────────────────
+  // ar:menu — show archive options
+  // ar:all / ar:keep:N — execute bulk archive
+  // ar:pick — show session list for individual archive selection
+  if (data?.startsWith('ar:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+
+    const sub = data.slice(3);
+
+    if (sub === 'menu') {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await sendMessageWithKeyboard(
+        env.BOT_TOKEN, chatId,
+        '🗂 <b>Архивировать диалоги</b>\n\nВыбери что архивировать:',
+        [
+          [{ text: '🗂 Архивировать все',                      callback_data: 'ar:all' }],
+          [{ text: '🗂 Оставить последний, остальные в архив', callback_data: 'ar:keep:1' }],
+          [{ text: '🗂 Оставить 2 последних',                  callback_data: 'ar:keep:2' }],
+          [{ text: '🗂 Оставить 3 последних',                  callback_data: 'ar:keep:3' }],
+          [{ text: '📋 Выбрать отдельный диалог',              callback_data: 'ar:pick' }],
+          [{ text: '← Назад к диалогам',                      callback_data: 'sl:' }],
+        ]
+      );
+      return;
+    }
+
+    if (sub === 'pick') {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      let list;
+      try { list = await getSessions(env, { username: session.username, limit: 20 }); } catch { list = []; }
+      if (!list.length) {
+        await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов для архивирования.');
+        return;
+      }
+      const buttons = list.map(s => ([{
+        text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
+        callback_data: `sa:${s.id}`,
+      }]));
+      buttons.push([{ text: '← Отмена', callback_data: 'ar:menu' }]);
+      await sendMessageWithKeyboard(
+        env.BOT_TOKEN, chatId,
+        '📋 <b>Выбери диалог для архивирования:</b>',
+        buttons
+      );
+      return;
+    }
+
+    // ar:all or ar:keep:N
+    let keepLast = 0;
+    if (sub === 'all') {
+      keepLast = 0;
+    } else if (sub.startsWith('keep:')) {
+      keepLast = parseInt(sub.slice(5), 10) || 0;
+    } else {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      return;
+    }
+
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Архивирую…');
+
+    let list;
+    try {
+      list = await getSessions(env, { username: session.username, limit: 100 });
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить диалоги: ${e.message}`);
+      return;
+    }
+
+    const toArchive = keepLast > 0 ? list.slice(keepLast) : list;
+    if (toArchive.length === 0) {
+      await sendMessage(env.BOT_TOKEN, chatId, '✅ Нечего архивировать — диалогов столько, сколько хочешь оставить.');
+      return;
+    }
+
+    try {
+      const result = await archiveSessions(env, {
+        username: session.username,
+        sessionIds: toArchive.map(s => s.id),
+      });
+      const n = result.archived ?? toArchive.length;
+      await sendMessage(env.BOT_TOKEN, chatId, `✅ Архивировано диалогов: <b>${n}</b>`);
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка архивирования: ${e.message}`);
+    }
+    return;
+  }
+
+  // ── Archive individual session ─────────────────────────────────────────────
+  // sa:<id> — archive one session (from detail submenu or from pick list)
+  if (data?.startsWith('sa:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const sessionId = data.slice(3);
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Архивирую…');
+
+    try {
+      await archiveSessions(env, {
+        username: session.username,
+        sessionIds: [sessionId],
+      });
+      const msgId = message?.message_id;
+      const text = '✅ <b>Диалог архивирован.</b>';
+      if (msgId) {
+        editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      } else {
+        await sendMessage(env.BOT_TOKEN, chatId, text);
+      }
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    }
+    return;
+  }
+
   // ── Expand quick answer — ask Claude for full answer ─────────────────────
   // ask_claude|{sessionId} — user tapped "↗️ вдумчивее плиз"
   if (data?.startsWith('ask_claude|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
 
-    // Send placeholder immediately so user sees feedback before agent starts
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
-    if (session.pinnedMsgId) unpinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId).catch(() => {});
-    if (initialMsgId) pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId).catch(() => {});
-    if (initialMsgId) {
-      setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: initialMsgId }).catch(() => {});
-    }
 
     const sessionId = data.slice('ask_claude|'.length) || session.activeSessionId || session.lastSessionId;
     await runTask(env, {
@@ -343,7 +447,6 @@ export async function handleCallbackQuery(cq, env) {
       sessionId,
       forceClaude: true,
       initialMsgId,
-      pinnedMsgId: initialMsgId,
       telegramUserId: session.telegramUserId,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
