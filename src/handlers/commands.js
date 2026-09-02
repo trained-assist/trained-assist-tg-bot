@@ -318,7 +318,10 @@ async function cmdSessions(chatId, env) {
     const label = `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`;
     return [{ text: label, callback_data: `sd:${s.id}` }];
   });
-  buttons.push([{ text: '✨ Новый диалог', callback_data: 'nd:' }]);
+  buttons.push([
+    { text: '✨ Новый диалог', callback_data: 'nd:' },
+    { text: '🗂 Архивировать', callback_data: 'ar:menu' },
+  ]);
 
   return sendMessageWithKeyboard(
     env.BOT_TOKEN, chatId,
