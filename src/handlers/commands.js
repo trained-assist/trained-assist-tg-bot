@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
-import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
@@ -39,7 +39,7 @@ export async function handleCommand(msg, env) {
 }
 
 async function cmdStart(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
@@ -64,6 +64,14 @@ async function cmdStart(chatId, env) {
 async function cmdLogin(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
+
+  const mappedProfile = getChatProfileFromMapping(chatId, env);
+  if (mappedProfile) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — войти вручную нельзя.`
+    );
+  }
+
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
     return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /login username password');
@@ -94,6 +102,12 @@ async function cmdLogin(msg, env) {
 }
 
 async function cmdLogout(chatId, env) {
+  const mappedProfile = getChatProfileFromMapping(chatId, env);
+  if (mappedProfile) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — выйти вручную нельзя.`
+    );
+  }
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
@@ -105,7 +119,7 @@ async function cmdLogout(chatId, env) {
 }
 
 async function cmdProfile(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👤 <b>Профиль</b>\n\nТы не авторизован.\n\n<code>/login username password</code>'
@@ -131,7 +145,7 @@ async function cmdProfile(chatId, env) {
 }
 
 async function cmdStatus(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован. /login username password');
 
   const [agentOk, agentRuOk] = await Promise.all([
@@ -153,7 +167,7 @@ async function cmdStatus(chatId, env) {
 async function cmdRu(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const task = text.replace(/^\/ru\s*/i, '').trim();
@@ -200,7 +214,7 @@ async function cmdVersion(chatId, env) {
 async function cmdSetToken(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const args = text.trim().split(/\s+/);
@@ -297,7 +311,7 @@ export function timeAgo(ts) {
 }
 
 async function cmdSessions(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let list;
@@ -331,7 +345,7 @@ async function cmdSessions(chatId, env) {
 }
 
 async function cmdClose(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   await setSession(env.SESSIONS, chatId, {
@@ -348,7 +362,7 @@ async function cmdClose(chatId, env) {
 }
 
 async function cmdNewDialog(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   return sendMessageWithKeyboard(
@@ -362,7 +376,7 @@ async function cmdNewDialog(chatId, env) {
 }
 
 export async function cmdFiles(chatId, env, relPath = '') {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let data;
@@ -414,7 +428,7 @@ export async function cmdFiles(chatId, env, relPath = '') {
 }
 
 async function cmdSkills(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let skills;

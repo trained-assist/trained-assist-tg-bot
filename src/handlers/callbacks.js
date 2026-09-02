@@ -1,4 +1,4 @@
-import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getOrCreateMappedSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions } from '../lib/agent-client.js';
@@ -10,7 +10,7 @@ export async function handleCallbackQuery(cq, env) {
 
   if (!chatId) return;
 
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, from?.id);
 
   // ── Session picker (from message.js disambiguation) ──────────────────────
   // sp:<id> or sp:new — triggered when routing was ambiguous
