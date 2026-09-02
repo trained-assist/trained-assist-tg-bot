@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
-import { getSession, setSession } from '../lib/kv.js';
+import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
 
 // Phrases that signal "start a new session" regardless of history
@@ -15,7 +15,7 @@ export async function handleMessage(msg, env) {
   const { chat, text, voice, photo, document: doc } = msg;
   const chatId = chat.id;
 
-  const session = await getSession(env.SESSIONS, chatId);
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Сначала войди: /login username password'

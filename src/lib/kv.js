@@ -6,6 +6,31 @@ export async function getSession(kv, chatId) {
   return val ? JSON.parse(val) : null;
 }
 
+// Parse CHAT_MAPPINGS env var: returns mapped profile name or null
+export function getChatProfileFromMapping(chatId, env) {
+  if (!env.CHAT_MAPPINGS) return null;
+  try {
+    const map = JSON.parse(env.CHAT_MAPPINGS);
+    return map[String(chatId)] || null;
+  } catch {
+    return null;
+  }
+}
+
+// Like getSession, but auto-creates session for chats in CHAT_MAPPINGS
+export async function getOrCreateMappedSession(kv, chatId, env, telegramUserId = null) {
+  const session = await getSession(kv, chatId);
+  const mappedProfile = getChatProfileFromMapping(chatId, env);
+  if (!mappedProfile) return session;
+
+  if (!session || session.username !== mappedProfile) {
+    const mapped = { username: mappedProfile, name: mappedProfile, telegramUserId };
+    await setSession(kv, chatId, mapped);
+    return mapped;
+  }
+  return session;
+}
+
 export async function setSession(kv, chatId, session) {
   await kv.put(String(chatId), JSON.stringify(session));
 }
