@@ -301,10 +301,14 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   // ── Expand quick answer — ask Claude for full answer ─────────────────────
-  // ask_claude|{sessionId} — user tapped "↗️ Спросить Клода подробнее"
+  // ask_claude|{sessionId} — user tapped "↗️ вдумчивее плиз"
   if (data?.startsWith('ask_claude|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
+
+    // Send placeholder immediately so user sees feedback before agent starts
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
+    const initialMsgId = thinkMsg?.result?.message_id;
 
     const sessionId = data.slice('ask_claude|'.length);
     await runTask(env, {
@@ -312,6 +316,7 @@ export async function handleCallbackQuery(cq, env) {
       username: session.username,
       sessionId,
       forceClaude: true,
+      initialMsgId,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }

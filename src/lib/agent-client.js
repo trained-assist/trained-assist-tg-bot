@@ -30,6 +30,9 @@ export async function pickAgentUrl(env, userId, task, forceRu = false) {
   if (forceRu && env.AGENT_RU_URL) return env.AGENT_RU_URL;
   if (!env.AGENT_RU_URL) return env.AGENT_URL;
 
+  // Empty task → no RU-only keyword can match → skip the 2.5s capability probe
+  if (!task) return env.AGENT_URL;
+
   const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
   if (ruCaps.length === 0) return env.AGENT_URL;
 
@@ -45,11 +48,12 @@ export async function pickAgentUrl(env, userId, task, forceRu = false) {
   return env.AGENT_URL;
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId }) {
   const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
+  if (initialMsgId) body.initialMsgId = initialMsgId;
   const res = await fetch(`${agentUrl}/run`, {
     method: 'POST',
     headers: {
