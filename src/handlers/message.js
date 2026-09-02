@@ -72,6 +72,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       sessionId,
       contextFromSession: session.contextFromSession || null,
       initialMsgId,
+      pinnedMsgId: initialMsgId, // same message: agent edits it for progress, then rewrites as context card
     });
 
     // Update KV — clear transient flags, carry forward lastSessionId for auto-continue

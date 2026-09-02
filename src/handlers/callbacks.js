@@ -52,6 +52,7 @@ export async function handleCallbackQuery(cq, env) {
         context: null,
         sessionId: resolvedId,
         initialMsgId,
+        pinnedMsgId: initialMsgId,
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
       // KV stale or message expired — switch to the chosen session and ask to resend
@@ -335,6 +336,7 @@ export async function handleCallbackQuery(cq, env) {
       sessionId,
       forceClaude: true,
       initialMsgId,
+      pinnedMsgId: initialMsgId,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }
