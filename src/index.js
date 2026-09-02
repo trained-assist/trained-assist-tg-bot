@@ -4,6 +4,7 @@ import { handleCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
+import { sendMessage } from './lib/telegram.js';
 
 const app = new Hono();
 
@@ -33,6 +34,20 @@ async function dispatch(update, env) {
 
   const msg = update.message;
   if (!msg) return;
+
+  // Skip stale messages — delivered >5 min late means worker was down during that time
+  const msgAge = Math.round(Date.now() / 1000 - msg.date);
+  if (msgAge > 300) {
+    const isPrivate = msg.chat.type === 'private';
+    const isCommand = (msg.text || '').startsWith('/');
+    // Notify user for semi-old messages (5–30 min), silently drop very old ones
+    if (isPrivate && !isCommand && msgAge < 1800) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        `📬 Сообщение получено с задержкой ${Math.round(msgAge / 60)} мин — отправь снова если актуально.`
+      );
+    }
+    return;
+  }
 
   // Invalidate member count cache when group membership changes
   if (msg.new_chat_members || msg.left_chat_member) {

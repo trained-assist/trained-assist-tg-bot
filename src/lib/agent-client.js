@@ -56,16 +56,26 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (initialMsgId) body.initialMsgId = initialMsgId;
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
-  const res = await fetch(`${agentUrl}/run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${env.AGENT_SECRET}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`agent /run HTTP ${res.status}`);
-  return res.json();
+
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAY_MS = 2000;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt));
+    const res = await fetch(`${agentUrl}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.AGENT_SECRET}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.ok) return res.json();
+    const isRetryable = res.status === 502 || res.status === 503;
+    if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
+      throw new Error(`agent /run HTTP ${res.status}`);
+    }
+  }
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
@@ -129,6 +139,19 @@ export async function getSkills(env) {
   if (!res.ok) throw new Error(`agent /skills HTTP ${res.status}`);
   const { skills } = await res.json();
   return skills;
+}
+
+export async function archiveSessions(env, { username, sessionIds }) {
+  const res = await fetch(`${env.AGENT_URL}/sessions/archive`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ username, sessionIds }),
+  });
+  if (!res.ok) throw new Error(`agent /sessions/archive HTTP ${res.status}`);
+  return res.json();
 }
 
 export async function getAgentHealth(env) {
