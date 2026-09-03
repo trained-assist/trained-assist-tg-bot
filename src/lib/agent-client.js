@@ -79,13 +79,30 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
-  const res = await fetch(
-    `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}`,
-    { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` } }
-  );
-  if (!res.ok) throw new Error(`agent /sessions HTTP ${res.status}`);
-  const { sessions } = await res.json();
-  return sessions;
+  const qs = `username=${encodeURIComponent(username)}&limit=${limit}`;
+  const headers = { 'Authorization': `Bearer ${env.AGENT_SECRET}` };
+
+  const fetchSessions = url =>
+    fetch(`${url}/sessions?${qs}`, { headers })
+      .then(r => (r.ok ? r.json() : null))
+      .catch(() => null);
+
+  const [gcpData, ruData] = await Promise.all([
+    fetchSessions(env.AGENT_URL),
+    env.AGENT_RU_URL ? fetchSessions(env.AGENT_RU_URL) : Promise.resolve(null),
+  ]);
+
+  if (!gcpData && !ruData) throw new Error('agent /sessions unreachable');
+
+  const gcp = gcpData?.sessions ?? [];
+  const ru  = ruData?.sessions  ?? [];
+
+  // Merge both VMs, deduplicate by id, sort newest first
+  const seen = new Set();
+  return [...gcp, ...ru]
+    .filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true; })
+    .sort((a, b) => b.lastAt - a.lastAt)
+    .slice(0, limit);
 }
 
 export async function getFiles(env, { username, path = '' }) {
