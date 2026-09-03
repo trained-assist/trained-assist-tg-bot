@@ -1,4 +1,4 @@
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
 
@@ -58,8 +58,23 @@ async function handleText(chatId, session, text, env, opts = {}) {
     const sessionId = route.sessionId;
     const context = opts.isVoice ? '[voice-message]' : null;
 
-    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
-    const initialMsgId = placeholderRes?.result?.message_id ?? null;
+    // Reuse existing pinned message (edit in place) or create a new one and pin it
+    let initialMsgId = null;
+    let newPinnedMsgId = session.pinnedMsgId || null;
+
+    if (session.pinnedMsgId) {
+      const editRes = await editMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId, '⏳ Запускаю…').catch(() => null);
+      if (editRes?.ok) initialMsgId = session.pinnedMsgId;
+    }
+
+    if (!initialMsgId) {
+      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      initialMsgId = placeholderRes?.result?.message_id ?? null;
+      if (initialMsgId) {
+        await pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId, { silent: true }).catch(() => {});
+        newPinnedMsgId = initialMsgId;
+      }
+    }
 
     await runTask(env, {
       userId: chatId,
@@ -69,6 +84,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       sessionId,
       contextFromSession: session.contextFromSession || null,
       initialMsgId,
+      pinnedMsgId: newPinnedMsgId,
       telegramUserId: session.telegramUserId,
     });
 
@@ -80,6 +96,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pendingMessageAt: null,
       activeSessionId: null,
       contextFromSession: null,
+      pinnedMsgId: newPinnedMsgId,
     });
   } catch (err) {
     const isAgentDown = /HTTP 50[23]/.test(err.message) || err.name === 'TimeoutError';
