@@ -1,4 +1,4 @@
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
 
@@ -29,7 +29,15 @@ export async function handleMessage(msg, env) {
     const mimeType = (voice || audio).mime_type || null;
     const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
     if (transcript) {
-      await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
+      if (transcript.length < 800) {
+        await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
+      } else {
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const filename = `transcript-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}.txt`;
+        const preview = transcriptPreview(transcript, 3);
+        await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `🎤 ${preview}…`);
+      }
       await handleText(chatId, session, transcript, env, { isVoice: true });
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
@@ -184,6 +192,18 @@ async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) 
     '↩ В какой диалог добавить сообщение?',
     buttons
   );
+}
+
+function transcriptPreview(text, maxSentences = 3) {
+  const sentences = [];
+  let remaining = text;
+  for (let i = 0; i < maxSentences && remaining.length > 0; i++) {
+    const m = remaining.match(/^[^.!?]*[.!?]+\s*/);
+    if (!m) { sentences.push(remaining.trimEnd()); break; }
+    sentences.push(m[0].trim());
+    remaining = remaining.slice(m[0].length);
+  }
+  return sentences.join(' ');
 }
 
 async function transcribeVoice(fileId, mimeType, env) {
