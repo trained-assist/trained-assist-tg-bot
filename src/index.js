@@ -80,9 +80,11 @@ async function dispatch(update, env) {
       if (!hasContent) return;
       const session = await getSession(env.SESSIONS, chatId);
       if (!session) return;
-      // In groups with 3+ members require explicit mention or reply
-      const memberCount = await getGroupMemberCount(env, chatId);
-      if (memberCount > 2) return;
+      // In groups with 3+ members require explicit mention or reply — unless allMsgMode is on
+      if (!session.allMsgMode) {
+        const memberCount = await getGroupMemberCount(env, chatId);
+        if (memberCount > 2) return;
+      }
     }
 
     // Strip mention from text before handling

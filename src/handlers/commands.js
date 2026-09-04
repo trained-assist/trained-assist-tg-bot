@@ -1,4 +1,4 @@
-import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills } from '../lib/agent-client.js';
@@ -33,6 +33,8 @@ export async function handleCommand(msg, env) {
     case '/ru':                return cmdRu(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
+    case '/all_on':            return cmdAllOn(msg, env);
+    case '/all_off':           return cmdAllOff(msg, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -457,5 +459,69 @@ async function cmdPrivacy(chatId, env) {
     `Файлы → папка на VM, не передаются третьим сторонам.\n` +
     `Пароли → Cloudflare KV (scrypt hash).\n\n` +
     `Напиши "удали мои данные" — всё будет очищено.`
+  );
+}
+
+async function cmdAllOn(msg, env) {
+  const { chat } = msg;
+  const chatId = chat.id;
+  const isGroup = ['group', 'supergroup'].includes(chat.type);
+
+  if (!isGroup) {
+    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Эта команда работает только в группах.');
+  }
+
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  if (session.allMsgMode) {
+    return sendMessage(env.BOT_TOKEN, chatId, '✅ Режим уже включён. Выключить: /all_off');
+  }
+
+  const res = await sendMessage(env.BOT_TOKEN, chatId,
+    '🔴 <b>Все сообщения → агенту</b>\n\n' +
+    'Все сообщения в этой группе автоматически передаются Claude Code.\n\n' +
+    'Выключить: /all_off',
+    { disable_notification: true }
+  );
+  const modeMsg = res?.result?.message_id ?? null;
+  if (modeMsg) await pinChatMessage(env.BOT_TOKEN, chatId, modeMsg, { silent: true });
+
+  await setSession(env.SESSIONS, chatId, {
+    ...session,
+    allMsgMode: true,
+    allMsgPinnedId: modeMsg,
+  });
+}
+
+async function cmdAllOff(msg, env) {
+  const { chat } = msg;
+  const chatId = chat.id;
+
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  if (!session.allMsgMode) {
+    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Режим уже выключен.');
+  }
+
+  if (session.allMsgPinnedId) {
+    await unpinChatMessage(env.BOT_TOKEN, chatId, session.allMsgPinnedId);
+    await deleteMessage(env.BOT_TOKEN, chatId, session.allMsgPinnedId);
+  }
+
+  if (session.pinnedMsgId) {
+    await pinChatMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId, { silent: true });
+  }
+
+  await setSession(env.SESSIONS, chatId, {
+    ...session,
+    allMsgMode: false,
+    allMsgPinnedId: null,
+  });
+
+  return sendMessage(env.BOT_TOKEN, chatId,
+    '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
+    { disable_notification: true }
   );
 }
