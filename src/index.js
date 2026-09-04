@@ -79,10 +79,14 @@ async function dispatch(update, env) {
       // Skip if no content, or no active session in this chat
       if (!hasContent) return;
       const session = await getSession(env.SESSIONS, chatId);
-      if (!session) return;
+      if (!session) {
+        console.log(`[group ${chatId}] no session — skipping`);
+        return;
+      }
       // In groups with 3+ members require explicit mention or reply — unless allMsgMode is on
       if (!session.allMsgMode) {
         const memberCount = await getGroupMemberCount(env, chatId);
+        console.log(`[group ${chatId}] memberCount=${memberCount} allMsgMode=${session.allMsgMode}`);
         if (memberCount > 2) return;
       }
     }
@@ -103,12 +107,16 @@ async function dispatch(update, env) {
   }
 }
 
-/** Returns cached Telegram chat member count (TTL 1h). Fails safe to 999. */
+/** Returns cached Telegram chat member count (TTL 1h). Falls back to stale cache, then 999. */
 async function getGroupMemberCount(env, chatId) {
   const cacheKey = `mc:${chatId}`;
+  let stale = null;
   try {
     const cached = await env.SESSIONS.get(cacheKey, { type: 'json' });
-    if (cached && Date.now() - cached.ts < 60 * 60 * 1000) return cached.count;
+    if (cached) {
+      if (Date.now() - cached.ts < 60 * 60 * 1000) return cached.count; // fresh
+      stale = cached.count; // keep as fallback
+    }
 
     const res = await fetch(
       `https://api.telegram.org/bot${env.BOT_TOKEN}/getChatMemberCount?chat_id=${chatId}`
@@ -118,8 +126,12 @@ async function getGroupMemberCount(env, chatId) {
       await env.SESSIONS.put(cacheKey, JSON.stringify({ count: data.result, ts: Date.now() }));
       return data.result;
     }
-  } catch { /* ignore */ }
-  return 999; // fail-safe: treat as large group
+    console.log(`[group ${chatId}] getChatMemberCount failed: ${JSON.stringify(data)}`);
+  } catch (e) {
+    console.log(`[group ${chatId}] getChatMemberCount error: ${e.message}`);
+  }
+  // Prefer stale cache over fail-safe — a known small group shouldn't be blocked by a transient error
+  return stale ?? 999;
 }
 
 export default app;
