@@ -95,6 +95,36 @@
 - [реализовано] package.json name: trained-assist-agent / trained-assist-tg-bot
 - [реализовано] Удалено "Алеса" из cmdVersion, cmdPrivacy
 
+## Пин контекст карточка
+
+- [реализовано] Пин показывает КОНТЕКСТ (подключённые скиллы, активная вакансия) — не прогресс задачи
+- [реализовано] agent/runner.js: buildContextCard() — строит карточку контекста из скиллов пользователя
+- [реализовано] agent/runner.js: updateContextPin() — редактирует существующее пин-сообщение или создаёт+пинит новое; состояние хранится в ~/users/{username}/.pin_state.json на VM
+- [реализовано] PR #20 (feat/pinned-message-update-v2): бот передаёт pinnedMsgId агенту; initialMsgId и pinnedMsgId — РАЗНЫЕ сообщения (initialMsgId = новый "⏳ Запускаю…" для стриминга, pinnedMsgId = контекст)
+- [реализовано] buildContextCard: для object-значений (vacancies) извлекает .title/.name вместо JSON.stringify (commit 7dd48e1 на VM ветке docs/architecture)
+- [реализовано] Накопившиеся старые пин-сообщения ("⏳ Запускаю…") — очищены через unpinAllChatMessages API
+
+## Иллюстрации и лейблинг (95-illustrate + 96-label)
+
+- [реализовано] Ideogram: не поддерживает кириллицу — buildPrompt всегда без текстовых меток для этого провайдера
+- [реализовано] OpenAI: переход с dall-e-3 на gpt-image-1 (новый API — возвращает b64_json, не URL)
+- [реализовано] gpt-image-1: b64_json сохраняется в agent-data/images/, отдаётся через GET /images/:filename (public, без auth)
+- [реализовано] labels_mode: embedded/caption/none — три режима меток (PR #224 от другой сессии Claude)
+- [реализовано] Billing error detection: OpenAI insufficient_quota → понятное сообщение пользователю
+- [реализовано] 96-label.js: новый скилл для оверлея кириллических подписей через sharp+SVG
+  - AUTO режим: structures[] → Claude Vision (claude-haiku) определяет позиции автоматически
+  - MANUAL режим: labels[] с явными x,y координатами для итерации
+  - Возвращает detected_positions для ручной корректировки
+  - Итерационный тип: copy detected_positions и adjust x/y
+- [реализовано] server.js: GET /images/:filename — публичный route ДО auth gate (Telegram скачивает без токена)
+- [реализовано] AGENT_BOT_TOKEN/AGENT_CHAT_ID в image_label (не TELEGRAM_*)
+- [планируется] Recraft v3 как третий провайдер с поддержкой русского текста (нужен RECRAFT_API_KEY)
+- [планируется] Vision pass для AUTO режима image_label — нужен ANTHROPIC_API_KEY в secrets.env (сейчас только внутри Claude Code процесса)
+
+## Групповые режимы
+
+- [реализовано] /all_on — режим "все сообщения → агенту" для групп: бот обрабатывает все сообщения без repl/mention; индикатор 🔴 пинится в чате; /all_off — выключает режим и восстанавливает пин агента. Prereq: Group Privacy OFF в BotFather (/setprivacy → Disable)
+
 ## Безопасность
 
 - [реализовано] AGENT_SECRET — Bearer auth между CF Worker и агентами
