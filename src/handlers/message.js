@@ -210,7 +210,9 @@ async function transcribeVoice(fileId, mimeType, env) {
       method: 'POST',
       headers: {
         'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
-        'Content-Type': mimeType || 'audio/ogg; codecs=opus',
+        // Only send Content-Type when known — Deepgram auto-detects from content when omitted.
+        // Hardcoding audio/ogg for non-OGG files (e.g. m4a) causes transcription failures.
+        ...(mimeType ? { 'Content-Type': mimeType } : {}),
       },
       body: audioBuffer,
     }
