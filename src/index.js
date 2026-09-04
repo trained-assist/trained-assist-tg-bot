@@ -27,6 +27,20 @@ app.post('/webhook', async (c) => {
 });
 
 async function dispatch(update, env) {
+  const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
+  try {
+    await dispatchInner(update, env);
+  } catch (err) {
+    console.error(`[dispatch] unhandled error chatId=${chatId}:`, err?.message, err?.stack);
+    if (chatId) {
+      try {
+        await sendMessage(env.BOT_TOKEN, chatId, `❌ Внутренняя ошибка: ${err?.message || err}`);
+      } catch { /* ignore */ }
+    }
+  }
+}
+
+async function dispatchInner(update, env) {
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query, env);
     return;
