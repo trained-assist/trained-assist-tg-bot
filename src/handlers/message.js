@@ -12,7 +12,7 @@ const NEW_SESSION_SIGNALS = [
 const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 export async function handleMessage(msg, env) {
-  const { chat, text, voice, photo, document: doc } = msg;
+  const { chat, text, voice, audio, photo, document: doc } = msg;
   const chatId = chat.id;
 
   const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
@@ -24,8 +24,10 @@ export async function handleMessage(msg, env) {
 
   if (text) {
     await handleText(chatId, session, text, env);
-  } else if (voice) {
-    const { transcript, error } = await transcribeVoice(voice.file_id, env);
+  } else if (voice || audio) {
+    const fileId = (voice || audio).file_id;
+    const mimeType = (voice || audio).mime_type || null;
+    const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
     if (transcript) {
       await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
       await handleText(chatId, session, transcript, env, { isVoice: true });
@@ -36,6 +38,10 @@ export async function handleMessage(msg, env) {
     await sendMessage(env.BOT_TOKEN, chatId, '🖼 Фото — TODO: передать агенту');
   } else if (doc) {
     await sendMessage(env.BOT_TOKEN, chatId, '📎 Документ — TODO: передать агенту');
+  } else {
+    await sendMessage(env.BOT_TOKEN, chatId,
+      '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
+    );
   }
 }
 
@@ -180,7 +186,7 @@ async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) 
   );
 }
 
-async function transcribeVoice(fileId, env) {
+async function transcribeVoice(fileId, mimeType, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
   const fileRes = await fetch(
     `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
@@ -204,7 +210,7 @@ async function transcribeVoice(fileId, env) {
       method: 'POST',
       headers: {
         'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
-        'Content-Type': 'audio/ogg; codecs=opus',
+        'Content-Type': mimeType || 'audio/ogg; codecs=opus',
       },
       body: audioBuffer,
     }
