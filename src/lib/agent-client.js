@@ -69,7 +69,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
   const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
@@ -78,6 +78,9 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
   if (projectDir) body.projectDir = projectDir;
+  if (fileBase64) body.fileBase64 = fileBase64;
+  if (fileName) body.fileName = fileName;
+  if (fileMimeType) body.fileMimeType = fileMimeType;
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;

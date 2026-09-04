@@ -45,7 +45,25 @@ export async function handleMessage(msg, env) {
   } else if (photo) {
     await sendMessage(env.BOT_TOKEN, chatId, '🖼 Фото — TODO: передать агенту');
   } else if (doc) {
-    await sendMessage(env.BOT_TOKEN, chatId, '📎 Документ — TODO: передать агенту');
+    const caption = msg.caption || '';
+    const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю документ…');
+    const initialMsgId = placeholder?.result?.message_id ?? null;
+    try {
+      const { base64, error } = await downloadTgFileBase64(doc.file_id, env);
+      if (error) {
+        await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать файл: ${error}`);
+      } else {
+        const task = caption || `Документ: ${doc.file_name || 'файл'}`;
+        await handleText(chatId, session, task, env, {
+          initialMsgId,
+          fileBase64: base64,
+          fileName: doc.file_name || 'document',
+          fileMimeType: doc.mime_type || 'application/octet-stream',
+        });
+      }
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке: ${e.message}`);
+    }
   } else {
     await sendMessage(env.BOT_TOKEN, chatId,
       '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
@@ -72,8 +90,11 @@ async function handleText(chatId, session, text, env, opts = {}) {
     const sessionId = route.sessionId;
     const context = opts.isVoice ? '[voice-message]' : null;
 
-    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
-    const initialMsgId = placeholderRes?.result?.message_id ?? null;
+    // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
+    const placeholderRes = opts.initialMsgId
+      ? null
+      : await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+    const initialMsgId = opts.initialMsgId ?? (placeholderRes?.result?.message_id ?? null);
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
     // If agent creates a new pinned message it returns the new ID; we store it for next time
@@ -88,6 +109,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
       projectDir: session.projectDir || null,
+      fileBase64: opts.fileBase64 || null,
+      fileName: opts.fileName || null,
+      fileMimeType: opts.fileMimeType || null,
     });
 
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
@@ -246,4 +270,22 @@ async function transcribeVoice(fileId, mimeType, env) {
     return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b, confidence: ${confidence})` };
   }
   return { transcript, error: null };
+}
+
+async function downloadTgFileBase64(fileId, env) {
+  const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+  const fileRes = await fetch(`${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`);
+  const fileData = await fileRes.json();
+  if (!fileData.ok) return { base64: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
+
+  const fileUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
+  const fileRes2 = await fetch(fileUrl);
+  if (!fileRes2.ok) return { base64: null, error: `download ${fileRes2.status}` };
+
+  const buffer = await fileRes2.arrayBuffer();
+  // btoa only works with Latin-1; for binary, encode via Uint8Array
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return { base64: btoa(binary), error: null };
 }
