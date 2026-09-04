@@ -32,31 +32,34 @@ export async function handleCallbackQuery(cq, env) {
       const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
-      await setSession(env.SESSIONS, chatId, {
+      // Capture post-write state so .then() below spreads from the same base,
+      // not the stale pre-write snapshot that still has pendingMessage/old IDs.
+      const updatedSession = {
         ...session,
         lastSessionId: resolvedId,
         lastMessageAt: Date.now(),
         pendingMessage: null,
         pendingMessageAt: null,
         activeSessionId: null,
-      });
+      };
+      await setSession(env.SESSIONS, chatId, updatedSession);
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
       if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
       runTask(env, {
         userId: chatId,
-        username: session.username,
+        username: updatedSession.username,
         task: pending,
         context: null,
         sessionId: resolvedId,
         initialMsgId,
-        pinnedMsgId: session.pinnedMsgId || null,
-        telegramUserId: session.telegramUserId,
-        projectDir: session.projectDir || null,
+        pinnedMsgId: updatedSession.pinnedMsgId || null,
+        telegramUserId: updatedSession.telegramUserId,
+        projectDir: updatedSession.projectDir || null,
       }).then(result => {
-        const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
-        if (newPinnedMsgId !== session.pinnedMsgId) {
-          return setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: newPinnedMsgId });
+        const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
+        if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
+          return setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
         }
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
@@ -215,15 +218,20 @@ export async function handleCallbackQuery(cq, env) {
   const FP_PAGE_SIZE = 6;
 
   async function showFolderPicker(chatId, session, msgId, page = 0) {
-    const projects = await getProjects(env, { username: session.username });
+    const projects = await getProjects(env, { username: session.username, userId: chatId });
     const total = projects.length;
     const start = page * FP_PAGE_SIZE;
     const pageItems = projects.slice(start, start + FP_PAGE_SIZE);
 
-    const buttons = pageItems.map(p => [{
+    // Use absolute numeric index in callback_data to avoid Telegram's 64-byte limit
+    // on long project path names. fp: handler re-fetches and looks up by index.
+    const buttons = pageItems.map((p, i) => [{
       text: `${p.label}${p.count > 0 ? ` (${p.count})` : ''}`,
-      callback_data: `fp:${p.name}`,
+      callback_data: `fp:${start + i}`,
     }]);
+
+    // Always show a "skip / root" escape so users are never stuck with no exit path
+    buttons.push([{ text: '📂 Без папки (корень)', callback_data: 'fp:' }]);
 
     // Pagination row
     const navRow = [];
@@ -231,7 +239,9 @@ export async function handleCallbackQuery(cq, env) {
     if (start + FP_PAGE_SIZE < total) navRow.push({ text: '➡️', callback_data: `fpg:${page + 1}` });
     if (navRow.length > 0) buttons.push(navRow);
 
-    const text = '📁 <b>Выбери рабочую папку</b>\n\nЦифра в скобках — сколько раз запускал сессию:';
+    const text = total === 0
+      ? '📁 <b>Нет проектов</b> — начнём в корневой директории.'
+      : '📁 <b>Выбери рабочую папку</b>\n\nЦифра в скобках — сколько раз запускал сессию:';
     if (msgId) {
       await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: buttons } })
         .catch(() => sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons));
@@ -243,7 +253,16 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('fp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id);
-    const folderName = data.slice(3); // empty string = root
+    const raw = data.slice(3); // '' = root, numeric = absolute project index
+    let folderName;
+    if (raw === '') {
+      folderName = '';
+    } else if (/^\d+$/.test(raw)) {
+      const projects = await getProjects(env, { username: session.username, userId: chatId });
+      folderName = projects[parseInt(raw, 10)]?.name ?? '';
+    } else {
+      folderName = raw; // legacy string form
+    }
     await setSession(env.SESSIONS, chatId, {
       ...session,
       projectDir: folderName || null,
