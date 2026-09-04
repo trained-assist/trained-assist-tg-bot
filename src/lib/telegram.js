@@ -50,3 +50,15 @@ export async function unpinChatMessage(token, chatId, messageId) {
     body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
   });
 }
+
+export async function sendDocument(token, chatId, filename, content, caption = '') {
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('document', new Blob([content], { type: 'text/plain' }), filename);
+  if (caption) form.append('caption', caption);
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: 'POST',
+    body: form,
+  });
+  return res.json();
+}
