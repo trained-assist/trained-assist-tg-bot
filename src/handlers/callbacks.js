@@ -29,23 +29,8 @@ export async function handleCallbackQuery(cq, env) {
       // Happy path: pending message exists and is fresh — run it
       await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
 
-      // Reuse existing pinned message (edit in place) or create a new one and pin it
-      let initialMsgId = null;
-      let newPinnedMsgId = session.pinnedMsgId || null;
-
-      if (session.pinnedMsgId) {
-        const editRes = await editMessage(env.BOT_TOKEN, chatId, session.pinnedMsgId, '⏳ Запускаю…').catch(() => null);
-        if (editRes?.ok) initialMsgId = session.pinnedMsgId;
-      }
-
-      if (!initialMsgId) {
-        const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
-        initialMsgId = placeholderRes?.result?.message_id ?? null;
-        if (initialMsgId) {
-          await pinChatMessage(env.BOT_TOKEN, chatId, initialMsgId, { silent: true }).catch(() => {});
-          newPinnedMsgId = initialMsgId;
-        }
-      }
+      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -54,10 +39,10 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessage: null,
         pendingMessageAt: null,
         activeSessionId: null,
-        pinnedMsgId: newPinnedMsgId,
       });
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
       if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
       runTask(env, {
         userId: chatId,
         username: session.username,
@@ -65,8 +50,13 @@ export async function handleCallbackQuery(cq, env) {
         context: null,
         sessionId: resolvedId,
         initialMsgId,
-        pinnedMsgId: newPinnedMsgId,
+        pinnedMsgId: session.pinnedMsgId || null,
         telegramUserId: session.telegramUserId,
+      }).then(result => {
+        const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
+        if (newPinnedMsgId !== session.pinnedMsgId) {
+          return setSession(env.SESSIONS, chatId, { ...session, pinnedMsgId: newPinnedMsgId });
+        }
       }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     } else {
       // KV stale or message expired — replace keyboard with prompt to write
