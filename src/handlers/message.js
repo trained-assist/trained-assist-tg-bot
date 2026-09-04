@@ -73,6 +73,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
+      projectDir: session.projectDir || null,
     });
 
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;

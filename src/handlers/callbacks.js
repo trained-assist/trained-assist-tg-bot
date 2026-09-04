@@ -1,7 +1,7 @@
 import { getOrCreateMappedSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask, getSessions, readFile, archiveSessions } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
@@ -52,6 +52,7 @@ export async function handleCallbackQuery(cq, env) {
         initialMsgId,
         pinnedMsgId: session.pinnedMsgId || null,
         telegramUserId: session.telegramUserId,
+        projectDir: session.projectDir || null,
       }).then(result => {
         const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
         if (newPinnedMsgId !== session.pinnedMsgId) {
@@ -208,9 +209,71 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Project folder picker ─────────────────────────────────────────────────
+  // fp:{folderName} — select project folder (empty = root)
+  // fpg:{page}      — navigate to page n of the folder list
+  const FP_PAGE_SIZE = 6;
+
+  async function showFolderPicker(chatId, session, msgId, page = 0) {
+    const projects = await getProjects(env, { username: session.username });
+    const total = projects.length;
+    const start = page * FP_PAGE_SIZE;
+    const pageItems = projects.slice(start, start + FP_PAGE_SIZE);
+
+    const buttons = pageItems.map(p => [{
+      text: `${p.label}${p.count > 0 ? ` (${p.count})` : ''}`,
+      callback_data: `fp:${p.name}`,
+    }]);
+
+    // Pagination row
+    const navRow = [];
+    if (page > 0) navRow.push({ text: '⬅️', callback_data: `fpg:${page - 1}` });
+    if (start + FP_PAGE_SIZE < total) navRow.push({ text: '➡️', callback_data: `fpg:${page + 1}` });
+    if (navRow.length > 0) buttons.push(navRow);
+
+    const text = '📁 <b>Выбери рабочую папку</b>\n\nЦифра в скобках — сколько раз запускал сессию:';
+    if (msgId) {
+      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: buttons } })
+        .catch(() => sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons));
+    } else {
+      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+    }
+  }
+
+  if (data?.startsWith('fp:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    const folderName = data.slice(3); // empty string = root
+    await setSession(env.SESSIONS, chatId, {
+      ...session,
+      projectDir: folderName || null,
+      activeSessionId: null,
+      lastSessionId: null,
+      contextFromSession: null,
+    });
+    const folderLabel = folderName || 'корень';
+    const msgId = message?.message_id;
+    const text = `✏️ <b>Новый диалог</b> — папка <code>${folderLabel}</code>\n\nПиши свою задачу — начнём с нуля.`;
+    if (msgId) {
+      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } })
+        .catch(() => sendMessage(env.BOT_TOKEN, chatId, text));
+    } else {
+      await sendMessage(env.BOT_TOKEN, chatId, text);
+    }
+    return;
+  }
+
+  if (data?.startsWith('fpg:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    const page = parseInt(data.slice(4)) || 0;
+    await showFolderPicker(chatId, session, message?.message_id, page);
+    return;
+  }
+
   // ── New dialog flow ───────────────────────────────────────────────────────
-  // nd: — open new dialog menu
-  // nd:clean — fresh start
+  // nd: — show folder picker to start fresh dialog
+  // nd:clean — fresh start without picking folder
   // nd:ctx — pick session to load context from
   // nd:ctx:<id> — load context from specific session
   if (data?.startsWith('nd:')) {
@@ -218,8 +281,15 @@ export async function handleCallbackQuery(cq, env) {
 
     const sub = data.slice(3);
 
-    if (sub === '' || sub === 'clean') {
-      // Clear active session, start fresh
+    if (sub === '') {
+      // Show folder picker first
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await showFolderPicker(chatId, session, message?.message_id, 0);
+      return;
+    }
+
+    if (sub === 'clean') {
+      // Clear active session, start fresh (keep current projectDir)
       await setSession(env.SESSIONS, chatId, {
         ...session,
         activeSessionId: null,
@@ -455,6 +525,7 @@ export async function handleCallbackQuery(cq, env) {
       forceClaude: true,
       initialMsgId,
       telegramUserId: session.telegramUserId,
+      projectDir: session.projectDir || null,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }
