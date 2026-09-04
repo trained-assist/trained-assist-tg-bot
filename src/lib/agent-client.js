@@ -48,7 +48,21 @@ export async function pickAgentUrl(env, userId, task, forceRu = false) {
   return env.AGENT_URL;
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId }) {
+export async function getProjects(env, { username }) {
+  try {
+    const res = await fetch(
+      `${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.projects || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir }) {
   const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
@@ -56,6 +70,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (initialMsgId) body.initialMsgId = initialMsgId;
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
+  if (projectDir) body.projectDir = projectDir;
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;

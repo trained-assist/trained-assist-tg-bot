@@ -15,6 +15,8 @@ const KNOWN_CALLBACK_PREFIXES = [
   'fl:',        // file browser navigate
   'fr:',        // file browser read
   'ask_claude|', // "вдумчивее плиз" — rerun through Claude
+  'fp:',        // folder picker — select project dir
+  'fpg:',       // folder picker — paginate
 ];
 
 // Mock all external dependencies so we can import the handler
@@ -39,6 +41,11 @@ vi.mock('../src/lib/agent-client.js', () => ({
   runTask: vi.fn().mockResolvedValue({ taskId: 'test-task' }),
   getSessions: vi.fn().mockResolvedValue([]),
   readFile: vi.fn().mockResolvedValue({ content: '{}', truncated: false, size: 2 }),
+  archiveSessions: vi.fn().mockResolvedValue({ archived: [] }),
+  getProjects: vi.fn().mockResolvedValue([
+    { name: '', label: '🏠 Корень', count: 3 },
+    { name: 'efimova-school', label: 'efimova-school', count: 5 },
+  ]),
 }));
 
 vi.mock('../src/handlers/commands.js', () => ({
