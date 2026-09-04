@@ -51,6 +51,14 @@ export async function unpinChatMessage(token, chatId, messageId) {
   });
 }
 
+export async function deleteMessage(token, chatId, messageId) {
+  await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+}
+
 export async function sendDocument(token, chatId, filename, content, caption = '') {
   const form = new FormData();
   form.append('chat_id', String(chatId));
