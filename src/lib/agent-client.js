@@ -48,10 +48,17 @@ export async function pickAgentUrl(env, userId, task, forceRu = false) {
   return env.AGENT_URL;
 }
 
-export async function getProjects(env, { username }) {
+export async function getProjects(env, { username, userId }) {
+  // Probe RU VM capabilities so users with nalog/gosuslugi tokens see projects
+  // from the VM their tasks actually run on, not always GCP.
+  let agentUrl = env.AGENT_URL;
+  if (userId && env.AGENT_RU_URL) {
+    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+    if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
+  }
   try {
     const res = await fetch(
-      `${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+      `${agentUrl}/projects?username=${encodeURIComponent(username)}`,
       { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
     );
     if (!res.ok) return [];
