@@ -24,7 +24,8 @@ export async function getOrCreateMappedSession(kv, chatId, env, telegramUserId =
   if (!mappedProfile) return session;
 
   if (!session || session.username !== mappedProfile) {
-    const mapped = { username: mappedProfile, name: mappedProfile, telegramUserId };
+    // Spread existing session to preserve fields like allMsgMode, allMsgPinnedId, pinnedMsgId
+    const mapped = { ...(session || {}), username: mappedProfile, name: mappedProfile, telegramUserId };
     await setSession(kv, chatId, mapped);
     return mapped;
   }
