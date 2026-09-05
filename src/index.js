@@ -90,18 +90,19 @@ async function dispatchInner(update, env) {
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
 
     if (!isCommand && !isAddressedToBot) {
-      // Skip if no content, or no active session in this chat
       if (!hasContent) return;
       const session = await getSession(env.SESSIONS, chatId);
-      if (!session) {
-        console.log(`[group ${chatId}] no session — skipping`);
-        return;
-      }
-      // In groups with 3+ members require explicit mention or reply — unless allMsgMode is on
-      if (!session.allMsgMode) {
+      if (!session?.allMsgMode) {
         const memberCount = await getGroupMemberCount(env, chatId);
-        console.log(`[group ${chatId}] memberCount=${memberCount} allMsgMode=${session.allMsgMode}`);
-        if (memberCount > 2) return;
+        console.log(`[group ${chatId}] memberCount=${memberCount} session=${!!session} allMsgMode=${session?.allMsgMode}`);
+        if (memberCount > 2) {
+          // Large group without allMsgMode: require existing session (bot is set up) and skip
+          if (!session) {
+            console.log(`[group ${chatId}] large group, no session — skipping`);
+          }
+          return;
+        }
+        // 2-member group: always process — handleMessage handles auth if session is missing
       }
     }
 
