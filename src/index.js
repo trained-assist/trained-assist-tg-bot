@@ -3,7 +3,7 @@ import { handleMessage } from './handlers/message.js';
 import { handleCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
-import { getSession } from './lib/kv.js';
+import { getSession, getOrCreateMappedSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
 
 const app = new Hono();
@@ -90,20 +90,21 @@ async function dispatchInner(update, env) {
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
 
     if (!isCommand && !isAddressedToBot) {
-      // Skip if no content, or no active session in this chat
       if (!hasContent) return;
-      const session = await getSession(env.SESSIONS, chatId);
-      if (!session) {
-        console.log(`[group ${chatId}] no session — skipping`);
-        return;
-      }
-      // Voice/audio: always forward if session exists — no one accidentally sends voice to a bot
+      // Use getOrCreateMappedSession so CHAT_MAPPINGS groups auto-create their session here
+      const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
       const isVoiceOrAudio = !!(msg.voice || msg.audio);
-      // In groups with 3+ members require explicit mention or reply — unless allMsgMode or voice
-      if (!session.allMsgMode && !isVoiceOrAudio) {
+      if (!session?.allMsgMode && !isVoiceOrAudio) {
         const memberCount = await getGroupMemberCount(env, chatId);
-        console.log(`[group ${chatId}] memberCount=${memberCount} allMsgMode=${session.allMsgMode}`);
-        if (memberCount > 2) return;
+        console.log(`[group ${chatId}] memberCount=${memberCount} session=${!!session} allMsgMode=${session?.allMsgMode}`);
+        if (memberCount > 2) {
+          if (!session) console.log(`[group ${chatId}] large group, no session — skipping`);
+          return;
+        }
+      }
+      if (!session) {
+        // 2-member group or voice/audio but no session and no CHAT_MAPPINGS — let handleMessage respond
+        console.log(`[group ${chatId}] no session, passing to handleMessage`);
       }
     }
 
