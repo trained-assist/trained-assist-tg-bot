@@ -43,7 +43,26 @@ export async function handleMessage(msg, env) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
   } else if (photo) {
-    await sendMessage(env.BOT_TOKEN, chatId, '🖼 Фото — TODO: передать агенту');
+    const caption = msg.caption || '';
+    const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю фото…');
+    const initialMsgId = placeholder?.result?.message_id ?? null;
+    try {
+      const largest = photo[photo.length - 1];
+      const { base64, error } = await downloadTgFileBase64(largest.file_id, env);
+      if (error) {
+        await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать фото: ${error}`);
+      } else {
+        const task = caption || 'Фото';
+        await handleText(chatId, session, task, env, {
+          initialMsgId,
+          fileBase64: base64,
+          fileName: 'photo.jpg',
+          fileMimeType: 'image/jpeg',
+        });
+      }
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке фото: ${e.message}`);
+    }
   } else if (doc) {
     const caption = msg.caption || '';
     const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю документ…');
