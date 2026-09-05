@@ -94,7 +94,9 @@ async function dispatchInner(update, env) {
       // Use getOrCreateMappedSession so CHAT_MAPPINGS groups auto-create their session here
       const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
       const isVoiceOrAudio = !!(msg.voice || msg.audio);
-      if (!session?.allMsgMode && !isVoiceOrAudio) {
+      // Voice bypasses member-count check only when allMsgMode was NEVER set.
+      // If it was explicitly turned off (=== false), voice also obeys the limit.
+      if (!session?.allMsgMode && (!isVoiceOrAudio || session?.allMsgMode === false)) {
         const memberCount = await getGroupMemberCount(env, chatId);
         console.log(`[group ${chatId}] memberCount=${memberCount} session=${!!session} allMsgMode=${session?.allMsgMode}`);
         if (memberCount > 2) {
