@@ -97,8 +97,10 @@ async function dispatchInner(update, env) {
         console.log(`[group ${chatId}] no session — skipping`);
         return;
       }
-      // In groups with 3+ members require explicit mention or reply — unless allMsgMode is on
-      if (!session.allMsgMode) {
+      // Voice/audio: always forward if session exists — no one accidentally sends voice to a bot
+      const isVoiceOrAudio = !!(msg.voice || msg.audio);
+      // In groups with 3+ members require explicit mention or reply — unless allMsgMode or voice
+      if (!session.allMsgMode && !isVoiceOrAudio) {
         const memberCount = await getGroupMemberCount(env, chatId);
         console.log(`[group ${chatId}] memberCount=${memberCount} allMsgMode=${session.allMsgMode}`);
         if (memberCount > 2) return;
