@@ -46,22 +46,27 @@ export async function handleCallbackQuery(cq, env) {
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
       if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
-      runTask(env, {
-        userId: chatId,
-        username: updatedSession.username,
-        task: pending,
-        context: null,
-        sessionId: resolvedId,
-        initialMsgId,
-        pinnedMsgId: updatedSession.pinnedMsgId || null,
-        telegramUserId: updatedSession.telegramUserId,
-        projectDir: updatedSession.projectDir || null,
-      }).then(result => {
+      // MUST await so the dispatch→waitUntil chain keeps the Worker alive until the HTTP call lands.
+      // Without await, Cloudflare terminates the execution context before /run is ever fetched.
+      try {
+        const result = await runTask(env, {
+          userId: chatId,
+          username: updatedSession.username,
+          task: pending,
+          context: null,
+          sessionId: resolvedId,
+          initialMsgId,
+          pinnedMsgId: updatedSession.pinnedMsgId || null,
+          telegramUserId: updatedSession.telegramUserId,
+          projectDir: updatedSession.projectDir || null,
+        });
         const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
         if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
-          return setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+          await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
         }
-      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      } catch (err) {
+        sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
+      }
     } else {
       // KV stale or message expired — replace keyboard with prompt to write
       await answerCallbackQuery(env.BOT_TOKEN, id);
