@@ -35,8 +35,8 @@ export async function handleCommand(msg, env) {
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
-    case '/report':
-    case '/report_bug_or_feature_request': return cmdReport(msg, env);
+    case '/bug_report_or_feature_request':
+    case '/report': return cmdReport(msg, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -59,7 +59,7 @@ async function cmdStart(chatId, env) {
     `/status — статус агента\n` +
     `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
     `/settoken — сохранить токен сервиса\n` +
-    `/report &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
+    `/bug_report_or_feature_request &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
     `/chromeext_connect — подключить Chrome-расширение\n` +
     `/chromeext_install — установить расширение\n` +
     `/logout — выйти`
@@ -310,15 +310,15 @@ async function cmdReport(msg, env) {
   const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
-  const description = text.replace(/^\/report(_bug_or_feature_request)?\s*/i, '').trim();
+  const description = text.replace(/^\/(bug_report_or_feature_request|report)\s*/i, '').trim();
   if (!description) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '🐛 <b>Сообщить о баге или предложить фичу</b>\n\n' +
       'Использование:\n' +
-      '<code>/report описание проблемы или идеи</code>\n\n' +
+      '<code>/bug_report_or_feature_request описание проблемы или идеи</code>\n\n' +
       'Примеры:\n' +
-      '<code>/report при отправке файла бот зависает</code>\n' +
-      '<code>/report хочу чтобы можно было скачивать сессии в PDF</code>'
+      '<code>/bug_report_or_feature_request при отправке файла бот зависает</code>\n' +
+      '<code>/bug_report_or_feature_request хочу чтобы можно было скачивать сессии в PDF</code>'
     );
   }
 
