@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles, runTask, getSkills } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask, getSkills, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -35,6 +35,8 @@ export async function handleCommand(msg, env) {
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
+    case '/report':
+    case '/report_bug_or_feature_request': return cmdReport(msg, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
@@ -57,6 +59,7 @@ async function cmdStart(chatId, env) {
     `/status — статус агента\n` +
     `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
     `/settoken — сохранить токен сервиса\n` +
+    `/report &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
     `/chromeext_connect — подключить Chrome-расширение\n` +
     `/chromeext_install — установить расширение\n` +
     `/logout — выйти`
@@ -299,6 +302,42 @@ async function cmdChromeExtInstall(chatId, env) {
     `Кликни на иконку расширения → введи код → <b>Подключить</b>.\n\n` +
     `Готово! Расширение будет автоматически переносить токены авторизации на VM.`
   );
+}
+
+async function cmdReport(msg, env) {
+  const { chat, text } = msg;
+  const chatId = chat.id;
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  const description = text.replace(/^\/report(_bug_or_feature_request)?\s*/i, '').trim();
+  if (!description) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '🐛 <b>Сообщить о баге или предложить фичу</b>\n\n' +
+      'Использование:\n' +
+      '<code>/report описание проблемы или идеи</code>\n\n' +
+      'Примеры:\n' +
+      '<code>/report при отправке файла бот зависает</code>\n' +
+      '<code>/report хочу чтобы можно было скачивать сессии в PDF</code>'
+    );
+  }
+
+  await sendMessage(env.BOT_TOKEN, chatId, '📤 Создаю issue...');
+
+  try {
+    const result = await reportBugOrFeature(env, {
+      username: session.username,
+      description,
+      sessionId: session.activeSessionId || session.lastSessionId || undefined,
+    });
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `✅ <b>Issue создан!</b>\n\n` +
+      `<b>#${result.number}</b> ${description.slice(0, 60)}${description.length > 60 ? '…' : ''}\n\n` +
+      `<a href="${result.url}">Открыть в GitHub</a>`
+    );
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось создать issue: ${e.message}`);
+  }
 }
 
 export function timeAgo(ts) {
