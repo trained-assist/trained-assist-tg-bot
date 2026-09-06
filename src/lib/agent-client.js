@@ -179,6 +179,23 @@ export async function archiveSessions(env, { username, sessionIds }) {
   return res.json();
 }
 
+export async function reportBugOrFeature(env, { username, description, sessionId }) {
+  const res = await fetch(`${env.AGENT_URL}/report`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ username, description, sessionId }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `agent /report HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {
