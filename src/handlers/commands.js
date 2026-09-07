@@ -33,6 +33,8 @@ export async function handleCommand(msg, env) {
     case '/ru':                return cmdRu(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
+    case '/stop':
+    case '/стоп':              return cmdStop(msg, env);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
     case '/report':
@@ -499,6 +501,26 @@ async function cmdPrivacy(chatId, env) {
     `Пароли → Cloudflare KV (scrypt hash).\n\n` +
     `Напиши "удали мои данные" — всё будет очищено.`
   );
+}
+
+async function cmdStop(msg, env) {
+  const { chat } = msg;
+  const chatId = chat.id;
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  try {
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      task: '/stop',
+      context: null,
+      sessionId: null,
+      initialMsgId: null,
+    });
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+  }
 }
 
 async function cmdAllOn(msg, env) {
