@@ -196,6 +196,15 @@ export async function reportBugOrFeature(env, { username, description, sessionId
   return res.json();
 }
 
+export async function stopTask(env, taskId) {
+  const res = await fetch(`${env.AGENT_URL}/tasks/${encodeURIComponent(taskId)}/stop`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+    signal: AbortSignal.timeout(5_000),
+  });
+  return res.json().catch(() => ({ ok: false }));
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {

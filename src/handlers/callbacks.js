@@ -1,7 +1,7 @@
 import { getOrCreateMappedSession, setSession, deleteSession } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
@@ -524,6 +524,15 @@ export async function handleCallbackQuery(cq, env) {
     } catch (e) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
     }
+    return;
+  }
+
+  // ── Stop running Claude task ──────────────────────────────────────────────
+  // stop|{taskId} — user tapped "⛔ Стоп" to kill a running Claude process
+  if (data?.startsWith('stop|')) {
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    const taskId = data.slice('stop|'.length);
+    await stopTask(env, taskId).catch(() => {});
     return;
   }
 

@@ -17,6 +17,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'ask_claude|', // "вдумчивее плиз" — rerun through Claude
   'fp:',        // folder picker — select project dir
   'fpg:',       // folder picker — paginate
+  'stop|',      // stop running Claude task
 ];
 
 // Mock all external dependencies so we can import the handler
@@ -46,6 +47,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
     { name: '', label: '🏠 Корень', count: 3 },
     { name: 'efimova-school', label: 'efimova-school', count: 5 },
   ]),
+  stopTask: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock('../src/handlers/commands.js', () => ({
