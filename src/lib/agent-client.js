@@ -26,14 +26,15 @@ async function getCapabilities(agentUrl, secret, userId) {
 
 // Returns the agent URL to use for this task.
 // Queries RU VM capabilities first; falls back to GCP on error/timeout.
-export async function pickAgentUrl(env, userId, task, forceRu = false) {
+// username: alphanumeric profile name (NOT the numeric Telegram chat ID)
+export async function pickAgentUrl(env, username, task, forceRu = false) {
   if (forceRu && env.AGENT_RU_URL) return env.AGENT_RU_URL;
   if (!env.AGENT_RU_URL) return env.AGENT_URL;
 
   // Empty task → no RU-only keyword can match → skip the 2.5s capability probe
   if (!task) return env.AGENT_URL;
 
-  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
   if (ruCaps.length === 0) return env.AGENT_URL;
 
   // Normalize task for matching (collapse STT dot-splitting like "na log.ru" → "nalog.ru")
@@ -52,8 +53,8 @@ export async function getProjects(env, { username, userId }) {
   // Probe RU VM capabilities so users with nalog/gosuslugi tokens see projects
   // from the VM their tasks actually run on, not always GCP.
   let agentUrl = env.AGENT_URL;
-  if (userId && env.AGENT_RU_URL) {
-    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+  if (username && env.AGENT_RU_URL) {
+    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
     if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
   }
   try {
@@ -70,7 +71,7 @@ export async function getProjects(env, { username, userId }) {
 }
 
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
-  const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
+  const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;

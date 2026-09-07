@@ -188,7 +188,7 @@ async function cmdRu(msg, env) {
   }
 
   try {
-    const sessionId = `s-${chatId}-${Date.now()}`;
+    const sessionId = `s-${Math.abs(chatId)}-${Date.now()}`;
     await runTask(env, {
       userId: chatId,
       username: session.username,
