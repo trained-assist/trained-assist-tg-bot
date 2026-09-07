@@ -207,3 +207,17 @@ export async function getAgentHealth(env) {
     return false;
   }
 }
+
+export async function stopTask(env, { username }) {
+  const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ username }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
+  return res.json();
+}

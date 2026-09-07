@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles, runTask, getSkills, reportBugOrFeature } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 
@@ -31,6 +31,8 @@ export async function handleCommand(msg, env) {
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     case '/ru':                return cmdRu(msg, env);
+    case '/стоп':
+    case '/stop':              return cmdStop(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/stop':
@@ -492,6 +494,23 @@ async function cmdSkills(chatId, env) {
   );
 }
 
+async function cmdStop(msg, env) {
+  const chatId = msg.chat.id;
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  try {
+    const result = await stopTask(env, { username: session.username });
+    if (result.killed > 0) {
+      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
+    } else {
+      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
+    }
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось остановить: ${e.message}`);
+  }
+}
+
 async function cmdPrivacy(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `🔒 <b>Приватность</b>\n\n` +
@@ -510,14 +529,12 @@ async function cmdStop(msg, env) {
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   try {
-    await runTask(env, {
-      userId: chatId,
-      username: session.username,
-      task: '/stop',
-      context: null,
-      sessionId: null,
-      initialMsgId: null,
-    });
+    const result = await stopTask(env, { username: session.username });
+    if (result.killed > 0) {
+      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
+    } else {
+      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
+    }
   } catch (e) {
     return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
   }
