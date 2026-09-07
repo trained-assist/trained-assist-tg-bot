@@ -21,7 +21,7 @@ export async function handleCallbackQuery(cq, env) {
     const pending = session.pendingMessage;
     const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
 
-    const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
+    const resolvedId = sessionId === 'new' ? `s-${Math.abs(chatId)}-${Date.now()}` : sessionId;
 
     const msgId = message?.message_id;
 
@@ -179,7 +179,7 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sn:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
-    const newId = `s-${chatId}-${Date.now()}`;
+    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
     // Store source session ID so agent loads its context into the new session
     await setSession(env.SESSIONS, chatId, {
       ...session,

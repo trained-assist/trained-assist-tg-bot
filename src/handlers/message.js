@@ -164,7 +164,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {
-    const newId = `s-${chatId}-${Date.now()}`;
+    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
     return { type: 'run', sessionId: newId, forceNew: true };
   }
 
@@ -175,7 +175,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // 3. No history at all → new session
   if (!session.lastSessionId) {
-    const newId = `s-${chatId}-${Date.now()}`;
+    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
     return { type: 'run', sessionId: newId };
   }
 

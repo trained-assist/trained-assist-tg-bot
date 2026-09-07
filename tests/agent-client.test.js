@@ -3,7 +3,7 @@ import { pickAgentUrl } from '../src/lib/agent-client.js';
 
 const BASE = 'https://gcp.example.com';
 const RU   = 'https://ru.example.com';
-const USER = 42;
+const USER = 'testuser';
 
 function mockCapabilities(caps) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
