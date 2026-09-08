@@ -306,7 +306,30 @@ export async function handleCallbackQuery(cq, env) {
     const sub = data.slice(3);
 
     if (sub === '') {
-      // Show folder picker first
+      // Show simplified new-dialog prompt; folder picker is opt-in for advanced users
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      const msgId = message?.message_id;
+      const currentFolder = session.projectDir
+        ? `📁 <b>${session.projectDir}</b>`
+        : '🏠 корневая';
+      const text = `✏️ <b>Новый диалог</b>\n\nСоздаём в папке ${currentFolder}.`;
+      const buttons = [
+        [{ text: '✏️ Создать', callback_data: 'nd:clean' }],
+        [{ text: '📁 Выбрать папку  · для тех, кто хочет структурировать диалоги', callback_data: 'nd:folder' }],
+      ];
+      const kb = { reply_markup: { inline_keyboard: buttons } };
+      if (msgId) {
+        await editMessage(env.BOT_TOKEN, chatId, msgId, text, kb).catch(() =>
+          sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons)
+        );
+      } else {
+        await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+      }
+      return;
+    }
+
+    if (sub === 'folder') {
+      // Advanced: show folder picker
       await answerCallbackQuery(env.BOT_TOKEN, id);
       await showFolderPicker(chatId, session, message?.message_id, 0);
       return;
