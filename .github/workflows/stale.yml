@@ -1,0 +1,38 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # daily at midnight UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # PRs — short window so abandoned fixer-PRs don't pile up
+          stale-pr-message: >
+            This PR has had no activity for 10 days. It will be closed in 3 days unless updated.
+            If this is an autonomous fixer PR still in progress, push a new commit to reset the timer.
+          close-pr-message: >
+            Closing due to 13 days of inactivity. Re-open or create a new PR if this work is still needed.
+          days-before-pr-stale: 10
+          days-before-pr-close: 3
+          stale-pr-label: stale
+          # Issues — more lenient
+          stale-issue-message: >
+            This issue has had no activity for 30 days and will be closed in 7 days unless updated.
+          close-issue-message: >
+            Closing due to 37 days of inactivity.
+          days-before-issue-stale: 30
+          days-before-issue-close: 7
+          stale-issue-label: stale
+          # Never stale pinned or security items
+          exempt-issue-labels: 'pinned,security'
+          exempt-pr-labels: 'pinned'
