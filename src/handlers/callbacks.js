@@ -64,6 +64,9 @@ export async function handleCallbackQuery(cq, env) {
         if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
           await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
         }
+        sendMessageWithKeyboard(env.BOT_TOKEN, chatId, '↗️', [[
+          { text: '↗️ Вдумчивее', callback_data: `ask_claude|${resolvedId}` },
+        ]]).catch(() => {});
       } catch (err) {
         sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
       }

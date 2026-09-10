@@ -9,6 +9,12 @@ const NEW_SESSION_SIGNALS = [
   'новая тема', 'забудь про', 'new task', 'new session', 'другое:',
 ];
 
+// Phrases that mean "re-run last task with deeper reasoning" (forceClaude)
+const FORCE_CLAUDE_SIGNALS = [
+  'вдумчивее', 'вдумчиво', 'подумай вдумчивее', 'думай вдумчивее',
+  'подробнее', 'глубже', 'подумай глубже', 'think harder', 'think deeper',
+];
+
 const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 export async function handleMessage(msg, env) {
@@ -92,6 +98,29 @@ export async function handleMessage(msg, env) {
 
 async function handleText(chatId, session, text, env, opts = {}) {
   try {
+    // "вдумчивее" and similar → re-run last task with deeper reasoning
+    const lc = text.toLowerCase().trim();
+    if (FORCE_CLAUDE_SIGNALS.some(s => lc === s || lc.startsWith(s + ' ') || lc.endsWith(' ' + s) || lc.includes(' ' + s + ' '))) {
+      const sessionId = session.activeSessionId || session.lastSessionId;
+      if (!sessionId) {
+        await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Нет активного диалога — сначала задай вопрос.');
+        return;
+      }
+      const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
+      const initialMsgId = thinkMsg?.result?.message_id ?? null;
+      await runTask(env, {
+        userId: chatId,
+        username: session.username,
+        sessionId,
+        forceClaude: true,
+        initialMsgId,
+        pinnedMsgId: session.pinnedMsgId || null,
+        telegramUserId: session.telegramUserId,
+        projectDir: session.projectDir || null,
+      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      return;
+    }
+
     const route = await resolveSessionRoute(chatId, session, text, env);
 
     if (route.type === 'disambiguate') {
@@ -145,6 +174,11 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
+
+    // Show "вдумчивее" button so user can ask Claude to go deeper without typing
+    sendMessageWithKeyboard(env.BOT_TOKEN, chatId, '↗️', [[
+      { text: '↗️ Вдумчивее', callback_data: `ask_claude|${sessionId}` },
+    ]]).catch(() => {});
   } catch (err) {
     const isAgentDown = /HTTP 50[23]/.test(err.message) || err.name === 'TimeoutError';
     const userMsg = isAgentDown
