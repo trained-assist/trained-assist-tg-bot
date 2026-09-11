@@ -50,8 +50,6 @@ export async function handleCommand(msg, env) {
     case '/stop':              return cmdStop(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
-    case '/stop':
-    case '/стоп':              return cmdStop(msg, env);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
     case '/report':
@@ -508,23 +506,6 @@ async function cmdSkills(chatId, env) {
     `🛠 <b>Доступные скиллы</b>\n\n${lines.join('\n\n')}\n\n` +
     `<i>Просто напиши задачу — Клод сам выберет нужный скилл.</i>`
   );
-}
-
-async function cmdStop(msg, env) {
-  const chatId = msg.chat.id;
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
-
-  try {
-    const result = await stopTask(env, { username: session.username });
-    if (result.killed > 0) {
-      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
-    } else {
-      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
-    }
-  } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось остановить: ${e.message}`);
-  }
 }
 
 async function cmdPrivacy(chatId, env) {
