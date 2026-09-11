@@ -4,11 +4,26 @@ import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
+import { handleMessage } from './message.js';
+
+// Commands the agent handles itself (via getQuickAnswer / a session task) rather than
+// the gateway. The gateway must forward these to the agent instead of rejecting them as
+// "unknown" — otherwise agent-side commands stay invisible until the gateway is redeployed.
+// Aliases mirror the agent's PERSONA_INTENT (persona/role/роль/персона/character/характер).
+const AGENT_FORWARDED_COMMANDS = new Set([
+  '/persona', '/role', '/роль', '/персона', '/character', '/характер',
+]);
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
   const cmd = text.split(' ')[0].split('@')[0]; // strip @botname
+
+  // Agent-side commands (e.g. /persona) are handled downstream in the agent, not here.
+  // Forward the raw message so the agent's task pipeline sees the full text + args.
+  if (AGENT_FORWARDED_COMMANDS.has(cmd.toLowerCase())) {
+    return handleMessage(msg, env);
+  }
 
   switch (cmd) {
     case '/start':   return cmdStart(chatId, env);
@@ -59,6 +74,7 @@ async function cmdStart(chatId, env) {
     `<b>Команды:</b>\n` +
     `/skills — что умеет агент (список скиллов)\n` +
     `/sessions — мои диалоги\n` +
+    `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
     `/files — файлы и папки\n` +
     `/status — статус агента\n` +
     `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
