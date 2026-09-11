@@ -22,6 +22,14 @@ export async function handleCommand(msg, env) {
   // Agent-side commands (e.g. /persona) are handled downstream in the agent, not here.
   // Forward the raw message so the agent's task pipeline sees the full text + args.
   if (AGENT_FORWARDED_COMMANDS.has(cmd.toLowerCase())) {
+    // Convenience: set the role by REPLYING to a message with just `/persona`.
+    // If there's no inline arg (and it isn't a control word), lift the replied-to
+    // message's text/caption in as the role body, so users don't retype paragraphs.
+    const inline = text.slice(cmd.length).trim();
+    const quoted = (msg.reply_to_message?.text || msg.reply_to_message?.caption || '').trim();
+    if (quoted && !inline) {
+      return handleMessage({ ...msg, text: `${cmd} ${quoted}` }, env);
+    }
     return handleMessage(msg, env);
   }
 
