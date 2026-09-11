@@ -9,9 +9,13 @@ import { handleMessage } from './message.js';
 // Commands the agent handles itself (via getQuickAnswer / a session task) rather than
 // the gateway. The gateway must forward these to the agent instead of rejecting them as
 // "unknown" — otherwise agent-side commands stay invisible until the gateway is redeployed.
-// Aliases mirror the agent's PERSONA_INTENT (persona/role/роль/персона/character/характер).
+// Aliases mirror the agent's PERSONA_INTENT (persona/role/роль/персона/character/характер)
+// and PROJECT_INTENT (project/projects/проект/проекты — list/switch/create projects).
 const AGENT_FORWARDED_COMMANDS = new Set([
   '/persona', '/role', '/роль', '/персона', '/character', '/характер',
+  '/project', '/projects', '/проект', '/проекты',
+  // Admin-only; the agent gates it by chat id (see GET_WEBPASS_INTENT in runner.js).
+  '/get_webpass', '/webpass', '/вебпароль',
 ]);
 
 export async function handleCommand(msg, env) {
@@ -81,6 +85,7 @@ async function cmdStart(chatId, env) {
     `/skills — что умеет агент (список скиллов)\n` +
     `/sessions — мои диалоги\n` +
     `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
+    `/project — проекты профиля: список / сменить / создать (новые сессии идут в активный)\n` +
     `/files — файлы и папки\n` +
     `/status — статус агента\n` +
     `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
