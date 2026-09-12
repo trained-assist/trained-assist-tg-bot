@@ -1,6 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
+import { renderSessionList } from './commands.js';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -214,27 +215,17 @@ async function resolveSessionRoute(chatId, session, text, env) {
 }
 
 async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) {
-  function timeAgo(ts) {
-    const m = Math.floor((Date.now() - ts) / 60000);
-    if (m < 1) return 'только что';
-    if (m < 60) return `${m}м`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}ч`;
-    return `${Math.floor(h / 24)}д`;
-  }
-
-  const buttons = sessions.map(s => {
-    const marker = s.id === activeId ? '🔵 ' : '';
-    const label = `${marker}${s.topic.slice(0, 28)} · ${timeAgo(s.lastAt)}`;
-    return [{ text: label, callback_data: `sp:${s.id}` }];
+  // Descriptive text body (project · title · gist · meta) + numbered tap-buttons,
+  // same renderer as /sessions and the new-dialog context picker. Replaces the old
+  // 28-char truncated button labels that made dialogs indistinguishable.
+  const { text, buttons } = renderSessionList(sessions, {
+    callbackPrefix: 'sp',
+    header: '↩ <b>В какой диалог добавить сообщение?</b>',
+    hint: 'Выбери номер диалога ниже:',
   });
   buttons.push([{ text: '✨ Новый диалог', callback_data: 'sp:new' }]);
 
-  return sendMessageWithKeyboard(
-    botToken, chatId,
-    '↩ В какой диалог добавить сообщение?',
-    buttons
-  );
+  return sendMessageWithKeyboard(botToken, chatId, text, buttons);
 }
 
 function transcriptPreview(text, maxSentences = 3) {
