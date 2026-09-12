@@ -23,7 +23,7 @@ export async function handleMessage(msg, env) {
   }
 
   if (text) {
-    await handleText(chatId, session, text, env);
+    return await handleText(chatId, session, text, env);
   } else if (voice || audio) {
     const fileId = (voice || audio).file_id;
     const mimeType = (voice || audio).mime_type || null;
@@ -38,7 +38,7 @@ export async function handleMessage(msg, env) {
         const preview = transcriptPreview(transcript, 3);
         await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `🎤 ${preview}…`);
       }
-      await handleText(chatId, session, transcript, env, { isVoice: true });
+      return await handleText(chatId, session, transcript, env, { isVoice: true });
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
@@ -102,7 +102,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
         pendingMessageAt: Date.now(),
       });
       await sendDisambiguationKeyboard(env.BOT_TOKEN, chatId, route.sessions, session.activeSessionId);
-      return;
+      return { dispatched: false }; // no run started — DO must not busy-hold on a picker
     }
 
     // Run the task — agent creates/continues session
@@ -145,12 +145,17 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
+    // Run enqueued (agent /run → 202). Report the resolved username so the
+    // IntakeBuffer DO can poll /tasks/running and hold new messages for the
+    // real duration of the session, not just this fast enqueue call.
+    return { dispatched: true, username: session.username };
   } catch (err) {
     const isAgentDown = /HTTP 50[23]/.test(err.message) || err.name === 'TimeoutError';
     const userMsg = isAgentDown
       ? '⏸ Агент временно недоступен. Попробуй через минуту.'
       : `❌ Ошибка: ${err.message}`;
     await sendMessage(env.BOT_TOKEN, chatId, userMsg);
+    return { dispatched: false }; // enqueue failed — don't trap the buffer in busy-hold
   }
 }
 

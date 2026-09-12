@@ -150,6 +150,30 @@ export async function classifyMessage(env, { message, sessions }) {
  * intake buffer is a finished thought or an obviously cut-off fragment.
  * Fails open (complete:true) on any error — the gate must never trap the user.
  */
+/**
+ * ШАГ 1.3 busy-hold poll: is a Claude session live for this user right now?
+ * The agent /run returns 202 on enqueue, so the gateway can't learn a run's
+ * real duration from the dispatch call — it must read live state. The DO polls
+ * this to hold new messages until the session actually frees up.
+ *
+ * Fails CLOSED (running:true) on any error: an unreachable agent must keep the
+ * hold, not release it prematurely and per-message-dispatch mid-run. The DO's
+ * BUSY_MAX safety alarm is the ultimate backstop against a hold that never clears.
+ */
+export async function isTaskRunning(env, { username }) {
+  try {
+    const res = await fetch(
+      `${env.AGENT_URL}/tasks/running?username=${encodeURIComponent(username)}`,
+      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return { running: true };
+    const data = await res.json();
+    return { running: data.running === true };
+  } catch {
+    return { running: true };
+  }
+}
+
 export async function checkCompleteness(env, { text }) {
   try {
     const res = await fetch(`${env.AGENT_URL}/intake-gate`, {

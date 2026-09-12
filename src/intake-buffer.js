@@ -15,19 +15,32 @@
 //             works they often want to edit / add to what they said, and firing per
 //             message ruins that — so we hold until the session is free.
 //
+//             The hold is driven by POLLING the agent's live task state
+//             (/tasks/running), NOT by the /run dispatch call: /run returns 202 on
+//             enqueue and Claude runs in the background for minutes, so awaiting the
+//             dispatch tells us nothing about the session's real duration. Polling
+//             reads ground truth and self-heals — a missed poll (isolate eviction)
+//             just retries on the next durable alarm; a lost callback can't trap the
+//             buffer. BUSY_MAX_MS is the ultimate backstop.
+//
 // One instance per chat_id (idFromName(chatId)). Durable Object alarm handlers are
-// serialised per instance, so BUSY_MAX_MS can safely recover a buffer trapped by an
-// isolate eviction mid-run without ever racing a live dispatch.
+// serialised per instance, so a poll can never race a live dispatch.
 
 import { sendMessage } from './lib/telegram.js';
-import { checkCompleteness } from './lib/agent-client.js';
+import { checkCompleteness, isTaskRunning } from './lib/agent-client.js';
 
 const DEBOUNCE_MS = 10_000;      // silence window before flush; tune via ШАГ 1 acceptance
 const SOFT_REARM_MS = 15_000;    // grace window after a "looks unfinished" nudge
 const POST_RUN_MS = 4_000;       // short debounce after a run frees up, to catch a trailing edit
-const BUSY_MAX_MS = 45 * 60_000; // safety: if a run never signals done (isolate evicted mid-flight),
-                                 // release the hold after this so the buffer can't be trapped forever.
-                                 // Must exceed the longest legitimate session (~40 min agent cap).
+const POLL_MS = 12_000;          // cadence for polling the agent's live task state during a hold
+const START_GRACE_MS = 30_000;   // enqueue→spawn grace: /run is 202, the claude proc may not be
+                                 // visible in the agent's task registry for a few seconds (queue/
+                                 // semaphore). Until we've seen it running once, don't treat
+                                 // "not running" as done inside this window.
+const BUSY_MAX_MS = 45 * 60_000; // safety: if a run never signals done (agent unreachable, isolate
+                                 // evicted mid-flight), release the hold after this so the buffer
+                                 // can't be trapped forever. Must exceed the longest legitimate
+                                 // session (~40 min agent cap).
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -46,9 +59,9 @@ export class IntakeBuffer {
       const busy = (await this.state.storage.get('busy')) === true;
       if (busy) {
         // ШАГ 1.3: a session is running — accumulate silently and DON'T touch the
-        // alarm. The safety alarm set at dispatch time is our only timer; the
-        // buffer will be flushed by the run's own completion (see alarm()'s
-        // finally), not by a debounce.
+        // alarm. The poll alarm (re-armed by the busy branch of alarm()) is the
+        // only timer; the buffer will be flushed once polling observes the run
+        // has finished, not by a debounce.
         return json({ buffered: buf.length, held: true });
       }
 
@@ -61,24 +74,80 @@ export class IntakeBuffer {
   }
 
   async alarm() {
-    // Busy-hold guard. If a run is (still) marked in-flight, the only way we reach
-    // here is the BUSY_MAX safety alarm — a normal completion cancels its own
-    // alarm in finally. Since alarm handlers are serialised, a live dispatch's
-    // alarm() cannot be running concurrently, so reaching here while busy means
-    // the previous run's isolate died before its finally cleared the flag.
+    // While a hold is in force, every alarm is a poll tick — check the agent's
+    // live task state and either keep holding or release + schedule the flush.
     const busy = (await this.state.storage.get('busy')) === true;
     if (busy) {
-      const since = (await this.state.storage.get('busySince')) || 0;
-      if (Date.now() - since < BUSY_MAX_MS) {
-        // Shouldn't normally happen; re-arm the safety and bail.
-        await this.state.storage.setAlarm(since + BUSY_MAX_MS);
-        return;
-      }
-      // Assume the run is dead — release the hold and fall through to flush.
-      await this.state.storage.delete('busy');
-      await this.state.storage.delete('busySince');
+      return await this.pollBusy();
+    }
+    // Idle: this is a debounce / post-run flush. Coalesce and dispatch.
+    return await this.flush();
+  }
+
+  // Poll tick during a busy-hold. Serialised with everything else on this DO.
+  async pollBusy() {
+    const now = Date.now();
+    const since = (await this.state.storage.get('busySince')) || 0;
+    const elapsed = now - since;
+
+    // Ultimate backstop: a run that never signals done (agent down the whole time,
+    // or isolate died mid-flight). Release so the buffer isn't trapped forever.
+    if (elapsed >= BUSY_MAX_MS) {
+      await this.releaseBusy();
+      return await this.afterRelease();
     }
 
+    const pollUser = await this.state.storage.get('pollUser');
+    if (!pollUser) {
+      // No username to poll against (dispatch didn't start a run). Nothing to
+      // hold for — release and flush whatever arrived.
+      await this.releaseBusy();
+      return await this.afterRelease();
+    }
+
+    const { running } = await isTaskRunning(this.env, { username: pollUser });
+    if (running) {
+      // Session live — remember we saw it start, keep holding, poll again later.
+      await this.state.storage.put('seenRunning', true);
+      await this.state.storage.setAlarm(now + POLL_MS);
+      return;
+    }
+
+    // Agent reports no live task for this user.
+    const seen = (await this.state.storage.get('seenRunning')) === true;
+    if (!seen && elapsed < START_GRACE_MS) {
+      // Enqueued but the claude proc hasn't appeared in the registry yet
+      // (queue/semaphore). Don't mistake "not spawned yet" for "finished".
+      await this.state.storage.setAlarm(now + POLL_MS);
+      return;
+    }
+
+    // Session finished (or never started within the grace window). Release the
+    // hold and let a short post-run debounce catch a trailing edit.
+    await this.releaseBusy();
+    return await this.afterRelease();
+  }
+
+  async releaseBusy() {
+    await this.state.storage.delete('busy');
+    await this.state.storage.delete('busySince');
+    await this.state.storage.delete('seenRunning');
+    await this.state.storage.delete('pollUser');
+  }
+
+  // Called right after a hold is released: whatever piled up during the run gets
+  // flushed as one coalesced message after a short debounce (POST_RUN_MS) so a
+  // trailing edit sent right as the run finishes still lands in the same batch.
+  async afterRelease() {
+    const remaining = (await this.state.storage.get('buf')) || [];
+    if (remaining.length) {
+      await this.state.storage.setAlarm(Date.now() + POST_RUN_MS);
+    } else {
+      await this.state.storage.deleteAlarm();
+    }
+  }
+
+  async flush() {
     const buf = (await this.state.storage.get('buf')) || [];
     if (!buf.length) return;
 
@@ -117,29 +186,34 @@ export class IntakeBuffer {
     await this.state.storage.delete('nudged');
     await this.state.storage.put('busy', true);
     await this.state.storage.put('busySince', Date.now());
-    // Safety net: if this run never returns (isolate eviction), this alarm frees
-    // the hold. A normal completion replaces it in finally, so it only ever fires
-    // on a genuinely dead run.
-    await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+    // Begin polling the agent for this run's real completion. Note: handleMessage
+    // returns as soon as the agent /run enqueue responds (202) — it does NOT wait
+    // for the session, so the hold cannot be released here.
+    await this.state.storage.setAlarm(Date.now() + POLL_MS);
 
+    let result = null;
     try {
       // Dynamic import avoids a circular import at module load (message.js is the
       // normal request path; the DO is only reached via the binding).
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env);
-    } finally {
-      // Release the hold. Whatever piled up while we were busy gets flushed as one
-      // coalesced message after a short debounce (POST_RUN_MS) so a trailing edit
-      // sent right as the run finishes still lands in the same batch.
-      await this.state.storage.delete('busy');
-      await this.state.storage.delete('busySince');
-      const remaining = (await this.state.storage.get('buf')) || [];
-      if (remaining.length) {
-        await this.state.storage.setAlarm(Date.now() + POST_RUN_MS);
-      } else {
-        await this.state.storage.deleteAlarm();
-      }
+      result = await handleMessage(msg, this.env);
+    } catch (err) {
+      // The enqueue itself failed unexpectedly. Don't trap the buffer — release
+      // and flush anything that arrived so the next message re-arms cleanly.
+      await this.releaseBusy();
+      return await this.afterRelease();
     }
+
+    if (result?.dispatched && result.username) {
+      // Real run started — record who to poll. The poll alarm is already armed.
+      await this.state.storage.put('pollUser', result.username);
+      return;
+    }
+
+    // No run actually started (session picker, login prompt, handled-inline, or a
+    // caught error already surfaced to the user). Nothing to hold for.
+    await this.releaseBusy();
+    return await this.afterRelease();
   }
 }
 
