@@ -14,17 +14,19 @@ import { handleMessage } from './message.js';
 const AGENT_FORWARDED_COMMANDS = new Set([
   '/persona', '/role', '/роль', '/персона', '/character', '/характер',
   '/project', '/projects', '/проект', '/проекты',
-  // Admin-only; the agent gates it by sender/chat id (see GET_WEBPASS_INTENT in runner.js).
+  // Pure self-service — the agent issues the caller's own web password (GET_WEBPASS_INTENT
+  // in runner.js). No admin gate; works in any chat.
   '/get_webpass', '/webpass', '/вебпароль',
 ]);
 
-// Admin-only agent commands that must ALSO pass through the admin-group branch in
-// index.js (which otherwise only forwards user-mgmt commands and silently drops the
-// rest). Without this, /get_webpass typed in the admin group gets no reply at all.
-const ADMIN_FORWARDED_COMMANDS = new Set(['/get_webpass', '/webpass', '/вебпароль']);
-export function isAdminForwardedCommand(text) {
+// Commands that must ALSO pass through the quiet admin-group branch in index.js (which
+// otherwise forwards only user-mgmt commands and silently drops the rest). /get_webpass is
+// self-service, but users test it in the admin group too — without this it gets no reply
+// there at all.
+const QUIET_GROUP_FORWARDED_COMMANDS = new Set(['/get_webpass', '/webpass', '/вебпароль']);
+export function isQuietGroupForwardedCommand(text) {
   const cmd = (text || '').split(' ')[0].split('@')[0].toLowerCase();
-  return ADMIN_FORWARDED_COMMANDS.has(cmd);
+  return QUIET_GROUP_FORWARDED_COMMANDS.has(cmd);
 }
 
 export async function handleCommand(msg, env) {
