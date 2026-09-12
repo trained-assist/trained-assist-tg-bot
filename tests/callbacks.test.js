@@ -14,7 +14,8 @@ const KNOWN_CALLBACK_PREFIXES = [
   'prof:',      // profile actions
   'fl:',        // file browser navigate
   'fr:',        // file browser read
-  'ask_claude|', // "вдумчивее плиз" — rerun through Claude
+  'workrun|',   // «⏻ Запустить проработку» — rerun through Claude in deep mode
+  'clarify|',   // «❓ Уточнить задачу» — rerun through Claude in clarify mode
   'fp:',        // folder picker — select project dir
   'fpg:',       // folder picker — paginate
 ];
@@ -72,7 +73,7 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
       const { sendMessage, answerCallbackQuery } = await import('../src/lib/telegram.js');
 
       // Build a minimal callback_query
-      const data = prefix === 'ask_claude|' ? `${prefix}s-123` :
+      const data = prefix === 'workrun|' || prefix === 'clarify|' ? `${prefix}s-123` :
                    prefix === 'sl:' || prefix === 'nd:' ? prefix :
                    `${prefix}test-id`;
 
@@ -85,11 +86,14 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       await handleCallbackQuery(cq, env);
 
-      // For ask_claude specifically: runTask must be called with forceClaude=true
-      if (prefix === 'ask_claude|') {
+      // For workrun/clarify: runTask must be called with forceClaude=true + the right mode.
+      if (prefix === 'workrun|' || prefix === 'clarify|') {
         expect(runTask).toHaveBeenCalledWith(
           env,
-          expect.objectContaining({ forceClaude: true })
+          expect.objectContaining({
+            forceClaude: true,
+            mode: prefix === 'workrun|' ? 'deep' : 'clarify',
+          })
         );
         return;
       }

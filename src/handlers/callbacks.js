@@ -549,21 +549,28 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  // ── Expand quick answer — ask Claude for full answer ─────────────────────
-  // ask_claude|{sessionId} — user tapped "↗️ вдумчивее плиз"
-  if (data?.startsWith('ask_claude|')) {
+  // ── Explicit launch actions (manual launch model) ────────────────────────
+  // workrun|{sessionId} — «⏻ Запустить проработку» → re-run same request as deep session.
+  // clarify|{sessionId} — «❓ Уточнить задачу»    → one-shot: agent asks clarifying Qs.
+  // Both re-run through Claude (forceClaude); agent derives the task from the session's
+  // last user message and applies `mode`. Replaces the old ask_claude| expand button.
+  const launch = data?.startsWith('workrun|') ? { mode: 'deep', prefix: 'workrun|', wait: '⚙️ Запускаю проработку…' }
+               : data?.startsWith('clarify|') ? { mode: 'clarify', prefix: 'clarify|', wait: '❓ Собираю вопросы…' }
+               : null;
+  if (launch) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, launch.wait);
 
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, launch.wait);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
 
-    const sessionId = data.slice('ask_claude|'.length) || session.activeSessionId || session.lastSessionId;
+    const sessionId = data.slice(launch.prefix.length) || session.activeSessionId || session.lastSessionId;
     await runTask(env, {
       userId: chatId,
       username: session.username,
       sessionId,
       forceClaude: true,
+      mode: launch.mode,
       initialMsgId,
       telegramUserId: session.telegramUserId,
       projectDir: session.projectDir || null,
