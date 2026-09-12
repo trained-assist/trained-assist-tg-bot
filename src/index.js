@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { handleMessage } from './handlers/message.js';
-import { handleCommand } from './handlers/commands.js';
+import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession, getOrCreateMappedSession } from './lib/kv.js';
@@ -73,9 +73,16 @@ async function dispatchInner(update, env) {
   const text = msg.text || '';
   const isGroup = ['group', 'supergroup'].includes(msg.chat.type);
 
-  // Admin group: only user-mgmt commands pass through
+  // Admin group: user-mgmt commands + admin-only agent commands (e.g. /get_webpass)
+  // pass through. Everything else is intentionally dropped to keep the group quiet.
   if (String(chatId) === env.ADMIN_GROUP_ID) {
-    if (isUserMgmtCommand(text)) await handleUserMgmt(msg, env);
+    if (isUserMgmtCommand(text)) {
+      await handleUserMgmt(msg, env);
+    } else if (isAdminForwardedCommand(text)) {
+      // Strip the bot mention so the agent sees a clean "/get_webpass <username>".
+      const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
+      await handleCommand({ ...msg, text: cleanText }, env);
+    }
     return;
   }
 

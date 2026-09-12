@@ -14,9 +14,18 @@ import { handleMessage } from './message.js';
 const AGENT_FORWARDED_COMMANDS = new Set([
   '/persona', '/role', '/роль', '/персона', '/character', '/характер',
   '/project', '/projects', '/проект', '/проекты',
-  // Admin-only; the agent gates it by chat id (see GET_WEBPASS_INTENT in runner.js).
+  // Admin-only; the agent gates it by sender/chat id (see GET_WEBPASS_INTENT in runner.js).
   '/get_webpass', '/webpass', '/вебпароль',
 ]);
+
+// Admin-only agent commands that must ALSO pass through the admin-group branch in
+// index.js (which otherwise only forwards user-mgmt commands and silently drops the
+// rest). Without this, /get_webpass typed in the admin group gets no reply at all.
+const ADMIN_FORWARDED_COMMANDS = new Set(['/get_webpass', '/webpass', '/вебпароль']);
+export function isAdminForwardedCommand(text) {
+  const cmd = (text || '').split(' ')[0].split('@')[0].toLowerCase();
+  return ADMIN_FORWARDED_COMMANDS.has(cmd);
+}
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
