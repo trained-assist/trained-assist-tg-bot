@@ -391,6 +391,38 @@ export function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
 
+function escHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Descriptive session list: a readable text body (number · project · title · gist ·
+// meta) plus a compact row of numbered tap-buttons. Replaces the old truncated-label
+// button list — users couldn't tell the dialogs apart from a 40-char button. The text
+// reads like the agent's own /sessions view (durable summary.gist); the numbers below
+// stay one-tap and robust (no ambiguous free-text number parsing).
+//   callbackPrefix: 'sd' → open action submenu (continue/info/archive);
+//                   'sn' → start new dialog loading that session's context.
+// Returns { text, buttons } for sendMessageWithKeyboard.
+export function renderSessionList(list, { callbackPrefix = 'sd', header = '💬 <b>Диалоги</b>', hint = 'Выбери номер диалога ниже, чтобы вернуться и продолжить:' } = {}) {
+  const lines = [header, '', hint, ''];
+  list.forEach((s, i) => {
+    const n = i + 1;
+    const title = (s.summary && s.summary.title) ? s.summary.title : (s.topic || 'Диалог');
+    const gist = s.summary && s.summary.gist ? s.summary.gist : '';
+    const proj = s.projectName || s.projectDir || '';
+    const count = s.messageCount || (s.messages && s.messages.length) || 0;
+    lines.push(`<b>${n}. ${escHtml(title.slice(0, 80))}</b>`);
+    if (proj) lines.push(`📁 проект: ${escHtml(proj)}`);
+    if (gist) lines.push(escHtml(gist.slice(0, 220)));
+    lines.push(`🕒 ${timeAgo(s.lastAt)} · ${count} сообщ.`);
+    lines.push('');
+  });
+  const numBtns = list.map((s, i) => ({ text: String(i + 1), callback_data: `${callbackPrefix}:${s.id}` }));
+  const rows = [];
+  for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
+  return { text: lines.join('\n').trim(), buttons: rows };
+}
+
 async function cmdSessions(chatId, env) {
   const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
@@ -408,24 +440,15 @@ async function cmdSessions(chatId, env) {
     );
   }
 
-  // Tapping a session opens action submenu, not immediate continue
-  const buttons = list.map(s => {
-    // Prefer the durable summary title (agent-side, lang-aware) over a raw
-    // first-message truncation; fall back to topic when no summary exists yet.
-    const name = (s.summary && s.summary.title) ? s.summary.title : (s.topic || 'Диалог');
-    const label = `${name.slice(0, 40)} · ${timeAgo(s.lastAt)}`;
-    return [{ text: label, callback_data: `sd:${s.id}` }];
-  });
+  // Descriptive text body + numbered tap-buttons (see renderSessionList).
+  // Tapping a number opens the action submenu (sd:), not an immediate continue.
+  const { text, buttons } = renderSessionList(list, { callbackPrefix: 'sd' });
   buttons.push([
     { text: '✨ Новый диалог', callback_data: 'nd:' },
     { text: '🗂 Архивировать', callback_data: 'ar:menu' },
   ]);
 
-  return sendMessageWithKeyboard(
-    env.BOT_TOKEN, chatId,
-    '💬 <b>Диалоги</b>\n\nВыбери диалог:',
-    buttons
-  );
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
 }
 
 async function cmdClose(chatId, env) {

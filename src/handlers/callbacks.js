@@ -2,7 +2,7 @@ import { getOrCreateMappedSession, setSession, deleteSession } from '../lib/kv.j
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
-import { cmdFiles, timeAgo } from './commands.js';
+import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
@@ -205,15 +205,12 @@ export async function handleCallbackQuery(cq, env) {
       await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов.');
       return;
     }
-    const buttons = list.map(s => ([{
-      text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
-      callback_data: `sd:${s.id}`,
-    }]));
+    const { text, buttons } = renderSessionList(list, { callbackPrefix: 'sd' });
     buttons.push([
       { text: '✨ Новый диалог', callback_data: 'nd:' },
       { text: '🗂 Архивировать', callback_data: 'ar:menu' },
     ]);
-    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, '💬 <b>Диалоги</b>\n\nВыбери диалог:', buttons);
+    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
     return;
   }
 
@@ -365,15 +362,12 @@ export async function handleCallbackQuery(cq, env) {
         await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов для загрузки контекста.');
         return;
       }
-      const buttons = list.map(s => ([{
-        text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
-        callback_data: `sn:${s.id}`,
-      }]));
-      await sendMessageWithKeyboard(
-        env.BOT_TOKEN, chatId,
-        '📚 <b>Выбери диалог</b>\n\nКонтекст загрузится в новый диалог:',
-        buttons
-      );
+      const { text, buttons } = renderSessionList(list, {
+        callbackPrefix: 'sn',
+        header: '📚 <b>Загрузить контекст в новый диалог</b>',
+        hint: 'Выбери номер диалога ниже — его контекст загрузится в новый:',
+      });
+      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
       return;
     }
 
