@@ -410,7 +410,10 @@ async function cmdSessions(chatId, env) {
 
   // Tapping a session opens action submenu, not immediate continue
   const buttons = list.map(s => {
-    const label = `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`;
+    // Prefer the durable summary title (agent-side, lang-aware) over a raw
+    // first-message truncation; fall back to topic when no summary exists yet.
+    const name = (s.summary && s.summary.title) ? s.summary.title : (s.topic || 'Диалог');
+    const label = `${name.slice(0, 40)} · ${timeAgo(s.lastAt)}`;
     return [{ text: label, callback_data: `sd:${s.id}` }];
   });
   buttons.push([
