@@ -145,6 +145,29 @@ export async function classifyMessage(env, { message, sessions }) {
   return res.json();
 }
 
+/**
+ * ШАГ 1.2 completeness gate: ask the agent's cheap LLM whether a coalesced
+ * intake buffer is a finished thought or an obviously cut-off fragment.
+ * Fails open (complete:true) on any error — the gate must never trap the user.
+ */
+export async function checkCompleteness(env, { text }) {
+  try {
+    const res = await fetch(`${env.AGENT_URL}/intake-gate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.AGENT_SECRET}`,
+      },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { complete: true };
+    return res.json();
+  } catch {
+    return { complete: true };
+  }
+}
+
 export async function setUserToken(env, { userId, label, value }) {
   const res = await fetch(`${env.AGENT_URL}/tokens`, {
     method: 'POST',

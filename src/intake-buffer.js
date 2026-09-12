@@ -10,7 +10,11 @@
 // appends to the buffer and (re)arms the alarm; the alarm resets on every new
 // message, so the run happens only once the user has stopped typing.
 
-const DEBOUNCE_MS = 10_000; // silence window before flush; tune via ШАГ 1 acceptance
+import { sendMessage } from './lib/telegram.js';
+import { checkCompleteness } from './lib/agent-client.js';
+
+const DEBOUNCE_MS = 10_000;      // silence window before flush; tune via ШАГ 1 acceptance
+const SOFT_REARM_MS = 15_000;    // grace window after a "looks unfinished" nudge
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -37,7 +41,6 @@ export class IntakeBuffer {
 
   async alarm() {
     const buf = (await this.state.storage.get('buf')) || [];
-    await this.state.storage.delete('buf');
     if (!buf.length) return;
 
     // Coalesce: reuse the last message envelope (chat/from/reply metadata) and
@@ -46,10 +49,31 @@ export class IntakeBuffer {
     const coalescedText = buf.map(i => i.text).filter(Boolean).join('\n');
     const msg = { ...base, text: coalescedText };
 
-    // TODO ШАГ 1.2: run the cheap completeness gate here before dispatching.
-    // If the coalesced text still looks like a cut-off thought, re-arm a short
-    // alarm and send a soft "похоже, мысль не закончена — дополните?" instead of
-    // dispatching. Bias strongly toward dispatching (don't nag on normal input).
+    // ШАГ 1.2 — cheap completeness gate. Only nudge when the thought looks
+    // clearly cut off, and only ONCE per buffer: if we've already nudged, we
+    // dispatch regardless (bias to pass — never trap the user in a nag loop).
+    const alreadyNudged = (await this.state.storage.get('nudged')) === true;
+    if (!alreadyNudged) {
+      const { complete } = await checkCompleteness(this.env, { text: coalescedText });
+      if (!complete) {
+        // Keep the buffer, remember we nudged, and give the user room to finish.
+        await this.state.storage.put('nudged', true);
+        await this.state.storage.setAlarm(Date.now() + SOFT_REARM_MS);
+        const chatId = base.chat?.id;
+        if (chatId) {
+          await sendMessage(
+            this.env.BOT_TOKEN,
+            chatId,
+            'Похоже, мысль не закончена — допишите следующим сообщением, и я возьмусь.',
+          );
+        }
+        return;
+      }
+    }
+
+    // Dispatch: clear state first so a crash can't double-fire the same buffer.
+    await this.state.storage.delete('buf');
+    await this.state.storage.delete('nudged');
 
     // Dynamic import avoids a circular import at module load (message.js is the
     // normal request path; the DO is only reached via the binding).
