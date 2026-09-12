@@ -7,6 +7,16 @@ compatibility_flags = ["nodejs_compat"]
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
 RELAY_URL = "https://136-65-7-197.sslip.io"
+INTAKE_DEBOUNCE = "off"  # ШАГ 1 intake gate — prod default OFF (reversible via flag)
+
+# Intake debounce Durable Object (ШАГ 1) — coalesces rapid-fire messages per chat.
+[[durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
 
 # Secrets (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
@@ -30,6 +40,12 @@ name = "trained-assist-tg-bot-staging"
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
 RELAY_URL = "https://136-65-7-197.sslip.io"
+INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
+
+# DO binding must be redeclared per named env (migrations are top-level, shared).
+[[env.staging.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
 
 # Staging uses same KV namespaces as prod (OK for integration testing)
 [[env.staging.kv_namespaces]]

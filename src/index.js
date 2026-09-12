@@ -128,9 +128,33 @@ async function dispatchInner(update, env) {
   // Private chat: commands vs messages
   if (text.startsWith('/')) {
     await handleCommand(msg, env);
+  } else if (shouldDebounce(msg, env)) {
+    // Intake gate (ШАГ 1): buffer plain-text messages per chat and run once the
+    // user stops typing. Bypassed for commands, replies-to-bot (answering a
+    // question), non-text (voice/photo/doc), and explicit force-run words.
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+    await stub.fetch('https://intake/append', {
+      method: 'POST',
+      body: JSON.stringify({ text: msg.text, msg }),
+    });
   } else {
     await handleMessage(msg, env);
   }
+}
+
+// Words that force an immediate run, skipping the debounce window.
+const FORCE_RUN_RE = /(^|\s)(запускай|запуск|поехали|давай\s|го\b|go\b|run\b)/i;
+
+/** True when a private message should be routed through the intake debounce DO. */
+function shouldDebounce(msg, env) {
+  if (env.INTAKE_DEBOUNCE !== 'on') return false; // flag-gated, prod default off
+  if (!env.INTAKE) return false;                  // binding missing → fail open
+  const text = msg.text;
+  if (!text) return false;                        // voice/photo/doc bypass (v1)
+  if (text.startsWith('/')) return false;         // commands bypass
+  if (msg.reply_to_message) return false;         // answering the bot bypasses
+  if (FORCE_RUN_RE.test(text)) return false;      // explicit "запускай/go"
+  return true;
 }
 
 /** Returns cached Telegram chat member count (TTL 1h). Falls back to stale cache, then 999. */
@@ -160,4 +184,5 @@ async function getGroupMemberCount(env, chatId) {
   return stale ?? 999;
 }
 
+export { IntakeBuffer } from './intake-buffer.js';
 export default app;
