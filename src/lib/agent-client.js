@@ -70,11 +70,12 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, mode, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
+  if (mode) body.mode = mode;
   if (initialMsgId) body.initialMsgId = initialMsgId;
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
