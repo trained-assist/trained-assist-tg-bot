@@ -14,6 +14,8 @@ import { handleMessage } from './message.js';
 const AGENT_FORWARDED_COMMANDS = new Set([
   '/persona', '/role', '/роль', '/персона', '/character', '/характер',
   '/project', '/projects', '/проект', '/проекты',
+  // Bug/feature capture — bundles last messages + logs + note into a GitHub issue.
+  '/bug_or_feature', '/bug', '/feature', '/баг', '/фича', '/report', '/репорт',
   // Admin-only; the agent gates it by sender/chat id (see GET_WEBPASS_INTENT in runner.js).
   '/get_webpass', '/webpass', '/вебпароль',
 ]);
