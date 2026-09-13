@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://136-65-7-197.sslip.io"
+RELAY_URL = "https://agent.trainedassist.store"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
 
 # Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
@@ -39,7 +39,7 @@ name = "trained-assist-tg-bot-staging"
 [env.staging.vars]
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://136-65-7-197.sslip.io"
+RELAY_URL = "https://agent.trainedassist.store"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
 # DO binding must be redeclared per named env (migrations are top-level, shared).

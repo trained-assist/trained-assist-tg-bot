@@ -66,7 +66,7 @@ Update the binding IDs in `wrangler.toml`.
 wrangler secret put BOT_TOKEN        # Telegram bot token
 wrangler secret put BOT_USERNAME     # bot username without @  (e.g. trained_assist_bot)
 wrangler secret put BOT_SECRET       # shared secret for Chrome extension auth
-wrangler secret put AGENT_URL        # https://136-65-7-197.sslip.io  (GCP VM)
+wrangler secret put AGENT_URL        # https://agent.trainedassist.store  (GCP VM, via Cloudflare Tunnel — IP-stable)
 wrangler secret put AGENT_RU_URL     # https://178-212-14-192.sslip.io (RU VM, nalog/gosuslugi)
 wrangler secret put AGENT_SECRET     # shared secret for bot↔agent auth
 wrangler secret put ADMIN_GROUP_ID   # Telegram group ID for admin commands
