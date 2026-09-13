@@ -1,33 +1,34 @@
 // Durable Object: per-chat intake buffer.
 //
-// Two coalescing behaviours, both owned here so the rule is one place for every user:
+// Model (manual launch, no timer): the bot ALWAYS accumulates a user's plain-text
+// messages and never fires on its own. The user launches the run explicitly — by
+// tapping «▶️ Запустить» on the collector message, or by typing a force word
+// (запускай / го / поехали, see index.js). This replaces the old 10s debounce:
+// once the launch is a deliberate button press, guessing "did the user finish
+// typing?" (silence timer + LLM completeness nudge) is dead weight, so it's gone.
 //
-//   ШАГ 1   — debounce. A user who is still typing / sends early / wants to append
-//             triggers an expensive Claude run on a half-finished thought. We
-//             coalesce rapid-fire messages into one run, fired after DEBOUNCE_MS
-//             of silence.
+// Two states, both owned here so the rule is one place for every user:
+//   • idle     — messages pile into `buf`; a single collector message shows the
+//                launch button and its live count. No alarm is armed.
+//   • busy     — a run is in flight for this chat: new messages accumulate
+//                silently and are surfaced with a fresh launch button once the run
+//                finishes (never auto-dispatched).
 //
-//   ШАГ 1.3 — busy-hold. While a session is actually running for this chat we
-//             process NOTHING new: every message that arrives mid-run is buffered
-//             silently (no debounce flush, no nudge). When the run finishes we go
-//             back to Telegram, read everything that piled up, and dispatch it as
-//             ONE coalesced message. This is the point the user made: while Claude
-//             works they often want to edit / add to what they said, and firing per
-//             message ruins that — so we hold until the session is free.
-//
-// One instance per chat_id (idFromName(chatId)). Durable Object alarm handlers are
-// serialised per instance, so BUSY_MAX_MS can safely recover a buffer trapped by an
-// isolate eviction mid-run without ever racing a live dispatch.
+// One instance per chat_id (idFromName(chatId)). DO fetch/alarm handlers are
+// serialised per instance, so /append, /flush and the safety alarm never race.
+// The ONLY alarm is a safety net: if a run's isolate dies before clearing `busy`,
+// BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessage } from './lib/telegram.js';
-import { checkCompleteness } from './lib/agent-client.js';
+import { sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 
-const DEBOUNCE_MS = 10_000;      // silence window before flush; tune via ШАГ 1 acceptance
-const SOFT_REARM_MS = 15_000;    // grace window after a "looks unfinished" nudge
-const POST_RUN_MS = 4_000;       // short debounce after a run frees up, to catch a trailing edit
-const BUSY_MAX_MS = 45 * 60_000; // safety: if a run never signals done (isolate evicted mid-flight),
-                                 // release the hold after this so the buffer can't be trapped forever.
-                                 // Must exceed the longest legitimate session (~40 min agent cap).
+const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
+                                 // died mid-flight. Must exceed the longest
+                                 // legitimate session (~40 min agent cap).
+
+const LAUNCH_BTN = [[{ text: '▶️ Запустить', callback_data: 'intake_run' }]];
+
+const collectorText = n =>
+  `📥 Собираю сообщения (${n}). Пиши ещё — или нажми «▶️ Запустить», когда закончишь.`;
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -37,108 +38,113 @@ export class IntakeBuffer {
 
   async fetch(request) {
     const url = new URL(request.url);
+
     if (url.pathname === '/append' && request.method === 'POST') {
-      const item = await request.json(); // { text, msg }
+      const { text, msg, flush } = await request.json();
       const buf = (await this.state.storage.get('buf')) || [];
-      buf.push(item);
+      buf.push({ text, msg });
       await this.state.storage.put('buf', buf);
 
-      const busy = (await this.state.storage.get('busy')) === true;
-      if (busy) {
-        // ШАГ 1.3: a session is running — accumulate silently and DON'T touch the
-        // alarm. The safety alarm set at dispatch time is our only timer; the
-        // buffer will be flushed by the run's own completion (see alarm()'s
-        // finally), not by a debounce.
+      if ((await this.state.storage.get('busy')) === true) {
+        // A run is in flight — accumulate silently; surfaced after it finishes.
         return json({ buffered: buf.length, held: true });
       }
-
-      // ШАГ 1: idle — (re)arm the debounce. Every new message pushes the flush
-      // further out, giving the user room to finish / correct / append.
-      await this.state.storage.setAlarm(Date.now() + DEBOUNCE_MS);
+      if (flush) {
+        // Force word (запускай/го) — launch immediately, coalescing everything.
+        await this._dispatch();
+        return json({ flushed: true });
+      }
+      // Idle: (re)show the launch button with the live count. No timer.
+      await this._showCollector(msg.chat?.id, buf.length);
       return json({ buffered: buf.length });
     }
+
+    if (url.pathname === '/flush' && request.method === 'POST') {
+      // Button tap. If a run is somehow already going, ignore (don't double-fire).
+      if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
+      const buf = (await this.state.storage.get('buf')) || [];
+      if (!buf.length) return json({ empty: true });
+      await this._dispatch();
+      return json({ flushed: true });
+    }
+
     return new Response('not found', { status: 404 });
   }
 
-  async alarm() {
-    // Busy-hold guard. If a run is (still) marked in-flight, the only way we reach
-    // here is the BUSY_MAX safety alarm — a normal completion cancels its own
-    // alarm in finally. Since alarm handlers are serialised, a live dispatch's
-    // alarm() cannot be running concurrently, so reaching here while busy means
-    // the previous run's isolate died before its finally cleared the flag.
-    const busy = (await this.state.storage.get('busy')) === true;
-    if (busy) {
-      const since = (await this.state.storage.get('busySince')) || 0;
-      if (Date.now() - since < BUSY_MAX_MS) {
-        // Shouldn't normally happen; re-arm the safety and bail.
-        await this.state.storage.setAlarm(since + BUSY_MAX_MS);
-        return;
-      }
-      // Assume the run is dead — release the hold and fall through to flush.
-      await this.state.storage.delete('busy');
-      await this.state.storage.delete('busySince');
+  // Show or refresh the single collector message carrying the launch button.
+  async _showCollector(chatId, count) {
+    if (!chatId) return;
+    const msgId = await this.state.storage.get('collectorMsgId');
+    if (msgId) {
+      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, collectorText(count), {
+        reply_markup: { inline_keyboard: LAUNCH_BTN },
+      }).catch(() => null);
+      if (r && r.ok) return;
+      // Edit failed (message deleted / too old) — fall through and post a new one.
     }
+    const sent = await sendMessageWithKeyboard(
+      this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN,
+    ).catch(() => null);
+    const newId = sent?.result?.message_id;
+    if (newId) await this.state.storage.put('collectorMsgId', newId);
+  }
 
+  // Coalesce the buffer into one message and run it. Marks the chat busy so
+  // anything sent during the run is held (surfaced with a new button afterwards).
+  async _dispatch() {
     const buf = (await this.state.storage.get('buf')) || [];
     if (!buf.length) return;
 
-    // Coalesce: reuse the last message envelope (chat/from/reply metadata) and
-    // join every buffered text in arrival order into one intent.
     const base = buf[buf.length - 1].msg;
+    const chatId = base.chat?.id;
     const coalescedText = buf.map(i => i.text).filter(Boolean).join('\n');
     const msg = { ...base, text: coalescedText };
 
-    // ШАГ 1.2 — cheap completeness gate. Only nudge when the thought looks
-    // clearly cut off, and only ONCE per buffer: if we've already nudged, we
-    // dispatch regardless (bias to pass — never trap the user in a nag loop).
-    const alreadyNudged = (await this.state.storage.get('nudged')) === true;
-    if (!alreadyNudged) {
-      const { complete } = await checkCompleteness(this.env, { text: coalescedText });
-      if (!complete) {
-        // Keep the buffer, remember we nudged, and give the user room to finish.
-        await this.state.storage.put('nudged', true);
-        await this.state.storage.setAlarm(Date.now() + SOFT_REARM_MS);
-        const chatId = base.chat?.id;
-        if (chatId) {
-          await sendMessage(
-            this.env.BOT_TOKEN,
-            chatId,
-            'Похоже, мысль не закончена — допишите следующим сообщением, и я возьмусь.',
-          );
-        }
-        return;
-      }
+    // Retire the collector button so it can't be tapped twice.
+    const collectorMsgId = await this.state.storage.get('collectorMsgId');
+    if (collectorMsgId && chatId) {
+      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '⚙️ Запускаю…', {
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {});
     }
-
-    // Dispatch. Consume the buffer and gate flag first so a crash before we set
-    // busy can't double-fire the same thought; then mark the chat busy so any
-    // messages arriving during the run are held (ШАГ 1.3) rather than dispatched.
+    await this.state.storage.delete('collectorMsgId');
     await this.state.storage.delete('buf');
-    await this.state.storage.delete('nudged');
     await this.state.storage.put('busy', true);
     await this.state.storage.put('busySince', Date.now());
-    // Safety net: if this run never returns (isolate eviction), this alarm frees
-    // the hold. A normal completion replaces it in finally, so it only ever fires
-    // on a genuinely dead run.
+    // Safety net: only fires if the run's isolate dies before finally clears busy.
     await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
 
     try {
-      // Dynamic import avoids a circular import at module load (message.js is the
-      // normal request path; the DO is only reached via the binding).
+      // Dynamic import avoids a circular import at module load.
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(msg, this.env);
     } finally {
-      // Release the hold. Whatever piled up while we were busy gets flushed as one
-      // coalesced message after a short debounce (POST_RUN_MS) so a trailing edit
-      // sent right as the run finishes still lands in the same batch.
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
+      await this.state.storage.deleteAlarm();
       const remaining = (await this.state.storage.get('buf')) || [];
-      if (remaining.length) {
-        await this.state.storage.setAlarm(Date.now() + POST_RUN_MS);
-      } else {
-        await this.state.storage.deleteAlarm();
+      if (remaining.length && chatId) {
+        // Messages piled up mid-run — surface a fresh launch button, never auto-run.
+        await this._showCollector(chatId, remaining.length);
       }
+    }
+  }
+
+  async alarm() {
+    // Only the BUSY_MAX safety net reaches here: a run whose isolate died before
+    // its finally cleared `busy`. Release the hold and re-offer the launch button.
+    if ((await this.state.storage.get('busy')) === true) {
+      const since = (await this.state.storage.get('busySince')) || 0;
+      if (Date.now() - since < BUSY_MAX_MS) {
+        await this.state.storage.setAlarm(since + BUSY_MAX_MS);
+        return;
+      }
+      await this.state.storage.delete('busy');
+      await this.state.storage.delete('busySince');
+    }
+    const buf = (await this.state.storage.get('buf')) || [];
+    if (buf.length) {
+      await this._showCollector(buf[buf.length - 1].msg.chat?.id, buf.length);
     }
   }
 }

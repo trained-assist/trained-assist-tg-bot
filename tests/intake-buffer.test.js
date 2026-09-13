@@ -2,12 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock every module the DO pulls in so the state machine runs in isolation.
 const handleMessage = vi.fn();
-const checkCompleteness = vi.fn();
-const sendMessage = vi.fn();
+const sendMessageWithKeyboard = vi.fn();
+const editMessage = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
-vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness: (...a) => checkCompleteness(...a) }));
-vi.mock('../src/lib/telegram.js', () => ({ sendMessage: (...a) => sendMessage(...a) }));
+vi.mock('../src/lib/telegram.js', () => ({
+  sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
+  editMessage: (...a) => editMessage(...a),
+}));
 
 import { IntakeBuffer } from '../src/intake-buffer.js';
 
@@ -28,54 +30,92 @@ function makeState() {
   };
 }
 
-function appendReq(text) {
+function appendReq(text, flush = false) {
   return new Request('https://intake/append', {
     method: 'POST',
-    body: JSON.stringify({ text, msg: { chat: { id: 42 }, text } }),
+    body: JSON.stringify({ text, msg: { chat: { id: 42 }, text }, flush }),
   });
 }
+const flushReq = () => new Request('https://intake/flush', { method: 'POST' });
+
+// Let dynamic import() inside _dispatch settle across a few macrotasks.
+async function drain() { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  checkCompleteness.mockResolvedValue({ complete: true });
+  sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
+  editMessage.mockResolvedValue({ ok: true });
 });
 
-describe('IntakeBuffer — ШАГ 1.3 busy-hold', () => {
-  it('holds messages that arrive during a run and flushes them as ONE coalesced dispatch', async () => {
+describe('IntakeBuffer — manual accumulator (no timer)', () => {
+  it('idle messages accumulate with a launch button and never auto-dispatch', async () => {
     const state = makeState();
-    const env = { BOT_TOKEN: 't' };
-    const io = new IntakeBuffer(state, env);
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
-    // First message arrives while idle → armed for debounce, not dispatched yet.
     await io.fetch(appendReq('start the task'));
     expect(handleMessage).not.toHaveBeenCalled();
+    expect(state._dump().alarm).toBeNull();                 // no timer armed
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // collector shown
 
-    // Control the run: handleMessage stays pending while we pile on more messages.
+    // Second message edits the same collector message (updates the count).
+    await io.fetch(appendReq('also do X'));
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(editMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // still one collector
+  });
+
+  it('▶️ flush coalesces the buffer into ONE dispatch and clears busy after', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(appendReq('also do X'));
+
+    await io.fetch(flushReq());
+    await drain();
+
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
+    expect(await state.storage.get('busy')).toBeUndefined();
+    expect(await state.storage.get('buf')).toBeUndefined();
+  });
+
+  it('a force word (flush:true) launches immediately without a button tap', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await io.fetch(appendReq('do the thing', true));
+    await drain();
+
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
+  });
+
+  it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await io.fetch(appendReq('start the task'));
+
     let release;
     handleMessage.mockReturnValueOnce(new Promise(r => { release = r; }));
-
-    const runPromise = io.alarm();               // debounce fires → dispatch begins
-    // Dynamic import() inside alarm() settles on a macrotask, so drain real timers too.
-    for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+    const runPromise = io.fetch(flushReq());
+    await drain();
     expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][0].text).toBe('start the task');
 
-    // Messages sent WHILE the session runs must be buffered, not dispatched.
+    // Messages sent WHILE the run is in flight are buffered, not dispatched.
     await io.fetch(appendReq('actually also do X'));
     await io.fetch(appendReq('and Y'));
-    expect(handleMessage).toHaveBeenCalledTimes(1); // still just the one run
+    expect(handleMessage).toHaveBeenCalledTimes(1);
 
-    release();                                    // session finishes
+    release();
     await runPromise;
 
-    // On completion the held messages are armed for a short post-run debounce.
-    expect(state._dump().alarm).toBeGreaterThan(0);
+    // Run done: held messages are NOT auto-dispatched — a fresh button is shown.
+    expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(await state.storage.get('busy')).toBeUndefined();
-
-    // Fire the post-run flush → the two held messages dispatch as ONE coalesced text.
-    await io.alarm();
-    expect(handleMessage).toHaveBeenCalledTimes(2);
-    expect(handleMessage.mock.calls[1][0].text).toBe('actually also do X\nand Y');
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2); // collector re-offered
+    expect((await state.storage.get('buf')).length).toBe(2);
   });
 
   it('recovers a buffer trapped by a dead run once BUSY_MAX elapses', async () => {
@@ -89,9 +129,9 @@ describe('IntakeBuffer — ШАГ 1.3 busy-hold', () => {
 
     await io.alarm();
 
-    // Hold released and the stranded message dispatched.
+    // Hold released; stranded message surfaced with a button, never auto-run.
     expect(await state.storage.get('busy')).toBeUndefined();
-    expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][0].text).toBe('hello');
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
   });
 });

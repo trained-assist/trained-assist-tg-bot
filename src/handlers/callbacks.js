@@ -549,6 +549,21 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Intake launch (manual accumulator) ───────────────────────────────────
+  // intake_run — «▶️ Запустить» under the collector message: flush the buffered
+  // messages for this chat and run them as one. The DO derives everything from
+  // its own state (keyed by chatId), so no payload is needed.
+  if (data === 'intake_run') {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+      await stub.fetch('https://intake/flush', { method: 'POST' })
+        .catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }
+    return;
+  }
+
   // ── Explicit launch actions (manual launch model) ────────────────────────
   // workrun|{sessionId} — «⏻ Запустить проработку» → re-run same request as deep session.
   // clarify|{sessionId} — «❓ Уточнить задачу»    → one-shot: agent asks clarifying Qs.

@@ -7,9 +7,9 @@ compatibility_flags = ["nodejs_compat"]
 ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
 RELAY_URL = "https://136-65-7-197.sslip.io"
-INTAKE_DEBOUNCE = "on"  # ШАГ 1 intake gate — LIVE (committed on so redeploys can't silently revert). Reversible: flip to "off".
+INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
 
-# Intake debounce Durable Object (ШАГ 1) — coalesces rapid-fire messages per chat.
+# Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
 [[durable_objects.bindings]]
 name = "INTAKE"
 class_name = "IntakeBuffer"
