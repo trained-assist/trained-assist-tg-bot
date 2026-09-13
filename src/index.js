@@ -120,18 +120,28 @@ async function dispatchInner(update, env) {
     // Strip mention from text before handling
     const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
     const cleanMsg = { ...msg, text: cleanText };
+    // Same intake accumulator as private chats — a 2-member group (or an
+    // addressed message in a larger one) is a 1-on-1 workflow and must buffer
+    // + launch by ▶️, not fire a session per quick message (#530 group path).
     if (isCommand) await handleCommand(cleanMsg, env);
-    else await handleMessage(cleanMsg, env);
+    else await routeText(cleanMsg, env, chatId);
     return;
   }
 
   // Private chat: commands vs messages
   if (text.startsWith('/')) {
     await handleCommand(msg, env);
-  } else if (shouldDebounce(msg, env)) {
-    // Intake accumulator: always buffer plain-text messages per chat; the user
-    // launches the run explicitly (▶️ Запустить button, or a force word). Bypassed
-    // for commands, replies-to-bot (answering a question) and non-text.
+  } else {
+    await routeText(msg, env, chatId);
+  }
+}
+
+// One text-routing rule for both private and group chats: buffer through the
+// intake accumulator (explicit launch by ▶️ button or force word), else pass
+// straight to the agent. Keeping this in one place is why the group path can't
+// silently drift from the private path again (#530).
+export async function routeText(msg, env, chatId) {
+  if (shouldDebounce(msg, env)) {
     const flush = FORCE_RUN_RE.test(msg.text); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
     await stub.fetch('https://intake/append', {
