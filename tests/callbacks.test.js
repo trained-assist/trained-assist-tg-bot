@@ -16,8 +16,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'fr:',        // file browser read
   'workrun|',   // «⏻ Запустить проработку» — rerun through Claude in deep mode
   'clarify|',   // «❓ Уточнить задачу» — rerun through Claude in clarify mode
-  'fp:',        // folder picker — select project dir
-  'fpg:',       // folder picker — paginate
+  'pp:',        // project picker — pick/create typed project at new dialog (#517)
 ];
 
 // Mock all external dependencies so we can import the handler

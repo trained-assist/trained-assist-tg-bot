@@ -70,7 +70,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, mode, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
@@ -79,7 +79,8 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (initialMsgId) body.initialMsgId = initialMsgId;
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
-  if (projectDir) body.projectDir = projectDir;
+  if (projectId) body.projectId = projectId;
+  if (newProjectName) body.newProjectName = newProjectName;
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
@@ -102,6 +103,22 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
       throw new Error(`agent /run HTTP ${res.status}`);
     }
+  }
+}
+
+// What the gateway should do when a NEW dialog starts (issue #517):
+// {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}. On any failure
+// returns action:'auto' so we never block dispatch — the agent will auto-bind.
+export async function getProjectDecision(env, { username, chatId }) {
+  try {
+    const res = await fetch(
+      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
+      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return { action: 'auto', choices: [], active: null };
+    return await res.json();
+  } catch {
+    return { action: 'auto', choices: [], active: null };
   }
 }
 

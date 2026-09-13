@@ -58,7 +58,7 @@ export async function handleCallbackQuery(cq, env) {
           initialMsgId,
           pinnedMsgId: updatedSession.pinnedMsgId || null,
           telegramUserId: updatedSession.telegramUserId,
-          projectDir: updatedSession.projectDir || null,
+          projectId: updatedSession.projectId || null,
         });
         const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
         if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
@@ -85,6 +85,80 @@ export async function handleCallbackQuery(cq, env) {
       } else {
         await sendMessage(env.BOT_TOKEN, chatId, promptText);
       }
+    }
+    return;
+  }
+
+  // ── Project picker (from message.js new-dialog, issue #517) ───────────────
+  // pp:<index> — bind chosen typed project; pp:new — create a project from the first
+  // message (provisional name). Runs the stashed pending message, mirroring sp:.
+  if (data?.startsWith('pp:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const raw = data.slice(3);
+    const pending = session.pendingMessage;
+    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
+    const msgId = message?.message_id;
+
+    if (!pendingFresh) {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await setSession(env.SESSIONS, chatId, { ...session, pendingMessage: null, pendingMessageAt: null });
+      const t = '⌛ Сообщение устарело — напиши задачу заново, спрошу проект снова.';
+      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, t, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      else await sendMessage(env.BOT_TOKEN, chatId, t);
+      return;
+    }
+
+    // Resolve chosen project id (existing) OR a new-project name (from the first message).
+    let projectId = null, newProjectName = null, label = '';
+    if (raw === 'new') {
+      newProjectName = (pending.split('\n')[0] || '').trim().slice(0, 60) || 'Новый проект';
+      label = `➕ ${newProjectName}`;
+    } else {
+      const projects = await getProjects(env, { username: session.username, userId: chatId });
+      const chosen = projects[parseInt(raw, 10)];
+      if (!chosen) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Проект не найден'); return; }
+      projectId = chosen.id;
+      label = `📁 ${chosen.label || chosen.name}`;
+    }
+
+    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+    const resolvedId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+    const initialMsgId = placeholderRes?.result?.message_id ?? null;
+
+    const updatedSession = {
+      ...session,
+      lastSessionId: resolvedId,
+      lastMessageAt: Date.now(),
+      pendingMessage: null,
+      pendingMessageAt: null,
+      activeSessionId: null,
+      // Remember the picked project as the chat's hint (new-project id is unknown here;
+      // the agent stores it on the session record and re-binds on continuation).
+      projectId: projectId || session.projectId || null,
+    };
+    await setSession(env.SESSIONS, chatId, updatedSession);
+    if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+
+    try {
+      const result = await runTask(env, {
+        userId: chatId,
+        username: updatedSession.username,
+        task: pending,
+        context: null,
+        sessionId: resolvedId,
+        initialMsgId,
+        pinnedMsgId: updatedSession.pinnedMsgId || null,
+        telegramUserId: updatedSession.telegramUserId,
+        projectId,
+        newProjectName,
+      });
+      const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
+      if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
+        await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+      }
+    } catch (err) {
+      sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
     }
     return;
   }
@@ -214,88 +288,11 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  // ── Project folder picker ─────────────────────────────────────────────────
-  // fp:{folderName} — select project folder (empty = root)
-  // fpg:{page}      — navigate to page n of the folder list
-  const FP_PAGE_SIZE = 6;
-
-  async function showFolderPicker(chatId, session, msgId, page = 0) {
-    const projects = await getProjects(env, { username: session.username, userId: chatId });
-    const total = projects.length;
-    const start = page * FP_PAGE_SIZE;
-    const pageItems = projects.slice(start, start + FP_PAGE_SIZE);
-
-    // Use absolute numeric index in callback_data to avoid Telegram's 64-byte limit
-    // on long project path names. fp: handler re-fetches and looks up by index.
-    const buttons = pageItems.map((p, i) => [{
-      text: `${p.label}${p.count > 0 ? ` (${p.count})` : ''}`,
-      callback_data: `fp:${start + i}`,
-    }]);
-
-    // Always show a "skip / root" escape so users are never stuck with no exit path
-    buttons.push([{ text: '📂 Без папки (корень)', callback_data: 'fp:' }]);
-
-    // Pagination row
-    const navRow = [];
-    if (page > 0) navRow.push({ text: '⬅️', callback_data: `fpg:${page - 1}` });
-    if (start + FP_PAGE_SIZE < total) navRow.push({ text: '➡️', callback_data: `fpg:${page + 1}` });
-    if (navRow.length > 0) buttons.push(navRow);
-
-    const text = total === 0
-      ? '📁 <b>Нет проектов</b> — начнём в корневой директории.'
-      : '📁 <b>Выбери рабочую папку</b>\n\nЦифра в скобках — сколько раз запускал сессию:';
-    if (msgId) {
-      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: buttons } })
-        .catch(() => sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons));
-    } else {
-      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
-    }
-  }
-
-  if (data?.startsWith('fp:')) {
-    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id);
-    const raw = data.slice(3); // '' = root, numeric = absolute project index
-    let folderName;
-    if (raw === '') {
-      folderName = '';
-    } else if (/^\d+$/.test(raw)) {
-      const projects = await getProjects(env, { username: session.username, userId: chatId });
-      folderName = projects[parseInt(raw, 10)]?.name ?? '';
-    } else {
-      folderName = raw; // legacy string form
-    }
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      projectDir: folderName || null,
-      activeSessionId: null,
-      lastSessionId: null,
-      contextFromSession: null,
-    });
-    const folderLabel = folderName || 'корень';
-    const msgId = message?.message_id;
-    const text = `✏️ <b>Новый диалог</b> — папка <code>${folderLabel}</code>\n\nПиши свою задачу — начнём с нуля.`;
-    if (msgId) {
-      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } })
-        .catch(() => sendMessage(env.BOT_TOKEN, chatId, text));
-    } else {
-      await sendMessage(env.BOT_TOKEN, chatId, text);
-    }
-    return;
-  }
-
-  if (data?.startsWith('fpg:')) {
-    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id);
-    const page = parseInt(data.slice(4)) || 0;
-    await showFolderPicker(chatId, session, message?.message_id, page);
-    return;
-  }
-
   // ── New dialog flow ───────────────────────────────────────────────────────
-  // nd: — show folder picker to start fresh dialog
-  // nd:clean — fresh start without picking folder
-  // nd:ctx — pick session to load context from
+  // nd:      — new-dialog prompt (project is picked automatically once you type,
+  //            see message.js sendProjectPicker / the pp: handler above).
+  // nd:clean — clear active session, start fresh
+  // nd:ctx   — pick session to load context from
   // nd:ctx:<id> — load context from specific session
   if (data?.startsWith('nd:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
@@ -303,17 +300,10 @@ export async function handleCallbackQuery(cq, env) {
     const sub = data.slice(3);
 
     if (sub === '') {
-      // Show simplified new-dialog prompt; folder picker is opt-in for advanced users
       await answerCallbackQuery(env.BOT_TOKEN, id);
       const msgId = message?.message_id;
-      const currentFolder = session.projectDir
-        ? `📁 <b>${session.projectDir}</b>`
-        : '🏠 корневая';
-      const text = `✏️ <b>Новый диалог</b>\n\nСоздаём в папке ${currentFolder}.`;
-      const buttons = [
-        [{ text: '✏️ Создать', callback_data: 'nd:clean' }],
-        [{ text: '📁 Выбрать папку  · для тех, кто хочет структурировать диалоги', callback_data: 'nd:folder' }],
-      ];
+      const text = '✏️ <b>Новый диалог</b>\n\nПиши задачу — если проектов несколько, спрошу в какой добавить.';
+      const buttons = [[{ text: '✏️ Создать', callback_data: 'nd:clean' }]];
       const kb = { reply_markup: { inline_keyboard: buttons } };
       if (msgId) {
         await editMessage(env.BOT_TOKEN, chatId, msgId, text, kb).catch(() =>
@@ -325,15 +315,9 @@ export async function handleCallbackQuery(cq, env) {
       return;
     }
 
-    if (sub === 'folder') {
-      // Advanced: show folder picker
-      await answerCallbackQuery(env.BOT_TOKEN, id);
-      await showFolderPicker(chatId, session, message?.message_id, 0);
-      return;
-    }
-
     if (sub === 'clean') {
-      // Clear active session, start fresh (keep current projectDir)
+      // Clear active session — the next message starts a fresh dialog (and triggers
+      // the project picker if the profile has ≥2 projects).
       await setSession(env.SESSIONS, chatId, {
         ...session,
         activeSessionId: null,
@@ -588,7 +572,7 @@ export async function handleCallbackQuery(cq, env) {
       mode: launch.mode,
       initialMsgId,
       telegramUserId: session.telegramUserId,
-      projectDir: session.projectDir || null,
+      projectId: session.projectId || null,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }

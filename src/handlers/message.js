@@ -1,6 +1,6 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
-import { runTask, getSessions, classifyMessage } from '../lib/agent-client.js';
+import { runTask, getSessions, classifyMessage, getProjectDecision } from '../lib/agent-client.js';
 import { renderSessionList } from './commands.js';
 
 // Phrases that signal "start a new session" regardless of history
@@ -106,6 +106,23 @@ async function handleText(chatId, session, text, env, opts = {}) {
       return;
     }
 
+    // New-dialog project picker (issue #517): when this message starts a FRESH dialog
+    // and the profile has ≥2 projects, ask which project before dispatching. Skip for
+    // file uploads (the file can't be re-attached from the deferred pending message).
+    const isNewDialog = route.forceNew || !session.lastSessionId;
+    if (isNewDialog && !opts.fileBase64) {
+      const decision = await getProjectDecision(env, { username: session.username, chatId });
+      if (decision.action === 'ask' && decision.choices?.length) {
+        await setSession(env.SESSIONS, chatId, {
+          ...session,
+          pendingMessage: text,
+          pendingMessageAt: Date.now(),
+        });
+        await sendProjectPicker(env.BOT_TOKEN, chatId, decision.choices, decision.active);
+        return;
+      }
+    }
+
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
     const context = opts.isVoice ? '[voice-message]' : null;
@@ -128,7 +145,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
-      projectDir: session.projectDir || null,
+      projectId: session.projectId || null,
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
@@ -212,6 +229,20 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // Ambiguous — show picker with all recent sessions
   return { type: 'disambiguate', sessions: recentSessions.slice(0, 4) };
+}
+
+// New-dialog project picker (issue #517). Uses the project INDEX in callback_data
+// (pp:<i>) — typed project ids can be long Cyrillic slugs that blow the 64-byte
+// callback_data limit. The pp: handler re-fetches the list and looks up by index
+// (same ordering as GET /project-decision → listProjects, most-recent first).
+export async function sendProjectPicker(botToken, chatId, choices, activeId) {
+  const buttons = choices.slice(0, 8).map((c, i) => [{
+    text: `${c.id === activeId ? '✅ ' : '📁 '}${c.label || c.name}`,
+    callback_data: `pp:${i}`,
+  }]);
+  buttons.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
+  const text = '📂 <b>В какой проект добавить новый диалог?</b>\n\nВыбери проект или создай новый:';
+  return sendMessageWithKeyboard(botToken, chatId, text, buttons);
 }
 
 async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) {
