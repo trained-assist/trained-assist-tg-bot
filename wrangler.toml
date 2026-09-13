@@ -4,9 +4,7 @@ compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://agent.trainedassist.store"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
 
 # Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
@@ -18,11 +16,14 @@ class_name = "IntakeBuffer"
 tag = "v1"
 new_sqlite_classes = ["IntakeBuffer"]
 
-# Secrets (set via `wrangler secret put`):
+# Secrets / private config (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
 #   BOT_SECRET     — shared secret for Chrome extension
 #   AGENT_URL      — URL of trained-assist-agent HTTP API
+#   AGENT_RU_URL   — (optional) URL of a secondary/regional agent
 #   AGENT_SECRET   — shared secret for bot↔agent auth
+#   RELAY_URL      — URL of the token-relay / pairing service
+#   ADMIN_GROUP_ID — Telegram group ID for admin commands
 
 [[kv_namespaces]]
 binding = "SESSIONS"
@@ -37,9 +38,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
-ADMIN_GROUP_ID = "-5308931318"
 BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://agent.trainedassist.store"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
 # DO binding must be redeclared per named env (migrations are top-level, shared).
