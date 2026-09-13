@@ -25,10 +25,10 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
 
-const LAUNCH_BTN = [[{ text: '▶️ Запустить', callback_data: 'intake_run' }]];
+const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
 const collectorText = n =>
-  `📥 Собираю сообщения (${n}). Пиши ещё — или нажми «▶️ Запустить», когда закончишь.`;
+  `📥 Принял ✅ Накапливаю (${n}). Пиши ещё — или жми «▶️ Запустить проработку», когда закончишь.`;
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -116,8 +116,11 @@ export class IntakeBuffer {
 
     try {
       // Dynamic import avoids a circular import at module load.
+      // mode:'deep' — «▶️ Запустить проработку» запускает НАДЁЖНУЮ (deep) сессию на всём
+      // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
+      // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env);
+      await handleMessage(msg, this.env, { mode: 'deep' });
     } finally {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');

@@ -537,24 +537,30 @@ export async function handleCallbackQuery(cq, env) {
   // intake_run — «▶️ Запустить» under the collector message: flush the buffered
   // messages for this chat and run them as one. The DO derives everything from
   // its own state (keyed by chatId), so no payload is needed.
-  if (data === 'intake_run') {
+  // «▶️ Запустить проработку» (intake_run) — ЕДИНЫЙ путь запуска: сливает накопленный
+  // буфер и запускает по нему проработку. `workrun|…` — устаревшая кнопка «⏻ Запустить
+  // проработку» из старых чатов; раньше она перезапускала sess.lastUserMessage в обход
+  // буфера (десинк «ушло не на то», #530 §B). Теперь ведёт в тот же flush — один источник.
+  if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
-      await stub.fetch('https://intake/flush', { method: 'POST' })
-        .catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      const r = await stub.fetch('https://intake/flush', { method: 'POST' })
+        .then(x => x.json()).catch(err => { sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`); return null; });
+      if (r?.empty) {
+        await sendMessage(env.BOT_TOKEN, chatId,
+          '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
+      }
     }
     return;
   }
 
-  // ── Explicit launch actions (manual launch model) ────────────────────────
-  // workrun|{sessionId} — «⏻ Запустить проработку» → re-run same request as deep session.
-  // clarify|{sessionId} — «❓ Уточнить задачу»    → one-shot: agent asks clarifying Qs.
-  // Both re-run through Claude (forceClaude); agent derives the task from the session's
-  // last user message and applies `mode`. Replaces the old ask_claude| expand button.
-  const launch = data?.startsWith('workrun|') ? { mode: 'deep', prefix: 'workrun|', wait: '⚙️ Запускаю проработку…' }
-               : data?.startsWith('clarify|') ? { mode: 'clarify', prefix: 'clarify|', wait: '❓ Собираю вопросы…' }
+  // ── Explicit clarify action ──────────────────────────────────────────────
+  // clarify|{sessionId} — «❓ Уточнить задачу» → one-shot: agent asks clarifying Qs.
+  // Re-runs through Claude (forceClaude); agent derives the task from the session's
+  // last user message and applies `mode`. (Launch of проработка is intake_run above.)
+  const launch = data?.startsWith('clarify|') ? { mode: 'clarify', prefix: 'clarify|', wait: '❓ Собираю вопросы…' }
                : null;
   if (launch) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
@@ -570,6 +576,30 @@ export async function handleCallbackQuery(cq, env) {
       sessionId,
       forceClaude: true,
       mode: launch.mode,
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Continue-by-plan (§C #530) ────────────────────────────────────────────
+  // plan|{sessionId} — «▶️ Действуй дальше по плану» under a deep result: continue the
+  // SAME session by the plan the agent just described, no re-ask. Reply-path (forceClaude,
+  // deep) so it runs the resilient brain and keeps the sticky deep mode.
+  if (data?.startsWith('plan|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Продолжаю по плану…');
+    const sessionId = data.slice('plan|'.length) || session.activeSessionId || session.lastSessionId;
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      task: '[Продолжай по плану, который ты только что описал выше. Выполняй шаги по порядку до конца, не переспрашивай — план уже согласован нажатием кнопки «Действуй дальше по плану».]',
+      forceClaude: true,
+      mode: 'deep',
       initialMsgId,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,

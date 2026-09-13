@@ -14,9 +14,10 @@ const KNOWN_CALLBACK_PREFIXES = [
   'prof:',      // profile actions
   'fl:',        // file browser navigate
   'fr:',        // file browser read
-  'workrun|',   // «⏻ Запустить проработку» — rerun through Claude in deep mode
+  'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
   'clarify|',   // «❓ Уточнить задачу» — rerun through Claude in clarify mode
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
+  'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
 ];
 
 // Mock all external dependencies so we can import the handler
@@ -85,17 +86,17 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       await handleCallbackQuery(cq, env);
 
-      // For workrun/clarify: runTask must be called with forceClaude=true + the right mode.
-      if (prefix === 'workrun|' || prefix === 'clarify|') {
+      // clarify| re-runs through Claude (forceClaude=true, mode=clarify).
+      if (prefix === 'clarify|') {
         expect(runTask).toHaveBeenCalledWith(
           env,
-          expect.objectContaining({
-            forceClaude: true,
-            mode: prefix === 'workrun|' ? 'deep' : 'clarify',
-          })
+          expect.objectContaining({ forceClaude: true, mode: 'clarify' })
         );
         return;
       }
+      // workrun| is now the legacy alias of intake_run: it flushes the buffer (single
+      // launch source, #530 §B) — no runTask, no lastUserMessage rerun. With no INTAKE
+      // binding in the test env it just acks the callback; the general check below covers it.
 
       // Every real handler calls answerCallbackQuery at least once explicitly in its branch.
       // A silently-ignored callback would call nothing at all.
