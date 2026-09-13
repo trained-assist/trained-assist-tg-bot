@@ -237,10 +237,19 @@ async function resolveSessionRoute(chatId, session, text, env) {
 // callback_data limit. The pp: handler re-fetches the list and looks up by index
 // (same ordering as GET /project-decision → listProjects, most-recent first).
 export async function sendProjectPicker(botToken, chatId, choices, activeId) {
-  const buttons = choices.slice(0, 8).map((c, i) => [{
-    text: `${c.id === activeId ? '✅ ' : '📁 '}${c.label || c.name}`,
-    callback_data: `pp:${i}`,
-  }]);
+  const buttons = choices.slice(0, 8).map((c, i) => {
+    // c.name is the project's distinct name; c.label is the human TYPE label
+    // (Проект/Рекрутинг/Выставка). Show the NAME first — otherwise every generic
+    // project renders as "Проект" and they're indistinguishable. The type label is
+    // appended only for typed (non-generic) projects, where it actually disambiguates.
+    let name = c.name || c.label || 'Без названия';
+    if (name.length > 48) name = name.slice(0, 47) + '…';
+    const tag = c.type && c.type !== 'generic' && c.label ? ` · ${c.label}` : '';
+    return [{
+      text: `${c.id === activeId ? '✅ ' : '📁 '}${name}${tag}`,
+      callback_data: `pp:${i}`,
+    }];
+  });
   buttons.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
   const text = '📂 <b>В какой проект добавить новый диалог?</b>\n\nВыбери проект или создай новый:';
   return sendMessageWithKeyboard(botToken, chatId, text, buttons);
