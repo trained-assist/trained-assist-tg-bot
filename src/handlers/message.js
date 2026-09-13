@@ -12,7 +12,7 @@ const NEW_SESSION_SIGNALS = [
 
 const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
-export async function handleMessage(msg, env) {
+export async function handleMessage(msg, env, opts = {}) {
   const { chat, text, voice, audio, photo, document: doc } = msg;
   const chatId = chat.id;
 
@@ -24,7 +24,7 @@ export async function handleMessage(msg, env) {
   }
 
   if (text) {
-    await handleText(chatId, session, text, env);
+    await handleText(chatId, session, text, env, { mode: opts.mode || null });
   } else if (voice || audio) {
     const fileId = (voice || audio).file_id;
     const mimeType = (voice || audio).mime_type || null;
@@ -142,6 +142,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       context,
       sessionId,
       contextFromSession: session.contextFromSession || null,
+      mode: opts.mode || null,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,

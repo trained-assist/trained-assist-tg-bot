@@ -143,8 +143,11 @@ async function dispatchInner(update, env) {
   }
 }
 
-// Words that flush the buffer immediately instead of waiting for the button.
-const FORCE_RUN_RE = /(^|\s)(запускай|запуск|поехали|давай\s|го\b|go\b|run\b)/i;
+// A message that is ONLY an explicit launch word flushes the buffer immediately;
+// otherwise launch is by the ▶️ button (§A #530: «запуск только по явной кнопке»).
+// Must be a standalone word — the old broad regex matched prose like «давай сделаем…»
+// and «…го…», firing the brain on the first message (the «стартует сразу» bug).
+const FORCE_RUN_RE = /^\s*(запускай|запусти|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
 
 /** True when a private message should be routed through the intake accumulator. */
 function shouldDebounce(msg, env) {
