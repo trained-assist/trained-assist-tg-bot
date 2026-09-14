@@ -6,7 +6,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession, getOrCreateMappedSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
-import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention } from './group-routing.js';
+import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
 const app = new Hono();
 
@@ -65,9 +65,14 @@ export async function dispatchInner(update, env) {
     return;
   }
 
-  // Invalidate member count cache when group membership changes
+  // Membership changed → the cached member count is stale.
   if (msg.new_chat_members || msg.left_chat_member) {
     await env.SESSIONS.delete(`mc:${msg.chat.id}`);
+    // If WE were just added, don't sit silent (the "ноль реакции, старт только
+    // реплаем" complaint) — greet and spell out how to talk to the bot here.
+    if (botWasAddedToGroup(msg, env.BOT_USERNAME)) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id, groupWelcomeText(env.BOT_USERNAME));
+    }
     return;
   }
 
