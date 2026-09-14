@@ -78,3 +78,34 @@ export function groupDisposition(msg, { botUsername, allMsgMode, memberCount } =
   if (shouldHandleAmbient({ allMsgMode, memberCount })) return { action: 'accumulate', cleanText };
   return { action: 'ignore' };
 }
+
+/**
+ * True when THIS bot is among the users who just joined the group (Telegram
+ * `new_chat_members` service message). Matched by username — always present for
+ * bots and stable across restarts (we don't carry the numeric bot id in env).
+ * Pure. Used to greet + explain interaction the moment the bot is added, instead
+ * of the old silent "ноль реакции, старт только реплаем".
+ */
+export function botWasAddedToGroup(msg, botUsername) {
+  const joined = msg?.new_chat_members;
+  if (!Array.isArray(joined) || !botUsername) return false;
+  const uname = String(botUsername).replace(/^@/, '').toLowerCase();
+  return joined.some((u) => String(u?.username || '').toLowerCase() === uname);
+}
+
+/**
+ * The greeting posted right after the bot is added to a group. Tells the user
+ * how to make it work here — the piece the owner said was missing: don't guess
+ * the member count silently, just SAY it and offer the explicit switch.
+ */
+export function groupWelcomeText(botUsername) {
+  const mention = '@' + String(botUsername || '').replace(/^@/, '');
+  return (
+    '👋 Спасибо, что добавили меня в группу!\n\n' +
+    'Я не всегда могу надёжно определить, все ли сообщения здесь адресованы мне. Поэтому:\n\n' +
+    '• Авторизуйтесь — <b>/login &lt;пароль&gt;</b>. После входа в группе я собираю все сообщения ' +
+    'и запускаю проработку по кнопке «▶️».\n' +
+    '• Переключатель режима «все сообщения → агенту»: <b>/all_on</b> и <b>/all_off</b>.\n' +
+    `• В общей группе, где не всё адресовано мне, — обращайтесь через ${mention} или reply на моё сообщение.`
+  );
+}

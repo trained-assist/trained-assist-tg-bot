@@ -113,7 +113,7 @@ export async function getProjectDecision(env, { username, chatId }) {
   try {
     const res = await fetch(
       `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
-      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
+      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(9000) }
     );
     if (!res.ok) return { action: 'auto', choices: [], active: null };
     return await res.json();
