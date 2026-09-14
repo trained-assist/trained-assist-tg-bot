@@ -74,15 +74,15 @@ describe('intake invariant — a message must ACCUMULATE, not launch (issue #66)
     expect(handleMessage).toHaveBeenCalledTimes(1);
   });
 
-  // ---- KNOWN-BROKEN (part B of #66): media must buffer, currently fires. ----
-  it.fails('photo: should buffer (currently bypasses → premature launch)', async () => {
+  // ---- Part B of #66 landed: media now buffers instead of firing. ----
+  it('photo: buffers, does not launch', async () => {
     const { env, _appended } = makeEnv();
     await routeText(fx.photo, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
     expect(_appended).toHaveLength(1);
   });
 
-  it.fails('document: should buffer (currently bypasses → premature launch)', async () => {
+  it('document: buffers, does not launch', async () => {
     const { env, _appended } = makeEnv();
     await routeText(fx.document, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
