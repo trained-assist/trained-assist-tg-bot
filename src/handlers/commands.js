@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
-import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
@@ -234,7 +234,7 @@ async function cmdRu(msg, env) {
   }
 
   try {
-    const sessionId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const sessionId = newSessionId(chatId);
     await runTask(env, {
       userId: chatId,
       username: session.username,

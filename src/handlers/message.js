@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { getSession, setSession } from '../lib/kv.js';
+import { getSession, setSession, newSessionId } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
@@ -163,6 +163,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       task: text,
       context,
       sessionId,
+      forceNew: !!route.forceNew,
       contextFromSession: session.contextFromSession || null,
       mode: opts.mode || null,
       initialMsgId,
@@ -183,6 +184,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pendingMessage: null,
       pendingMessageAt: null,
       activeSessionId: null,
+      activeSessionIsNew: null,
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
@@ -209,19 +211,22 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {
-    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const newId = newSessionId(chatId);
     return { type: 'run', sessionId: newId, forceNew: true };
   }
 
-  // 2. User explicitly chose a session via /sessions button → use it once, then clear
+  // 2. User explicitly chose a session via /sessions button → use it once, then clear.
+  // activeSessionIsNew: set by the "sn:" callback (new dialog with carried-over context) —
+  // that id is a freshly generated one with no file on disk yet, so it needs forceNew too,
+  // or the sign-split heal would silently reattach it to the chat's old pointer.
   if (session.activeSessionId) {
-    return { type: 'run', sessionId: session.activeSessionId };
+    return { type: 'run', sessionId: session.activeSessionId, forceNew: !!session.activeSessionIsNew };
   }
 
   // 3. No history at all → new session
   if (!session.lastSessionId) {
-    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
-    return { type: 'run', sessionId: newId };
+    const newId = newSessionId(chatId);
+    return { type: 'run', sessionId: newId, forceNew: true };
   }
 
   // 4. Recent session (< 2h) → continue it automatically, no friction
