@@ -1,5 +1,17 @@
 // Cloudflare KV helpers for sessions and user registry
 
+// Single home for session-id generation. Was copy-pasted as
+// `s-${Math.abs(chatId)}-${Date.now()}` in 6 places — every duplicate is a chance
+// for the sign handling to drift, which is exactly how a group chat ended up with
+// two divergent session families (`s-1003…` vs `s--1003…`) and lost its ТЗ
+// (chatId-sign-split-session-loss). Keep the id derivation in ONE place so the
+// invariant "id is a stable, unique key" can never fork again. The agent resolves
+// continuity via its per-chat current-session pointer (keyed by the real signed
+// chatId), so the id string itself is just an opaque key.
+export function newSessionId(chatId) {
+  return `s-${Math.abs(chatId)}-${Date.now()}`;
+}
+
 // Sessions: chatId → { username, profileName }
 export async function getSession(kv, chatId) {
   const val = await kv.get(String(chatId));

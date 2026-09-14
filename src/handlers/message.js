@@ -1,5 +1,10 @@
+<<<<<<< Updated upstream
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession } from '../lib/kv.js';
+=======
+import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { getSession, setSession, newSessionId } from '../lib/kv.js';
+>>>>>>> Stashed changes
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
@@ -209,7 +214,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {
-    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const newId = newSessionId(chatId);
     return { type: 'run', sessionId: newId, forceNew: true };
   }
 
@@ -220,7 +225,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 
   // 3. No history at all → new session
   if (!session.lastSessionId) {
-    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const newId = newSessionId(chatId);
     return { type: 'run', sessionId: newId };
   }
 

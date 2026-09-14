@@ -1,4 +1,4 @@
-import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
@@ -21,7 +21,7 @@ export async function handleCallbackQuery(cq, env) {
     const pending = session.pendingMessage;
     const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
 
-    const resolvedId = sessionId === 'new' ? `s-${Math.abs(chatId)}-${Date.now()}` : sessionId;
+    const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
     const msgId = message?.message_id;
 
@@ -122,7 +122,7 @@ export async function handleCallbackQuery(cq, env) {
     }
 
     await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
-    const resolvedId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const resolvedId = newSessionId(chatId);
     const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
     const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
@@ -253,7 +253,7 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sn:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
-    const newId = `s-${Math.abs(chatId)}-${Date.now()}`;
+    const newId = newSessionId(chatId);
     // Store source session ID so agent loads its context into the new session
     await setSession(env.SESSIONS, chatId, {
       ...session,
