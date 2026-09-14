@@ -1,3 +1,24 @@
+# Auto-merge workflow — CURRENTLY DISABLED
+#
+# This workflow calls `gh pr merge --auto --squash`, which requires auto-merge to be
+# enabled at the repo level (`allow_auto_merge: true`). Without that flag the command
+# silently succeeds but does nothing, so the workflow currently has no effect.
+#
+# BLOCKER: The repo is on GitHub Free (private). GitHub Free does not support branch
+# protection rules on private repos, which means there is no way to require the `ci`
+# job to pass before auto-merge triggers. Enabling auto-merge without required checks
+# would merge PRs immediately on creation — before CI runs — and the deploy job in
+# ci.yml would push broken code to Cloudflare Workers production.
+#
+# To re-enable auto-merge safely:
+#   1. Upgrade to GitHub Pro OR make the repo public (branch protection is free for
+#      public repos).
+#   2. Add a branch protection rule on `main` requiring the `ci` status check to pass.
+#   3. Run:  gh repo edit --enable-auto-merge
+#   4. Re-enable the job below by removing the `if: false` guard.
+#
+# See also: issue #49
+
 name: Auto-merge
 
 on:
@@ -10,6 +31,8 @@ permissions:
 
 jobs:
   enable-auto-merge:
+    # Disabled — see top-of-file comment for the blocker and re-enable instructions.
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge (squash)
