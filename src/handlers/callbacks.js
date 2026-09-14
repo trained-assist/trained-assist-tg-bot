@@ -561,32 +561,9 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  // ── Explicit clarify action ──────────────────────────────────────────────
-  // clarify|{sessionId} — «❓ Уточнить задачу» → one-shot: agent asks clarifying Qs.
-  // Re-runs through Claude (forceClaude); agent derives the task from the session's
-  // last user message and applies `mode`. (Launch of проработка is intake_run above.)
-  const launch = data?.startsWith('clarify|') ? { mode: 'clarify', prefix: 'clarify|', wait: '❓ Собираю вопросы…' }
-               : null;
-  if (launch) {
-    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, launch.wait);
-
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, launch.wait);
-    const initialMsgId = thinkMsg?.result?.message_id ?? null;
-
-    const sessionId = data.slice(launch.prefix.length) || session.activeSessionId || session.lastSessionId;
-    await runTask(env, {
-      userId: chatId,
-      username: session.username,
-      sessionId,
-      forceClaude: true,
-      mode: launch.mode,
-      initialMsgId,
-      telegramUserId: session.telegramUserId,
-      projectId: session.projectId || null,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
-    return;
-  }
+  // «❓ Уточнить задачу» (clarify|) removed — owner reversal (INTAKE-REFACTOR-SPEC.md
+  // §9.2, 2026-09-14): bad idea, no button generates this callback anymore. A stale
+  // clarify| tap from an old chat falls through to the plain ack at the bottom.
 
   // ── Continue-by-plan (§C #530) ────────────────────────────────────────────
   // plan|{sessionId} — «▶️ Действуй дальше по плану» under a deep result: continue the
