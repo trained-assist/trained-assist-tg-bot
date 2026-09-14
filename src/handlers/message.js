@@ -2,6 +2,7 @@ import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/teleg
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList } from './commands.js';
+import { shouldAskProject } from '../intake-routing.js';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -110,9 +111,10 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // and the profile has ≥2 projects, ask which project before dispatching. Skip for
     // file uploads (the file can't be re-attached from the deferred pending message).
     const isNewDialog = route.forceNew || !session.lastSessionId;
-    if (isNewDialog && !opts.fileBase64) {
+    const hasFile = !!opts.fileBase64;
+    if (isNewDialog && !hasFile) {
       const decision = await getProjectDecision(env, { username: session.username, chatId });
-      if (decision.action === 'ask' && decision.choices?.length) {
+      if (shouldAskProject({ isNewDialog, hasFile, decision })) {
         await setSession(env.SESSIONS, chatId, {
           ...session,
           pendingMessage: text,
