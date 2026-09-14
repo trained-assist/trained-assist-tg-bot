@@ -96,8 +96,20 @@ export class IntakeBuffer {
       this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN,
     ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
     const newId = sent?.result?.message_id;
-    if (newId) await this.state.storage.put('collectorMsgId', newId);
-    else console.error(`[intake ${chatId}] collector message not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
+    if (newId) {
+      await this.state.storage.put('collectorMsgId', newId);
+      return;
+    }
+    console.error(`[intake ${chatId}] collector-with-keyboard not delivered, retrying without keyboard:`, sent?.description || sent);
+    // The buffer already has the message (buf.push happened before this call) — losing
+    // the ack here reads as "the bot ate my message" even though nothing was lost. Try
+    // once more without the inline keyboard in case the markup itself is what Telegram
+    // rejected; the force word (see FORCE_RUN_RE) still launches without a button.
+    const plain = await sendMessage(this.env.BOT_TOKEN, chatId, collectorText(count))
+      .catch(err => { console.error(`[intake ${chatId}] plain-text collector retry failed:`, err?.message); return null; });
+    const plainId = plain?.result?.message_id;
+    if (plainId) await this.state.storage.put('collectorMsgId', plainId);
+    else console.error(`[intake ${chatId}] collector message not delivered at all — buf accepted silently, user sees no ack:`, plain?.description || plain);
   }
 
   // Confirm receipt of a message held during an in-flight run. One rolling notice

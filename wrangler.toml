@@ -3,6 +3,12 @@ main = "src/index.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Persistent Workers Logs — without this, console.log/error only exist in a live
+# `wrangler tail` session; a silent-drop bug (#595) leaves zero trace to diagnose
+# after the fact. Free, no perf cost, queryable in the CF dashboard for ~3 days.
+[observability]
+enabled = true
+
 [vars]
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).

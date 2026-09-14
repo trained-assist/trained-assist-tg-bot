@@ -124,6 +124,22 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
+  it('falls back to a plain-text ack when the keyboard send is rejected (#595)', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    // Telegram rejects the keyboard message (e.g. bad markup) — must not leave
+    // the user with zero ack even though the message itself was buffered fine.
+    sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Bad Request: reply markup' });
+    sendMessage.mockResolvedValueOnce({ ok: true, result: { message_id: 55 } });
+
+    await io.fetch(appendReq('start the task'));
+
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(1); // plain-text retry fired
+    expect(await state.storage.get('collectorMsgId')).toBe(55);
+  });
+
   it('recovers a buffer trapped by a dead run once BUSY_MAX elapses', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
