@@ -88,15 +88,16 @@ export class IntakeBuffer {
     if (msgId) {
       const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, collectorText(count), {
         reply_markup: { inline_keyboard: LAUNCH_BTN },
-      }).catch(() => null);
+      }).catch(err => { console.error(`[intake ${chatId}] edit collector failed:`, err?.message); return null; });
       if (r && r.ok) return;
       // Edit failed (message deleted / too old) — fall through and post a new one.
     }
     const sent = await sendMessageWithKeyboard(
       this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN,
-    ).catch(() => null);
+    ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
     const newId = sent?.result?.message_id;
     if (newId) await this.state.storage.put('collectorMsgId', newId);
+    else console.error(`[intake ${chatId}] collector message not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
   }
 
   // Confirm receipt of a message held during an in-flight run. One rolling notice
@@ -105,13 +106,16 @@ export class IntakeBuffer {
     if (!chatId) return;
     const msgId = await this.state.storage.get('heldMsgId');
     if (msgId) {
-      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, heldText(count)).catch(() => null);
+      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, heldText(count))
+        .catch(err => { console.error(`[intake ${chatId}] edit held-notice failed:`, err?.message); return null; });
       if (r && r.ok) return;
       // Edit failed (deleted / too old) — fall through and post a fresh notice.
     }
-    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count)).catch(() => null);
+    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count))
+      .catch(err => { console.error(`[intake ${chatId}] send held-notice failed:`, err?.message); return null; });
     const newId = sent?.result?.message_id;
     if (newId) await this.state.storage.put('heldMsgId', newId);
+    else console.error(`[intake ${chatId}] held-notice not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
   }
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
