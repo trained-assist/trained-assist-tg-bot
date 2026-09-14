@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
+import { getSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
@@ -17,7 +17,7 @@ export async function handleMessage(msg, env, opts = {}) {
   const { chat, text, voice, audio, photo, document: doc } = msg;
   const chatId = chat.id;
 
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Сначала войди: /login username password'

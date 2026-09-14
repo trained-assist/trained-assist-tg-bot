@@ -22,7 +22,7 @@ const KNOWN_CALLBACK_PREFIXES = [
 
 // Mock all external dependencies so we can import the handler
 vi.mock('../src/lib/kv.js', () => ({
-  getOrCreateMappedSession: vi.fn().mockResolvedValue({
+  getSession: vi.fn().mockResolvedValue({
     username: 'testuser',
     activeSessionId: 's-123',
     lastSessionId: 's-123',

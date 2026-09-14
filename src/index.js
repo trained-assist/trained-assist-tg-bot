@@ -3,7 +3,7 @@ import { handleMessage } from './handlers/message.js';
 import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
-import { getSession, getOrCreateMappedSession, getChatProfileFromMapping } from './lib/kv.js';
+import { getSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
@@ -119,15 +119,12 @@ export async function dispatchInner(update, env) {
     // Ambient message: react only in a de-facto 1-on-1 (≤2 members) or when the
     // group opted into all-messages mode. Voice/audio obeys the SAME gate as text
     // (the old voice-only bypass answered audio in large groups — bug #4).
-    const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
-    // A chat in CHAT_MAPPINGS is an operator-curated workspace (the owner deliberately
-    // bound it to a profile) → treat it like a private chat: EVERY ambient message
-    // accumulates, no memberCount gate. This is also the only correct behaviour for
-    // mapped groups, where cmdLogin refuses manual /login (commands.js:116) so the
-    // "login auto-enables allMsgMode" path can never run — the flag would stay unset
-    // and messages would be dropped. Mapping ⇒ all-msg removes that dead dependency.
-    const mapped = !!getChatProfileFromMapping(chatId, env);
-    const allMsgMode = mapped || session?.allMsgMode;
+    const session = await getSession(env.SESSIONS, chatId);
+    // Uniform model: a group accumulates every ambient message only when it opted in
+    // via allMsgMode — which /login auto-enables for groups (commands.js cmdLogin) and
+    // /all_on toggles. No CHAT_MAPPINGS special-case: every chat, mapped or not, logs
+    // in the same way and follows the same allMsgMode flag persisted in its session.
+    const allMsgMode = session?.allMsgMode;
     const memberCount = allMsgMode ? undefined : await getGroupMemberCount(env, chatId);
     console.log(`[group ${chatId}] ambient memberCount=${memberCount} allMsgMode=${allMsgMode}`);
     if (!shouldHandleAmbient({ allMsgMode, memberCount })) return;

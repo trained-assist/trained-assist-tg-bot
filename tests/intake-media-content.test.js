@@ -24,7 +24,7 @@ const sendMessage = vi.fn();
 const sendDocument = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
 const setSession = vi.fn();
-const getOrCreateMappedSession = vi.fn();
+const getSession = vi.fn();
 
 vi.mock('../src/lib/agent-client.js', () => ({
   runTask: (...a) => runTask(...a),
@@ -34,7 +34,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
   classifyAgentError: (...a) => classifyAgentError(...a),
 }));
 vi.mock('../src/lib/kv.js', () => ({
-  getOrCreateMappedSession: (...a) => getOrCreateMappedSession(...a),
+  getSession: (...a) => getSession(...a),
   setSession: (...a) => setSession(...a),
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -51,7 +51,7 @@ const PHOTO_BYTES = new Uint8Array([1, 2, 3, 4, 5]).buffer;
 beforeEach(() => {
   vi.clearAllMocks();
   // Recent session → resolveSessionRoute continues it (no picker, no getSessions).
-  getOrCreateMappedSession.mockResolvedValue({
+  getSession.mockResolvedValue({
     username: 'u', lastSessionId: 's-1', lastMessageAt: Date.now(),
   });
   getProjectDecision.mockResolvedValue({ action: 'auto' });

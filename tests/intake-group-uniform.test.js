@@ -24,15 +24,15 @@ vi.mock('../src/handlers/commands.js', async (orig) => {
 vi.mock('../src/handlers/user-mgmt.js', () => ({ handleUserMgmt: vi.fn(), isUserMgmtCommand: () => false }));
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
 
-// KV + auth + telegram: capture setSession / getOrCreateMappedSession.
+// KV + auth + telegram: capture setSession. getSession is the single session read now
+// (no CHAT_MAPPINGS re-derivation) — a mutable `currentSession` lets each test set what
+// the store holds: null for the login test, an allMsgMode session for the ambient test.
 const setSession = vi.fn();
-let mappedSession = { allMsgMode: true };
+let currentSession = null;
 vi.mock('../src/lib/kv.js', () => ({
-  getSession: vi.fn(async () => null),
+  getSession: vi.fn(async () => currentSession),
   setSession: (...a) => setSession(...a),
   deleteSession: vi.fn(),
-  getOrCreateMappedSession: vi.fn(async () => mappedSession),
-  getChatProfileFromMapping: () => null,
   getUser: vi.fn(async () => ({ name: 'Owner', passwordHash: 'h', salt: 's' })),
   listUsernames: vi.fn(async () => []),
 }));
@@ -66,7 +66,7 @@ const groupMsg = (over = {}) => ({
   message: { chat: { id: -1001, type: 'supergroup' }, from: { id: 7, username: 'owner' }, date: now(), text: 'разбери задачу', ...over },
 });
 
-beforeEach(() => { vi.clearAllMocks(); mappedSession = { allMsgMode: true }; });
+beforeEach(() => { vi.clearAllMocks(); currentSession = null; });
 
 describe('group login → uniform intake accumulator', () => {
   it('1. /login in a group AUTO-enables allMsgMode (so ambient msgs are not dropped)', async () => {
@@ -79,6 +79,7 @@ describe('group login → uniform intake accumulator', () => {
 
   it('2. an ambient group message reaches the accumulator in the correct envelope', async () => {
     const { env, _appended } = makeEnv();
+    currentSession = { username: 'owner', allMsgMode: true }; // logged-in group, allMsgMode on
     await dispatchInner(groupMsg({ text: 'первая мысль' }), env);
     expect(handleMessage).not.toHaveBeenCalled();          // not launched per-message
     expect(_appended).toHaveLength(1);                     // it reached the intake buffer
