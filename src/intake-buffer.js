@@ -21,6 +21,7 @@
 
 import { sendMessage, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer } from './intake-routing.js';
+import { enrichVoiceMessage } from './lib/voice.js';
 
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
@@ -48,8 +49,14 @@ export class IntakeBuffer {
 
     if (url.pathname === '/append' && request.method === 'POST') {
       const { text, msg, flush } = await request.json();
+      // Transcribe voice/audio ONCE, here at intake. Storing the transcript on the
+      // message (and dropping the audio ref) is what keeps EVERY voice in a
+      // multi-voice buffer: coalesceBuffer reads msg.transcript, so the launch task
+      // carries all of them in order, and _dispatch no longer re-transcribes only
+      // the last file (multi-voice loss + double-transcription, #74).
+      const enriched = await enrichVoiceMessage(msg, this.env);
       const buf = (await this.state.storage.get('buf')) || [];
-      buf.push({ text, msg });
+      buf.push({ text, msg: enriched });
       await this.state.storage.put('buf', buf);
 
       if ((await this.state.storage.get('busy')) === true) {

@@ -1,8 +1,9 @@
-import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { getSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
+import { transcribeVoice, announceTranscript } from '../lib/voice.js';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -38,15 +39,7 @@ export async function handleMessage(msg, env, opts = {}) {
     const mimeType = (voice || audio).mime_type || null;
     const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
     if (transcript) {
-      if (transcript.length < 800) {
-        await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
-      } else {
-        const now = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        const filename = `transcript-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}.txt`;
-        const preview = transcriptPreview(transcript, 3);
-        await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `🎤 ${preview}…`);
-      }
+      await announceTranscript(env, chatId, transcript);
       // Prepend any accumulated human text so buffered "текст + голос" keeps both.
       const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
       await handleText(chatId, session, task, env, { isVoice: true });
@@ -304,60 +297,6 @@ async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) 
   buttons.push([{ text: '✨ Новый диалог', callback_data: 'sp:new' }]);
 
   return sendMessageWithKeyboard(botToken, chatId, text, buttons);
-}
-
-function transcriptPreview(text, maxSentences = 3) {
-  const sentences = [];
-  let remaining = text;
-  for (let i = 0; i < maxSentences && remaining.length > 0; i++) {
-    const m = remaining.match(/^[^.!?]*[.!?]+\s*/);
-    if (!m) { sentences.push(remaining.trimEnd()); break; }
-    sentences.push(m[0].trim());
-    remaining = remaining.slice(m[0].length);
-  }
-  return sentences.join(' ');
-}
-
-async function transcribeVoice(fileId, mimeType, env) {
-  const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const fileRes = await fetch(
-    `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
-  );
-  const fileData = await fileRes.json();
-  if (!fileData.ok) {
-    return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
-  }
-
-  // File download always goes through api.telegram.org/file/ — use same proxy base
-  const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
-  const audioRes = await fetch(audioUrl);
-  if (!audioRes.ok) {
-    return { transcript: null, error: `audio download ${audioRes.status}` };
-  }
-  const audioBuffer = await audioRes.arrayBuffer();
-
-  const dgRes = await fetch(
-    'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
-        'Content-Type': mimeType || 'audio/ogg; codecs=opus',
-      },
-      body: audioBuffer,
-    }
-  );
-  const dgText = await dgRes.text();
-  if (!dgRes.ok) {
-    return { transcript: null, error: `deepgram ${dgRes.status}: ${dgText.slice(0, 200)}` };
-  }
-  const dgData = JSON.parse(dgText);
-  const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-  if (!transcript) {
-    const confidence = dgData?.results?.channels?.[0]?.alternatives?.[0]?.confidence;
-    return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b, confidence: ${confidence})` };
-  }
-  return { transcript, error: null };
 }
 
 async function downloadTgFileBase64(fileId, env) {
