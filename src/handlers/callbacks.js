@@ -55,6 +55,7 @@ export async function handleCallbackQuery(cq, env) {
           task: pending,
           context: null,
           sessionId: resolvedId,
+          forceNew: sessionId === 'new',
           initialMsgId,
           pinnedMsgId: updatedSession.pinnedMsgId || null,
           telegramUserId: updatedSession.telegramUserId,
@@ -147,6 +148,7 @@ export async function handleCallbackQuery(cq, env) {
         task: pending,
         context: null,
         sessionId: resolvedId,
+        forceNew: true,
         initialMsgId,
         pinnedMsgId: updatedSession.pinnedMsgId || null,
         telegramUserId: updatedSession.telegramUserId,
@@ -254,11 +256,14 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
     const newId = newSessionId(chatId);
-    // Store source session ID so agent loads its context into the new session
+    // Store source session ID so agent loads its context into the new session.
+    // activeSessionId (not lastSessionId) + activeSessionIsNew routes this through
+    // resolveSessionRoute's "explicit, use once" case with forceNew — the id has no
+    // file on disk yet, so it must not heal back onto the chat's old pointer.
     await setSession(env.SESSIONS, chatId, {
       ...session,
-      activeSessionId: null,
-      lastSessionId: newId,
+      activeSessionId: newId,
+      activeSessionIsNew: true,
       lastMessageAt: Date.now(),
       contextFromSession: sourceSessionId,
     });
