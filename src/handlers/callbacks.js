@@ -589,5 +589,35 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Multi-button menu (§D) ────────────────────────────────────────────────
+  // menu|{sessionId}|{idx} — Claude's answer offered 2-4 explicit alternatives (agent
+  // side detects this the same way it detects a plan) and we rendered one button per
+  // option. The tap carries only the index, not the label text — the session already
+  // has its own last answer in context and knows what option N means, so we don't
+  // burn callback_data bytes re-stating it.
+  if (data?.startsWith('menu|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const rest = data.slice('menu|'.length);
+    const sepIdx = rest.lastIndexOf('|');
+    const sessionId = (sepIdx === -1 ? rest : rest.slice(0, sepIdx)) || session.activeSessionId || session.lastSessionId;
+    const idxNum = Number(sepIdx === -1 ? NaN : rest.slice(sepIdx + 1));
+    const optionNo = Number.isFinite(idxNum) ? idxNum + 1 : 1;
+    await answerCallbackQuery(env.BOT_TOKEN, id, `▶️ Вариант ${optionNo}…`);
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      task: `[Пользователь выбрал вариант ${optionNo} из меню, которое ты только что предложил выше (нумерация с 1). Действуй по этому варианту дальше, не переспрашивай — выбор уже сделан нажатием кнопки.]`,
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
   await answerCallbackQuery(env.BOT_TOKEN, id);
 }

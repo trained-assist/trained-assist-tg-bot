@@ -17,6 +17,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
+  'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
 ];
 
 // Mock all external dependencies so we can import the handler
