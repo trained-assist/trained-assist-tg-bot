@@ -101,7 +101,11 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     if (res.ok) return res.json();
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
-      throw new Error(`agent /run HTTP ${res.status}`);
+      // Surface the agent's `{error}` body — a bare status made 4xx (e.g. a
+      // rejected projectId/sessionId) undiagnosable from either side.
+      let reason = '';
+      try { reason = (await res.json())?.error || ''; } catch { /* non-JSON body */ }
+      throw new Error(`agent /run HTTP ${res.status}${reason ? ` — ${reason}` : ''}`);
     }
   }
 }
