@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock every module the DO pulls in so the state machine runs in isolation.
 const handleMessage = vi.fn();
+const sendMessage = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
 const editMessage = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 vi.mock('../src/lib/telegram.js', () => ({
+  sendMessage: (...a) => sendMessage(...a),
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
   editMessage: (...a) => editMessage(...a),
 }));
@@ -43,6 +45,7 @@ async function drain() { for (let i = 0; i < 5; i++) await new Promise(r => setT
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sendMessage.mockResolvedValue({ ok: true, result: { message_id: 98 } });
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   editMessage.mockResolvedValue({ ok: true });
 });

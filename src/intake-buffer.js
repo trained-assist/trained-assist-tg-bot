@@ -19,7 +19,7 @@
 // The ONLY alarm is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer } from './intake-routing.js';
 
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
@@ -30,6 +30,12 @@ const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', c
 
 const collectorText = n =>
   `📥 Принял ✅ Накапливаю (${n}). Пиши ещё — или жми «▶️ Запустить проработку», когда закончишь.`;
+
+// Shown while a run is in flight: the buffer holds new messages (never auto-runs),
+// but the user MUST still see they were received. Silence here was the «спросил
+// "работает" — молчит» bug — a busy hold produced no Telegram output at all.
+const heldText = n =>
+  `⏳ Иду по текущей задаче. Принял ещё (${n}) — покажу кнопку «▶️ Запустить», как закончу.`;
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -47,7 +53,10 @@ export class IntakeBuffer {
       await this.state.storage.put('buf', buf);
 
       if ((await this.state.storage.get('busy')) === true) {
-        // A run is in flight — accumulate silently; surfaced after it finishes.
+        // A run is in flight — hold new messages (never auto-run), but ACK them so
+        // the user isn't met with silence. A fresh launch button is offered once
+        // the run finishes; here we only confirm receipt.
+        await this._showHeldNotice(msg.chat?.id, buf.length);
         return json({ buffered: buf.length, held: true });
       }
       if (flush) {
@@ -90,6 +99,21 @@ export class IntakeBuffer {
     if (newId) await this.state.storage.put('collectorMsgId', newId);
   }
 
+  // Confirm receipt of a message held during an in-flight run. One rolling notice
+  // (send once → edit its count) so held messages are visible but not spammy.
+  async _showHeldNotice(chatId, count) {
+    if (!chatId) return;
+    const msgId = await this.state.storage.get('heldMsgId');
+    if (msgId) {
+      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, heldText(count)).catch(() => null);
+      if (r && r.ok) return;
+      // Edit failed (deleted / too old) — fall through and post a fresh notice.
+    }
+    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count)).catch(() => null);
+    const newId = sent?.result?.message_id;
+    if (newId) await this.state.storage.put('heldMsgId', newId);
+  }
+
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a new button afterwards).
   async _dispatch() {
@@ -126,6 +150,9 @@ export class IntakeBuffer {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
+      // The held-notice belongs to the run that just ended; retire it so the next
+      // busy cycle starts a fresh one.
+      await this.state.storage.delete('heldMsgId');
       const remaining = (await this.state.storage.get('buf')) || [];
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
