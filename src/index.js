@@ -42,7 +42,7 @@ async function dispatch(update, env) {
   }
 }
 
-async function dispatchInner(update, env) {
+export async function dispatchInner(update, env) {
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query, env);
     return;

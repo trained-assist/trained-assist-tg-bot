@@ -108,7 +108,7 @@ async function cmdStart(chatId, env) {
   );
 }
 
-async function cmdLogin(msg, env) {
+export async function cmdLogin(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
 
@@ -142,17 +142,22 @@ async function cmdLogin(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
   }
 
-  await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
   const isGroup = ['group', 'supergroup'].includes(chat.type);
-  // In a group >2 members regular messages are dropped until allMsgMode is on,
-  // so promising "just write tasks" here would be a lie — the exact reason a
-  // logged-in group looked dead. Tell the user to run /all_on. (No auto-enable:
-  // owner asked to keep it a manual, explicit step.)
+  // Uniformity (owner 2026-09-14): a logged-in group must behave like a private chat —
+  // EVERY message reaches the intake accumulator. Previously login only asked the user
+  // to run /all_on; without it ambient messages fell to the memberCount gate, which
+  // fails closed (999) when getChatMemberCount can't read the count → "ноль реакции,
+  // старт только реплаем". Auto-enabling allMsgMode here removes that manual step and
+  // the flaky-count dependency. Reversible: /all_off turns it back off.
+  await setSession(env.SESSIONS, chatId, {
+    username, name: user.name, telegramUserId: from?.id,
+    ...(isGroup ? { allMsgMode: true } : {}),
+  });
   return sendMessage(env.BOT_TOKEN, chatId,
     isGroup
       ? `✅ Добро пожаловать, ${user.name}!\n\n` +
-        `Ещё один шаг для группы — включи режим «все сообщения → агенту»:\n<b>/all_on</b>\n\n` +
-        `Без него в группе больше 2 участников я вижу только команды, упоминания и реплаи.`
+        `Пиши задачи как в личке — я собираю все сообщения и запускаю проработку по кнопке «▶️».\n\n` +
+        `Отключить режим «все сообщения → агенту»: <b>/all_off</b>`
       : `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
 }
