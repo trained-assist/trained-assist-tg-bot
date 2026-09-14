@@ -17,19 +17,58 @@ export function getChatProfileFromMapping(chatId, env) {
   }
 }
 
-// Like getSession, but auto-creates session for chats in CHAT_MAPPINGS
+// Like getSession, but auto-creates session for chats in CHAT_MAPPINGS, and —
+// as a last resort — revives a private-chat session from the telegram-user
+// binding so auth follows the PERSON, not a single chatId (see getUserBinding).
 export async function getOrCreateMappedSession(kv, chatId, env, telegramUserId = null) {
   const session = await getSession(kv, chatId);
   const mappedProfile = getChatProfileFromMapping(chatId, env);
-  if (!mappedProfile) return session;
 
-  if (!session || session.username !== mappedProfile) {
-    // Spread existing session to preserve fields like allMsgMode, allMsgPinnedId, pinnedMsgId
-    const mapped = { ...(session || {}), username: mappedProfile, name: mappedProfile, telegramUserId };
-    await setSession(kv, chatId, mapped);
-    return mapped;
+  if (mappedProfile) {
+    if (!session || session.username !== mappedProfile) {
+      // Spread existing session to preserve fields like allMsgMode, allMsgPinnedId, pinnedMsgId
+      const mapped = { ...(session || {}), username: mappedProfile, name: mappedProfile, telegramUserId };
+      await setSession(kv, chatId, mapped);
+      return mapped;
+    }
+    return session;
   }
-  return session;
+
+  if (session) return session;
+
+  // No per-chat session and no static mapping: fall back to the telegram-user
+  // binding so a login done once is recognized across the user's chats and
+  // survives session eviction. Gate on chatId === telegramUserId — i.e. the
+  // user's own private chat (in a DM chat.id equals from.id) — so a group is
+  // NEVER auto-bound to whichever member happens to write (no cross-profile leak).
+  if (telegramUserId && String(chatId) === String(telegramUserId)) {
+    const binding = await getUserBinding(kv, telegramUserId);
+    if (binding?.username) {
+      const revived = { username: binding.username, name: binding.name || binding.username, telegramUserId };
+      await setSession(kv, chatId, revived);
+      return revived;
+    }
+  }
+  return null;
+}
+
+// Telegram-user → profile binding: `tguser:<telegramUserId>` → { username, name }.
+// Written on /login, cleared on /logout. Lets auth follow the person rather than
+// a single chatId, so the same telegram user is recognized in any of their chats.
+export async function getUserBinding(kv, telegramUserId) {
+  if (!telegramUserId) return null;
+  const val = await kv.get(`tguser:${telegramUserId}`);
+  return val ? JSON.parse(val) : null;
+}
+
+export async function setUserBinding(kv, telegramUserId, data) {
+  if (!telegramUserId) return;
+  await kv.put(`tguser:${telegramUserId}`, JSON.stringify(data));
+}
+
+export async function deleteUserBinding(kv, telegramUserId) {
+  if (!telegramUserId) return;
+  await kv.delete(`tguser:${telegramUserId}`);
 }
 
 export async function setSession(kv, chatId, session) {

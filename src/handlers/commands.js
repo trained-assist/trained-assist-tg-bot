@@ -1,5 +1,5 @@
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
-import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping, setUserBinding, deleteUserBinding } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
@@ -143,6 +143,10 @@ async function cmdLogin(msg, env) {
   }
 
   await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
+  // Bind the telegram user → profile so this login is recognized across the
+  // user's other chats and survives per-chat session eviction (auth follows
+  // the person, not a single chatId).
+  await setUserBinding(env.SESSIONS, from?.id, { username, name: user.name });
   return sendMessage(env.BOT_TOKEN, chatId,
     `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
@@ -160,6 +164,9 @@ async function cmdLogout(chatId, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
   }
   await deleteSession(env.SESSIONS, chatId);
+  // Also drop the telegram-user binding so /logout means logout everywhere,
+  // not just in this chat (fall back to chatId for legacy sessions without it).
+  await deleteUserBinding(env.SESSIONS, session.telegramUserId ?? chatId);
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 До встречи, ${session.name}! Для входа: /login username password`
   );
