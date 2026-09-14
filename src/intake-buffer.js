@@ -20,6 +20,7 @@
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
 import { sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
+import { coalesceBuffer } from './intake-routing.js';
 
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
@@ -97,7 +98,7 @@ export class IntakeBuffer {
 
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
-    const coalescedText = buf.map(i => i.text).filter(Boolean).join('\n');
+    const coalescedText = coalesceBuffer(buf);
     const msg = { ...base, text: coalescedText };
 
     // Retire the collector button so it can't be tapped twice.

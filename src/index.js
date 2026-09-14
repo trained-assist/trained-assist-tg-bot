@@ -5,6 +5,7 @@ import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession, getOrCreateMappedSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
+import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 
 const app = new Hono();
 
@@ -142,7 +143,7 @@ async function dispatchInner(update, env) {
 // silently drift from the private path again (#530).
 export async function routeText(msg, env, chatId) {
   if (shouldDebounce(msg, env)) {
-    const flush = FORCE_RUN_RE.test(msg.text); // "запускай/го" → run buffer now
+    const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
     await stub.fetch('https://intake/append', {
       method: 'POST',
@@ -151,23 +152,6 @@ export async function routeText(msg, env, chatId) {
   } else {
     await handleMessage(msg, env);
   }
-}
-
-// A message that is ONLY an explicit launch word flushes the buffer immediately;
-// otherwise launch is by the ▶️ button (§A #530: «запуск только по явной кнопке»).
-// Must be a standalone word — the old broad regex matched prose like «давай сделаем…»
-// and «…го…», firing the brain on the first message (the «стартует сразу» bug).
-const FORCE_RUN_RE = /^\s*(запускай|запусти|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
-
-/** True when a private message should be routed through the intake accumulator. */
-function shouldDebounce(msg, env) {
-  if (env.INTAKE_DEBOUNCE === 'off') return false; // kill-switch; default ON
-  if (!env.INTAKE) return false;                   // binding missing → fail open
-  const text = msg.text;
-  if (!text) return false;                         // voice/photo/doc bypass (v1)
-  if (text.startsWith('/')) return false;          // commands bypass
-  if (msg.reply_to_message) return false;          // answering the bot bypasses
-  return true;
 }
 
 /** Returns cached Telegram chat member count (TTL 1h). Falls back to stale cache, then 999. */
