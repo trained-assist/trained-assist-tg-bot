@@ -24,9 +24,16 @@ export async function handleMessage(msg, env, opts = {}) {
     );
   }
 
-  if (text) {
-    await handleText(chatId, session, text, env, { mode: opts.mode || null });
-  } else if (voice || audio) {
+  // Media branches take precedence over `text`. On the buffered/dispatch path
+  // (IntakeBuffer._dispatch) a media message keeps its .photo/.voice/.document
+  // field but gets .text overwritten with a coalesced tag string ("photo:<id>").
+  // If we checked `text` first, that raw tag would be sent to the agent as the
+  // task and the file would never be downloaded (voice never transcribed).
+  // Instead: download/transcribe the media, and pass the human text — the
+  // coalesced buffer with its own media tag-lines stripped — as the caption/task,
+  // so BOTH the file and the surrounding words reach the agent.
+  const humanCaption = msg.caption || stripMediaTags(text);
+  if (voice || audio) {
     const fileId = (voice || audio).file_id;
     const mimeType = (voice || audio).mime_type || null;
     const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
@@ -40,12 +47,13 @@ export async function handleMessage(msg, env, opts = {}) {
         const preview = transcriptPreview(transcript, 3);
         await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `🎤 ${preview}…`);
       }
-      await handleText(chatId, session, transcript, env, { isVoice: true });
+      // Prepend any accumulated human text so buffered "текст + голос" keeps both.
+      const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
+      await handleText(chatId, session, task, env, { isVoice: true });
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
   } else if (photo) {
-    const caption = msg.caption || '';
     const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю фото…');
     const initialMsgId = placeholder?.result?.message_id ?? null;
     try {
@@ -54,7 +62,7 @@ export async function handleMessage(msg, env, opts = {}) {
       if (error) {
         await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать фото: ${error}`);
       } else {
-        const task = caption || 'Фото';
+        const task = humanCaption || 'Фото';
         await handleText(chatId, session, task, env, {
           initialMsgId,
           fileBase64: base64,
@@ -66,7 +74,6 @@ export async function handleMessage(msg, env, opts = {}) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке фото: ${e.message}`);
     }
   } else if (doc) {
-    const caption = msg.caption || '';
     const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю документ…');
     const initialMsgId = placeholder?.result?.message_id ?? null;
     try {
@@ -74,7 +81,7 @@ export async function handleMessage(msg, env, opts = {}) {
       if (error) {
         await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать файл: ${error}`);
       } else {
-        const task = caption || `Документ: ${doc.file_name || 'файл'}`;
+        const task = humanCaption || `Документ: ${doc.file_name || 'файл'}`;
         await handleText(chatId, session, task, env, {
           initialMsgId,
           fileBase64: base64,
@@ -85,11 +92,24 @@ export async function handleMessage(msg, env, opts = {}) {
     } catch (e) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке: ${e.message}`);
     }
+  } else if (text) {
+    await handleText(chatId, session, text, env, { mode: opts.mode || null });
   } else {
     await sendMessage(env.BOT_TOKEN, chatId,
       '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
     );
   }
+}
+
+// Strip coalesced media tag-lines ("photo:<id>", "voice:<id>", …) that
+// IntakeBuffer._dispatch injects, leaving only the human-typed text.
+function stripMediaTags(text) {
+  if (!text) return '';
+  return text
+    .split('\n')
+    .filter(line => !/^(photo|voice|audio|document|video):/i.test(line.trim()))
+    .join('\n')
+    .trim();
 }
 
 async function handleText(chatId, session, text, env, opts = {}) {
