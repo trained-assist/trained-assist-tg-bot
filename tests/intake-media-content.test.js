@@ -108,4 +108,29 @@ describe('media reaches the agent as a file, not a tag string', () => {
     expect(arg.task).toContain('привет как дела');
     expect(arg.task).not.toBe('voice:Voice123');
   });
+
+  // GAP PROOF: IntakeBuffer._dispatch calls handleMessage(msg, env, { mode: 'deep' }) —
+  // «▶️ Запустить проработку» must always launch the resilient DEEP session (#530 §A).
+  // Each media branch builds its own opts object for the inner handleText() call; it's
+  // easy to forward isVoice/fileBase64 and forget `mode`, silently downgrading a
+  // buffered launch to a one-shot. One assertion per branch pins this end-to-end.
+  describe('mode:"deep" from the buffered launch reaches runTask for every media branch', () => {
+    it('photo', async () => {
+      const msg = { chat: { id: 42 }, photo: [{ file_id: 'AgAC123' }], text: 'photo:AgAC123' };
+      await handleMessage(msg, env, { mode: 'deep' });
+      expect(runTask.mock.calls[0][1].mode).toBe('deep');
+    });
+
+    it('voice', async () => {
+      const msg = { chat: { id: 42 }, voice: { file_id: 'Voice123' }, text: 'voice:Voice123' };
+      await handleMessage(msg, env, { mode: 'deep' });
+      expect(runTask.mock.calls[0][1].mode).toBe('deep');
+    });
+
+    it('document', async () => {
+      const msg = { chat: { id: 42 }, document: { file_id: 'Doc123', file_name: 'a.pdf' }, text: 'document:Doc123' };
+      await handleMessage(msg, env, { mode: 'deep' });
+      expect(runTask.mock.calls[0][1].mode).toBe('deep');
+    });
+  });
 });

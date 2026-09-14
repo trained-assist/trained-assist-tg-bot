@@ -49,7 +49,7 @@ export async function handleMessage(msg, env, opts = {}) {
       }
       // Prepend any accumulated human text so buffered "текст + голос" keeps both.
       const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
-      await handleText(chatId, session, task, env, { isVoice: true });
+      await handleText(chatId, session, task, env, { isVoice: true, mode: opts.mode || null });
     } else {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
     }
@@ -68,6 +68,7 @@ export async function handleMessage(msg, env, opts = {}) {
           fileBase64: base64,
           fileName: 'photo.jpg',
           fileMimeType: 'image/jpeg',
+          mode: opts.mode || null,
         });
       }
     } catch (e) {
@@ -87,6 +88,7 @@ export async function handleMessage(msg, env, opts = {}) {
           fileBase64: base64,
           fileName: doc.file_name || 'document',
           fileMimeType: doc.mime_type || 'application/octet-stream',
+          mode: opts.mode || null,
         });
       }
     } catch (e) {
@@ -365,20 +367,25 @@ async function transcribeVoice(fileId, mimeType, env) {
   return { transcript, error: null };
 }
 
+const DOWNLOAD_TIMEOUT_MS = 20_000;
+
 async function downloadTgFileBase64(fileId, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const fileRes = await fetch(`${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`);
+  const fileRes = await fetch(`${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`, {
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
   const fileData = await fileRes.json();
   if (!fileData.ok) return { base64: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
 
   const fileUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
-  const fileRes2 = await fetch(fileUrl);
+  const fileRes2 = await fetch(fileUrl, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
   if (!fileRes2.ok) return { base64: null, error: `download ${fileRes2.status}` };
 
   const buffer = await fileRes2.arrayBuffer();
-  // btoa only works with Latin-1; for binary, encode via Uint8Array
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return { base64: btoa(binary), error: null };
+  // nodejs_compat gives us a real Buffer — native base64 encoding. The previous
+  // char-by-char String.fromCharCode loop was CPU-bound O(n) JS on the isolate's
+  // wall/CPU-time budget; on a real phone photo it could blow the limit and get
+  // silently killed mid-flight (this runs under waitUntil, so no exception ever
+  // surfaces to the user — exactly the "Запускаю…" then nothing, forever" hang).
+  return { base64: Buffer.from(buffer).toString('base64'), error: null };
 }
