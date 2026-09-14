@@ -1,6 +1,6 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
-import { runTask, getSessions, classifyMessage, getProjectDecision } from '../lib/agent-client.js';
+import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList } from './commands.js';
 
 // Phrases that signal "start a new session" regardless of history
@@ -165,8 +165,12 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: newPinnedMsgId,
     });
   } catch (err) {
-    const isAgentDown = /HTTP 50[23]/.test(err.message) || err.name === 'TimeoutError';
-    const userMsg = isAgentDown
+    // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
+    // so we never falsely tell the user to resend (which spawns a duplicate session).
+    const kind = await classifyAgentError(env, err);
+    const userMsg = kind === 'busy'
+      ? '🕐 Агент занят — задача принята и стоит в очереди, отвечу как освобожусь. Не отправляй повторно.'
+      : kind === 'down'
       ? '⏸ Агент временно недоступен. Попробуй через минуту.'
       : `❌ Ошибка: ${err.message}`;
     await sendMessage(env.BOT_TOKEN, chatId, userMsg);

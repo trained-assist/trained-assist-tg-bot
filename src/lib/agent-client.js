@@ -238,6 +238,22 @@ export async function reportBugOrFeature(env, { username, description, sessionId
   return res.json();
 }
 
+// R10: classify a runTask failure into 'down' | 'busy' | 'error'.
+// /run returns 202 immediately after enqueue, so a 15s AbortSignal timeout does
+// NOT mean the agent is dead — it may just be busy (up to 6 concurrent tasks).
+// Only 502/503 (proxy/agent genuinely failing) is 'down' outright; on timeout we
+// probe /health and report 'busy' if the agent answers, 'down' if it doesn't.
+// This prevents the false "недоступен → попробуй через минуту" that makes users
+// resend and spawn duplicate sessions.
+export async function classifyAgentError(env, err) {
+  if (/HTTP 50[23]/.test(err.message)) return 'down';
+  if (err.name === 'TimeoutError') {
+    const healthy = await getAgentHealth(env);
+    return healthy ? 'busy' : 'down';
+  }
+  return 'error';
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {
