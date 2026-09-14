@@ -213,4 +213,31 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
     expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep' });
   });
+
+  it('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
+    // The user's rationale: Telegram can't carry a comment + an explaining
+    // screenshot in one message. So after the agent answers, the very next
+    // contribution is usually the SECOND half of one thought — it must be held
+    // and the bot must ask «это всё, или ещё дополнишь?» (offering ▶️), never
+    // fire on its own. This is the class behind «ответил Б → сразу побежал».
+    const { env } = makeWorld();
+
+    // Turn 1: build + launch. The run completing == «the agent responded».
+    await say(env, 42, 'разбери отклик кандидата Иванова');
+    await tapRun(env, 42);
+    await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1);          // one run so far
+
+    // The user now adds the second half of the same thought (a reply to the
+    // bot's answer — exactly «юзер ему отвечает»). It must NOT dispatch; it must
+    // surface a confirmation carrying the launch button.
+    const mark = tg.length;
+    await replyToBot(env, 42, 'вот скриншот его теста — учти его тоже');
+
+    const emitted = since(mark);
+    expect(emitted.length).toBeGreaterThan(0);               // never silent
+    expect(emitted.some(e => e.buttons.includes(RUN_CB))).toBe(true); // «▶️» offered
+    expect(emitted.some(e => /это всё|дополн/i.test(e.text || ''))).toBe(true); // asks
+    expect(handleMessage).toHaveBeenCalledTimes(1);          // <-- current bug: fires 2nd run
+  });
 });

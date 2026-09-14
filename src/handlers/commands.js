@@ -407,7 +407,7 @@ export function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
 
-function escHtml(s) {
+export function escHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 

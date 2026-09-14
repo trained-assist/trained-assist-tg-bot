@@ -1,7 +1,7 @@
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getOrCreateMappedSession, setSession } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
-import { renderSessionList } from './commands.js';
+import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
 
 // Phrases that signal "start a new session" regardless of history
@@ -263,22 +263,33 @@ async function resolveSessionRoute(chatId, session, text, env) {
 // callback_data limit. The pp: handler re-fetches the list and looks up by index
 // (same ordering as GET /project-decision → listProjects, most-recent first).
 export async function sendProjectPicker(botToken, chatId, choices, activeId) {
-  const buttons = choices.slice(0, 8).map((c, i) => {
-    // c.name is the project's distinct name; c.label is the human TYPE label
-    // (Проект/Рекрутинг/Выставка). Show the NAME first — otherwise every generic
-    // project renders as "Проект" and they're indistinguishable. The type label is
-    // appended only for typed (non-generic) projects, where it actually disambiguates.
-    let name = c.name || c.label || 'Без названия';
-    if (name.length > 48) name = name.slice(0, 47) + '…';
-    const tag = c.type && c.type !== 'generic' && c.label ? ` · ${c.label}` : '';
-    return [{
-      text: `${c.id === activeId ? '✅ ' : '📁 '}${name}${tag}`,
-      callback_data: `pp:${i}`,
-    }];
+  // Descriptive body + numbered tap-buttons — same shape as the session picker
+  // (renderSessionList). A project carries a durable 3-sense summary (start/middle/end)
+  // from the agent; render it so the user can tell projects apart, instead of a bare
+  // name button. Falls back to name-only when the summary hasn't matured yet.
+  const list = choices.slice(0, 8);
+  const lines = ['📂 <b>В какой проект добавить новый диалог?</b>', '', 'Выбери номер проекта ниже:', ''];
+  list.forEach((c, i) => {
+    const n = i + 1;
+    const name = c.name || c.label || 'Без названия';
+    const active = c.id === activeId ? ' ✅' : '';
+    const tag = c.type && c.type !== 'generic' && c.label ? ` · ${escHtml(c.label)}` : '';
+    lines.push(`<b>${n}. ${escHtml(name.slice(0, 80))}</b>${tag}${active}`);
+    const s = c.summary || {};
+    if (s.start)  lines.push(`▫️ старт: ${escHtml(String(s.start).slice(0, 160))}`);
+    if (s.middle) lines.push(`▫️ в процессе: ${escHtml(String(s.middle).slice(0, 220))}`);
+    if (s.end)    lines.push(`▫️ сейчас: ${escHtml(String(s.end).slice(0, 160))}`);
+    const meta = [];
+    if (c.lastAt) meta.push(`🕒 ${timeAgo(c.lastAt)}`);
+    if (typeof c.sessionCount === 'number' && c.sessionCount > 0) meta.push(`${c.sessionCount} диал.`);
+    if (meta.length) lines.push(meta.join(' · '));
+    lines.push('');
   });
-  buttons.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
-  const text = '📂 <b>В какой проект добавить новый диалог?</b>\n\nВыбери проект или создай новый:';
-  return sendMessageWithKeyboard(botToken, chatId, text, buttons);
+  const numBtns = list.map((c, i) => ({ text: String(i + 1), callback_data: `pp:${i}` }));
+  const rows = [];
+  for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
+  rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
+  return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows);
 }
 
 async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) {
