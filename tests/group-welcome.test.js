@@ -22,8 +22,6 @@ vi.mock('../src/lib/kv.js', () => ({
   getSession: vi.fn(async () => null),
   setSession: vi.fn(),
   deleteSession: vi.fn(),
-  getOrCreateMappedSession: vi.fn(async () => ({ allMsgMode: false })),
-  getChatProfileFromMapping: () => null,
   getUser: vi.fn(async () => null),
   listUsernames: vi.fn(async () => []),
 }));

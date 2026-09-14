@@ -2,13 +2,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock dependencies before importing commands
 vi.mock('../src/lib/kv.js', () => ({
-  getSession: vi.fn(),
+  getSession: vi.fn().mockResolvedValue({ username: 'testuser', name: 'Test' }),
   setSession: vi.fn(),
   deleteSession: vi.fn(),
   getUser: vi.fn(),
   listUsernames: vi.fn(),
-  getChatProfileFromMapping: vi.fn().mockReturnValue(null),
-  getOrCreateMappedSession: vi.fn().mockResolvedValue({ username: 'testuser', name: 'Test' }),
+
 }));
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: vi.fn().mockResolvedValue({}),

@@ -1,0 +1,141 @@
+    case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
+    case '/chromeext_connect': return cmdChromeExtConnect(msg, env);
+    case '/chromeext_status':  return cmdChromeExtStatus(msg, env);
+    case '/sessions':
+    case '/диалоги':           return cmdSessions(chatId, env);
+    case '/new_dialog':
+    case '/новый_диалог':      return cmdNewDialog(chatId, env);
+    case '/close':
+    case '/закрыть':           return cmdClose(chatId, env);
+    case '/files':
+    case '/папки':             return cmdFiles(chatId, env);
+    case '/ru':                return cmdRu(msg, env);
+    case '/стоп':
+    case '/stop':              return cmdStop(msg, env);
+    case '/skills':
+    case '/скиллы':            return cmdSkills(chatId, env);
+    case '/all_on':            return cmdAllOn(msg, env);
+    case '/all_off':           return cmdAllOff(msg, env);
+    case '/report':
+    case '/report_bug_or_feature_request': return cmdReport(msg, env);
+    default:
+      return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
+  }
+}
+
+async function cmdStart(chatId, env) {
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  if (!session) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
+    );
+  }
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `👋 Привет, ${session.name}!\n\n` +
+    `Просто пиши задачи — я передам их Claude Code.\n\n` +
+    `<b>Команды:</b>\n` +
+    `/skills — что умеет агент (список скиллов)\n` +
+    `/sessions — мои диалоги\n` +
+    `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
+    `/project — проекты профиля: список / сменить / создать (новые сессии идут в активный)\n` +
+    `/files — файлы и папки\n` +
+    `/status — статус агента\n` +
+    `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
+    `/settoken — сохранить токен сервиса\n` +
+    `/report &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
+    `/chromeext_connect — подключить Chrome-расширение\n` +
+    `/chromeext_install — установить расширение\n` +
+    `/logout — выйти`
+  );
+}
+
+export async function cmdLogin(msg, env) {
+  const { chat, text, from } = msg;
+  const chatId = chat.id;
+
+  const mappedProfile = getChatProfileFromMapping(chatId, env);
+  if (mappedProfile) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — войти вручную нельзя.`
+    );
+  }
+
+  const args = text.trim().split(/\s+/);
+  if (args.length < 3) {
+    return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /login username password');
+  }
+  const [, username, password] = args;
+
+  const existing = await getSession(env.SESSIONS, chatId);
+  if (existing) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `✅ Ты уже вошёл как ${existing.name}. /logout чтобы выйти.`
+    );
+  }
+
+  const user = await getUser(env.USERS, username);
+  if (!user) {
+    return sendMessage(env.BOT_TOKEN, chatId, '❌ Пользователь не найден.');
+  }
+
+  const ok = await verifyPassword(password, user.passwordHash, user.salt);
+  if (!ok) {
+    return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
+  }
+
+  const isGroup = ['group', 'supergroup'].includes(chat.type);
+  // Uniformity (owner 2026-09-14): a logged-in group must behave like a private chat —
+  // EVERY message reaches the intake accumulator. Previously login only asked the user
+  // to run /all_on; without it ambient messages fell to the memberCount gate, which
+  // fails closed (999) when getChatMemberCount can't read the count → "ноль реакции,
+  // старт только реплаем". Auto-enabling allMsgMode here removes that manual step and
+  // the flaky-count dependency. Reversible: /all_off turns it back off.
+  await setSession(env.SESSIONS, chatId, {
+    username, name: user.name, telegramUserId: from?.id,
+    ...(isGroup ? { allMsgMode: true } : {}),
+  });
+  return sendMessage(env.BOT_TOKEN, chatId,
+    isGroup
+      ? `✅ Добро пожаловать, ${user.name}!\n\n` +
+        `Пиши задачи как в личке — я собираю все сообщения и запускаю проработку по кнопке «▶️».\n\n` +
+        `Отключить режим «все сообщения → агенту»: <b>/all_off</b>`
+      : `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
+  );
+}
+
+async function cmdLogout(chatId, env) {
+  const mappedProfile = getChatProfileFromMapping(chatId, env);
+  if (mappedProfile) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — выйти вручную нельзя.`
+    );
+  }
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) {
+    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
+  }
+  await deleteSession(env.SESSIONS, chatId);
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `👋 До встречи, ${session.name}! Для входа: /login username password`
+  );
+}
+
+async function cmdProfile(chatId, env) {
+  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  if (!session) {
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '👤 <b>Профиль</b>\n\nТы не авторизован.\n\n<code>/login username password</code>'
+    );
+  }
+
+  const allUsernames = await listUsernames(env.USERS);
+  const others = allUsernames.filter(u => u !== session.username);
+
+  const buttons = [];
+  if (others.length > 0) {
+    buttons.push([{ text: '🔄 Сменить профиль', callback_data: 'prof:switch' }]);
+  }
+  buttons.push([{ text: '🚪 Выйти', callback_data: 'prof:logout' }]);
+
+  return sendMessageWithKeyboard(
+    env.BOT_TOKEN, chatId,
