@@ -143,8 +143,17 @@ async function cmdLogin(msg, env) {
   }
 
   await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
+  const isGroup = ['group', 'supergroup'].includes(chat.type);
+  // In a group >2 members regular messages are dropped until allMsgMode is on,
+  // so promising "just write tasks" here would be a lie — the exact reason a
+  // logged-in group looked dead. Tell the user to run /all_on. (No auto-enable:
+  // owner asked to keep it a manual, explicit step.)
   return sendMessage(env.BOT_TOKEN, chatId,
-    `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
+    isGroup
+      ? `✅ Добро пожаловать, ${user.name}!\n\n` +
+        `Ещё один шаг для группы — включи режим «все сообщения → агенту»:\n<b>/all_on</b>\n\n` +
+        `Без него в группе больше 2 участников я вижу только команды, упоминания и реплаи.`
+      : `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
 }
 
