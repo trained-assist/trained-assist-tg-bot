@@ -3,7 +3,7 @@ import { handleMessage } from './handlers/message.js';
 import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
-import { getSession, getOrCreateMappedSession } from './lib/kv.js';
+import { getSession, getOrCreateMappedSession, getChatProfileFromMapping } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
@@ -120,7 +120,14 @@ export async function dispatchInner(update, env) {
     // group opted into all-messages mode. Voice/audio obeys the SAME gate as text
     // (the old voice-only bypass answered audio in large groups — bug #4).
     const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
-    const allMsgMode = session?.allMsgMode;
+    // A chat in CHAT_MAPPINGS is an operator-curated workspace (the owner deliberately
+    // bound it to a profile) → treat it like a private chat: EVERY ambient message
+    // accumulates, no memberCount gate. This is also the only correct behaviour for
+    // mapped groups, where cmdLogin refuses manual /login (commands.js:116) so the
+    // "login auto-enables allMsgMode" path can never run — the flag would stay unset
+    // and messages would be dropped. Mapping ⇒ all-msg removes that dead dependency.
+    const mapped = !!getChatProfileFromMapping(chatId, env);
+    const allMsgMode = mapped || session?.allMsgMode;
     const memberCount = allMsgMode ? undefined : await getGroupMemberCount(env, chatId);
     console.log(`[group ${chatId}] ambient memberCount=${memberCount} allMsgMode=${allMsgMode}`);
     if (!shouldHandleAmbient({ allMsgMode, memberCount })) return;
