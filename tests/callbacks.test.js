@@ -15,7 +15,6 @@ const KNOWN_CALLBACK_PREFIXES = [
   'fl:',        // file browser navigate
   'fr:',        // file browser read
   'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
-  'clarify|',   // «❓ Уточнить задачу» — rerun through Claude in clarify mode
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
 ];
@@ -74,7 +73,7 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
       const { sendMessage, answerCallbackQuery } = await import('../src/lib/telegram.js');
 
       // Build a minimal callback_query
-      const data = prefix === 'workrun|' || prefix === 'clarify|' ? `${prefix}s-123` :
+      const data = prefix === 'workrun|' ? `${prefix}s-123` :
                    prefix === 'sl:' || prefix === 'nd:' ? prefix :
                    `${prefix}test-id`;
 
@@ -87,14 +86,6 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       await handleCallbackQuery(cq, env);
 
-      // clarify| re-runs through Claude (forceClaude=true, mode=clarify).
-      if (prefix === 'clarify|') {
-        expect(runTask).toHaveBeenCalledWith(
-          env,
-          expect.objectContaining({ forceClaude: true, mode: 'clarify' })
-        );
-        return;
-      }
       // workrun| is now the legacy alias of intake_run: it flushes the buffer (single
       // launch source, #530 §B) — no runTask, no lastUserMessage rerun. With no INTAKE
       // binding in the test env it just acks the callback; the general check below covers it.
@@ -112,4 +103,26 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
       expect(didSomething, `prefix "${prefix}" appears to be silently ignored`).toBe(true);
     });
   }
+});
+
+describe('callbacks — clarify| removed (§9.2 owner reversal, 2026-09-14)', () => {
+  it('a stale clarify| tap from an old chat does not re-run Claude', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const { answerCallbackQuery } = await import('../src/lib/telegram.js');
+    const env = { BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret' };
+
+    const cq = {
+      id: 'cq-1',
+      data: 'clarify|s-123',
+      from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 },
+    };
+    await handleCallbackQuery(cq, env);
+
+    expect(runTask).not.toHaveBeenCalled();
+    // Falls through to the plain ack at the bottom of the handler, not silence.
+    expect(answerCallbackQuery).toHaveBeenCalled();
+  });
 });
