@@ -135,9 +135,14 @@ export async function dispatchInner(update, env) {
     return;
   }
 
-  // Private chat: commands vs messages
+  // Private chat: commands vs messages. Service-only updates (pin notifications,
+  // etc.) carry no text/voice/photo/document — same gate the group branch already
+  // uses (hasContent) — so they're silently dropped instead of hitting the
+  // "не могу обработать этот тип сообщения" fallback in handleMessage.
   if (text.startsWith('/')) {
     await handleCommand(msg, env);
+  } else if (!hasContent(msg)) {
+    return;
   } else {
     await routeText(msg, env, chatId);
   }
