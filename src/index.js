@@ -6,6 +6,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession, getOrCreateMappedSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
+import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention } from './group-routing.js';
 
 const app = new Hono();
 
@@ -87,45 +88,41 @@ async function dispatchInner(update, env) {
     return;
   }
 
-  // Other groups: commands and mentions/replies always handled;
-  // regular messages handled based on group size
+  // Other groups. Trigger rule lives in src/group-routing.js (pure + tested);
+  // see docs/GROUP-TRIGGER-MATRIX.md. Summary:
+  //   • /command                       → handle it
+  //   • addressed (mention text/caption OR reply-to-bot) → answer NOW, bypass buffer
+  //   • ambient + (2-member group OR all-msg mode) → intake accumulator (▶️ launch)
+  //   • ambient in a bigger group with all-msg off → ignore (text AND audio alike)
   if (isGroup) {
-    const isMentioned = text.includes(`@${env.BOT_USERNAME}`);
-    const isReplyToBot = msg.reply_to_message?.from?.username === env.BOT_USERNAME;
-    const isAddressedToBot = isMentioned || isReplyToBot;
-    const isCommand = text.startsWith('/');
-    const hasContent = !!(msg.voice || msg.audio || msg.document || msg.photo || text);
+    const cleanText = stripBotMention(text, env.BOT_USERNAME);
+    const cleanMsg = { ...msg, text: cleanText };
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
 
-    if (!isCommand && !isAddressedToBot) {
-      if (!hasContent) return;
-      // Use getOrCreateMappedSession so CHAT_MAPPINGS groups auto-create their session here
-      const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
-      const isVoiceOrAudio = !!(msg.voice || msg.audio);
-      // Voice bypasses member-count check only when allMsgMode was NEVER set.
-      // If it was explicitly turned off (=== false), voice also obeys the limit.
-      if (!session?.allMsgMode && (!isVoiceOrAudio || session?.allMsgMode === false)) {
-        const memberCount = await getGroupMemberCount(env, chatId);
-        console.log(`[group ${chatId}] memberCount=${memberCount} session=${!!session} allMsgMode=${session?.allMsgMode}`);
-        if (memberCount > 2) {
-          if (!session) console.log(`[group ${chatId}] large group, no session — skipping`);
-          return;
-        }
-      }
-      if (!session) {
-        // 2-member group or voice/audio but no session and no CHAT_MAPPINGS — let handleMessage respond
-        console.log(`[group ${chatId}] no session, passing to handleMessage`);
-      }
+    if (text.startsWith('/')) {
+      await handleCommand(cleanMsg, env);
+      return;
     }
+    // Addressed to the bot → an explicit "answer me now". Bypass the ▶️ accumulator
+    // (a mention used to get buffered → felt like "mention doesn't react", #2).
+    if (isAddressedToBot(msg, env.BOT_USERNAME)) {
+      await handleMessage(cleanMsg, env);
+      return;
+    }
+    if (!hasContent(msg)) return;
 
-    // Strip mention from text before handling
-    const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
-    const cleanMsg = { ...msg, text: cleanText };
-    // Same intake accumulator as private chats — a 2-member group (or an
-    // addressed message in a larger one) is a 1-on-1 workflow and must buffer
-    // + launch by ▶️, not fire a session per quick message (#530 group path).
-    if (isCommand) await handleCommand(cleanMsg, env);
-    else await routeText(cleanMsg, env, chatId);
+    // Ambient message: react only in a de-facto 1-on-1 (≤2 members) or when the
+    // group opted into all-messages mode. Voice/audio obeys the SAME gate as text
+    // (the old voice-only bypass answered audio in large groups — bug #4).
+    const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+    const allMsgMode = session?.allMsgMode;
+    const memberCount = allMsgMode ? undefined : await getGroupMemberCount(env, chatId);
+    console.log(`[group ${chatId}] ambient memberCount=${memberCount} allMsgMode=${allMsgMode}`);
+    if (!shouldHandleAmbient({ allMsgMode, memberCount })) return;
+
+    // Same intake accumulator as private chats — a 2-member group is a 1-on-1
+    // workflow and buffers + launches by ▶️, not a session per quick message (#530).
+    await routeText(cleanMsg, env, chatId);
     return;
   }
 
