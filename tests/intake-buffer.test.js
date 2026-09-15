@@ -5,12 +5,14 @@ const handleMessage = vi.fn();
 const sendMessage = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
 const editMessage = vi.fn();
+const editMessageReplyMarkup = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: (...a) => sendMessage(...a),
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
   editMessage: (...a) => editMessage(...a),
+  editMessageReplyMarkup: (...a) => editMessageReplyMarkup(...a),
 }));
 
 import { IntakeBuffer } from '../src/intake-buffer.js';
@@ -48,10 +50,11 @@ beforeEach(() => {
   sendMessage.mockResolvedValue({ ok: true, result: { message_id: 98 } });
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   editMessage.mockResolvedValue({ ok: true });
+  editMessageReplyMarkup.mockResolvedValue({ ok: true });
 });
 
 describe('IntakeBuffer — manual accumulator (no timer)', () => {
-  it('idle messages accumulate with a launch button and never auto-dispatch', async () => {
+  it('idle messages each get a FRESH anchored ack, never a silent edit (owner reversal 2026-09-15)', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
@@ -59,12 +62,15 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(state._dump().alarm).toBeNull();                 // no timer armed
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // collector shown
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();    // nothing prior to strip
 
-    // Second message edits the same collector message (updates the count).
+    // Second message must produce its OWN fresh bubble (anchored to it), not an
+    // edit of the first — an edit is invisible once the chat has scrolled past it.
     await io.fetch(appendReq('also do X'));
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(editMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // still one collector
+    expect(editMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2); // a new collector each time
+    expect(editMessageReplyMarkup).toHaveBeenCalledTimes(1);  // prior button stripped
   });
 
   it('▶️ flush coalesces the buffer into ONE dispatch and clears busy after', async () => {

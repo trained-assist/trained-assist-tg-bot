@@ -18,9 +18,19 @@ export async function editMessage(token, chatId, messageId, text, extra = {}) {
   return res.json();
 }
 
-export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboard) {
+export async function editMessageReplyMarkup(token, chatId, messageId, inlineKeyboard = []) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: inlineKeyboard } }),
+  });
+  return res.json();
+}
+
+export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboard, extra = {}) {
   return sendMessage(token, chatId, text, {
     reply_markup: { inline_keyboard: inlineKeyboard },
+    ...extra,
   });
 }
 

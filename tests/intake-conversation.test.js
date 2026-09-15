@@ -39,6 +39,10 @@ vi.mock('../src/lib/telegram.js', () => ({
     tg.push({ kind: 'edit', chatId, msgId, text, buttons: kb(extra?.reply_markup?.inline_keyboard) });
     return Promise.resolve({ ok: true });
   }),
+  editMessageReplyMarkup: vi.fn((_t, chatId, msgId, inlineKeyboard = []) => {
+    tg.push({ kind: 'edit', chatId, msgId, buttons: kb(inlineKeyboard) });
+    return Promise.resolve({ ok: true });
+  }),
   sendDocument: vi.fn(() => Promise.resolve({ ok: true, result: { message_id: nextId() } })),
 }));
 
