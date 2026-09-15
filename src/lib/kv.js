@@ -44,3 +44,35 @@ export async function listUsernames(kv) {
   const list = await kv.list({ prefix: 'user:' });
   return list.keys.map(k => k.name.replace('user:', ''));
 }
+
+// Class B self-heal (issue #604): when the agent is classified 'down', queue ONE
+// delayed retry instead of dead-ending on "попробуй через минуту". The Worker is
+// stateless and can't setTimeout for minutes, so the retry queue lives in KV and
+// is drained by a Cron Trigger (see scheduled() in index.js).
+const RETRY_DELAY_MS = 3 * 60 * 1000; // owner's own estimate — restart+redeploy margin, see #604
+const RETRY_TTL_SECONDS = 10 * 60; // self-cleans if the cron somehow never picks it up
+
+export async function scheduleRetry(kv, { chatId, text, opts }) {
+  const dueAt = Date.now() + RETRY_DELAY_MS;
+  const key = `retry:${chatId}:${Date.now()}`;
+  await kv.put(key, JSON.stringify({ chatId, text, opts, dueAt }), {
+    expirationTtl: RETRY_TTL_SECONDS,
+    metadata: { dueAt },
+  });
+}
+
+// Pop every retry whose dueAt has passed. Deletes each key BEFORE the caller acts
+// on it — that's what caps this at exactly one attempt, without a separate
+// "attempted" flag: an overlapping cron tick simply finds nothing left to take.
+export async function takeDueRetries(kv) {
+  const list = await kv.list({ prefix: 'retry:' });
+  const now = Date.now();
+  const due = [];
+  for (const k of list.keys) {
+    if ((k.metadata?.dueAt ?? 0) > now) continue;
+    const val = await kv.get(k.name);
+    await kv.delete(k.name);
+    if (val) due.push(JSON.parse(val));
+  }
+  return due;
+}
