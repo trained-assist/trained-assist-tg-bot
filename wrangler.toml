@@ -72,3 +72,36 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 #   wrangler secret put BOT_SECRET --env staging
 #   wrangler secret put AGENT_URL --env staging
 #   wrangler secret put AGENT_SECRET --env staging
+
+# ── Recruiter environment (separate bot, same MCP/agent backend, recruiting-
+# domain commands pinned in the menu — so recruiter users don't mix with the
+# general-purpose bot's user base and command set) ─────────────────────────
+[env.recruiter]
+name = "trained-assist-tg-bot-recruiter"
+
+[env.recruiter.vars]
+BOT_USERNAME = "super_recruiter_assistant_bot"
+INTAKE_DEBOUNCE = "on"
+
+[[env.recruiter.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+# Same USERS KV as prod — recruiters log in with the same account/profile
+# system as the main bot. Same SESSIONS KV — its only content is a harmless
+# per-chat member-count cache, safe to share across bots.
+[[env.recruiter.kv_namespaces]]
+binding = "SESSIONS"
+id = "5753e58c86c14550930106cf9248eb72"
+
+[[env.recruiter.kv_namespaces]]
+binding = "USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+# Secrets for recruiter — set once via:
+#   wrangler secret put BOT_TOKEN --env recruiter
+#   wrangler secret put AGENT_URL --env recruiter
+#   wrangler secret put AGENT_SECRET --env recruiter
+# (ADMIN_GROUP_ID / RELAY_URL / RELAY_BOT_SECRET / DEEPGRAM_API_KEY optional —
+# only needed if the recruiter bot grows an admin group, Chrome-ext pairing,
+# or voice-note transcription.)
