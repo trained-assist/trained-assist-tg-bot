@@ -5,25 +5,29 @@ import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, re
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 import { handleMessage } from './message.js';
+import commandsRegistry from '../../commands-registry.json';
 
 // Commands the agent handles itself (via getQuickAnswer / a session task) rather than
 // the gateway. The gateway must forward these to the agent instead of rejecting them as
-// "unknown" — otherwise agent-side commands stay invisible until the gateway is redeployed.
-// Aliases mirror the agent's PERSONA_INTENT (persona/role/роль/персона/character/характер)
-// and PROJECT_INTENT (project/projects/проект/проекты — list/switch/create projects).
-const AGENT_FORWARDED_COMMANDS = new Set([
-  '/persona', '/role', '/роль', '/персона', '/character', '/характер',
-  '/project', '/projects', '/проект', '/проекты',
-  // Bug/feature capture — bundles last messages + logs + note into a GitHub issue.
-  '/bug_or_feature', '/bug', '/feature', '/баг', '/фича', '/report', '/репорт',
-  // Admin-only; the agent gates it by sender/chat id (see GET_WEBPASS_INTENT in runner.js).
-  '/get_webpass', '/webpass', '/вебпароль',
-]);
+// "unknown" — otherwise agent-side commands stay invisible until the gateway is
+// redeployed. Derived from commands-registry.json (handler: "forward") instead of a
+// hand-maintained Set — see that file for the single source of truth + scripts/
+// check-commands-registry.js, which is what used to go stale and hide agent commands
+// from Telegram until someone remembered to update this list by hand.
+const AGENT_FORWARDED_COMMANDS = new Set(
+  commandsRegistry.commands
+    .filter((c) => c.handler === 'forward')
+    .flatMap((c) => [c.command, ...c.aliases])
+);
 
 // Admin-only agent commands that must ALSO pass through the admin-group branch in
 // index.js (which otherwise only forwards user-mgmt commands and silently drops the
 // rest). Without this, /get_webpass typed in the admin group gets no reply at all.
-const ADMIN_FORWARDED_COMMANDS = new Set(['/get_webpass', '/webpass', '/вебпароль']);
+const ADMIN_FORWARDED_COMMANDS = new Set(
+  commandsRegistry.commands
+    .filter((c) => c.handler === 'forward' && c.adminOnly)
+    .flatMap((c) => [c.command, ...c.aliases])
+);
 export function isAdminForwardedCommand(text) {
   const cmd = (text || '').split(' ')[0].split('@')[0].toLowerCase();
   return ADMIN_FORWARDED_COMMANDS.has(cmd);
