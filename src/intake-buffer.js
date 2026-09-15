@@ -19,8 +19,14 @@
 // The ONLY alarm is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessage, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
 import { coalesceBuffer } from './intake-routing.js';
+
+// Reply-anchor a new message to the one that triggered it — the only way a fresh
+// bubble reliably appears right after the user's own message once the chat has
+// scrolled (an edit to an older bubble is invisible off-screen). Best-effort:
+// if the source message was since deleted, still deliver un-anchored.
+const anchor = messageId => (messageId ? { reply_to_message_id: messageId, allow_sending_without_reply: true } : {});
 
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
@@ -56,7 +62,7 @@ export class IntakeBuffer {
         // A run is in flight — hold new messages (never auto-run), but ACK them so
         // the user isn't met with silence. A fresh launch button is offered once
         // the run finishes; here we only confirm receipt.
-        await this._showHeldNotice(msg.chat?.id, buf.length);
+        await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id);
         return json({ buffered: buf.length, held: true });
       }
       if (flush) {
@@ -65,7 +71,7 @@ export class IntakeBuffer {
         return json({ flushed: true });
       }
       // Idle: (re)show the launch button with the live count. No timer.
-      await this._showCollector(msg.chat?.id, buf.length);
+      await this._showCollector(msg.chat?.id, buf.length, msg.message_id);
       return json({ buffered: buf.length });
     }
 
@@ -81,19 +87,22 @@ export class IntakeBuffer {
     return new Response('not found', { status: 404 });
   }
 
-  // Show or refresh the single collector message carrying the launch button.
-  async _showCollector(chatId, count) {
+  // ACK every accumulated message with a FRESH bubble anchored to it — never an
+  // edit of an older one. An edit is invisible once the chat has scrolled past
+  // it, which is exactly what read as "did my message even arrive?" (the owner
+  // rejected the old edit-in-place design for this reason, 2026-09-15). The
+  // previous collector's button is stripped so only the newest is tappable —
+  // all buttons flush the same chat-keyed buffer, so a stale one is cosmetic
+  // clutter at worst, but one live button reads cleaner.
+  async _showCollector(chatId, count, replyToMessageId) {
     if (!chatId) return;
-    const msgId = await this.state.storage.get('collectorMsgId');
-    if (msgId) {
-      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, collectorText(count), {
-        reply_markup: { inline_keyboard: LAUNCH_BTN },
-      }).catch(err => { console.error(`[intake ${chatId}] edit collector failed:`, err?.message); return null; });
-      if (r && r.ok) return;
-      // Edit failed (message deleted / too old) — fall through and post a new one.
+    const prevId = await this.state.storage.get('collectorMsgId');
+    if (prevId) {
+      await editMessageReplyMarkup(this.env.BOT_TOKEN, chatId, prevId, [])
+        .catch(err => console.error(`[intake ${chatId}] strip prior collector button failed:`, err?.message));
     }
     const sent = await sendMessageWithKeyboard(
-      this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN,
+      this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId),
     ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
     const newId = sent?.result?.message_id;
     if (newId) {
@@ -105,29 +114,23 @@ export class IntakeBuffer {
     // the ack here reads as "the bot ate my message" even though nothing was lost. Try
     // once more without the inline keyboard in case the markup itself is what Telegram
     // rejected; the force word (see FORCE_RUN_RE) still launches without a button.
-    const plain = await sendMessage(this.env.BOT_TOKEN, chatId, collectorText(count))
+    const plain = await sendMessage(this.env.BOT_TOKEN, chatId, collectorText(count), anchor(replyToMessageId))
       .catch(err => { console.error(`[intake ${chatId}] plain-text collector retry failed:`, err?.message); return null; });
     const plainId = plain?.result?.message_id;
     if (plainId) await this.state.storage.put('collectorMsgId', plainId);
     else console.error(`[intake ${chatId}] collector message not delivered at all — buf accepted silently, user sees no ack:`, plain?.description || plain);
   }
 
-  // Confirm receipt of a message held during an in-flight run. One rolling notice
-  // (send once → edit its count) so held messages are visible but not spammy.
-  async _showHeldNotice(chatId, count) {
+  // Confirm receipt of a message held during an in-flight run. Same rule as the
+  // collector: a fresh bubble per message, anchored to it, not an edit of a
+  // rolling notice — the rolling edit was invisible once scrolled past.
+  async _showHeldNotice(chatId, count, replyToMessageId) {
     if (!chatId) return;
-    const msgId = await this.state.storage.get('heldMsgId');
-    if (msgId) {
-      const r = await editMessage(this.env.BOT_TOKEN, chatId, msgId, heldText(count))
-        .catch(err => { console.error(`[intake ${chatId}] edit held-notice failed:`, err?.message); return null; });
-      if (r && r.ok) return;
-      // Edit failed (deleted / too old) — fall through and post a fresh notice.
-    }
-    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count))
+    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count), anchor(replyToMessageId))
       .catch(err => { console.error(`[intake ${chatId}] send held-notice failed:`, err?.message); return null; });
-    const newId = sent?.result?.message_id;
-    if (newId) await this.state.storage.put('heldMsgId', newId);
-    else console.error(`[intake ${chatId}] held-notice not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
+    if (!sent?.result?.message_id) {
+      console.error(`[intake ${chatId}] held-notice not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
+    }
   }
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
@@ -166,13 +169,10 @@ export class IntakeBuffer {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
-      // The held-notice belongs to the run that just ended; retire it so the next
-      // busy cycle starts a fresh one.
-      await this.state.storage.delete('heldMsgId');
       const remaining = (await this.state.storage.get('buf')) || [];
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
-        await this._showCollector(chatId, remaining.length);
+        await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);
       }
     }
   }
@@ -191,7 +191,8 @@ export class IntakeBuffer {
     }
     const buf = (await this.state.storage.get('buf')) || [];
     if (buf.length) {
-      await this._showCollector(buf[buf.length - 1].msg.chat?.id, buf.length);
+      const last = buf[buf.length - 1].msg;
+      await this._showCollector(last.chat?.id, buf.length, last.message_id);
     }
   }
 }
