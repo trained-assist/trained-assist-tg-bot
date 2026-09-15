@@ -1,0 +1,51 @@
+{
+  "$comment": "Single source of truth for every Telegram command this bot responds to. 'local' = handled directly in src/handlers/commands.js (see the case in the switch). 'forward' = relayed as-is to the agent backend, which matches it against a *_INTENT regex in trained-assist-agent/src/runner.js (getQuickAnswer) — see that repo's src/telegram-commands.js for the matching agent-side registry entry. scripts/check-commands-registry.js enforces that every 'local' entry has a real switch case; AGENT_FORWARDED_COMMANDS/ADMIN_FORWARDED_COMMANDS in commands.js are derived from this file, not hand-duplicated. Adding a new command? Add it here in the same PR — that's what keeps this list from drifting out of sync with the code again.",
+  "commands": [
+    { "command": "/start", "aliases": [], "handler": "local", "description": "Приветствие / список команд" },
+    { "command": "/login", "aliases": [], "handler": "local", "description": "Войти: /login username password" },
+    { "command": "/logout", "aliases": [], "handler": "local", "description": "Выйти из аккаунта" },
+    { "command": "/profile", "aliases": [], "handler": "local", "description": "Текущий профиль, смена профиля" },
+    { "command": "/status", "aliases": [], "handler": "local", "description": "Статус агента (и RU-агента)" },
+    { "command": "/version", "aliases": [], "handler": "local", "description": "Версия бота" },
+    { "command": "/privacy", "aliases": [], "handler": "local", "description": "Политика приватности" },
+    { "command": "/settoken", "aliases": [], "handler": "local", "description": "Сохранить токен сервиса" },
+    { "command": "/chromeext_install", "aliases": [], "handler": "local", "description": "Установка Chrome-расширения" },
+    { "command": "/chromeext_connect", "aliases": [], "handler": "local", "description": "Код подключения расширения" },
+    { "command": "/chromeext_status", "aliases": [], "handler": "local", "description": "Статус подключения расширения" },
+    { "command": "/sessions", "aliases": ["/диалоги"], "handler": "local", "description": "Последние диалоги" },
+    { "command": "/new_dialog", "aliases": ["/новый_диалог"], "handler": "local", "description": "Начать новый диалог" },
+    { "command": "/close", "aliases": ["/закрыть"], "handler": "local", "description": "Закрыть текущий диалог" },
+    { "command": "/files", "aliases": ["/папки"], "handler": "local", "description": "Файлы и папки профиля" },
+    { "command": "/ru", "aliases": [], "handler": "local", "description": "Задача через РФ IP (nalog.ru и т.п.)" },
+    { "command": "/stop", "aliases": ["/стоп"], "handler": "local", "description": "Остановить текущую задачу" },
+    { "command": "/skills", "aliases": ["/скиллы"], "handler": "local", "description": "Список доступных скиллов" },
+    { "command": "/all_on", "aliases": [], "handler": "local", "description": "Включить «все сообщения → агенту» в группе" },
+    { "command": "/all_off", "aliases": [], "handler": "local", "description": "Выключить «все сообщения → агенту»" },
+    {
+      "command": "/report_bug_or_feature_request",
+      "aliases": [],
+      "handler": "local",
+      "description": "Сообщить о баге/фиче (форма с описанием)",
+      "note": "'/report' alone is shadowed by the bug_or_feature forward group below — the gateway checks AGENT_FORWARDED_COMMANDS before the switch, so only this long alias actually reaches cmdReport."
+    },
+
+    { "command": "/persona", "aliases": ["/role", "/роль", "/персона", "/character", "/характер"], "handler": "forward", "description": "Роль ассистента для профиля" },
+    { "command": "/project", "aliases": ["/projects", "/проект", "/проекты"], "handler": "forward", "description": "Проекты профиля: список/смена/создание" },
+    { "command": "/bug_or_feature", "aliases": ["/bug", "/feature", "/баг", "/фича", "/report", "/репорт"], "handler": "forward", "description": "Быстрый репорт бага/фичи → GitHub issue" },
+    { "command": "/get_webpass", "aliases": ["/webpass", "/вебпароль"], "handler": "forward", "adminOnly": true, "description": "Пароль для веб-интерфейса (self-service, не эскалирует чужой профиль)" },
+
+    { "command": "/ping", "aliases": [], "handler": "forward", "description": "Проверка что агент онлайн" },
+    { "command": "/help", "aliases": [], "handler": "forward", "description": "Список возможностей и подсказки по настройке" },
+    { "command": "/usage", "aliases": [], "handler": "forward", "description": "Расход токенов и оценочная стоимость" },
+    { "command": "/context_on", "aliases": [], "handler": "forward", "description": "Показывать карточку статуса контекста" },
+    { "command": "/context_off", "aliases": [], "handler": "forward", "description": "Скрыть карточку статуса контекста" },
+    { "command": "/wakeup", "aliases": [], "handler": "forward", "description": "Разбудить зависшую задачу агента" },
+    { "command": "/hh_status", "aliases": [], "handler": "forward", "description": "Статус фоновой оценки кандидатов HeadHunter" },
+    { "command": "/enable_illustrate", "aliases": [], "handler": "forward", "description": "Включить скил генерации иллюстраций" },
+    { "command": "/new_job_post", "aliases": [], "handler": "forward", "description": "Начать создание новой вакансии HeadHunter" },
+    { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "description": "Отменить текущее создание вакансии" },
+    { "command": "/bugreport", "aliases": [], "handler": "forward", "description": "Короткий алиас для /bug_or_feature" },
+    { "command": "/google_drive_sharing_notifications_switch_off", "aliases": [], "handler": "forward", "description": "Выключить уведомления о шаринге Google Drive" },
+    { "command": "/google_drive_sharing_notifications_switch_on", "aliases": [], "handler": "forward", "description": "Включить уведомления о шаринге Google Drive" }
+  ]
+}
