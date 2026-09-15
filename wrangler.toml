@@ -50,7 +50,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
-BOT_USERNAME = "super_personal_assistant_bot"
+BOT_USERNAME = "staging_bot_required"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
 # DO binding must be redeclared per named env (migrations are top-level, shared).
@@ -58,14 +58,14 @@ INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
-# Staging uses same KV namespaces as prod (OK for integration testing)
+# Provision dedicated staging namespaces before deployment. Placeholder IDs deliberately block deployment.
 [[env.staging.kv_namespaces]]
 binding = "SESSIONS"
-id = "5753e58c86c14550930106cf9248eb72"
+id = "STAGING_SESSIONS_REQUIRED"
 
 [[env.staging.kv_namespaces]]
 binding = "USERS"
-id = "74c1930ed8464f4889c056031f0d42f8"
+id = "STAGING_USERS_REQUIRED"
 
 # Secrets for staging — set once via:
 #   wrangler secret put BOT_TOKEN --env staging

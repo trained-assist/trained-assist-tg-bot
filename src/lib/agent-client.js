@@ -70,9 +70,11 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, files, traceId, fileBase64, fileName, fileMimeType }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
+  if (files?.length) body.files = files;
+  if (traceId) body.traceId = traceId;
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
   if (forceNew) body.forceNew = true;
@@ -99,7 +101,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
-    if (res.ok) return res.json();
+    if (res.ok) return { ...await res.json(), agentUrl };
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
       throw new Error(`agent /run HTTP ${res.status}`);

@@ -34,6 +34,28 @@ export async function handleMessage(msg, env, opts = {}) {
     );
   }
 
+  if (msg.intakeMessages) {
+    const files = [];
+    const words = [];
+    for (const item of msg.intakeMessages) {
+      const human = item.caption || stripMediaTags(item.text);
+      if (human) words.push(human);
+      const source = item.voice || item.audio || item.video || item.document || item.photo?.at(-1);
+      if (!source) continue;
+      if (source.file_size > MAX_TG_DOWNLOAD_BYTES) throw new Error('Вложение превышает 20 MB');
+      if (item.voice || item.audio || item.video || /^(audio|video)\//.test(source.mime_type || '')) {
+        const { transcript, error } = await transcribeVoice(source.file_id, source.mime_type, env);
+        if (error) throw new Error('Не удалось расшифровать вложение');
+        words.push(transcript);
+      } else {
+        const { base64, error } = await downloadTgFileBase64(source.file_id, env);
+        if (error) throw new Error('Не удалось скачать вложение');
+        files.push({ fileBase64: base64, fileName: source.file_name || `photo-${item.message_id || files.length}.jpg`, fileMimeType: source.mime_type || 'image/jpeg' });
+      }
+    }
+    return handleText(chatId, session, words.join('\n') || 'Вложения', env, { ...opts, files, traceId: msg.traceId });
+  }
+
   // Media branches take precedence over `text`. On the buffered/dispatch path
   // (IntakeBuffer._dispatch) a media message keeps its .photo/.voice/.document
   // field but gets .text overwritten with a coalesced tag string ("photo:<id>").
@@ -105,7 +127,7 @@ export async function handleMessage(msg, env, opts = {}) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке: ${e.message}`);
     }
   } else if (text) {
-    await handleText(chatId, session, text, env, { mode: opts.mode || null });
+    return handleText(chatId, session, text, env, { ...opts, traceId: msg.traceId });
   } else {
     await sendMessage(env.BOT_TOKEN, chatId,
       '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
@@ -128,7 +150,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
   try {
     const route = await resolveSessionRoute(chatId, session, text, env);
 
-    if (route.type === 'disambiguate') {
+    if (route.type === 'disambiguate' && !opts.files?.length) {
       // Store the pending message, show session picker
       await setSession(env.SESSIONS, chatId, {
         ...session,
@@ -143,7 +165,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // and the profile has ≥2 projects, ask which project before dispatching. Skip for
     // file uploads (the file can't be re-attached from the deferred pending message).
     const isNewDialog = route.forceNew || !session.lastSessionId;
-    const hasFile = !!opts.fileBase64;
+    const hasFile = !!opts.fileBase64 || !!opts.files?.length;
     if (isNewDialog && !hasFile) {
       const decision = await getProjectDecision(env, { username: session.username, chatId });
       if (shouldAskProject({ isNewDialog, hasFile, decision })) {
@@ -158,7 +180,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     }
 
     // Run the task — agent creates/continues session
-    const sessionId = route.sessionId;
+    const sessionId = route.sessionId || newSessionId();
     const context = opts.isVoice ? '[voice-message]' : null;
 
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
@@ -182,6 +204,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
+      traceId: opts.traceId,
+      files: opts.files,
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
@@ -200,6 +224,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
+    return result;
   } catch (err) {
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
@@ -211,7 +236,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Skip queueing when a file payload is attached: base64-inflated, it can
     // approach KV's 25MB value limit, and resending a file is trivial for the
     // user anyway — not worth the failure mode of scheduleRetry itself throwing.
-    if (kind === 'down' && !opts.isRetry && !opts.fileBase64) {
+    if (kind === 'down' && !opts.isRetry && !opts.fileBase64 && !opts.files?.length) {
       await scheduleRetry(env.SESSIONS, { chatId, text, opts });
       await sendMessage(env.BOT_TOKEN, chatId,
         '⏸ Агент временно недоступен. Попробую снова через 3 минуты — не отправляй повторно.'

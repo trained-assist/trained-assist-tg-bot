@@ -172,14 +172,17 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(opts).toEqual({ mode: 'deep' });
   });
 
-  it('C4: replying to the bot bypasses the buffer and reaches the agent directly', async () => {
+  it('C4: replying to the bot accumulates until explicit launch', async () => {
     const { env } = makeWorld();
     await say(env, 42, 'первый кусок задачи');               // accumulates
     expect(handleMessage).not.toHaveBeenCalled();
 
-    await replyToBot(env, 42, 'да, именно так');             // conversation turn
+    await replyToBot(env, 42, 'да, именно так');
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(tg.at(-1).buttons).toContain(RUN_CB);
+    await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][0].text).toBe('да, именно так');
+    expect(handleMessage.mock.calls[0][0].text).toBe('первый кусок задачи\nда, именно так');
   });
 
   it('C5: an 8-message conversation — accumulate, launch, follow-ups held+acked, re-launch', async () => {
@@ -222,7 +225,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
   // ask «это всё, или дополнишь?» offering ▶️, instead of silently swallowing /
   // auto-launching a 2nd run. Kept as an executable spec but skipped so it doesn't
   // hold main RED under the now-required `ci` gate. Un-skip when #71 lands.
-  it.skip('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
+  it('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
     // The user's rationale: Telegram can't carry a comment + an explaining
     // screenshot in one message. So after the agent answers, the very next
     // contribution is usually the SECOND half of one thought — it must be held

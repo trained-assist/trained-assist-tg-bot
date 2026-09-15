@@ -66,12 +66,12 @@ describe('intake invariant — a message must ACCUMULATE, not launch (issue #66)
     expect(_appended[0].flush).toBe(false);
   });
 
-  // Documented bypass: answering the bot's own question goes straight through.
-  it('reply-to-bot: intentional bypass (launches)', async () => {
+  // Replies follow the same explicit-launch contract as other content.
+  it('reply-to-bot: accumulates without launching', async () => {
     const { env, _appended } = makeEnv();
     await routeText(fx.reply, env, 42);
-    expect(_appended).toHaveLength(0);
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(_appended).toHaveLength(1);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   // ---- Part B of #66 landed: media now buffers instead of firing. ----

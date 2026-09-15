@@ -35,7 +35,7 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
 const collectorText = n =>
-  `📥 Принял ✅ Накапливаю (${n}). Пиши ещё — или жми «▶️ Запустить проработку», когда закончишь.`;
+  `📥 Принял ✅ Накапливаю (${n}). Можешь дополнить — или жми «▶️ Запустить проработку», когда закончишь.`;
 
 // Shown while a run is in flight: the buffer holds new messages (never auto-runs),
 // but the user MUST still see they were received. Silence here was the «спросил
@@ -142,7 +142,10 @@ export class IntakeBuffer {
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
     const coalescedText = coalesceBuffer(buf);
-    const msg = { ...base, text: coalescedText };
+    const traceId = crypto.randomUUID();
+    const hasMedia = buf.some(({ msg }) => msg.photo || msg.document || msg.voice || msg.audio || msg.video);
+    const msg = { ...base, text: coalescedText, traceId, ...(hasMedia ? { intakeMessages: buf.map(x => x.msg) } : {}) };
+    console.log(JSON.stringify({ event: 'intake.dispatch', traceId, chatId, messageIds: buf.map(x => x.msg.message_id) }));
 
     // Retire the collector button so it can't be tapped twice.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
@@ -164,8 +167,18 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep' });
+      const accepted = await handleMessage(msg, this.env, { mode: 'deep' });
+      if (accepted?.taskId) {
+        await this.state.storage.put('activeRun', { taskId: accepted.taskId, agentUrl: accepted.agentUrl || this.env.AGENT_URL, traceId, chatId });
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+      }
+    } catch (error) {
+      const pending = (await this.state.storage.get('buf')) || [];
+      await this.state.storage.put('buf', [...buf, ...pending]);
+      await sendMessage(this.env.BOT_TOKEN, chatId, 'Не удалось передать пакет. Сообщения сохранены — можно повторить запуск.');
+      console.error(JSON.stringify({ event: 'intake.failed', traceId }));
     } finally {
+      if (await this.state.storage.get('activeRun')) return;
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
@@ -178,6 +191,26 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    const active = await this.state.storage.get('activeRun');
+    if (active) {
+      try {
+        const response = await fetch(`${active.agentUrl}/tasks/status?taskId=${encodeURIComponent(active.taskId)}`, {
+          headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) throw new Error('status unavailable');
+        const status = await response.json();
+        if (!['settled', 'failed'].includes(status.state)) throw new Error('still active or unknown');
+        console.log(JSON.stringify({ event: 'intake.finished', traceId: active.traceId, taskId: active.taskId, state: status.state }));
+        await this.state.storage.delete('activeRun');
+        await this.state.storage.delete('busy');
+        await this.state.storage.delete('busySince');
+      } catch {
+        // Unknown (including agent restart) is not proof of completion.
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+        return;
+      }
+    }
+
     // Only the BUSY_MAX safety net reaches here: a run whose isolate died before
     // its finally cleared `busy`. Release the hold and re-offer the launch button.
     if ((await this.state.storage.get('busy')) === true) {

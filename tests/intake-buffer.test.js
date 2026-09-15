@@ -163,3 +163,58 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('accepted task lifecycle', () => {
+  it('keeps busy after 202, holds follow-ups, and releases only after terminal status', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent.test', AGENT_SECRET: 'test' });
+    handleMessage.mockResolvedValueOnce({ taskId: 'task-1' });
+    await io.fetch(appendReq('first'));
+    await io.fetch(flushReq());
+    expect(await state.storage.get('busy')).toBe(true);
+    await io.fetch(appendReq('follow-up'));
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValueOnce(Response.json({ state: 'accepted' }))
+        .mockResolvedValueOnce(Response.json({ state: 'unknown' }))
+        .mockResolvedValueOnce(Response.json({ state: 'settled' }));
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBeUndefined();
+      expect(await state.storage.get('activeRun')).toBeUndefined();
+      expect((await state.storage.get('buf'))[0].text).toBe('follow-up');
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+      expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it('passes every media message in order with the trace ID', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const messages = [
+      { chat: { id: 42 }, message_id: 1, photo: [{ file_id: 'p1' }] },
+      { chat: { id: 42 }, message_id: 2, document: { file_id: 'd1' } },
+      { chat: { id: 42 }, message_id: 3, text: 'compare these' },
+    ];
+    for (const msg of messages) await io.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({ text: msg.text || '', msg }) }));
+    await io.fetch(flushReq());
+    const sent = handleMessage.mock.calls[0][0];
+    expect(sent.intakeMessages).toEqual(messages);
+    expect(sent.traceId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('restores a rejected batch and offers explicit retry', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    handleMessage.mockRejectedValueOnce(new Error('download failed'));
+    await io.fetch(appendReq('keep this'));
+    await io.fetch(flushReq());
+    expect((await state.storage.get('buf'))[0].text).toBe('keep this');
+    expect(await state.storage.get('busy')).toBeUndefined();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
+  });
+});
