@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { getSession, setSession, newSessionId } from '../lib/kv.js';
+import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import { shouldAskProject } from '../intake-routing.js';
@@ -204,12 +204,42 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);
+
+    // Class B self-heal (issue #604): the FIRST time we see 'down', queue one
+    // delayed retry instead of dead-ending on the user. opts.isRetry marks the
+    // scheduled retry itself — it must never queue a second one (cap-at-1).
+    // Skip queueing when a file payload is attached: base64-inflated, it can
+    // approach KV's 25MB value limit, and resending a file is trivial for the
+    // user anyway — not worth the failure mode of scheduleRetry itself throwing.
+    if (kind === 'down' && !opts.isRetry && !opts.fileBase64) {
+      await scheduleRetry(env.SESSIONS, { chatId, text, opts });
+      await sendMessage(env.BOT_TOKEN, chatId,
+        '⏸ Агент временно недоступен. Попробую снова через 3 минуты — не отправляй повторно.'
+      );
+      return;
+    }
+
     const userMsg = kind === 'busy'
       ? '🕐 Агент занят — задача принята и стоит в очереди, отвечу как освобожусь. Не отправляй повторно.'
+      : kind === 'down' && opts.isRetry
+      ? '⏸ Агент всё ещё недоступен после повторной попытки. Попробуй позже вручную.'
       : kind === 'down'
-      ? '⏸ Агент временно недоступен. Попробуй через минуту.'
+      ? '⏸ Агент временно недоступен. Попробуй прислать файл ещё раз через пару минут.'
       : `❌ Ошибка: ${err.message}`;
     await sendMessage(env.BOT_TOKEN, chatId, userMsg);
+  }
+}
+
+// Class B self-heal (issue #604): drained by the Cron Trigger in index.js's
+// scheduled() every ~1min. Re-fetches the session fresh (not a stale snapshot)
+// so a retry doesn't fight a session the user has since moved on from; skips
+// silently if the user logged out in the meantime.
+export async function processDueRetries(env) {
+  const due = await takeDueRetries(env.SESSIONS);
+  for (const { chatId, text, opts } of due) {
+    const session = await getSession(env.SESSIONS, chatId);
+    if (!session) continue;
+    await handleText(chatId, session, text, env, { ...opts, isRetry: true });
   }
 }
 

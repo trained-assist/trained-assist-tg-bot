@@ -9,6 +9,12 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# Class B self-heal (issue #604): drains the KV delayed-retry queue every minute
+# so a "⏸ Агент недоступен" no longer dead-ends on the user — one automatic
+# retry ~3min later, see scheduled() in src/index.js.
+[triggers]
+crons = ["* * * * *"]
+
 [vars]
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).

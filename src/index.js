@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { handleMessage } from './handlers/message.js';
+import { handleMessage, processDueRetries } from './handlers/message.js';
 import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
@@ -192,5 +192,12 @@ async function getGroupMemberCount(env, chatId) {
   return stale ?? 999;
 }
 
+// Class B self-heal (issue #604): drains the KV retry queue every ~1min via
+// the Cron Trigger declared in wrangler.toml. waitUntil keeps the invocation
+// alive past the return — scheduled handlers have no separate "response" to wait on.
+async function scheduled(event, env, ctx) {
+  ctx.waitUntil(processDueRetries(env));
+}
+
 export { IntakeBuffer } from './intake-buffer.js';
-export default app;
+export default { fetch: app.fetch, scheduled };
