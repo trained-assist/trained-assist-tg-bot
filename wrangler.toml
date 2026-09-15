@@ -58,14 +58,14 @@ INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
-# Provision dedicated staging namespaces before deployment. Placeholder IDs deliberately block deployment.
+# Dedicated staging namespaces; must never be replaced with production IDs.
 [[env.staging.kv_namespaces]]
 binding = "SESSIONS"
-id = "STAGING_SESSIONS_REQUIRED"
+id = "b150ef5968d94849a79814ba8bc4ee42"
 
 [[env.staging.kv_namespaces]]
 binding = "USERS"
-id = "STAGING_USERS_REQUIRED"
+id = "1928a191938f4f60b01fbe12d66380e0"
 
 # Secrets for staging — set once via:
 #   wrangler secret put BOT_TOKEN --env staging

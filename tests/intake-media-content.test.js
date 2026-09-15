@@ -187,3 +187,19 @@ describe('oversized media is rejected before hitting Telegram\'s getFile limit',
     expect(runTask).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('buffered handler errors', () => {
+  const message = { chat: { id: 42 }, text: 'test', traceId: 'trace-1' };
+  it('propagates delivery errors to the buffer instead of claiming acceptance', async () => {
+    const error = Object.assign(new Error('timeout'), { delivery: 'unknown' });
+    runTask.mockRejectedValueOnce(error);
+    await expect(handleMessage(message, env)).rejects.toBe(error);
+    expect(classifyAgentError).not.toHaveBeenCalled();
+  });
+  it('keeps the admission receipt even when saving session state fails', async () => {
+    runTask.mockResolvedValueOnce({ taskId: 'u-intake-trace-1', agentUrl: 'https://agent.test' });
+    setSession.mockRejectedValueOnce(new Error('KV unavailable'));
+    await expect(handleMessage(message, env)).resolves.toMatchObject({ taskId: 'u-intake-trace-1' });
+    expect(runTask).toHaveBeenCalledTimes(1);
+  });
+});

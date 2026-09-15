@@ -155,6 +155,7 @@ export class IntakeBuffer {
       }).catch(() => {});
     }
     await this.state.storage.delete('collectorMsgId');
+    await this.state.storage.put('dispatchPacket', { traceId, chatId, messages: buf });
     await this.state.storage.delete('buf');
     await this.state.storage.put('busy', true);
     await this.state.storage.put('busySince', Date.now());
@@ -173,12 +174,22 @@ export class IntakeBuffer {
         await this.state.storage.setAlarm(Date.now() + 15_000);
       }
     } catch (error) {
+      if (error.delivery === 'unknown') {
+        await this.state.storage.put('activeRun', {
+          taskId: error.taskId, agentUrl: error.agentUrl, traceId, chatId,
+        });
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+        await sendMessage(this.env.BOT_TOKEN, chatId,
+          'Не удалось подтвердить запуск. Пакет сохранён, проверяю статус — повторно не отправляй.');
+        return;
+      }
       const pending = (await this.state.storage.get('buf')) || [];
       await this.state.storage.put('buf', [...buf, ...pending]);
       await sendMessage(this.env.BOT_TOKEN, chatId, 'Не удалось передать пакет. Сообщения сохранены — можно повторить запуск.');
       console.error(JSON.stringify({ event: 'intake.failed', traceId }));
     } finally {
       if (await this.state.storage.get('activeRun')) return;
+      await this.state.storage.delete('dispatchPacket');
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
@@ -201,6 +212,7 @@ export class IntakeBuffer {
         const status = await response.json();
         if (!['settled', 'failed'].includes(status.state)) throw new Error('still active or unknown');
         console.log(JSON.stringify({ event: 'intake.finished', traceId: active.traceId, taskId: active.taskId, state: status.state }));
+        await this.state.storage.delete('dispatchPacket');
         await this.state.storage.delete('activeRun');
         await this.state.storage.delete('busy');
         await this.state.storage.delete('busySince');
@@ -209,6 +221,14 @@ export class IntakeBuffer {
         await this.state.storage.setAlarm(Date.now() + 15_000);
         return;
       }
+    }
+
+    // An isolate can die after POST but before persisting its acknowledgement.
+    // Keep the packet for reconciliation; elapsed time proves neither rejection
+    // nor completion and must never cause duplicate execution.
+    if (await this.state.storage.get('dispatchPacket')) {
+      await this.state.storage.setAlarm(Date.now() + 15_000);
+      return;
     }
 
     // Only the BUSY_MAX safety net reaches here: a run whose isolate died before

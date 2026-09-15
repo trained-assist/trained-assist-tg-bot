@@ -147,6 +147,7 @@ function stripMediaTags(text) {
 }
 
 async function handleText(chatId, session, text, env, opts = {}) {
+  let accepted;
   try {
     const route = await resolveSessionRoute(chatId, session, text, env);
 
@@ -211,6 +212,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       fileMimeType: opts.fileMimeType || null,
     });
 
+    accepted = result;
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
 
     await setSession(env.SESSIONS, chatId, {
@@ -226,6 +228,10 @@ async function handleText(chatId, session, text, env, opts = {}) {
     });
     return result;
   } catch (err) {
+    // Session KV failure after admission must not lose the task acknowledgement.
+    if (accepted?.taskId) return accepted;
+    // The intake buffer owns packet restoration and ambiguous-delivery tracking.
+    if (opts.traceId) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);

@@ -218,3 +218,43 @@ describe('accepted task lifecycle', () => {
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('ambiguous delivery reconciliation', () => {
+  it('retains the packet across timeout, holds follow-ups, and releases only on terminal status', async () => {
+    const state = makeState();
+    const env = { BOT_TOKEN: 't', AGENT_SECRET: 'test' };
+    const io = new IntakeBuffer(state, env);
+    handleMessage.mockRejectedValueOnce(Object.assign(new Error('timeout'), {
+      delivery: 'unknown', taskId: 'u-intake-trace-1', agentUrl: 'https://agent.test',
+    }));
+    await io.fetch(appendReq('original'));
+    await io.fetch(flushReq());
+    expect((await state.storage.get('dispatchPacket')).messages[0].msg.text).toBe('original');
+    expect(await state.storage.get('busy')).toBe(true);
+    await io.fetch(appendReq('follow-up'));
+    await io.fetch(flushReq());
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'accepted' })));
+      await new IntakeBuffer(state, env).alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'settled' })));
+      await new IntakeBuffer(state, env).alarm();
+      expect(await state.storage.get('busy')).toBeUndefined();
+      expect(await state.storage.get('dispatchPacket')).toBeUndefined();
+      expect((await state.storage.get('buf'))[0].msg.text).toBe('follow-up');
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+  it('does not discard an unacknowledged packet after an isolate crash', async () => {
+    const state = makeState();
+    await state.storage.put('dispatchPacket', { traceId: 't', messages: [{ msg: { text: 'original' } }] });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', 1);
+    await new IntakeBuffer(state, { BOT_TOKEN: 't' }).alarm();
+    expect(await state.storage.get('busy')).toBe(true);
+    expect(await state.storage.get('dispatchPacket')).toBeDefined();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+});

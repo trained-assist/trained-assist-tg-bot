@@ -44,6 +44,7 @@ function run(args) {
   if (result.status !== 0) throw new Error(`Scenario command failed (${result.status}): ${args.join(' ')}`);
 }
 try {
+  run(['scripts/check-staging-isolation.mjs']);
   for (const file of [...suites.vitest, ...suites.node]) {
     if (!existsSync(file)) throw new Error(`Required scenario suite missing: ${file}`);
   }

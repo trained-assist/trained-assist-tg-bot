@@ -88,6 +88,32 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
 
+  // Intake owns retries. A transport failure or 5xx can arrive AFTER admission.
+  // Keep the stable lookup ID so the buffer can reconcile without another POST.
+  if (traceId) {
+    const taskId = `${username}-intake-${traceId}`;
+    try {
+      const res = await fetch(`${agentUrl}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.AGENT_SECRET}` },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const error = new Error(`agent /run HTTP ${res.status}`);
+        error.delivery = res.status >= 400 && res.status < 500 && res.status !== 408 ? 'rejected' : 'unknown';
+        throw error;
+      }
+      const result = await res.json();
+      if (!result.taskId) throw new Error('missing task acknowledgement');
+      return { ...result, agentUrl };
+    } catch (error) {
+      error.delivery ||= 'unknown';
+      error.taskId = taskId;
+      error.agentUrl = agentUrl;
+      throw error;
+    }
+  }
+
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
