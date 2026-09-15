@@ -11,6 +11,7 @@ if (!token) {
 }
 
 const commands = [
+  { command: 'login',            description: 'Войти: /login username password' },
   { command: 'new_job_post',     description: 'Новая вакансия HeadHunter' },
   { command: 'hh_status',        description: 'Статус фоновой оценки кандидатов' },
   { command: 'cancel_vacancy',   description: 'Отменить создание вакансии' },
