@@ -31,6 +31,7 @@
 
     { "command": "/persona", "aliases": ["/role", "/роль", "/персона", "/character", "/характер"], "handler": "forward", "description": "Роль ассистента для профиля" },
     { "command": "/project", "aliases": ["/projects", "/проект", "/проекты"], "handler": "forward", "description": "Проекты профиля: список/смена/создание" },
+    { "command": "/switch2klod", "aliases": ["/switch2codex"], "handler": "forward", "description": "Переключить CLI-движок (Claude Code / Codex) для этого чата" },
     { "command": "/bug_or_feature", "aliases": ["/bug", "/feature", "/баг", "/фича", "/report", "/репорт"], "handler": "forward", "description": "Быстрый репорт бага/фичи → GitHub issue" },
     { "command": "/get_webpass", "aliases": ["/webpass", "/вебпароль"], "handler": "forward", "adminOnly": true, "description": "Пароль для веб-интерфейса (self-service, не эскалирует чужой профиль)" },
 
