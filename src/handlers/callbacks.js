@@ -589,6 +589,34 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Escalate a quick answer (requirements-log [062], 2026-09-15) ─────────
+  // qa_more|{sessionId} — «🔎 Разобраться подробнее» under a template quick-answer
+  // (ping/hh-quick/etc. never touched Claude). §9.2 killed the generic one-shot
+  // action markup, which left quick answers with NO way to hand themselves to
+  // Claude — the user had to retype the question into the accumulator and hope
+  // it landed on the same session. This reruns the SAME session forceClaude+deep;
+  // agent-side (runner.js) already wraps the prior quick reply as context when it
+  // sees forceClaude+deep+no-explicit-task, so the escalation carries the original
+  // exchange instead of losing it.
+  if (data?.startsWith('qa_more|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🔎 Разбираюсь подробнее…');
+    const sessionId = data.slice('qa_more|'.length) || session.activeSessionId || session.lastSessionId;
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
   // ── Multi-button menu (§D) ────────────────────────────────────────────────
   // menu|{sessionId}|{idx} — Claude's answer offered 2-4 explicit alternatives (agent
   // side detects this the same way it detects a plan) and we rendered one button per
