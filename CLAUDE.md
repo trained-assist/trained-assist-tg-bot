@@ -104,7 +104,10 @@ npm test       # unit tests
 
 ## Development workflow
 
-All changes go through PRs — no direct pushes to `main`.
+All changes go through PRs — no direct pushes to `main`. This is enforced client-side via `.githooks/` (run `scripts/install-git-hooks.sh` once per clone — a fresh session should verify `git config core.hooksPath` is set to `.githooks` before doing anything else):
+- **pre-commit** blocks any commit made directly on `main`/`master` — create a branch first.
+- **pre-push** blocks pushing to `main`/`master`, and blocks pushing *again* to a branch that already has an OPEN pull request. **PRs are immutable**: once a branch is submitted as a PR, don't amend/force-push it — open a new branch and a new PR for further changes, even to fix CI.
+- Emergency override (explain why in the commit/PR): `ALLOW_PROTECTED_COMMIT=1` / `ALLOW_PR_UPDATE=1`.
 
 ```bash
 git checkout -b fix/description   # or feat/description
