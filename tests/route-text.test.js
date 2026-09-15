@@ -53,11 +53,11 @@ describe('routeText — shared private+group intake rule', () => {
     expect(_appended[0].flush).toBe(false);
   });
 
-  it('bypasses the buffer for a reply-to-bot (answering a question)', async () => {
+  it('accumulates a reply-to-bot until explicit launch)', async () => {
     const { env, _appended } = makeEnv();
     await routeText({ chat: { id: 42 }, text: 'да', reply_to_message: { message_id: 1 } }, env, 42);
-    expect(_appended).toHaveLength(0);
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(_appended).toHaveLength(1);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('honours the kill-switch — routes straight to the agent when off', async () => {

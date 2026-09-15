@@ -86,7 +86,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', onPrepared: expect.any(Function) });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +100,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' }); // force word also launches deep
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', onPrepared: expect.any(Function) }); // force word also launches deep
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -162,4 +162,150 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('accepted task lifecycle', () => {
+  it('keeps busy after 202, holds follow-ups, and releases only after terminal status', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent.test', AGENT_SECRET: 'test' });
+    handleMessage.mockResolvedValueOnce({ taskId: 'task-1' });
+    await io.fetch(appendReq('first'));
+    await io.fetch(flushReq());
+    expect(await state.storage.get('busy')).toBe(true);
+    await io.fetch(appendReq('follow-up'));
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValueOnce(Response.json({ state: 'accepted' }))
+        .mockResolvedValueOnce(Response.json({ state: 'unknown' }))
+        .mockResolvedValueOnce(Response.json({ state: 'settled' }));
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBeUndefined();
+      expect(await state.storage.get('activeRun')).toBeUndefined();
+      expect((await state.storage.get('buf'))[0].text).toBe('follow-up');
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+      expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it('passes every media message in order with the trace ID', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const messages = [
+      { chat: { id: 42 }, message_id: 1, photo: [{ file_id: 'p1' }] },
+      { chat: { id: 42 }, message_id: 2, document: { file_id: 'd1' } },
+      { chat: { id: 42 }, message_id: 3, text: 'compare these' },
+    ];
+    for (const msg of messages) await io.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({ text: msg.text || '', msg }) }));
+    await io.fetch(flushReq());
+    const sent = handleMessage.mock.calls[0][0];
+    expect(sent.intakeMessages).toEqual(messages);
+    expect(sent.traceId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('restores a rejected batch and offers explicit retry', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    handleMessage.mockRejectedValueOnce(new Error('download failed'));
+    await io.fetch(appendReq('keep this'));
+    await io.fetch(flushReq());
+    expect((await state.storage.get('buf'))[0].text).toBe('keep this');
+    expect(await state.storage.get('busy')).toBeUndefined();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ambiguous delivery reconciliation', () => {
+  it('retains the packet across timeout, holds follow-ups, and releases only on terminal status', async () => {
+    const state = makeState();
+    const env = { BOT_TOKEN: 't', AGENT_SECRET: 'test' };
+    const io = new IntakeBuffer(state, env);
+    handleMessage.mockRejectedValueOnce(Object.assign(new Error('timeout'), {
+      delivery: 'unknown', taskId: 'u-intake-trace-1', agentUrl: 'https://agent.test',
+    }));
+    await io.fetch(appendReq('original'));
+    await io.fetch(flushReq());
+    expect((await state.storage.get('dispatchPacket')).messages[0].msg.text).toBe('original');
+    expect(await state.storage.get('busy')).toBe(true);
+    await io.fetch(appendReq('follow-up'));
+    await io.fetch(flushReq());
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'accepted' })));
+      await new IntakeBuffer(state, env).alarm();
+      expect(await state.storage.get('busy')).toBe(true);
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'settled' })));
+      await new IntakeBuffer(state, env).alarm();
+      expect(await state.storage.get('busy')).toBeUndefined();
+      expect(await state.storage.get('dispatchPacket')).toBeUndefined();
+      expect((await state.storage.get('buf'))[0].msg.text).toBe('follow-up');
+      expect(handleMessage).toHaveBeenCalledTimes(1);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+  it('does not discard an unacknowledged packet after an isolate crash', async () => {
+    const state = makeState();
+    await state.storage.put('dispatchPacket', { traceId: 't', messages: [{ msg: { text: 'original' } }] });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', 1);
+    await new IntakeBuffer(state, { BOT_TOKEN: 't' }).alarm();
+    expect(await state.storage.get('busy')).toBe(true);
+    expect(await state.storage.get('dispatchPacket')).toBeDefined();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('prepared request recovery', () => {
+  it('persists exact request before POST and retries on the same agent only after capability confirmation', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { AGENT_SECRET: 'test' });
+    const body = { username: 'u', traceId: 'trace', task: 'original', files: [{ fileBase64: 'a'.repeat(35000) }] };
+    await io._prepareRun({ taskId: 'u-intake-trace', agentUrl: 'https://agent.test', body }, 'trace', 42);
+    expect((await state.storage.get('activeRun')).chunks).toBeGreaterThan(1);
+    const mock = vi.fn().mockResolvedValueOnce(Response.json({ state: 'unknown', retrySafe: true }))
+      .mockResolvedValueOnce(Response.json({ taskId: 'u-intake-trace' }, { status: 202 }));
+    vi.stubGlobal('fetch', mock);
+    try {
+      await io.alarm();
+      expect(mock.mock.calls[1][0]).toBe('https://agent.test/run');
+      expect(JSON.parse(mock.mock.calls[1][1].body)).toEqual(body);
+      expect((await state.storage.get('activeRun')).retries).toBe(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('caps retries and does not replay against an older agent', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { AGENT_SECRET: 'test' });
+    await io._prepareRun({ taskId: 'u-intake-t', agentUrl: 'https://agent.test', body: { traceId: 't' } }, 't', 42);
+    const mock = vi.fn().mockResolvedValue(Response.json({ state: 'unknown' }));
+    vi.stubGlobal('fetch', mock);
+    try {
+      await io.alarm();
+      expect(mock).toHaveBeenCalledTimes(1);
+      const active = await state.storage.get('activeRun');
+      active.retries = 3;
+      await state.storage.put('activeRun', active);
+      mock.mockResolvedValue(Response.json({ state: 'unknown', retrySafe: true }));
+      await io.alarm();
+      expect(mock).toHaveBeenCalledTimes(2);
+      expect(await state.storage.get('activeRun')).toBeDefined();
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+it('restores a packet interrupted before HTTP preparation exactly once', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, {});
+  await state.storage.put('busy', true);
+  await state.storage.put('dispatchPacket', { preparedProtocol: 1, messages: [{ text: 'first', msg: { chat: { id: 42 }, text: 'first' } }] });
+  await state.storage.put('buf', [{ text: 'second', msg: { chat: { id: 42 }, text: 'second' } }]);
+  await io.alarm();
+  await io.alarm();
+  expect((await state.storage.get('buf')).map(item => item.text)).toEqual(['first', 'second']);
+  expect(await state.storage.get('dispatchPacket')).toBeUndefined();
+  expect(await state.storage.get('busy')).toBeUndefined();
 });

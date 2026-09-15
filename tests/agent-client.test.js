@@ -67,3 +67,29 @@ describe('pickAgentUrl', () => {
     expect(await pickAgentUrl(env, USER, 'зайди на na log.ru')).toBe(RU);
   });
 });
+
+import { runTask } from '../src/lib/agent-client.js';
+describe('intake delivery outcomes', () => {
+  const env = { AGENT_URL: BASE, AGENT_SECRET: 'test' };
+  const packet = { username: 'u', userId: 42, task: 'test', traceId: 'trace-1' };
+  it('does not retry an ambiguous transport failure and supplies the lookup ID', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('timeout'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(runTask(env, packet)).rejects.toMatchObject({ delivery: 'unknown', taskId: 'u-intake-trace-1', agentUrl: BASE });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it('does not retry 503 because a proxy may fail after admission', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(runTask(env, packet)).rejects.toMatchObject({ delivery: 'unknown' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it('reports validation rejection so the original packet can be restored', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 400 })));
+    await expect(runTask(env, packet)).rejects.toMatchObject({ delivery: 'rejected' });
+  });
+  it('treats an unreadable acknowledgement as ambiguous', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not json')));
+    await expect(runTask(env, packet)).rejects.toMatchObject({ delivery: 'unknown' });
+  });
+});

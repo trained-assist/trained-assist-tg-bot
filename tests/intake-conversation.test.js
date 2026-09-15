@@ -134,7 +134,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
-    expect(opts).toEqual({ mode: 'deep' });
+    expect(opts).toEqual({ mode: 'deep', onPrepared: expect.any(Function) });
   });
 
   it('C2: a question sent WHILE a run is in flight must not be swallowed (anti-«молчит»)', async () => {
@@ -169,17 +169,20 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toContain('собери участников выставки Rosupack');
     expect(msg.text).toContain('только российские производители упаковки');
-    expect(opts).toEqual({ mode: 'deep' });
+    expect(opts).toEqual({ mode: 'deep', onPrepared: expect.any(Function) });
   });
 
-  it('C4: replying to the bot bypasses the buffer and reaches the agent directly', async () => {
+  it('C4: replying to the bot accumulates until explicit launch', async () => {
     const { env } = makeWorld();
     await say(env, 42, 'первый кусок задачи');               // accumulates
     expect(handleMessage).not.toHaveBeenCalled();
 
-    await replyToBot(env, 42, 'да, именно так');             // conversation turn
+    await replyToBot(env, 42, 'да, именно так');
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(tg.at(-1).buttons).toContain(RUN_CB);
+    await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][0].text).toBe('да, именно так');
+    expect(handleMessage.mock.calls[0][0].text).toBe('первый кусок задачи\nда, именно так');
   });
 
   it('C5: an 8-message conversation — accumulate, launch, follow-ups held+acked, re-launch', async () => {
@@ -215,14 +218,14 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(2);
     expect(handleMessage.mock.calls[1][0].text)
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
-    expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep' });
+    expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep', onPrepared: expect.any(Function) });
   });
 
   // PENDING (#71): describes unbuilt behavior — hold the follow-up after a run and
   // ask «это всё, или дополнишь?» offering ▶️, instead of silently swallowing /
   // auto-launching a 2nd run. Kept as an executable spec but skipped so it doesn't
   // hold main RED under the now-required `ci` gate. Un-skip when #71 lands.
-  it.skip('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
+  it('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
     // The user's rationale: Telegram can't carry a comment + an explaining
     // screenshot in one message. So after the agent answers, the very next
     // contribution is usually the SECOND half of one thought — it must be held

@@ -35,7 +35,7 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
 const collectorText = n =>
-  `📥 Принял ✅ Накапливаю (${n}). Пиши ещё — или жми «▶️ Запустить проработку», когда закончишь.`;
+  `📥 Принял ✅ Накапливаю (${n}). Можешь дополнить — или жми «▶️ Запустить проработку», когда закончишь.`;
 
 // Shown while a run is in flight: the buffer holds new messages (never auto-runs),
 // but the user MUST still see they were received. Silence here was the «спросил
@@ -47,6 +47,54 @@ export class IntakeBuffer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+  }
+
+  async _atomic(action) {
+    const storage = this.state.storage;
+    return storage.transaction ? storage.transaction(action) : action(storage);
+  }
+
+  async _restorePacket() {
+    await this._atomic(async storage => {
+      const packet = await storage.get('dispatchPacket');
+      if (!packet) return;
+      const pending = (await storage.get('buf')) || [];
+      await storage.put('buf', [...packet.messages, ...pending]);
+      await storage.delete('dispatchPacket');
+      await storage.delete('activeRun');
+      await storage.delete('busy');
+      await storage.delete('busySince');
+    });
+  }
+
+  async _prepareRun(request, traceId, chatId) {
+    const encoded = JSON.stringify(request.body);
+    const chunks = Math.ceil(encoded.length / 16000);
+    for (let i = 0; i < chunks; i++) {
+      await this.state.storage.put(`request:${i}`, encoded.slice(i * 16000, (i + 1) * 16000));
+    }
+    // Commit receipt only after every chunk is durable, before any HTTP POST.
+    await this.state.storage.put('activeRun', {
+      taskId: request.taskId, agentUrl: request.agentUrl, traceId, chatId, chunks, retries: 0,
+    });
+  }
+
+  async _retryPrepared(active) {
+    const parts = [];
+    for (let i = 0; i < active.chunks; i++) {
+      const part = await this.state.storage.get(`request:${i}`);
+      if (typeof part !== 'string') throw new Error('incomplete recovery packet');
+      parts.push(part);
+    }
+    const body = parts.join('');
+    JSON.parse(body); // Fail before sending a partial/corrupt request.
+    active.retries = (active.retries || 0) + 1;
+    await this.state.storage.put('activeRun', active);
+    const response = await fetch(`${active.agentUrl}/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
+      body, signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error('recovery delivery unconfirmed');
   }
 
   async fetch(request) {
@@ -142,7 +190,10 @@ export class IntakeBuffer {
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
     const coalescedText = coalesceBuffer(buf);
-    const msg = { ...base, text: coalescedText };
+    const traceId = crypto.randomUUID();
+    const hasMedia = buf.some(({ msg }) => msg.photo || msg.document || msg.voice || msg.audio || msg.video);
+    const msg = { ...base, text: coalescedText, traceId, ...(hasMedia ? { intakeMessages: buf.map(x => x.msg) } : {}) };
+    console.log(JSON.stringify({ event: 'intake.dispatch', traceId, chatId, messageIds: buf.map(x => x.msg.message_id) }));
 
     // Retire the collector button so it can't be tapped twice.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
@@ -152,11 +203,13 @@ export class IntakeBuffer {
       }).catch(() => {});
     }
     await this.state.storage.delete('collectorMsgId');
-    await this.state.storage.delete('buf');
-    await this.state.storage.put('busy', true);
-    await this.state.storage.put('busySince', Date.now());
-    // Safety net: only fires if the run's isolate dies before finally clears busy.
-    await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+    await this._atomic(async storage => {
+      await storage.put('dispatchPacket', { traceId, chatId, messages: buf, preparedProtocol: 1 });
+      await storage.delete('buf');
+      await storage.put('busy', true);
+      await storage.put('busySince', Date.now());
+      await storage.setAlarm(Date.now() + BUSY_MAX_MS);
+    });
 
     try {
       // Dynamic import avoids a circular import at module load.
@@ -164,8 +217,29 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep' });
+      const accepted = await handleMessage(msg, this.env, { mode: 'deep', onPrepared: request => this._prepareRun(request, traceId, chatId) });
+      if (accepted?.taskId) {
+        await this.state.storage.put('activeRun', { ...await this.state.storage.get('activeRun'), taskId: accepted.taskId, agentUrl: accepted.agentUrl || this.env.AGENT_URL, traceId, chatId });
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+      }
+    } catch (error) {
+      if (error.delivery === 'unknown') {
+        await this.state.storage.put('activeRun', {
+          ...await this.state.storage.get('activeRun'), taskId: error.taskId, agentUrl: error.agentUrl, traceId, chatId,
+        });
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+        await sendMessage(this.env.BOT_TOKEN, chatId,
+          'Не удалось подтвердить запуск. Пакет сохранён, проверяю статус — повторно не отправляй.');
+        return;
+      }
+      const prepared = await this.state.storage.get('activeRun');
+      for (let i = 0; i < (prepared?.chunks || 0); i++) await this.state.storage.delete(`request:${i}`);
+      await this._restorePacket();
+      await sendMessage(this.env.BOT_TOKEN, chatId, 'Не удалось передать пакет. Сообщения сохранены — можно повторить запуск.');
+      console.error(JSON.stringify({ event: 'intake.failed', traceId }));
     } finally {
+      if (await this.state.storage.get('activeRun')) return;
+      await this.state.storage.delete('dispatchPacket');
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
@@ -178,6 +252,44 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    const active = await this.state.storage.get('activeRun');
+    if (active) {
+      try {
+        const response = await fetch(`${active.agentUrl}/tasks/status?taskId=${encodeURIComponent(active.taskId)}`, {
+          headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) throw new Error('status unavailable');
+        const status = await response.json();
+        if (status.state === 'unknown' && status.retrySafe === true && active.chunks && (active.retries || 0) < 3) {
+          await this._retryPrepared(active);
+        }
+        if (!['settled', 'failed'].includes(status.state)) throw new Error('still active or unknown');
+        console.log(JSON.stringify({ event: 'intake.finished', traceId: active.traceId, taskId: active.taskId, state: status.state }));
+        for (let i = 0; i < (active.chunks || 0); i++) await this.state.storage.delete(`request:${i}`);
+        await this.state.storage.delete('dispatchPacket');
+        await this.state.storage.delete('activeRun');
+        await this.state.storage.delete('busy');
+        await this.state.storage.delete('busySince');
+      } catch {
+        // Unknown (including agent restart) is not proof of completion.
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+        return;
+      }
+    }
+
+    // An isolate can die after POST but before persisting its acknowledgement.
+    // Keep the packet for reconciliation; elapsed time proves neither rejection
+    // nor completion and must never cause duplicate execution.
+    const packet = await this.state.storage.get('dispatchPacket');
+    if (packet) {
+      if (packet.preparedProtocol === 1) {
+        await this._restorePacket();
+      } else {
+        await this.state.storage.setAlarm(Date.now() + 15_000);
+        return;
+      }
+    }
+
     // Only the BUSY_MAX safety net reaches here: a run whose isolate died before
     // its finally cleared `busy`. Release the hold and re-offer the launch button.
     if ((await this.state.storage.get('busy')) === true) {
