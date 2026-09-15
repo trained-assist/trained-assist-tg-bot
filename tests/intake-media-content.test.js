@@ -132,5 +132,58 @@ describe('media reaches the agent as a file, not a tag string', () => {
       await handleMessage(msg, env, { mode: 'deep' });
       expect(runTask.mock.calls[0][1].mode).toBe('deep');
     });
+
+    it('video', async () => {
+      const msg = { chat: { id: 42 }, video: { file_id: 'Vid123', mime_type: 'video/mp4' }, text: 'video:Vid123' };
+      await handleMessage(msg, env, { mode: 'deep' });
+      expect(runTask.mock.calls[0][1].mode).toBe('deep');
+    });
+  });
+});
+
+describe('video messages are transcribed, not forwarded as raw bytes', () => {
+  it('a native video message is sent to Deepgram and the transcript reaches the agent', async () => {
+    const msg = { chat: { id: 42 }, video: { file_id: 'Vid123', mime_type: 'video/mp4' } };
+    await handleMessage(msg, env);
+    expect(runTask).toHaveBeenCalledTimes(1);
+    const arg = runTask.mock.calls[0][1];
+    expect(arg.task).toContain('привет как дела');
+    expect(arg.fileBase64).toBeFalsy();
+  });
+
+  it('a video sent as a "file" (document with video/* mime_type) is also transcribed', async () => {
+    const msg = { chat: { id: 42 }, document: { file_id: 'Doc999', file_name: 'clip.mov', mime_type: 'video/quicktime' } };
+    await handleMessage(msg, env);
+    expect(runTask).toHaveBeenCalledTimes(1);
+    expect(runTask.mock.calls[0][1].task).toContain('привет как дела');
+  });
+});
+
+describe('oversized media is rejected before hitting Telegram\'s getFile limit', () => {
+  it('a >20MB video is refused with a friendly message and never reaches runTask', async () => {
+    const msg = { chat: { id: 42 }, video: { file_id: 'Big1', mime_type: 'video/mp4', file_size: 900 * 1024 * 1024 } };
+    await handleMessage(msg, env);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
+  });
+
+  it('a >20MB document is refused the same way', async () => {
+    const msg = { chat: { id: 42 }, document: { file_id: 'Big2', file_name: 'big.zip', file_size: 25 * 1024 * 1024 } };
+    await handleMessage(msg, env);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
+  });
+
+  it('a >20MB photo is refused the same way', async () => {
+    const msg = { chat: { id: 42 }, photo: [{ file_id: 'Big3', file_size: 21 * 1024 * 1024 }] };
+    await handleMessage(msg, env);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
+  });
+
+  it('a video under 20MB is downloaded normally', async () => {
+    const msg = { chat: { id: 42 }, video: { file_id: 'Small1', mime_type: 'video/mp4', file_size: 5 * 1024 * 1024 } };
+    await handleMessage(msg, env);
+    expect(runTask).toHaveBeenCalledTimes(1);
   });
 });

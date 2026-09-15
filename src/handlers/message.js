@@ -14,8 +14,17 @@ const NEW_SESSION_SIGNALS = [
 
 const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
+// Telegram's Bot API cloud servers refuse getFile above this size — it's a
+// platform limit, not something we can raise from the worker side.
+const MAX_TG_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+
+function tooBigMessage(fileSize) {
+  const mb = fileSize ? (fileSize / (1024 * 1024)).toFixed(1) : '20+';
+  return `⚠️ Файл слишком большой (${mb} MB). Telegram не отдаёт ботам файлы крупнее 20 MB через getFile — это ограничение самого Telegram, обойти его на нашей стороне нельзя.\n\nЧто можно сделать:\n• Сожми видео при отправке (Telegram делает это сам, если выбрать более низкое качество)\n• Пришли только звук (голосовым) — этого обычно достаточно для транскрипта\n• Загрузи файл на Google Drive/Диск и пришли ссылку`;
+}
+
 export async function handleMessage(msg, env, opts = {}) {
-  const { chat, text, voice, audio, photo, document: doc } = msg;
+  const { chat, text, voice, audio, photo, document: doc, video } = msg;
   const chatId = chat.id;
 
   const session = await getSession(env.SESSIONS, chatId);
@@ -34,31 +43,27 @@ export async function handleMessage(msg, env, opts = {}) {
   // coalesced buffer with its own media tag-lines stripped — as the caption/task,
   // so BOTH the file and the surrounding words reach the agent.
   const humanCaption = msg.caption || stripMediaTags(text);
+  const docIsMedia = doc && /^(audio|video)\//i.test(doc.mime_type || '');
   if (voice || audio) {
     const fileId = (voice || audio).file_id;
     const mimeType = (voice || audio).mime_type || null;
-    const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
-    if (transcript) {
-      if (transcript.length < 800) {
-        await sendMessage(env.BOT_TOKEN, chatId, `🎤 ${transcript}`);
-      } else {
-        const now = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        const filename = `transcript-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}.txt`;
-        const preview = transcriptPreview(transcript, 3);
-        await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `🎤 ${preview}…`);
-      }
-      // Prepend any accumulated human text so buffered "текст + голос" keeps both.
-      const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
-      await handleText(chatId, session, task, env, { isVoice: true, mode: opts.mode || null });
+    await transcribeAndDispatch(chatId, session, env, opts, humanCaption, fileId, mimeType, '🎤');
+  } else if (video || docIsMedia) {
+    const src = video || doc;
+    if (src.file_size && src.file_size > MAX_TG_DOWNLOAD_BYTES) {
+      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(src.file_size));
     } else {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
+      await transcribeAndDispatch(chatId, session, env, opts, humanCaption, src.file_id, src.mime_type || 'video/mp4', '🎬');
     }
   } else if (photo) {
+    const largest = photo[photo.length - 1];
+    if (largest.file_size && largest.file_size > MAX_TG_DOWNLOAD_BYTES) {
+      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(largest.file_size));
+      return;
+    }
     const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю фото…');
     const initialMsgId = placeholder?.result?.message_id ?? null;
     try {
-      const largest = photo[photo.length - 1];
       const { base64, error } = await downloadTgFileBase64(largest.file_id, env);
       if (error) {
         await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать фото: ${error}`);
@@ -76,6 +81,10 @@ export async function handleMessage(msg, env, opts = {}) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке фото: ${e.message}`);
     }
   } else if (doc) {
+    if (doc.file_size && doc.file_size > MAX_TG_DOWNLOAD_BYTES) {
+      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(doc.file_size));
+      return;
+    }
     const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю документ…');
     const initialMsgId = placeholder?.result?.message_id ?? null;
     try {
@@ -324,6 +333,29 @@ function transcriptPreview(text, maxSentences = 3) {
     remaining = remaining.slice(m[0].length);
   }
   return sentences.join(' ');
+}
+
+// Shared by voice/audio and video/video-as-document branches: transcribe via
+// Deepgram (it accepts video containers directly — no local extraction needed),
+// deliver the transcript to the chat, then hand it to the agent as the task text.
+async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, fileId, mimeType, emoji) {
+  const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
+  if (!transcript) {
+    await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
+    return;
+  }
+  if (transcript.length < 800) {
+    await sendMessage(env.BOT_TOKEN, chatId, `${emoji} ${transcript}`);
+  } else {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const filename = `transcript-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}.txt`;
+    const preview = transcriptPreview(transcript, 3);
+    await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `${emoji} ${preview}…`);
+  }
+  // Prepend any accumulated human text so buffered "текст + медиа" keeps both.
+  const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
+  await handleText(chatId, session, task, env, { isVoice: true, mode: opts.mode || null });
 }
 
 async function transcribeVoice(fileId, mimeType, env) {
