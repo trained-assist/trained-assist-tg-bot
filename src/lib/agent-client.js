@@ -70,7 +70,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, files, traceId, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, files, traceId, fileBase64, fileName, fileMimeType, onPrepared }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (files?.length) body.files = files;
@@ -92,6 +92,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   // Keep the stable lookup ID so the buffer can reconcile without another POST.
   if (traceId) {
     const taskId = `${username}-intake-${traceId}`;
+    if (onPrepared) await onPrepared({ taskId, agentUrl, body });
     try {
       const res = await fetch(`${agentUrl}/run`, {
         method: 'POST',

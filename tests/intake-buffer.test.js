@@ -86,7 +86,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', onPrepared: expect.any(Function) });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +100,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' }); // force word also launches deep
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', onPrepared: expect.any(Function) }); // force word also launches deep
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -257,4 +257,55 @@ describe('ambiguous delivery reconciliation', () => {
     expect(await state.storage.get('dispatchPacket')).toBeDefined();
     expect(handleMessage).not.toHaveBeenCalled();
   });
+});
+
+describe('prepared request recovery', () => {
+  it('persists exact request before POST and retries on the same agent only after capability confirmation', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { AGENT_SECRET: 'test' });
+    const body = { username: 'u', traceId: 'trace', task: 'original', files: [{ fileBase64: 'a'.repeat(35000) }] };
+    await io._prepareRun({ taskId: 'u-intake-trace', agentUrl: 'https://agent.test', body }, 'trace', 42);
+    expect((await state.storage.get('activeRun')).chunks).toBeGreaterThan(1);
+    const mock = vi.fn().mockResolvedValueOnce(Response.json({ state: 'unknown', retrySafe: true }))
+      .mockResolvedValueOnce(Response.json({ taskId: 'u-intake-trace' }, { status: 202 }));
+    vi.stubGlobal('fetch', mock);
+    try {
+      await io.alarm();
+      expect(mock.mock.calls[1][0]).toBe('https://agent.test/run');
+      expect(JSON.parse(mock.mock.calls[1][1].body)).toEqual(body);
+      expect((await state.storage.get('activeRun')).retries).toBe(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('caps retries and does not replay against an older agent', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { AGENT_SECRET: 'test' });
+    await io._prepareRun({ taskId: 'u-intake-t', agentUrl: 'https://agent.test', body: { traceId: 't' } }, 't', 42);
+    const mock = vi.fn().mockResolvedValue(Response.json({ state: 'unknown' }));
+    vi.stubGlobal('fetch', mock);
+    try {
+      await io.alarm();
+      expect(mock).toHaveBeenCalledTimes(1);
+      const active = await state.storage.get('activeRun');
+      active.retries = 3;
+      await state.storage.put('activeRun', active);
+      mock.mockResolvedValue(Response.json({ state: 'unknown', retrySafe: true }));
+      await io.alarm();
+      expect(mock).toHaveBeenCalledTimes(2);
+      expect(await state.storage.get('activeRun')).toBeDefined();
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+it('restores a packet interrupted before HTTP preparation exactly once', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, {});
+  await state.storage.put('busy', true);
+  await state.storage.put('dispatchPacket', { preparedProtocol: 1, messages: [{ text: 'first', msg: { chat: { id: 42 }, text: 'first' } }] });
+  await state.storage.put('buf', [{ text: 'second', msg: { chat: { id: 42 }, text: 'second' } }]);
+  await io.alarm();
+  await io.alarm();
+  expect((await state.storage.get('buf')).map(item => item.text)).toEqual(['first', 'second']);
+  expect(await state.storage.get('dispatchPacket')).toBeUndefined();
+  expect(await state.storage.get('busy')).toBeUndefined();
 });

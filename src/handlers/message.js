@@ -206,6 +206,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
       traceId: opts.traceId,
+      onPrepared: opts.onPrepared,
       files: opts.files,
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
