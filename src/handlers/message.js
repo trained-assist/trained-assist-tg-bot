@@ -216,7 +216,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
     const placeholderRes = opts.initialMsgId
       ? null
-      : await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      : await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
     const initialMsgId = opts.initialMsgId ?? (placeholderRes?.result?.message_id ?? null);
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
@@ -272,7 +272,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     }
 
     const userMsg = kind === 'busy'
-      ? '🕐 Агент занят — задача принята и стоит в очереди, отвечу как освобожусь. Не отправляй повторно.'
+      ? '↪️ Сервер отвечает, но подтверждение приёма задачи не пришло. Пока не отправляй повторно: запрос мог быть принят.'
       : kind === 'down' && opts.isRetry
       ? '⏸ Агент всё ещё недоступен после повторной попытки. Попробуй позже вручную.'
       : kind === 'down'

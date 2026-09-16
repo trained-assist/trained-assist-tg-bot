@@ -82,7 +82,7 @@ describe('first "down" on a live message → queue one delayed retry', () => {
     classifyAgentError.mockResolvedValue('busy');
     await handleMessage({ chat: { id: 42 }, text: 'x' }, env);
     expect(scheduleRetry).not.toHaveBeenCalled();
-    expect(sendMessage.mock.calls.at(-1)[2]).toContain('занят');
+    expect(sendMessage.mock.calls.at(-1)[2]).toContain('подтверждение приёма задачи не пришло');
 
     vi.clearAllMocks();
     getSession.mockResolvedValue({ username: 'u', lastSessionId: 's-1', lastMessageAt: Date.now() });
