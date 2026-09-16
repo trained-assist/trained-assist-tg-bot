@@ -270,3 +270,12 @@ it('two photos and a document arrive together as a valid archive with distinct s
   for (const name of names) expect(execFileSync('tar', ['-xOf', '-', name], { input: archive })).toEqual(Buffer.from(PHOTO_BYTES));
   expect(arg.task).toContain('проверь все файлы');
 });
+
+// Collector is the only status bubble for an explicitly launched batch.
+it('reuses collector status for a voice batch instead of leaving two launching bubbles', async () => {
+  await handleMessage({ chat: { id: 42 }, intakeItems: [
+    { msg: { voice: { file_id: 'voice' }, transcript: 'доработай задачу' } },
+  ] }, env, { mode: 'deep', initialMsgId: 777 });
+  expect(runTask.mock.calls[0][1]).toMatchObject({ initialMsgId: 777, mode: 'deep' });
+  expect(sendMessage).not.toHaveBeenCalled();
+});
