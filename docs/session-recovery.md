@@ -9,3 +9,5 @@ Bounded cost: up to two additional agent dispatches, DO requests/storage and not
 ## Changed executable contract
 
 Owner request 2026-09-16 replaces one silent retry with two visible attempts. tests/self-heal-classb.test.js replaces the old “still down on the retry” and silent logout expectations. tests/retry-queue-kv.test.js replaces delete-before-dispatch with retain-until-result semantics. tests/recovery-durable.test.js exercises the real coordinator, handler and storage under overlapping drains, object recreation, Telegram ok:false, failed session writes after ACK, intake transfer, ambiguous dispatch and profile change. External agent/Telegram calls are mocked; no production messages or paid model calls are made by tests.
+
+Staging migration compatibility: the shared staging worker already has v2-run-outbox from PR #103. Its unchanged RunOutbox class remains exported and its migration history is preserved only in env.staging; this change does not route new work to it or create it in production.

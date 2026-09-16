@@ -57,6 +57,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
+RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
@@ -87,6 +88,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-recruiter"
 
 [env.recruiter.vars]
+RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
 
@@ -120,3 +122,17 @@ class_name = "RetryQueue"
 [[env.recruiter.durable_objects.bindings]]
 name = "RETRY_QUEUE"
 class_name = "RetryQueue"
+
+# Staging already deployed the planned-restart outbox from PR #103. Preserve
+# its class and migration history; production has not deployed that change.
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
+
+[[env.staging.migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.staging.migrations]]
+tag = "v3-recovery"
+new_sqlite_classes = ["RetryQueue"]
