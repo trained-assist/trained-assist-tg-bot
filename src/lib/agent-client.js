@@ -1,3 +1,4 @@
+import { copyRefsToAgent } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -70,9 +71,12 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, requestId }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
+  await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
   const body = { userId, username, context, sessionId, contextFromSession };
+  if (fileRefs?.length) body.fileRefs = fileRefs;
+  if (requestId) body.requestId = requestId;
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
   if (forceNew) body.forceNew = true;
@@ -113,25 +117,32 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     if (res.ok) return res.json();
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
-      throw new Error(`agent /run HTTP ${res.status}`);
+      throw Object.assign(new Error(`agent /run HTTP ${res.status}`), { rejected: res.status >= 400 && res.status < 500 });
     }
   }
 }
 
-// What the gateway should do when a NEW dialog starts (issue #517):
-// {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}. On any failure
-// returns action:'auto' so we never block dispatch — the agent will auto-bind.
+// The list remains available even if optional decision enrichment is broken.
+// Failure is explicit: never turn an unavailable project service into "no projects".
 export async function getProjectDecision(env, { username, chatId }) {
+  const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
   try {
     const res = await fetch(
       `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
-      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(9000) }
+      { headers, signal: AbortSignal.timeout(9000) }
     );
-    if (!res.ok) return { action: 'auto', choices: [], active: null };
-    return await res.json();
-  } catch {
-    return { action: 'auto', choices: [], active: null };
-  }
+    if (res.ok) {
+      const data = await res.json();
+      if (!data.note && ['auto', 'ask', 'create'].includes(data.action) && Array.isArray(data.choices)) return data;
+    }
+  } catch { /* use the same agent's basic project list */ }
+  const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+    { headers, signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  const data = await res.json();
+  if (data.note || !Array.isArray(data.projects)) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  return { action: data.projects.length > 1 ? 'ask' : data.projects.length ? 'auto' : 'create',
+    choices: data.projects, active: null };
 }
 
 export async function getSessions(env, { username, limit = 10 }) {

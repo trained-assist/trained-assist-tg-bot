@@ -155,13 +155,16 @@ export async function dispatchInner(update, env) {
 // silently drift from the private path again (#530).
 export async function routeText(msg, env, chatId) {
   if (shouldDebounce(msg, env)) {
-    // Pin continuation at receipt: later session selection must not move this batch.
-    if (msg.reply_to_message) {
-      const session = await getSession(env.SESSIONS, chatId);
-      const sessionId = session?.activeSessionId || session?.lastSessionId;
+    // Pin replies AND an explicitly chosen new project at receipt, so switching
+    // menus before launch cannot move an already collected batch to another project.
+    const session = await getSession(env.SESSIONS, chatId);
+    const sessionId = session?.activeSessionId || session?.lastSessionId;
+    if (msg.reply_to_message || (sessionId && session?.projectSelectionSessionId === sessionId)) {
       if (sessionId) msg = { ...msg, intakeRoute: { sessionId,
         forceNew: !!(session.activeSessionId && session.activeSessionIsNew),
-        projectId: session.projectId || null, contextFromSession: session.contextFromSession || null } };
+        projectId: session.projectId || null,
+        projectChosen: session.projectSelectionSessionId === sessionId,
+        newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
     const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
@@ -212,3 +215,8 @@ async function scheduled(event, env, ctx) {
 export { RunOutbox } from './run-outbox.js';
 export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };
+
+export { RetryQueue } from './retry-queue.js';
+
+// Compatibility export: staging already owns RunOutbox instances (PR #103).
+export { RunOutbox } from './run-outbox.js';

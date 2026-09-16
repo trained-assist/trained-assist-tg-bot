@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scheduleRetry, takeDueRetries } from '../src/lib/kv.js';
+import { scheduleRetry, takeDueRetries, markRetryStarted, finishRetry } from '../src/lib/kv.js';
 
 // Class B self-heal (issue #604): the actual KV mechanics behind the retry
 // queue, exercised against a minimal fake KV (not mocked away) — this is what
@@ -35,14 +35,14 @@ describe('retry queue KV mechanics', () => {
     expect(kv._size()).toBe(1); // still queued, not consumed
   });
 
-  it('a retry whose dueAt has passed is returned and REMOVED from the queue', async () => {
+  it('a retry whose dueAt has passed is returned and retained until acknowledged', async () => {
     const kv = fakeKv();
     await kv.put('retry:42:1', JSON.stringify({ chatId: 42, text: 'сделай', opts: {}, dueAt: Date.now() - 1000 }),
       { metadata: { dueAt: Date.now() - 1000 } });
 
     const due = await takeDueRetries(kv);
-    expect(due).toEqual([{ chatId: 42, text: 'сделай', opts: {}, dueAt: expect.any(Number) }]);
-    expect(kv._size()).toBe(0);
+    expect(due).toEqual([{ chatId: 42, text: 'сделай', opts: {}, dueAt: expect.any(Number), retryKey: 'retry:42:1' }]);
+    expect(kv._size()).toBe(1);
   });
 
   it('a second cron tick finds nothing left — cap-at-1 via deletion, not a flag', async () => {
@@ -50,7 +50,8 @@ describe('retry queue KV mechanics', () => {
     await kv.put('retry:42:1', JSON.stringify({ chatId: 42, text: 'x', opts: {}, dueAt: Date.now() - 1000 }),
       { metadata: { dueAt: Date.now() - 1000 } });
 
-    await takeDueRetries(kv);
+    const [entry] = await takeDueRetries(kv);
+    await finishRetry(kv, entry, 'accepted');
     expect(await takeDueRetries(kv)).toEqual([]);
   });
 
@@ -64,6 +65,6 @@ describe('retry queue KV mechanics', () => {
     const due = await takeDueRetries(kv);
     expect(due).toHaveLength(1);
     expect(due[0].chatId).toBe(1);
-    expect(kv._size()).toBe(1); // chat 2's entry is still queued
+    expect(kv._size()).toBe(2); // chat 2's entry is still queued
   });
 });

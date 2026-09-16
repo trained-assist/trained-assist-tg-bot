@@ -31,17 +31,10 @@ export function shouldDebounce(msg, env) {
   return hasIntakeContent(msg);
 }
 
-// New-dialog project gate (issue #517 / R14). A FRESH dialog on a profile with
-// ≥2 projects must ASK which project before dispatching — never auto-guess (the
-// original R14 bug: it fell through to active/most-recent and «диалог уехал не в
-// тот проект»). A continuing dialog keeps its stored project; a file upload can't
-// be re-attached from a deferred pending message, so it skips the picker and just
-// dispatches. `decision` is the agent's /project-decision result
-// ({action:'auto'|'ask'|'create', choices?}).
-export function shouldAskProject({ isNewDialog, hasFile, decision } = {}) {
-  if (!isNewDialog) return false;
-  if (hasFile) return false;
-  return decision?.action === 'ask' && (decision.choices?.length || 0) > 0;
+// Content type never bypasses project selection: the gateway defers the original
+// Telegram references until the project is chosen, before downloading attachments.
+export function shouldAskProject({ isNewDialog, decision } = {}) {
+  return !!isNewDialog && decision?.action === 'ask' && (decision.choices?.length || 0) > 0;
 }
 
 // One buffer item → its text representation for the coalesced launch task.

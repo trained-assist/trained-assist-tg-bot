@@ -9,13 +9,12 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
-# Class B self-heal (issue #604): drains the KV delayed-retry queue every minute
-# so a "⏸ Агент недоступен" no longer dead-ends on the user — one automatic
-# retry ~3min later, see scheduled() in src/index.js.
+# Durable recovery queue: two visible attempts, three minutes apart.
 [triggers]
 crons = ["* * * * *"]
 
 [vars]
+RECOVERY_IMPORT_LEGACY = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
 
@@ -25,16 +24,16 @@ name = "INTAKE"
 class_name = "IntakeBuffer"
 
 [[durable_objects.bindings]]
-name = "RUN_OUTBOX"
-class_name = "RunOutbox"
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IntakeBuffer"]
 
 [[migrations]]
-tag = "v2-run-outbox"
-new_sqlite_classes = ["RunOutbox"]
+tag = "v2-recovery"
+new_sqlite_classes = ["RetryQueue"]
 
 # Secrets / private config (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
@@ -58,6 +57,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
+RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
@@ -88,6 +88,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-recruiter"
 
 [env.recruiter.vars]
+RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
 
@@ -113,6 +114,36 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # (ADMIN_GROUP_ID / RELAY_URL / RELAY_BOT_SECRET / DEEPGRAM_API_KEY optional —
 # only needed if the recruiter bot grows an admin group, Chrome-ext pairing,
 # or voice-note transcription.)
+
+[[env.staging.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+[[env.recruiter.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+# Staging already deployed the planned-restart outbox from PR #103. Preserve
+# its class and migration history; production has not deployed that change.
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
+
+[[env.staging.migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.staging.migrations]]
+tag = "v3-recovery"
+new_sqlite_classes = ["RetryQueue"]
+
+[[durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[migrations]]
+tag = "v3-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
 
 [[env.staging.durable_objects.bindings]]
 name = "RUN_OUTBOX"

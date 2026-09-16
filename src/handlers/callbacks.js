@@ -1,3 +1,4 @@
+import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
 import { rejectExpiredUI, PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
@@ -15,6 +16,8 @@ export async function handleCallbackQuery(cq, env) {
 
   if (await rejectExpiredUI(cq, env, session)) return;
 
+  if (data?.startsWith('pc:')) return chooseProject(cq, env, session);
+
   // ── Session picker (from message.js disambiguation) ──────────────────────
   // sp:<id> or sp:new — triggered when routing was ambiguous
   if (data?.startsWith('sp:')) {
@@ -27,6 +30,17 @@ export async function handleCallbackQuery(cq, env) {
     const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
     const msgId = message?.message_id;
+
+    if (sessionId === 'new') {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      try {
+        await openProjectChoice(env, chatId, session, {
+          input: pendingFresh ? (session.pendingOriginalMessage || { chat: { id: chatId }, text: pending }) : null,
+          opts: session.pendingOriginalOpts || {},
+        });
+      } catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+      return;
+    }
 
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
@@ -198,6 +212,11 @@ export async function handleCallbackQuery(cq, env) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       activeSessionId: sessionId,
+      activeSessionIsNew: false,
+      projectSelectionSessionId: null,
+      pendingNewProject: false,
+      contextFromSession: null,
+      pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
     });
@@ -260,22 +279,9 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sn:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
-    const newId = newSessionId(chatId);
-    // Store source session ID so agent loads its context into the new session.
-    // activeSessionId (not lastSessionId) + activeSessionIsNew routes this through
-    // resolveSessionRoute's "explicit, use once" case with forceNew — the id has no
-    // file on disk yet, so it must not heal back onto the chat's old pointer.
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      activeSessionId: newId,
-      activeSessionIsNew: true,
-      lastMessageAt: Date.now(),
-      contextFromSession: sourceSessionId,
-    });
-    await answerCallbackQuery(env.BOT_TOKEN, id, '✨ Новый диалог с контекстом');
-    await sendMessage(env.BOT_TOKEN, chatId,
-      '✨ <b>Новый диалог</b>\n\nКонтекст предыдущего диалога загружен. Пиши — начнём с чистого листа, но я буду знать историю.'
-    );
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    try { await openProjectChoice(env, chatId, session, { contextFromSession: sourceSessionId }); }
+    catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
     return;
   }
 
@@ -299,9 +305,7 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   // ── New dialog flow ───────────────────────────────────────────────────────
-  // nd:      — new-dialog prompt (project is picked automatically once you type,
-  //            see message.js sendProjectPicker / the pp: handler above).
-  // nd:clean — clear active session, start fresh
+  // nd: / nd:clean — immediately choose a project before writing the task.
   // nd:ctx   — pick session to load context from
   // nd:ctx:<id> — load context from specific session
   if (data?.startsWith('nd:')) {
@@ -309,41 +313,10 @@ export async function handleCallbackQuery(cq, env) {
 
     const sub = data.slice(3);
 
-    if (sub === '') {
+    if (sub === '' || sub === 'clean') {
       await answerCallbackQuery(env.BOT_TOKEN, id);
-      const msgId = message?.message_id;
-      const text = '✏️ <b>Новый диалог</b>\n\nПиши задачу — если проектов несколько, спрошу в какой добавить.';
-      const buttons = [[{ text: '✏️ Создать', callback_data: 'nd:clean' }]];
-      const kb = { lifecycleEnv: env, reply_markup: { inline_keyboard: buttons } };
-      if (msgId) {
-        await editMessage(env.BOT_TOKEN, chatId, msgId, text, kb).catch(() =>
-          sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env)
-        );
-      } else {
-        await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
-      }
-      return;
-    }
-
-    if (sub === 'clean') {
-      // Clear active session — the next message starts a fresh dialog (and triggers
-      // the project picker if the profile has ≥2 projects).
-      await setSession(env.SESSIONS, chatId, {
-        ...session,
-        activeSessionId: null,
-        lastSessionId: null,
-        contextFromSession: null,
-      });
-      await answerCallbackQuery(env.BOT_TOKEN, id);
-      const msgId = message?.message_id;
-      const text = '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.';
-      if (msgId) {
-        await editMessage(env.BOT_TOKEN, chatId, msgId, text).catch(() =>
-          sendMessage(env.BOT_TOKEN, chatId, text)
-        );
-      } else {
-        await sendMessage(env.BOT_TOKEN, chatId, text);
-      }
+      try { await openProjectChoice(env, chatId, session); }
+      catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
       return;
     }
 
