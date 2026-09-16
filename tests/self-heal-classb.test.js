@@ -1,3 +1,4 @@
+import { withUploads } from './helpers/uploads.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Class B self-heal (issue #604): when classifyAgentError reports 'down', the
@@ -65,15 +66,16 @@ describe('first "down" on a live message → queue one delayed retry', () => {
     expect(sentText).not.toContain('через минуту');
   });
 
-  it('a file-attached task on "down" does NOT get queued (KV size-limit guard) but still tells the user', async () => {
+  it('a file reference on "down" can be retried without storing bytes in KV', async () => {
     runTask.mockRejectedValue(new Error('agent /run HTTP 502'));
     classifyAgentError.mockResolvedValue('down');
 
     // Direct photo path builds opts.fileBase64 internally — exercise via handleMessage.
-    globalThis.fetch = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]).buffer));
+    globalThis.fetch = withUploads(async url => String(url).includes('/getFile') ? Response.json({ ok: true, result: { file_path: 'photo.jpg' } }) : new Response(new Uint8Array([1, 2, 3]).buffer));
     await handleMessage({ chat: { id: 42 }, photo: [{ file_id: 'p1' }] }, env);
 
-    expect(scheduleRetry).not.toHaveBeenCalled();
+    expect(scheduleRetry).toHaveBeenCalledTimes(1);
+    expect(scheduleRetry.mock.calls[0][1].opts.fileRefs).toHaveLength(1);
     expect(sendMessage).toHaveBeenCalled();
   });
 

@@ -190,7 +190,8 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
   await state.storage.put('buf', [{ text: 'new', msg: { chat: { id: 42 }, message_id: 2 } }]);
   const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
   await io.alarm();
-  expect((await state.storage.get('buf')).map(i => i.text)).toEqual(['original', 'new']);
+  expect((await state.storage.get('retryBatch')).map(i => i.text)).toEqual(['original']);
+  expect((await state.storage.get('buf')).map(i => i.text)).toEqual(['new']);
   expect(handleMessage).not.toHaveBeenCalled();
   expect(await state.storage.get('launching')).toBeUndefined();
 });

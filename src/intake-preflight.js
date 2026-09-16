@@ -2,34 +2,34 @@
 import { getSession } from './lib/kv.js';
 import { sendMessage, sendDocument } from './lib/telegram.js';
 import { pickAgentUrl } from './lib/agent-client.js';
-import { transcribeVoice, downloadTgFileBase64 } from './handlers/message.js';
+import { storeTelegramFile, storeTranscript } from './lib/intake-files.js';
+import { transcribeVoice } from './handlers/message.js';
 
-export const MEDIA_TTL_SECONDS = 48 * 60 * 60;
 
 export async function prepareIntake(msg, env, session) {
   const media = msg.voice || msg.audio || msg.video ||
     (msg.document && /^(audio|video)\//i.test(msg.document.mime_type || '') ? msg.document : null);
   if (media) {
+    const fileRef = await storeTelegramFile(msg, media, env, session);
+    msg.fileRef = fileRef;
     if (media.file_size > 20 * 1024 * 1024) throw new Error('Файл больше 20 MB');
     const { transcript, error } = msg.transcript ? { transcript: msg.transcript }
       : await transcribeVoice(media.file_id, media.mime_type || null, env);
     if (!transcript) throw new Error(error || 'Пустая расшифровка');
+    const transcriptRef = await storeTranscript(msg, media, transcript, env, session);
     if (!msg.transcript) {
       const anchor = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
       if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, anchor);
       else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового');
     }
     // Keep the source media metadata for retry, but do not duplicate transcript in .text.
-    return { ...msg, transcript };
+    return { ...msg, transcript, fileRef, transcriptRef };
   }
   const file = msg.photo?.[msg.photo.length - 1] || msg.document;
   if (file) {
-    if (file.file_size > 18 * 1024 * 1024) return msg; // KV limit is 25 MiB including base64; download larger files at launch.
-    const data = await downloadTgFileBase64(file.file_id, env);
-    if (data.error) throw new Error(data.error);
-    const attachmentKey = `intake-media:${session.username}:${msg.chat.id}:${msg.message_id}`;
-    await env.SESSIONS.put(attachmentKey, JSON.stringify(data), { expirationTtl: MEDIA_TTL_SECONDS });
-    return { ...msg, attachmentKey };
+    const fileRef = await storeTelegramFile(msg, file, env, session);
+    const { attachmentKey, ...rest } = msg;
+    return { ...rest, fileRef };
   }
   return msg;
 }

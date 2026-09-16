@@ -1,3 +1,4 @@
+import { copyRefsToAgent } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -70,9 +71,12 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
+  await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
   const body = { userId, username, context, sessionId, contextFromSession };
+  if (fileRefs?.length) body.fileRefs = fileRefs;
+  if (requestId) body.requestId = requestId;
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
   if (forceNew) body.forceNew = true;
@@ -102,7 +106,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     if (res.ok) return res.json();
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
-      throw new Error(`agent /run HTTP ${res.status}`);
+      throw Object.assign(new Error(`agent /run HTTP ${res.status}`), { rejected: res.status >= 400 && res.status < 500 });
     }
   }
 }
