@@ -164,7 +164,7 @@ export async function routeText(msg, env, chatId) {
     }
     const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
-    await stub.fetch('https://intake/append', {
+    await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',
       body: JSON.stringify({ text: msg.text, msg, flush }),
     });
