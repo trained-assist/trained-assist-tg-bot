@@ -86,7 +86,7 @@ export async function dispatchInner(update, env) {
   if (String(chatId) === env.ADMIN_GROUP_ID) {
     if (isUserMgmtCommand(text)) {
       await handleUserMgmt(msg, env);
-    } else if (isAdminForwardedCommand(text)) {
+    } else if (isAdminForwardedCommand(text) || /^\/restart(?:@\w+)?(?:\s|$)/i.test(text)) {
       // Strip the bot mention so the agent sees a clean "/get_webpass <username>".
       const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
       await handleCommand({ ...msg, text: cleanText }, env);
@@ -209,5 +209,6 @@ async function scheduled(event, env, ctx) {
   ctx.waitUntil(processExpiredUI(env));
 }
 
+export { RunOutbox } from './run-outbox.js';
 export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };

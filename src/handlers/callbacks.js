@@ -53,6 +53,7 @@ export async function handleCallbackQuery(cq, env) {
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
       try {
         const result = await runTask(env, {
+      requestId: `callback-${id}`,
           userId: chatId,
           username: updatedSession.username,
           task: pending,
@@ -146,6 +147,7 @@ export async function handleCallbackQuery(cq, env) {
 
     try {
       const result = await runTask(env, {
+      requestId: `callback-${id}`,
         userId: chatId,
         username: updatedSession.username,
         task: pending,
@@ -579,6 +581,7 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -608,6 +611,7 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -637,6 +641,7 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,

@@ -24,9 +24,17 @@ INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-s
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
+[[durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IntakeBuffer"]
+
+[[migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
 
 # Secrets / private config (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
@@ -105,3 +113,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # (ADMIN_GROUP_ID / RELAY_URL / RELAY_BOT_SECRET / DEEPGRAM_API_KEY optional —
 # only needed if the recruiter bot grows an admin group, Chrome-ext pairing,
 # or voice-note transcription.)
+
+[[env.staging.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"

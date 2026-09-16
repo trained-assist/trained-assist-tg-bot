@@ -70,7 +70,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, requestId }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
   if (task) body.task = task;
@@ -85,6 +85,17 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
+
+  if (env.RUN_OUTBOX) {
+    // Caller supplies Telegram/batch identity; fallback uses a stable status message.
+    body.requestId = requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
+    const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(`${username}:${userId}`));
+    const res = await stub.fetch('https://outbox/enqueue', {
+      method: 'POST', body: JSON.stringify({ agentUrl, body }),
+    });
+    if (!res.ok) throw Error(`outbox HTTP ${res.status}`);
+    return res.json();
+  }
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;

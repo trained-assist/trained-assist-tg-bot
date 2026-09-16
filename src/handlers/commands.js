@@ -53,6 +53,7 @@ export async function handleCommand(msg, env) {
   }
 
   switch (cmd) {
+    case '/restart': return cmdRestart(msg, env);
     case '/start':   return cmdStart(chatId, env);
     case '/login':   return cmdLogin(msg, env);
     case '/logout':   return cmdLogout(chatId, env);
@@ -240,6 +241,7 @@ async function cmdRu(msg, env) {
   try {
     const sessionId = newSessionId(chatId);
     await runTask(env, {
+      requestId: `command-${chatId}-${msg.message_id}`,
       userId: chatId,
       username: session.username,
       task,
@@ -654,4 +656,32 @@ async function cmdAllOff(msg, env) {
     '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
     { disable_notification: true }
   );
+}
+
+// Hidden from /start and setMyCommands, deliberately available to all logged-in users.
+async function cmdRestart(msg, env) {
+  const session = await getSession(env.SESSIONS, msg.chat.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, msg.chat.id, 'Сначала войди через /login.');
+  const arg = msg.text.trim().split(/\s+/)[1] || '';
+  if (!['', 'status', 'cancel'].includes(arg)) return sendMessage(env.BOT_TOKEN, msg.chat.id, '/restart, /restart status или /restart cancel');
+  try {
+    const res = await fetch(`${env.AGENT_URL}/maintenance`, {
+      method: arg === 'status' ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
+      ...(arg === 'status' ? {} : { body: JSON.stringify({ action: arg === 'cancel' ? 'cancel' : 'request', initiator: session.username }) }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw Error(`HTTP ${res.status}`);
+    const state = await res.json();
+    const text = state.phase === 'failed'
+      ? '⚠️ Восстановление не завершено. Задачи сохранены, запуск приостановлен; требуется проверка сервера.'
+      : state.phase === 'restarting'
+      ? '🔄 Сервер перезапускается. Задачи сохранены; отменить начавшийся перезапуск нельзя.'
+      : state.paused
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохраняются и ждут перезапуска.`
+      : arg === 'cancel' ? '✅ Ожидание рестарта отменено. Очередь продолжает работу.' : '✅ Сервер работает; ожидающего рестарта нет.';
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, text);
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status после восстановления сервера.`);
+  }
 }
