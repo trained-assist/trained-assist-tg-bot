@@ -1,7 +1,7 @@
 import { getProjectDecision } from './agent-client.js';
 import { getSession, setSession, newSessionId } from './kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
-import { PICKER_TTL_MS } from './transient-ui.js';
+import { PICKER_TTL_MS, trackUI } from './transient-ui.js';
 
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -24,10 +24,12 @@ async function render(env, chatId, pending, page = 0) {
   if (pending.messageId) {
     await editMessage(env.BOT_TOKEN, chatId, pending.messageId, text,
       { lifecycleEnv: env, reply_markup: { inline_keyboard: rows } });
+    await trackUI(env, chatId, pending.messageId, rows, pending.createdAt);
     return pending.messageId;
   }
   const sent = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, rows, {}, env);
   if (!sent?.result?.message_id) throw new Error('Не удалось показать выбор проекта');
+  await trackUI(env, chatId, sent.result.message_id, rows, pending.createdAt);
   return sent.result.message_id;
 }
 
@@ -48,6 +50,10 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     opts, contextFromSession, messageId: null };
   await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: pending });
   const messageId = await render(env, chatId, pending);
+  if (input && opts.initialMsgId) {
+    await editMessage(env.BOT_TOKEN, chatId, opts.initialMsgId, '📂 Задача сохранена. Выбери проект в меню ниже.',
+      { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+  }
   const current = await getSession(env.SESSIONS, chatId);
   if (current?.pendingProjectChoice?.token === pending.token) {
     await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: { ...pending, messageId } });
