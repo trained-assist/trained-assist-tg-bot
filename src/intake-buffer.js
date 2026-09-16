@@ -1,3 +1,5 @@
+import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
+import { getSession } from './lib/kv.js';
 // Durable Object: per-chat intake buffer.
 //
 // Model (manual launch, no timer): the bot ALWAYS accumulates a user's plain-text
@@ -17,10 +19,10 @@
 // One instance per chat_id (idFromName(chatId)). DO fetch/alarm handlers are
 // can interleave at external awaits. Short state mutations use an explicit lock;
 // Telegram and transcription I/O must never hold that lock.
-// The ONLY alarm is a safety net: if a run's isolate dies before clearing `busy`,
+// The alarm also recovers reserved media jobs; for runs it is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
+import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
 import { coalesceBuffer } from './intake-routing.js';
 
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
@@ -62,8 +64,16 @@ export class IntakeBuffer {
   async fetch(request) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/media-result' && request.method === 'POST') {
+      return this._mediaResult(await request.json());
+    }
+
     if (url.pathname === '/ingest' && request.method === 'POST') {
       const { msg } = await request.json();
+      if (mediaEnabled(this.env) && mediaOf(msg)) {
+        const session = await getSession(this.env.SESSIONS, msg.chat.id);
+        if (session) return this._ingestMedia(msg, session);
+      }
       // Reserve BEFORE STT/network awaits: launch must not silently omit a slow voice.
       const accepted = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
@@ -136,7 +146,7 @@ export class IntakeBuffer {
       if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
       const buf = (await this.state.storage.get('retryBatch')) || (await this.state.storage.get('buf')) || [];
       if (!buf.length) return json({ empty: true });
-      const pending = buf.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000);
+      const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
       if (pending) {
         await sendMessage(this.env.BOT_TOKEN, buf[0].msg.chat.id, '⏳ Ещё расшифровываю полученные сообщения. Нажми запуск после расшифровки — пачка сохранена.');
         return json({ preparing: true });
@@ -146,6 +156,98 @@ export class IntakeBuffer {
     }
 
     return new Response('not found', { status: 404 });
+  }
+
+  async _ingestMedia(msg, session) {
+    const id = await mediaId(msg);
+    const accepted = await this._exclusive(async () => {
+      const seen = (await this.state.storage.get('received')) || [];
+      const items = (await this.state.storage.get('buf')) || [];
+      if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
+      // Reservation and watchdog survive a crash before enqueue's network call.
+      await this.state.storage.transaction(async tx => {
+        items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username });
+        await tx.put('buf', items);
+        await tx.put('received', [...seen, msg.message_id].slice(-1000));
+        await tx.setAlarm(Date.now() + 60000);
+      });
+      return true;
+    });
+    if (!accepted) return json({ duplicate: true });
+    await enqueueMedia(msg, this.env, session).catch(() => {}); // watchdog retries
+    const remaining = (await this.state.storage.get('buf')) || [];
+    if (await this.state.storage.get('busy')) await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
+    else await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+    return json({ queued: true, id });
+  }
+
+  async _recoverMedia() {
+    const pending = ((await this.state.storage.get('buf')) || []).filter(i => i.mediaPending);
+    if (!pending.length) return;
+    await this.state.storage.setAlarm(Date.now() + 60000);
+    for (const item of pending) {
+      try {
+        await enqueueMedia(item.msg, this.env, { username: item.mediaOwner }, true);
+      } catch {
+        let failed = false;
+        await this._exclusive(async () => {
+          const items = (await this.state.storage.get('buf')) || [];
+          const current = items.find(i => i.msg.mediaJob === item.msg.mediaJob && i.mediaPending);
+          if (!current) return;
+          current.enqueueFailures = (current.enqueueFailures || 0) + 1;
+          failed = current.enqueueFailures >= 3;
+          await this.state.storage.put('buf', items);
+        });
+        if (failed) await this._mediaResult({ id: item.msg.mediaJob, messageId: item.msg.message_id,
+          username: item.mediaOwner, error: 'Очередь обработки временно недоступна' });
+      }
+    }
+  }
+
+  async _mediaResult(result) {
+    let notify = null;
+    const response = await this._exclusive(async () => {
+      const items = (await this.state.storage.get('buf')) || [];
+      const index = items.findIndex(i => i.msg.mediaJob === result.id && i.msg.message_id === result.messageId);
+      // Already committed: delivery retry must not overwrite/recreate an item.
+      if (index < 0) {
+        const delivered = await this.state.storage.get(`media-delivered:${result.id}`);
+        return delivered ? json({ duplicate: true }) : new Response('Reservation missing', { status: 409 });
+      }
+      const item = items[index];
+      if (item.mediaOwner !== result.username) return new Response('Owner mismatch', { status: 403 });
+      if (!item.mediaPending) return json({ duplicate: true });
+      if (!result.error && (!result.fileRef || result.fileRef.id !== result.id || result.fileRef.storage !== 'r2')) {
+        return new Response('Invalid result', { status: 400 });
+      }
+      await this.state.storage.transaction(async tx => {
+        if (result.error) {
+          // Keep failed media outside the launchable batch so new text can proceed.
+          // Original Telegram metadata and any completed R2 stages stay durable.
+          await tx.put(`media-failed:${result.id}`, { ...item, error: result.error });
+          items.splice(index, 1);
+        } else {
+          items[index] = { ...item, mediaPending: false, msg: { ...item.msg,
+            fileRef: result.fileRef, transcript: result.transcript, transcriptRef: result.transcriptRef } };
+        }
+        await tx.put('buf', items);
+        await tx.put(`media-delivered:${result.id}`, true);
+        if (!items.some(i => i.mediaPending) && !(await tx.get('busy'))) await tx.deleteAlarm();
+      });
+      notify = { chatId: item.msg.chat.id, messageId: item.msg.message_id };
+      return json({ accepted: true });
+    });
+    if (notify) {
+      const text = result.error
+        ? `⚠️ ${result.error}. Ссылка на вложение сохранена для восстановления; в следующую задачу оно не войдёт. Можно продолжать текстом; для повторной обработки отправь вложение ещё раз.`
+        : result.transcript ? `🎤 ${result.transcript}` : '✅ Вложение сохранено. Можно запускать проработку.';
+      if (!result.error && result.transcript?.length >= 800) {
+        await sendDocument(this.env.BOT_TOKEN, notify.chatId, `transcript-${notify.messageId}.txt`, result.transcript, '🎤 Расшифровка голосового').catch(() => {});
+      } else {
+        await sendMessage(this.env.BOT_TOKEN, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }).catch(() => {});
+      }
+    }
+    return response;
   }
 
   // ACK every accumulated message with a FRESH bubble anchored to it — never an
@@ -202,7 +304,7 @@ export class IntakeBuffer {
       const retryBatch = await this.state.storage.get('retryBatch');
       const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
-      if (items.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000)) return [];
+      if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       await this.state.storage.put('busy', true);
       await this.state.storage.put('busySince', Date.now());
@@ -254,6 +356,7 @@ export class IntakeBuffer {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
+      await this._recoverMedia();
       const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
@@ -263,12 +366,14 @@ export class IntakeBuffer {
   }
 
   async alarm() {
-    // Only the BUSY_MAX safety net reaches here: a run whose isolate died before
+    await this._recoverMedia();
+    if (!(await this.state.storage.get('busy')) && ((await this.state.storage.get('buf')) || []).some(i => i.mediaPending)) return;
+    // Media recovery ran above. Also recover a run whose isolate died before
     // its finally cleared `busy`. Release the hold and re-offer the launch button.
     if ((await this.state.storage.get('busy')) === true) {
       const since = (await this.state.storage.get('busySince')) || 0;
       if (Date.now() - since < BUSY_MAX_MS) {
-        await this.state.storage.setAlarm(since + BUSY_MAX_MS);
+        await this.state.storage.setAlarm(Math.min(since + BUSY_MAX_MS, Date.now() + 60000));
         return;
       }
       await this._exclusive(async () => {

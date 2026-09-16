@@ -47,6 +47,8 @@ jobs:
         run: npx wrangler deploy --dry-run --env staging
       - name: Unit tests
         run: npm test
+      - name: Media pipeline in local workerd and R2
+        run: npm run test:media-runtime
 
   restart-integration:
     runs-on: ubuntu-latest
@@ -63,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: trained-assist/trained-assist-agent
-          ref: 9fa329576bdbbec758039839152f6efdcbf062fa
+          ref: b2bcba82cefcc86ed4682a8f5d00c6a0f83c3655
           path: .restart-agent
           persist-credentials: false
       - run: npm ci --include=dev

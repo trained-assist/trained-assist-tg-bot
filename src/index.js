@@ -1,3 +1,4 @@
+import { serveMedia } from './media-jobs.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
@@ -17,6 +18,7 @@ app.use('*', async (c, next) => {
   if (c.env.PREVIEW_ONLY === 'true' && c.req.path !== '/health') return c.json({ error: 'preview only' }, 403);
   return next();
 });
+app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
@@ -225,3 +227,5 @@ export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };
 
 export { RetryQueue } from './retry-queue.js';
+
+export { MediaJob } from './media-jobs.js';

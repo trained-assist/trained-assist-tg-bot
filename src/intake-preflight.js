@@ -7,6 +7,8 @@ import { transcribeVoice } from './handlers/message.js';
 
 
 export async function prepareIntake(msg, env, session) {
+  if (msg.fileRef?.storage === 'r2') return msg;
+  if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
   const media = msg.voice || msg.audio || msg.video ||
     (msg.document && /^(audio|video)\//i.test(msg.document.mime_type || '') ? msg.document : null);
   if (media) {

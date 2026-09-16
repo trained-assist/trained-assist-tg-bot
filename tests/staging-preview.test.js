@@ -6,8 +6,11 @@ it('preview serves exact revision and rejects ingress without touching storage o
   const ctx = { waitUntil: touched };
   const health = await worker.fetch(new Request('https://preview/health'), env, ctx);
   expect(await health.json()).toMatchObject({ buildSha: 'exact-revision' });
-  for (const route of ['/webhook', '/internal/media']) {
-    const response = await worker.fetch(new Request('https://preview'+route, { method: 'POST', body: '{}' }), env, ctx);
+  for (const [route, options] of [
+    ['/webhook', { method: 'POST', body: '{}' }],
+    ['/internal/media?username=alice&id=secret-file', { method: 'GET' }],
+  ]) {
+    const response = await worker.fetch(new Request('https://preview'+route, options), env, ctx);
     expect(response.status).toBe(403);
   }
   await worker.scheduled({}, env, ctx);

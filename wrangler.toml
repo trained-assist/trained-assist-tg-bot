@@ -14,6 +14,7 @@ enabled = true
 crons = ["* * * * *"]
 
 [vars]
+MEDIA_PIPELINE = "off" # Enable only after R2 provisioning and both VM readers are verified.
 RECOVERY_IMPORT_LEGACY = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
@@ -57,6 +58,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
+MEDIA_PIPELINE = "off"
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
@@ -137,12 +139,43 @@ new_sqlite_classes = ["RunOutbox"]
 tag = "v3-recovery"
 new_sqlite_classes = ["RetryQueue"]
 
+# Media ingestion remains off until private R2 buckets are provisioned.
+# Keep these bindings and the object-read route through any flag rollback.
+[[durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+[[migrations]]
+tag = "v3-media"
+new_sqlite_classes = ["MediaJob"]
+
+[[env.staging.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+[[env.staging.migrations]]
+tag = "v4-media"
+new_sqlite_classes = ["MediaJob"]
+
+[[env.recruiter.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+# Provisioned privately on 2026-09-16. Keep ingress off until both VM probes pass.
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media"
+
+[[env.staging.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media-staging"
+
 [[durable_objects.bindings]]
 name = "RUN_OUTBOX"
 class_name = "RunOutbox"
 
 [[migrations]]
-tag = "v3-run-outbox"
+tag = "v4-run-outbox"
 new_sqlite_classes = ["RunOutbox"]
 
 [[env.staging.durable_objects.bindings]]
