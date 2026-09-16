@@ -1,3 +1,4 @@
+import { openProjectChoice } from '../lib/project-choice.js';
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
@@ -479,14 +480,8 @@ async function cmdNewDialog(chatId, env) {
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
-  return sendMessageWithKeyboard(
-    env.BOT_TOKEN, chatId,
-    '✨ <b>Новый диалог</b>\n\nМожете просто начать писать — или загрузить контекст из одного из прошлых диалогов:',
-    [
-      [{ text: '✏️ Чистый лист — просто начну писать', callback_data: 'nd:clean' }],
-      [{ text: '📚 Выбрать диалог и загрузить контекст', callback_data: 'nd:ctx' }],
-    ], {}, env
-  );
+  try { return await openProjectChoice(env, chatId, session); }
+  catch (err) { return sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
 }
 
 export async function cmdFiles(chatId, env, relPath = '') {

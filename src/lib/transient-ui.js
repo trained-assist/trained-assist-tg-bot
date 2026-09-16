@@ -3,7 +3,7 @@
 export const PICKER_TTL_MS = 10 * 60 * 1000;
 export const MENU_TTL_MS = 15 * 60 * 1000;
 export function uiLifetime(data) {
-  if (/^(pp|sp):/.test(data || '')) return PICKER_TTL_MS;
+  if (/^(pp|sp|pc):/.test(data || '')) return PICKER_TTL_MS;
   if (/^(sd|sc|si|sn|sl|nd|ar|sa|fl|fr):/.test(data || '')) return MENU_TTL_MS;
   return null;
 }
@@ -59,11 +59,15 @@ export async function processExpiredUI(env, now = Date.now()) {
 export async function rejectExpiredUI(cq, env, session) {
   const ttl = uiLifetime(cq.data);
   if (!ttl || !cq.message?.message_id) return false;
+  const projectPicker = cq.data.startsWith('pc:');
   const picker = /^(pp|sp):/.test(cq.data);
   const expired = cq.message.date && Date.now() >= cq.message.date * 1000 + ttl;
   const superseded = picker && session?.pendingPickerId && session.pendingPickerId !== cq.message.message_id;
   const missing = picker && (!session?.pendingMessage || !session.pendingMessageAt || Date.now() >= session.pendingMessageAt + PICKER_TTL_MS);
-  if (!expired && !superseded && !missing) return false;
+  const projectMissing = projectPicker && (!session?.pendingProjectChoice || session.pendingProjectChoice.dispatching ||
+    session.pendingProjectChoice.messageId !== cq.message.message_id ||
+    Date.now() >= session.pendingProjectChoice.createdAt + PICKER_TTL_MS);
+  if (!expired && !superseded && !missing && !projectMissing) return false;
   await telegram(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: '⌛ Меню устарело. Открой его заново или отправь задачу.' });
   if (await retireUI(env, cq.message.chat.id, cq.message.message_id)) await forgetUI(env, cq.message.chat.id, cq.message.message_id);
   return true;
