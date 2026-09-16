@@ -1,7 +1,7 @@
 import { getProjectDecision } from './agent-client.js';
-import { getSession, setSession, newSessionId } from './kv.js';
+import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
-import { PICKER_TTL_MS, trackUI } from './transient-ui.js';
+import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
 
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -62,8 +62,10 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
 
 export async function chooseProject(cq, env, session) {
   const chatId = cq.message.chat.id;
+  session = await withKvConsistencyRetry(env.SESSIONS, chatId, session,
+    s => !projectChoiceExpired(s?.pendingProjectChoice, cq));
   const pending = session?.pendingProjectChoice;
-  if (!pending || pending.dispatching || pending.suspended || pending.messageId !== cq.message.message_id || Date.now() - pending.createdAt >= PICKER_TTL_MS) {
+  if (projectChoiceExpired(pending, cq)) {
     await answerCallbackQuery(env.BOT_TOKEN, cq.id, '⌛ Открой «Новый диалог» заново.');
     return;
   }
