@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { trackUI, processExpiredUI, rejectExpiredUI, PICKER_TTL_MS, MENU_TTL_MS } from '../src/lib/transient-ui.js';
+import { trackUI, processExpiredUI, rejectExpiredUI, projectChoiceExpired, PICKER_TTL_MS, MENU_TTL_MS, KV_PROPAGATION_GRACE_MS } from '../src/lib/transient-ui.js';
 import { sendMessageWithKeyboard, editMessage } from '../src/lib/telegram.js';
 
 let records, env, requests;
@@ -104,6 +104,48 @@ describe('durable temporary Telegram interfaces', () => {
     expect(session.pendingMessage).toBe('new task');
     expect(env.SESSIONS.put).not.toHaveBeenCalled();
     expect(await rejectExpiredUI({ ...cq, message: { ...cq.message, message_id: 8 } }, env, session)).toBe(false);
+  });
+  it('does not reject a freshly-shown pp:/sp: picker whose KV session write has not propagated yet', async () => {
+    // Simulates Workers KV eventual consistency: the write that stored pendingMessage
+    // (from the message that triggered this picker) hasn't reached this colo yet, so the
+    // session read here looks empty even though nothing actually expired or superseded it.
+    const cq = { id: 'cq', data: 'pp:0', message: { message_id: 7, date: now / 1000, chat: { id: 42 } } };
+    expect(await rejectExpiredUI(cq, env, null)).toBe(false);
+    expect(requests).toHaveLength(0);
+  });
+  it('still rejects an old pp:/sp: picker with no pending record once KV should have caught up', async () => {
+    const cq = { id: 'cq', data: 'pp:0', message: { message_id: 7, date: (now - KV_PROPAGATION_GRACE_MS) / 1000, chat: { id: 42 } } };
+    expect(await rejectExpiredUI(cq, env, null)).toBe(true);
+  });
+  describe('projectChoiceExpired (pc: picker)', () => {
+    it('is not expired for a freshly-shown picker with no propagated record yet', () => {
+      const cq = { message: { message_id: 7, date: now / 1000 } };
+      expect(projectChoiceExpired(null, cq)).toBe(false);
+    });
+    it('is expired for an old picker with no record once KV should have caught up', () => {
+      const cq = { message: { message_id: 7, date: (now - KV_PROPAGATION_GRACE_MS) / 1000 } };
+      expect(projectChoiceExpired(null, cq)).toBe(true);
+    });
+    it('is not expired while messageId has not been filled in yet, within the grace window', () => {
+      const pending = { createdAt: now, messageId: null };
+      const cq = { message: { message_id: 7, date: now / 1000 } };
+      expect(projectChoiceExpired(pending, cq)).toBe(false);
+    });
+    it('is expired immediately for a genuinely different (already-populated) messageId', () => {
+      const pending = { createdAt: now, messageId: 9 };
+      const cq = { message: { message_id: 7, date: now / 1000 } };
+      expect(projectChoiceExpired(pending, cq)).toBe(true);
+    });
+    it('is expired immediately when dispatching or suspended, regardless of grace', () => {
+      const cq = { message: { message_id: 7, date: now / 1000 } };
+      expect(projectChoiceExpired({ createdAt: now, messageId: 7, dispatching: true }, cq)).toBe(true);
+      expect(projectChoiceExpired({ createdAt: now, messageId: 7, suspended: true }, cq)).toBe(true);
+    });
+    it('is expired once past PICKER_TTL_MS, regardless of grace', () => {
+      const pending = { createdAt: now - PICKER_TTL_MS, messageId: 7 };
+      const cq = { message: { message_id: 7, date: now / 1000 } };
+      expect(projectChoiceExpired(pending, cq)).toBe(true);
+    });
   });
 });
 

@@ -54,6 +54,40 @@ export async function processExpiredUI(env, now = Date.now()) {
   } while (cursor);
 }
 
+// `session` comes from Workers KV, which gives no read-after-write guarantee across
+// requests/colos — the write that stashes pending-picker state (from the message that
+// showed the picker) and this read (from the callback tap moments later) are different
+// requests and can land on different colos. A picker tapped quickly after being shown
+// can then see a session that looks like the pending state was never written, even
+// though nothing actually expired or was superseded. Trust that "looks empty" reading
+// as real absence only once the picker is old enough that KV propagation has had time
+// to catch up; a record that's genuinely present but stale/superseded/dispatching still
+// rejects immediately, since none of that depends on a possibly-stale KV read resolving.
+export const KV_PROPAGATION_GRACE_MS = 20_000;
+
+function graceElapsed(cq) {
+  return !cq.message.date || Date.now() >= cq.message.date * 1000 + KV_PROPAGATION_GRACE_MS;
+}
+
+// Shared by every handler that dispatches a stashed pendingMessage (sp:/pp: in
+// callbacks.js) — one definition of "is it still usable" instead of each re-deriving
+// it ad hoc, which is exactly how they'd drift out of sync with rejectExpiredUI's copy.
+export function pendingMessageFresh(session) {
+  const pending = session?.pendingMessage;
+  return !!(pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS);
+}
+
+// Shared by rejectExpiredUI (the top-level gate) and chooseProject's own guard
+// (project-choice.js) — both need the identical answer to "is this pc: picker still
+// good?", and having it written twice is exactly how the two drifted out of sync before.
+export function projectChoiceExpired(pending, cq) {
+  if (!pending) return graceElapsed(cq);
+  if (pending.dispatching || pending.suspended) return true;
+  if (Date.now() - pending.createdAt >= PICKER_TTL_MS) return true;
+  if (pending.messageId == null) return graceElapsed(cq);
+  return pending.messageId !== cq.message.message_id;
+}
+
 // Also covers old menus that predate the queue. Never execute a stale callback
 // against a newer pending task, even if scheduled cleanup is late.
 export async function rejectExpiredUI(cq, env, session) {
@@ -63,10 +97,10 @@ export async function rejectExpiredUI(cq, env, session) {
   const picker = /^(pp|sp):/.test(cq.data);
   const expired = cq.message.date && Date.now() >= cq.message.date * 1000 + ttl;
   const superseded = picker && session?.pendingPickerId && session.pendingPickerId !== cq.message.message_id;
-  const missing = picker && (!session?.pendingMessage || !session.pendingMessageAt || Date.now() >= session.pendingMessageAt + PICKER_TTL_MS);
-  const projectMissing = projectPicker && (!session?.pendingProjectChoice || session.pendingProjectChoice.dispatching || session.pendingProjectChoice.suspended ||
-    session.pendingProjectChoice.messageId !== cq.message.message_id ||
-    Date.now() >= session.pendingProjectChoice.createdAt + PICKER_TTL_MS);
+  const noPendingRecord = !session?.pendingMessage || !session.pendingMessageAt;
+  const pendingExpired = session?.pendingMessageAt && Date.now() >= session.pendingMessageAt + PICKER_TTL_MS;
+  const missing = picker && ((noPendingRecord && graceElapsed(cq)) || pendingExpired);
+  const projectMissing = projectPicker && projectChoiceExpired(session?.pendingProjectChoice, cq);
   if (!expired && !superseded && !missing && !projectMissing) return false;
   await telegram(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: '⌛ Меню устарело. Открой его заново или отправь задачу.' });
   if (await retireUI(env, cq.message.chat.id, cq.message.message_id)) await forgetUI(env, cq.message.chat.id, cq.message.message_id);

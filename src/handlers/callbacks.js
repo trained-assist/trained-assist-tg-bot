@@ -1,6 +1,6 @@
 import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
-import { rejectExpiredUI, PICKER_TTL_MS } from '../lib/transient-ui.js';
-import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
+import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
+import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
@@ -12,7 +12,7 @@ export async function handleCallbackQuery(cq, env) {
 
   if (!chatId) return;
 
-  const session = await getSession(env.SESSIONS, chatId);
+  let session = await getSession(env.SESSIONS, chatId);
 
   if (await rejectExpiredUI(cq, env, session)) return;
 
@@ -23,9 +23,10 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
 
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
+    const pendingFresh = pendingMessageFresh(session);
 
     const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
@@ -112,9 +113,10 @@ export async function handleCallbackQuery(cq, env) {
   // message (provisional name). Runs the stashed pending message, mirroring sp:.
   if (data?.startsWith('pp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
     const raw = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
+    const pendingFresh = pendingMessageFresh(session);
     const msgId = message?.message_id;
 
     if (!pendingFresh) {

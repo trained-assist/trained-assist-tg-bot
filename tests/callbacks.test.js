@@ -32,6 +32,7 @@ vi.mock('../src/lib/kv.js', () => ({
   setSession: vi.fn().mockResolvedValue(undefined),
   deleteSession: vi.fn().mockResolvedValue(undefined),
   newSessionId: vi.fn(chatId => `s-${Math.abs(chatId)}-123456`),
+  withKvConsistencyRetry: vi.fn((kv, chatId, session) => Promise.resolve(session)),
 }));
 
 vi.mock('../src/lib/telegram.js', () => ({

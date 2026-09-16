@@ -26,6 +26,20 @@ export async function deleteSession(kv, chatId) {
   await kv.delete(String(chatId));
 }
 
+// Workers KV gives no read-after-write guarantee across requests — the write that
+// stashes pending picker state (from the message that showed a picker) and the read
+// here (from the button tap moments later) are different requests and can land on
+// different colos. A picker tapped quickly after being shown can then see a session
+// that looks like the pending state was never written. One retry after a short delay
+// recovers the overwhelming majority of these without adding latency to the common
+// (already-consistent) case, and costs nothing extra when the state really is stale.
+export async function withKvConsistencyRetry(kv, chatId, session, isReady, delayMs = 400) {
+  if (isReady(session)) return session;
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+  const retried = await getSession(kv, chatId);
+  return isReady(retried) ? retried : session;
+}
+
 // Users registry: username → { name, passwordHash, salt, workDir, createdAt }
 export async function getUser(kv, username) {
   const val = await kv.get(`user:${username}`);
