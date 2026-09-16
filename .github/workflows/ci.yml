@@ -43,6 +43,8 @@ jobs:
       - run: npm ci
       - name: Syntax check
         run: npm run check
+      - name: Build Worker
+        run: npx wrangler deploy --dry-run --env staging
       - name: Unit tests
         run: npm test
 
@@ -113,4 +115,3 @@ jobs:
             sleep 5
           done
           [ "$STATUS" = "200" ] && echo "✅ Worker alive" || { echo "❌ Worker not responding (HTTP $STATUS)"; exit 1; }
-
