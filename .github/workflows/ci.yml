@@ -7,6 +7,31 @@ on:
     branches: [main]
 
 jobs:
+  staging-gate:
+    name: staging-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Replay mandatory user scenarios
+        run: npm run test:staging
+      - name: Save scenario results and tested revision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-results/
+          if-no-files-found: error
+
   ci:
     runs-on: ubuntu-latest
     steps:
@@ -23,7 +48,7 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, staging-gate]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +65,7 @@ jobs:
 
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, staging-gate]
     if: github.ref != 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
@@ -72,15 +97,6 @@ jobs:
           done
           [ "$STATUS" = "200" ] && echo "✅ Staging alive" || { echo "❌ Staging not responding (HTTP $STATUS)"; exit 1; }
 
-      - name: Staging webhook smoke test
-        run: |
-          BODY='{"update_id":9999999,"message":{"message_id":1,"from":{"id":5367135237,"is_bot":false,"username":"zemtest"},"chat":{"id":5367135237,"type":"private"},"date":1234567890,"text":"/ping"}}'
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST -H "Content-Type: application/json" -d "$BODY" \
-            "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev/webhook")
-          echo "Webhook response: HTTP $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ Staging webhook OK" || { echo "❌ HTTP $STATUS"; exit 1; }
-
   smoke-test:
     runs-on: ubuntu-latest
     needs: deploy
@@ -98,13 +114,3 @@ jobs:
           done
           [ "$STATUS" = "200" ] && echo "✅ Worker alive" || { echo "❌ Worker not responding (HTTP $STATUS)"; exit 1; }
 
-      - name: Webhook integration test (fake /ping update)
-        run: |
-          BODY='{"update_id":9999999,"message":{"message_id":1,"from":{"id":5367135237,"is_bot":false,"username":"zemtest"},"chat":{"id":5367135237,"type":"private"},"date":1234567890,"text":"/ping"}}'
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d "$BODY" \
-            "https://trained-assist-tg-bot.skillset-apply.workers.dev/webhook")
-          echo "Webhook response: HTTP $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ Webhook accepted update" || { echo "❌ Unexpected HTTP $STATUS"; exit 1; }

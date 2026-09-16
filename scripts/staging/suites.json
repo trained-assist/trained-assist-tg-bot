@@ -1,0 +1,18 @@
+{
+  "vitest": [
+    "tests/intake-conversation.test.js",
+    "tests/intake-media-invariant.test.js",
+    "tests/intake-media-content.test.js",
+    "tests/route-text.test.js",
+    "tests/callbacks.test.js",
+    "tests/group-routing.test.js",
+    "tests/group-welcome.test.js",
+    "tests/project-picker-gate.test.js",
+    "tests/self-heal-classb.test.js",
+    "tests/agent-client.test.js",
+    "tests/intake-buffer.test.js",
+    "tests/run-outbox.test.js",
+    "tests/restart-command.test.js"
+  ],
+  "node": []
+}
