@@ -41,6 +41,13 @@ export class RunOutbox {
           data += chunk;
         }
         try {
+          // Negotiate BEFORE sending work: a legacy agent executes /run but cannot
+          // deduplicate a lost ACK. Retrying against it would create duplicate jobs.
+          const capability = await fetch(`${job.agentUrl}/maintenance`, {
+            headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}` },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!capability.ok || (await capability.json()).durableIngress !== 1) throw Error('Durable ingress is not ready');
           const res = await fetch(`${job.agentUrl}/run`, {
             method: 'POST', headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
             body: data, signal: AbortSignal.timeout(10000),
