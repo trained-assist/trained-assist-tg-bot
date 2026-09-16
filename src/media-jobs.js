@@ -99,6 +99,7 @@ export class MediaJob {
     if (!job || ['done', 'failed'].includes(job.stage)) return;
     // Watchdog survives isolate termination/network awaits. One job per DO.
     await this.state.storage.setAlarm(Date.now() + 180000);
+    let retryDelay = 0;
     try {
       if (job.stage === 'download') {
         const key = objectKey(job.username, job.id);
@@ -151,7 +152,8 @@ export class MediaJob {
       job.attempts = 0;
     } catch (error) {
       job.attempts++;
-      const terminal = error.permanent || (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status));
+      retryDelay = error.retryAfterMs || 0;
+      const terminal = retryDelay > 300000 || error.permanent || (error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status));
       // Delivery retries indefinitely at a capped rate: never strand an intake reservation.
       if (!['deliver', 'notify-failure'].includes(job.stage) && (terminal || job.attempts >= 3)) {
         job.resumeStage = job.stage; job.stage = 'notify-failure';
@@ -162,7 +164,7 @@ export class MediaJob {
     await this.state.storage.transaction(async tx => {
       await tx.put('job', job);
       if (['done', 'failed'].includes(job.stage)) await tx.deleteAlarm();
-      else await tx.setAlarm(Date.now() + (job.attempts ? Math.min(300000, 1000 * 2 ** Math.min(job.attempts, 8)) : 1));
+      else await tx.setAlarm(Date.now() + (job.attempts ? Math.min(300000, Math.max(retryDelay, 1000 * 2 ** Math.min(job.attempts, 8))) : 1));
     });
   }
 }

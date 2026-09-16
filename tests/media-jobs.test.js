@@ -89,6 +89,13 @@ describe('durable R2 pipeline',()=>{
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');const calls=f.net.mock.calls.length;
   f.env.INTAKE=real;await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');expect(f.net).toHaveBeenCalledTimes(calls);
  });
+ it('honors short Retry-After without keeping the intake request open',async()=>{
+  const f=await fixture();await f.job.alarm();
+  f.net.mockImplementation(async()=>new Response('rate limited',{status:429,headers:{'Retry-After':'30'}}));
+  const before=Date.now();await f.job.alarm();expect(f.s.alarm).toBeGreaterThanOrEqual(before+30000);expect(f.s.data.get('job').stage).toBe('transcribe');
+  f.net.mockImplementation(async()=>new Response('rate limited',{status:429,headers:{'Retry-After':'3600'}}));
+  await f.job.alarm();expect(f.s.data.get('job').stage).toBe('notify-failure');
+ });
  it('queue outage parks the reservation after bounded retries',async()=>{
   const f=await fixture();f.env.MEDIA_JOBS={idFromName:n=>n,get:()=>({fetch:async()=>{throw Error('down');}})};
   for(let i=0;i<3;i++)await f.io._recoverMedia();
