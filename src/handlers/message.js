@@ -55,7 +55,8 @@ export async function handleMessage(msg, env, opts = {}) {
         return { text: [caption, transcript].filter(Boolean).join('\n'), isVoice: true };
       }
       if (file) {
-        const { base64, error } = await downloadTgFileBase64(file.file_id, env);
+        const cached = m.attachmentKey ? await env.SESSIONS.get(m.attachmentKey, { type: 'json' }) : null;
+        const { base64, error } = cached || await downloadTgFileBase64(file.file_id, env);
         if (error) throw new Error(`Сообщение ${index + 1}: ${error}`);
         const name = file.file_name || 'photo.jpg';
         return { text: [caption, `Вложение ${index + 1}: ${name}`].filter(Boolean).join('\n'),
@@ -427,7 +428,7 @@ async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, f
   await handleText(chatId, session, task, env, { isVoice: true, mode: opts.mode || null });
 }
 
-async function transcribeVoice(fileId, mimeType, env) {
+export async function transcribeVoice(fileId, mimeType, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
   const fileRes = await fetch(
     `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
@@ -471,7 +472,7 @@ async function transcribeVoice(fileId, mimeType, env) {
 
 const DOWNLOAD_TIMEOUT_MS = 20_000;
 
-async function downloadTgFileBase64(fileId, env) {
+export async function downloadTgFileBase64(fileId, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
   const fileRes = await fetch(`${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`, {
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),

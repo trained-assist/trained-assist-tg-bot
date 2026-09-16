@@ -62,6 +62,47 @@ export class IntakeBuffer {
   async fetch(request) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/ingest' && request.method === 'POST') {
+      const { msg } = await request.json();
+      // Reserve BEFORE STT/network awaits: launch must not silently omit a slow voice.
+      const accepted = await this._exclusive(async () => {
+        const items = (await this.state.storage.get('buf')) || [];
+        const seen = (await this.state.storage.get('received')) || [];
+        if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
+        items.push({ text: msg.text, msg, preparingAt: Date.now() });
+        await this.state.storage.put('buf', items);
+        return true;
+      });
+      if (!accepted) return json({ duplicate: true });
+      let result = { msg };
+      try {
+        const { preflight } = await import('./intake-preflight.js');
+        result = await preflight(msg, this.env);
+      } catch (error) {
+        await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
+          '⚠️ Не удалось подготовить сообщение сразу. Оно сохранено; повторю при запуске проработки.');
+        console.warn('[intake prepare]', error.message);
+      }
+      await this._exclusive(async () => {
+        const items = (await this.state.storage.get('buf')) || [];
+        const index = items.findIndex(i => i.msg.message_id === msg.message_id);
+        if (index >= 0) {
+          if (result.handled) items.splice(index, 1);
+          else items[index] = { text: result.msg.text, msg: result.msg };
+        }
+        await this.state.storage.put('buf', items);
+        const seen = (await this.state.storage.get('received')) || [];
+        await this.state.storage.put('received', [...seen, msg.message_id].slice(-1000));
+      });
+      if (result.handled) return json({ handled: true });
+      const remaining = (await this.state.storage.get('buf')) || [];
+      if (remaining.length) {
+        if (await this.state.storage.get('busy')) await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
+        else await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+      }
+      return json({ buffered: remaining.length });
+    }
+
     if (url.pathname === '/append' && request.method === 'POST') {
       const { text, msg, flush } = await request.json();
       const buf = await this._exclusive(async () => {
@@ -83,8 +124,7 @@ export class IntakeBuffer {
       }
       if (flush) {
         // Force word (запускай/го) — launch immediately, coalescing everything.
-        await this._dispatch();
-        return json({ flushed: true });
+        return this.fetch(new Request('https://intake/flush', { method: 'POST' }));
       }
       // Idle: (re)show the launch button with the live count. No timer.
       await this._showCollector(msg.chat?.id, buf.length, msg.message_id);
@@ -96,6 +136,11 @@ export class IntakeBuffer {
       if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
       const buf = (await this.state.storage.get('buf')) || [];
       if (!buf.length) return json({ empty: true });
+      const pending = buf.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000);
+      if (pending) {
+        await sendMessage(this.env.BOT_TOKEN, buf[0].msg.chat.id, '⏳ Ещё расшифровываю полученные сообщения. Нажми запуск после расшифровки — пачка сохранена.');
+        return json({ preparing: true });
+      }
       await this._dispatch();
       return json({ flushed: true });
     }
@@ -156,6 +201,7 @@ export class IntakeBuffer {
       if (await this.state.storage.get('busy')) return [];
       const items = (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
+      if (items.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000)) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       await this.state.storage.put('busy', true);
       await this.state.storage.put('busySince', Date.now());
