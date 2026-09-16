@@ -163,3 +163,34 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe('intake concurrent delivery', () => {
+  it('five overlapping appends and a double launch retain all messages exactly once', async () => {
+    const state = makeState();
+    // Real storage returns detached values, not a shared mutable JS array.
+    const get = state.storage.get;
+    state.storage.get = async key => structuredClone(await get(key));
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await Promise.all([5, 2, 4, 1, 3].map(id => io.fetch(new Request('https://intake/append', {
+      method: 'POST', body: JSON.stringify({ text: `question ${id}`, msg: { chat: { id: 42 }, message_id: id } }),
+    }))));
+    await Promise.all([io.fetch(flushReq()), io.fetch(flushReq())]);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].intakeItems.map(i => i.msg.message_id)).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+
+it('recovers the persisted launch after isolate loss without auto-running it', async () => {
+  const state = makeState();
+  await state.storage.put('busy', true);
+  await state.storage.put('busySince', Date.now() - 46 * 60_000);
+  await state.storage.put('launching', [{ text: 'original', msg: { chat: { id: 42 }, message_id: 1 } }]);
+  await state.storage.put('buf', [{ text: 'new', msg: { chat: { id: 42 }, message_id: 2 } }]);
+  const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  await io.alarm();
+  expect((await state.storage.get('buf')).map(i => i.text)).toEqual(['original', 'new']);
+  expect(handleMessage).not.toHaveBeenCalled();
+  expect(await state.storage.get('launching')).toBeUndefined();
+});

@@ -15,7 +15,8 @@
 //                finishes (never auto-dispatched).
 //
 // One instance per chat_id (idFromName(chatId)). DO fetch/alarm handlers are
-// serialised per instance, so /append, /flush and the safety alarm never race.
+// can interleave at external awaits. Short state mutations use an explicit lock;
+// Telegram and transcription I/O must never hold that lock.
 // The ONLY alarm is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
@@ -47,6 +48,15 @@ export class IntakeBuffer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.mutation = Promise.resolve();
+  }
+
+  async _exclusive(fn) {
+    const previous = this.mutation;
+    let release;
+    this.mutation = new Promise(resolve => { release = resolve; });
+    await previous;
+    try { return await fn(); } finally { release(); }
   }
 
   async fetch(request) {
@@ -54,9 +64,15 @@ export class IntakeBuffer {
 
     if (url.pathname === '/append' && request.method === 'POST') {
       const { text, msg, flush } = await request.json();
-      const buf = (await this.state.storage.get('buf')) || [];
-      buf.push({ text, msg });
-      await this.state.storage.put('buf', buf);
+      const buf = await this._exclusive(async () => {
+        const items = (await this.state.storage.get('buf')) || [];
+        // Telegram can retry delivery of the same update.
+        if (!msg.message_id || !items.some(item => item.msg.message_id === msg.message_id)) {
+          items.push({ text, msg });
+          await this.state.storage.put('buf', items);
+        }
+        return items;
+      });
 
       if ((await this.state.storage.get('busy')) === true) {
         // A run is in flight — hold new messages (never auto-run), but ACK them so
@@ -136,13 +152,24 @@ export class IntakeBuffer {
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a new button afterwards).
   async _dispatch() {
-    const buf = (await this.state.storage.get('buf')) || [];
+    const buf = await this._exclusive(async () => {
+      if (await this.state.storage.get('busy')) return [];
+      const items = (await this.state.storage.get('buf')) || [];
+      if (!items.length) return [];
+      items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+      await this.state.storage.put('busy', true);
+      await this.state.storage.put('busySince', Date.now());
+      await this.state.storage.put('launching', items);
+      await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+      await this.state.storage.delete('buf');
+      return items;
+    });
     if (!buf.length) return;
 
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
     const coalescedText = coalesceBuffer(buf);
-    const msg = { ...base, text: coalescedText };
+    const msg = { ...base, text: coalescedText, intakeItems: buf };
 
     // Retire the collector button so it can't be tapped twice.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
@@ -152,9 +179,6 @@ export class IntakeBuffer {
       }).catch(() => {});
     }
     await this.state.storage.delete('collectorMsgId');
-    await this.state.storage.delete('buf');
-    await this.state.storage.put('busy', true);
-    await this.state.storage.put('busySince', Date.now());
     // Safety net: only fires if the run's isolate dies before finally clears busy.
     await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
 
@@ -165,6 +189,18 @@ export class IntakeBuffer {
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(msg, this.env, { mode: 'deep' });
+      await this.state.storage.delete('launching');
+    } catch (err) {
+      // Preparation failed: keep the original Telegram references, never launch
+      // a partial task or require the user to dictate everything again.
+      await this._exclusive(async () => {
+        const remaining = (await this.state.storage.get('buf')) || [];
+        await this.state.storage.put('buf', [...buf, ...remaining]);
+        await this.state.storage.delete('launching');
+      });
+      await sendMessage(this.env.BOT_TOKEN, chatId,
+        '⚠️ Не удалось подготовить все сообщения. Вся пачка сохранена — нажми «▶️ Запустить проработку», чтобы повторить.');
+      console.error(`[intake ${chatId}] batch preparation failed:`, err?.message);
     } finally {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
@@ -186,8 +222,14 @@ export class IntakeBuffer {
         await this.state.storage.setAlarm(since + BUSY_MAX_MS);
         return;
       }
-      await this.state.storage.delete('busy');
-      await this.state.storage.delete('busySince');
+      await this._exclusive(async () => {
+        const launching = (await this.state.storage.get('launching')) || [];
+        const remaining = (await this.state.storage.get('buf')) || [];
+        if (launching.length) await this.state.storage.put('buf', [...launching, ...remaining]);
+        await this.state.storage.delete('launching');
+        await this.state.storage.delete('busy');
+        await this.state.storage.delete('busySince');
+      });
     }
     const buf = (await this.state.storage.get('buf')) || [];
     if (buf.length) {
