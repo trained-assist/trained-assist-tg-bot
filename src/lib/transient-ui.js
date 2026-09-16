@@ -64,7 +64,7 @@ export async function rejectExpiredUI(cq, env, session) {
   const expired = cq.message.date && Date.now() >= cq.message.date * 1000 + ttl;
   const superseded = picker && session?.pendingPickerId && session.pendingPickerId !== cq.message.message_id;
   const missing = picker && (!session?.pendingMessage || !session.pendingMessageAt || Date.now() >= session.pendingMessageAt + PICKER_TTL_MS);
-  const projectMissing = projectPicker && (!session?.pendingProjectChoice || session.pendingProjectChoice.dispatching ||
+  const projectMissing = projectPicker && (!session?.pendingProjectChoice || session.pendingProjectChoice.dispatching || session.pendingProjectChoice.suspended ||
     session.pendingProjectChoice.messageId !== cq.message.message_id ||
     Date.now() >= session.pendingProjectChoice.createdAt + PICKER_TTL_MS);
   if (!expired && !superseded && !missing && !projectMissing) return false;

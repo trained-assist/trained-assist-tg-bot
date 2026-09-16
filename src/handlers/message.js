@@ -39,7 +39,7 @@ export async function handleMessage(msg, env, opts = {}) {
   const route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
-  const pendingCreation = !!session.pendingProjectChoice && !route.projectChosen;
+  const pendingCreation = !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
     const decision = await getProjectDecision(env, { username: session.username, chatId });
     if (pendingCreation || shouldAskProject({ isNewDialog: true, decision })) {

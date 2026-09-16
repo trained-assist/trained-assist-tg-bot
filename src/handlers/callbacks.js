@@ -210,6 +210,11 @@ export async function handleCallbackQuery(cq, env) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       activeSessionId: sessionId,
+      activeSessionIsNew: false,
+      projectSelectionSessionId: null,
+      pendingNewProject: false,
+      contextFromSession: null,
+      pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
     });

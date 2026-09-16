@@ -466,6 +466,10 @@ async function cmdClose(chatId, env) {
   await setSession(env.SESSIONS, chatId, {
     ...session,
     activeSessionId: null,
+    activeSessionIsNew: false,
+    projectSelectionSessionId: null,
+    pendingNewProject: false,
+    pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
     lastSessionId: null,
     pendingMessage: null,
     pendingMessageAt: null,
