@@ -66,14 +66,14 @@ INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
-# Staging uses same KV namespaces as prod (OK for integration testing)
+# Dedicated staging KV; checked before mandatory replay
 [[env.staging.kv_namespaces]]
 binding = "SESSIONS"
-id = "5753e58c86c14550930106cf9248eb72"
+id = "b150ef5968d94849a79814ba8bc4ee42"
 
 [[env.staging.kv_namespaces]]
 binding = "USERS"
-id = "74c1930ed8464f4889c056031f0d42f8"
+id = "1928a191938f4f60b01fbe12d66380e0"
 
 # Secrets for staging — set once via:
 #   wrangler secret put BOT_TOKEN --env staging
@@ -136,3 +136,15 @@ new_sqlite_classes = ["RunOutbox"]
 [[env.staging.migrations]]
 tag = "v3-recovery"
 new_sqlite_classes = ["RetryQueue"]
+
+[[durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[migrations]]
+tag = "v3-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.staging.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"

@@ -16,7 +16,7 @@ export class RunOutbox {
           for (let i = 0; i < chunks; i++) await txn.put(`${id}:${i}`, data.slice(i * 32000, (i + 1) * 32000));
           const sequence = (await txn.get('sequence') || 0) + 1;
           await txn.put('sequence', sequence);
-          await txn.put(key, { id, agentUrl, chunks, sequence, createdAt: Date.now(), chatId: body.userId, initialMsgId: body.initialMsgId });
+          await txn.put(key, { id, agentUrl, chunks, sequence, createdAt: Date.now(), chatId: body.userId, threadId: body.threadId || null, initialMsgId: body.initialMsgId });
           await txn.setAlarm(Date.now() + 1000);
         });
       }
@@ -87,7 +87,7 @@ export class RunOutbox {
     try {
       await fetch(`https://api.telegram.org/bot${this.env.BOT_TOKEN}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: job.chatId, ...(job.initialMsgId ? { message_id: job.initialMsgId } : {}), text }),
+        body: JSON.stringify({ chat_id: job.chatId, ...(job.initialMsgId ? { message_id: job.initialMsgId } : (job.threadId ? { message_thread_id: job.threadId } : {})), text }),
         signal: AbortSignal.timeout(5000),
       });
     } catch { /* Delivery status must not remove the queued payload. */ }
