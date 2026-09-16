@@ -75,16 +75,16 @@ describe('groupDisposition — full matrix', () => {
       .toMatchObject({ action: 'command' });
   });
 
-  it('mention → answer immediately (bypass buffer), even in a huge group', () => {
+  it('mention → shared intake, even in a huge group', () => {
     expect(groupDisposition({ text: `@${BOT} что по задаче?` }, { botUsername: BOT, memberCount: 500 }))
-      .toMatchObject({ action: 'answer', cleanText: 'что по задаче?' });
+      .toMatchObject({ action: 'accumulate', cleanText: 'что по задаче?' });
   });
 
-  it('reply-to-bot → answer immediately', () => {
+  it('reply-to-bot → shared intake', () => {
     expect(groupDisposition(
       { text: 'да', reply_to_message: { from: { username: BOT } } },
       { botUsername: BOT, memberCount: 500 },
-    )).toMatchObject({ action: 'answer' });
+    )).toMatchObject({ action: 'accumulate' });
   });
 
   it('AUDIO BUG #4: ambient voice in a large group with all-msg off/unset → IGNORE', () => {

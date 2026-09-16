@@ -64,7 +64,7 @@ export function shouldHandleAmbient({ allMsgMode, memberCount } = {}) {
  *
  * Returns one of:
  *   { action: 'command',  cleanText }   — a slash command
- *   { action: 'answer',   cleanText }   — addressed to bot → answer now (bypass buffer)
+ *   { action: 'accumulate', cleanText } — addressed to bot → shared intake buffer
  *   { action: 'accumulate', cleanText } — ambient, small group / all-msg → intake buffer
  *   { action: 'ignore' }                — ambient in a big group, or empty message
  */
@@ -73,7 +73,7 @@ export function groupDisposition(msg, { botUsername, allMsgMode, memberCount } =
   const cleanText = stripBotMention(text, botUsername);
 
   if (text.startsWith('/')) return { action: 'command', cleanText };
-  if (isAddressedToBot(msg, botUsername)) return { action: 'answer', cleanText };
+  if (isAddressedToBot(msg, botUsername)) return { action: 'accumulate', cleanText };
   if (!hasContent(msg)) return { action: 'ignore' };
   if (shouldHandleAmbient({ allMsgMode, memberCount })) return { action: 'accumulate', cleanText };
   return { action: 'ignore' };

@@ -96,7 +96,7 @@ export async function dispatchInner(update, env) {
   // Other groups. Trigger rule lives in src/group-routing.js (pure + tested);
   // see docs/GROUP-TRIGGER-MATRIX.md. Summary:
   //   • /command                       → handle it
-  //   • addressed (mention text/caption OR reply-to-bot) → answer NOW, bypass buffer
+  //   • addressed (mention text/caption OR reply-to-bot) → same intake as private chats
   //   • ambient + (2-member group OR all-msg mode) → intake accumulator (▶️ launch)
   //   • ambient in a bigger group with all-msg off → ignore (text AND audio alike)
   if (isGroup) {
@@ -108,10 +108,10 @@ export async function dispatchInner(update, env) {
       await handleCommand(cleanMsg, env);
       return;
     }
-    // Addressed to the bot → an explicit "answer me now". Bypass the ▶️ accumulator
-    // (a mention used to get buffered → felt like "mention doesn't react", #2).
+    // Addressing selects the recipient; it does not request an immediate launch.
+    // Use the same intake path as private chats so follow-up media can be added.
     if (isAddressedToBot(msg, env.BOT_USERNAME)) {
-      await handleMessage(cleanMsg, env);
+      await routeText(cleanMsg, env, chatId);
       return;
     }
     if (!hasContent(msg)) return;

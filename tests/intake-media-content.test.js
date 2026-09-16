@@ -223,12 +223,12 @@ describe('complete accumulated batch at agent boundary', () => {
     expect(task.task).not.toMatch(/voice:v/);
   });
 
-  it('voice reply, captioned photo and text retain all contents and the original session after selection changes', async () => {
+  it.each(['private', 'supergroup'])('%s: voice reply, photo and text retain content and original session after selection changes', async (type) => {
     getSession.mockResolvedValue({ username: 'u', activeSessionId: 'different', lastSessionId: 'different', projectId: 'different-project', contextFromSession: 'unrelated-context' });
     await launchBatch([
-      { chat: { id: 42 }, message_id: 1, voice: { file_id: 'v1' }, reply_to_message: { message_id: 99 }, intakeRoute: { sessionId: 's-original', projectId: 'p-original', forceNew: false } },
-      { chat: { id: 42 }, message_id: 2, photo: [{ file_id: 'p1' }], caption: 'подпись скриншота' },
-      { chat: { id: 42 }, message_id: 3, text: 'последний вопрос' },
+      { chat: { id: 42, type }, message_id: 1, voice: { file_id: 'v1' }, reply_to_message: { message_id: 99 }, intakeRoute: { sessionId: 's-original', projectId: 'p-original', forceNew: false } },
+      { chat: { id: 42, type }, message_id: 2, photo: [{ file_id: 'p1' }], caption: 'подпись скриншота' },
+      { chat: { id: 42, type }, message_id: 3, text: 'последний вопрос' },
     ]);
     expect(runTask).toHaveBeenCalledTimes(1);
     const task = runTask.mock.calls[0][1];

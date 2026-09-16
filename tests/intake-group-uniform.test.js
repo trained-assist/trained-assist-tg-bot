@@ -1,19 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// The exact scenario the owner reported: a logged-in GROUP chat (their 2-member QA
-// group) shows ZERO reaction to a plain message, and the only way to launch is a
-// reply. Reason: an ambient group message must pass shouldHandleAmbient — which needs
-// allMsgMode OR memberCount<=2. When getChatMemberCount can't read the count it
-// fails closed (999) → the message is silently dropped, never reaching the intake
-// accumulator. A reply hits the addressed-bypass, so it "works" — hence "старт только
-// реплаем". The fix: /login in a group AUTO-enables allMsgMode so every message reaches
-// the SAME accumulator as a private chat (uniformity), without touching the reply path.
-//
-// These tests lock:
-//   1. /login in a group turns allMsgMode ON (was: only told the user to run /all_on).
-//   2. An ambient group message then reaches the accumulator in the CORRECT format —
-//      the exact {text,msg,flush} envelope the agent's intake buffer consumes.
-//   3. A reply-to-bot still bypasses to handleMessage (the working path is NOT broken).
+// Group admission differs; admitted content uses the same intake as private chats.
 
 const handleMessage = vi.fn();
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
@@ -88,10 +75,55 @@ describe('group login → uniform intake accumulator', () => {
     expect(_appended[0].msg.chat.id).toBe(-1001);
   });
 
-  it('3. a reply-to-bot still bypasses to handleMessage (reply path NOT broken)', async () => {
+  it('3. a reply-to-bot accumulates and pins the continuation', async () => {
     const { env, _appended } = makeEnv();
+    currentSession = { lastSessionId: 'original', projectId: 'p1' };
     await dispatchInner(groupMsg({ text: 'да', reply_to_message: { from: { username: 'super_personal_assistant_bot' } } }), env);
-    expect(_appended).toHaveLength(0);
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(_appended).toHaveLength(1);
+    expect(_appended[0].msg.intakeRoute).toMatchObject({ sessionId: 'original', projectId: 'p1' });
+    expect(handleMessage).not.toHaveBeenCalled();
   });
+});
+
+const payloads = [
+  { text: 'подробности' }, { text: undefined, voice: { file_id: 'v' } },
+  { text: undefined, audio: { file_id: 'a' } },
+  { text: undefined, photo: [{ file_id: 'p' }], caption: 'снимок' },
+  { text: undefined, document: { file_id: 'd' }, caption: 'файл' },
+];
+
+describe('private/group admission parity for every supported attachment', () => {
+  for (const payload of payloads) {
+    it(`routes ${Object.keys(payload).join('/')} identically after admission`, async () => {
+      for (const mode of ['private', 'small', 'all_on', 'reply', 'mention']) {
+        const { env, _appended } = makeEnv();
+        currentSession = { allMsgMode: mode === 'all_on', lastSessionId: 'original', projectId: 'p1' };
+        env.SESSIONS.get.mockResolvedValue({ count: mode === 'small' ? 2 : 50, ts: Date.now() });
+        const update = groupMsg({ ...payload });
+        if (mode === 'private') update.message.chat = { id: 7, type: 'private' };
+        if (mode === 'reply') update.message.reply_to_message = { from: { username: env.BOT_USERNAME } };
+        if (mode === 'mention') {
+          const key = payload.text ? 'text' : 'caption';
+          update.message[key] = `@${env.BOT_USERNAME} ${update.message[key] || ''}`;
+        }
+        await dispatchInner(update, env);
+        expect(_appended, mode).toHaveLength(1);
+        expect(_appended[0].flush, mode).toBe(false);
+        for (const key of ['voice', 'audio', 'photo', 'document']) {
+          if (payload[key]) expect(_appended[0].msg[key]).toEqual(payload[key]);
+        }
+      }
+      expect(handleMessage).not.toHaveBeenCalled();
+    });
+
+    it(`ignores human-to-human ${Object.keys(payload).join('/')} in all_off large groups`, async () => {
+      const { env, _appended } = makeEnv();
+      currentSession = { allMsgMode: false };
+      env.SESSIONS.get.mockResolvedValue({ count: 3, ts: Date.now() });
+      await dispatchInner(groupMsg(payload), env);
+      await dispatchInner(groupMsg({ ...payload, reply_to_message: { from: { username: 'another_human' } } }), env);
+      expect(_appended).toHaveLength(0);
+      expect(handleMessage).not.toHaveBeenCalled();
+    });
+  }
 });
