@@ -32,6 +32,9 @@ vi.mock('../src/lib/kv.js', () => ({
   newSessionId: (chatId) => `s-${chatId}-new`,
   scheduleRetry: (...a) => scheduleRetry(...a),
   takeDueRetries: (...a) => takeDueRetries(...a),
+  markRetryStarted: vi.fn(),
+  finishRetry: vi.fn(),
+  saveRetryOutcome: vi.fn(),
 }));
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: (...a) => sendMessage(...a),
@@ -107,8 +110,8 @@ describe('the scheduled retry itself (opts.isRetry) — cap at exactly one attem
     expect(scheduleRetry).not.toHaveBeenCalled();
   });
 
-  it('still down on the retry → final error message, NOT another scheduled retry', async () => {
-    takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'сделай штуку', opts: {} }]);
+  it('still down on the second retry → final reason and no further retries', async () => {
+    takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'сделай штуку', opts: { retryAttempt: 1 } }]);
     runTask.mockRejectedValue(new Error('agent /run HTTP 503'));
     classifyAgentError.mockResolvedValue('down');
 
@@ -116,16 +119,40 @@ describe('the scheduled retry itself (opts.isRetry) — cap at exactly one attem
 
     expect(scheduleRetry).not.toHaveBeenCalled();
     const sentText = sendMessage.mock.calls.at(-1)[2];
-    expect(sentText).toContain('после повторной попытки');
+    expect(sentText).toContain('2/2 не удалась');
   });
 
-  it('skips silently if the user logged out before the retry fired', async () => {
+  it('reports cancellation if the user logged out before the retry fired', async () => {
     takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'сделай штуку', opts: {} }]);
     getSession.mockResolvedValue(null);
 
     await processDueRetries(env);
 
     expect(runTask).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage.mock.calls.at(-1)[2]).toContain('Восстановление отменено');
   });
+});
+
+it('first failed retry schedules the second and names the reason', async () => {
+  takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'x', opts: {} }]);
+  runTask.mockRejectedValue(new Error('agent /run HTTP 503'));
+  classifyAgentError.mockResolvedValue('down');
+  await processDueRetries(env);
+  expect(scheduleRetry).toHaveBeenCalledTimes(1);
+  expect(scheduleRetry.mock.calls[0][1].opts.retryAttempt).toBe(1);
+  expect(sendMessage.mock.calls.at(-1)[2]).toMatch(/1\/2 не удалась.*недоступен.*3 минуты/);
+});
+it('interrupted dispatch is reported without duplicate submission', async () => {
+  takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'x', opts: {}, startedAt: 1 }]);
+  await processDueRetries(env);
+  expect(runTask).not.toHaveBeenCalled();
+  expect(sendMessage.mock.calls.at(-1)[2]).toContain('без подтверждённого результата');
+});
+it('one failed session lookup does not prevent another chat recovery', async () => {
+  takeDueRetries.mockResolvedValue([{ chatId: 42, text: 'x', opts: {} }, { chatId: 43, text: 'y', opts: {} }]);
+  getSession.mockRejectedValueOnce(new Error('KV unavailable'));
+  runTask.mockResolvedValue({});
+  await processDueRetries(env);
+  expect(runTask).toHaveBeenCalledTimes(1);
+  expect(runTask.mock.calls[0][1].userId).toBe(43);
 });

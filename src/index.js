@@ -214,3 +214,8 @@ async function scheduled(event, env, ctx) {
 
 export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };
+
+export { RetryQueue } from './retry-queue.js';
+
+// Compatibility export: staging already owns RunOutbox instances (PR #103).
+export { RunOutbox } from './run-outbox.js';
