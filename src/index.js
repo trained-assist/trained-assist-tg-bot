@@ -1,3 +1,4 @@
+import { serveMedia } from './media-jobs.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
@@ -10,6 +11,8 @@ import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
 const app = new Hono();
+
+app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive' }));
@@ -219,3 +222,5 @@ export { RetryQueue } from './retry-queue.js';
 
 // Compatibility export: staging already owns RunOutbox instances (PR #103).
 export { RunOutbox } from './run-outbox.js';
+
+export { MediaJob } from './media-jobs.js';
