@@ -68,7 +68,7 @@ export async function handleMessage(msg, env, opts = {}) {
     const task = prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') +
       (files.length > 1 ? '\n\nВсе вложения находятся в приложенном TAR-архиве. Распакуй его и прочитай каждый файл; номер в имени соответствует сообщению.' : '');
     await handleText(chatId, session, task, env, {
-      ...opts, ...attachment, isVoice: prepared.some(p => p.isVoice),
+      ...opts, intakeRoute: msg.intakeRoute, ...attachment, isVoice: prepared.some(p => p.isVoice),
     });
     return;
   }
@@ -165,7 +165,9 @@ function stripMediaTags(text) {
 
 async function handleText(chatId, session, text, env, opts = {}) {
   try {
-    const route = await resolveSessionRoute(chatId, session, text, env);
+    const route = opts.intakeRoute
+      ? { type: 'run', ...opts.intakeRoute }
+      : await resolveSessionRoute(chatId, session, text, env);
 
     if (route.type === 'disambiguate') {
       // Store the pending message, show session picker
@@ -215,12 +217,12 @@ async function handleText(chatId, session, text, env, opts = {}) {
       context,
       sessionId,
       forceNew: !!route.forceNew,
-      contextFromSession: session.contextFromSession || null,
+      contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
-      projectId: session.projectId || null,
+      projectId: opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null),
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
