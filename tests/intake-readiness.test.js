@@ -1,6 +1,6 @@
 import { it, expect, vi, afterEach } from 'vitest';
 import { intakeReadiness } from '../src/intake-readiness.js';
-const env = { INTAKE: {}, SESSIONS: {}, AGENT_SECRET: 's', AGENT_URL: 'https://main/agent', AGENT_RU_URL: 'https://ru/agent' };
+const env = { INTAKE: {}, SESSIONS: {}, DEEPGRAM_API_KEY: 'stt', AGENT_SECRET: 's', AGENT_URL: 'https://main/agent', AGENT_RU_URL: 'https://ru/agent' };
 afterEach(() => vi.unstubAllGlobals());
 it('requires authenticated validation from every configured backend, never runs a task', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: 'invalid intake request' }, { status: 400 })));
