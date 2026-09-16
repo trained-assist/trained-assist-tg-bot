@@ -13,7 +13,8 @@
     "tests/intake-buffer.test.js",
     "tests/run-outbox.test.js",
     "tests/restart-command.test.js",
-    "tests/release-gates.test.js"
+    "tests/release-gates.test.js",
+    "tests/restart-confirmations.test.js"
   ],
   "node": []
 }
