@@ -50,7 +50,10 @@ export async function preflight(msg, env) {
         messageId: msg.message_id, telegramUserId: session.telegramUserId, projectId: session.projectId }),
       signal: AbortSignal.timeout(20000),
     });
-    if (!response.ok) return { msg: prepared };
+    if (!response.ok) {
+      console.warn(`[intake preflight] quick HTTP ${response.status}; preserving message for collection`);
+      return { msg: prepared };
+    }
     const result = await response.json();
     if (!result.answer || !result.sessionId) return { msg: prepared };
     const sent = await sendMessage(env.BOT_TOKEN, msg.chat.id, `⚡ ${result.answer}`, {

@@ -8,10 +8,26 @@ import { sendMessage } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
+import { intakeReadiness } from './intake-readiness.js';
+
 const app = new Hono();
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive' }));
+
+// A liveness 200 cannot certify the gateway→agent quick-answer contract.
+// Cache for one minute to bound read-only backend probes from health polling.
+let readinessCache;
+let readinessPending;
+app.get('/health/intake', async (c) => {
+  if (!readinessCache || Date.now() - readinessCache.at > 60000) {
+    readinessPending ||= intakeReadiness(c.env).then(body => {
+      readinessCache = { body, at: Date.now() };
+    }).finally(() => { readinessPending = null; });
+    await readinessPending;
+  }
+  return c.json(readinessCache.body, readinessCache.body.ready ? 200 : 503);
+});
 
 // Telegram webhook
 app.post('/webhook', async (c) => {

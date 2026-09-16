@@ -72,14 +72,11 @@ jobs:
           done
           [ "$STATUS" = "200" ] && echo "✅ Staging alive" || { echo "❌ Staging not responding (HTTP $STATUS)"; exit 1; }
 
-      - name: Staging webhook smoke test
+      - name: Staging quick-answer backend contract (no Telegram sends)
         run: |
-          BODY='{"update_id":9999999,"message":{"message_id":1,"from":{"id":5367135237,"is_bot":false,"username":"zemtest"},"chat":{"id":5367135237,"type":"private"},"date":1234567890,"text":"/ping"}}'
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST -H "Content-Type: application/json" -d "$BODY" \
-            "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev/webhook")
-          echo "Webhook response: HTTP $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ Staging webhook OK" || { echo "❌ HTTP $STATUS"; exit 1; }
+          curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+            "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev/health/intake" \
+            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends | all(. == true))'
 
   smoke-test:
     runs-on: ubuntu-latest
@@ -98,13 +95,8 @@ jobs:
           done
           [ "$STATUS" = "200" ] && echo "✅ Worker alive" || { echo "❌ Worker not responding (HTTP $STATUS)"; exit 1; }
 
-      - name: Webhook integration test (fake /ping update)
+      - name: Production quick-answer backend contract (no Telegram sends)
         run: |
-          BODY='{"update_id":9999999,"message":{"message_id":1,"from":{"id":5367135237,"is_bot":false,"username":"zemtest"},"chat":{"id":5367135237,"type":"private"},"date":1234567890,"text":"/ping"}}'
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d "$BODY" \
-            "https://trained-assist-tg-bot.skillset-apply.workers.dev/webhook")
-          echo "Webhook response: HTTP $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ Webhook accepted update" || { echo "❌ Unexpected HTTP $STATUS"; exit 1; }
+          curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+            "https://trained-assist-tg-bot.skillset-apply.workers.dev/health/intake" \
+            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends | all(. == true))'
