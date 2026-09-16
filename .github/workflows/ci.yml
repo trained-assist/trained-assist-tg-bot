@@ -20,6 +20,8 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm test
+      - name: Media pipeline in local workerd and R2
+        run: npm run test:media-runtime
 
   staging-gate:
     needs: [ci, deploy-staging, smoke-test-staging]

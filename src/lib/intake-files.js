@@ -52,6 +52,7 @@ export async function copyRefsToAgent(env, username, refs, agentUrl) {
   if (agentUrl === env.AGENT_URL) return;
   // The regional VM has its own disk; references must exist there before /run.
   for (const ref of refs) {
+    if (ref.storage === 'r2') continue;
     await retryMedia(async () => {
       const response = await fetch(endpoint(env.AGENT_URL, username, ref.id), {
         headers: auth(env), signal: AbortSignal.timeout(120000),
