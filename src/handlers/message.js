@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { packAttachments } from '../lib/attachment-bundle.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
@@ -32,6 +33,44 @@ export async function handleMessage(msg, env, opts = {}) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Сначала войди: /login username password'
     );
+  }
+
+  if (msg.intakeItems) {
+    // Resolve EVERY original message before making the single agent request.
+    // Parallel I/O preserves array order while avoiding N sequential STT waits.
+    const prepared = await Promise.all(msg.intakeItems.map(async (item, index) => {
+      const m = item.msg || {};
+      const caption = item.text || m.text || m.caption || '';
+      const media = m.voice || m.audio || m.video ||
+        (m.document && /^(audio|video)\//i.test(m.document.mime_type || '') ? m.document : null);
+      const file = m.photo?.[m.photo.length - 1] || m.document;
+      if ((media || file)?.file_size > MAX_TG_DOWNLOAD_BYTES) {
+        throw new Error(`Сообщение ${index + 1}: файл больше 20 MB`);
+      }
+      if (media) {
+        const { transcript, error } = m.transcript
+          ? { transcript: m.transcript }
+          : await transcribeVoice(media.file_id, media.mime_type || null, env);
+        if (!transcript) throw new Error(`Сообщение ${index + 1}: ${error || 'пустая расшифровка'}`);
+        return { text: [caption, transcript].filter(Boolean).join('\n'), isVoice: true };
+      }
+      if (file) {
+        const { base64, error } = await downloadTgFileBase64(file.file_id, env);
+        if (error) throw new Error(`Сообщение ${index + 1}: ${error}`);
+        const name = file.file_name || 'photo.jpg';
+        return { text: [caption, `Вложение ${index + 1}: ${name}`].filter(Boolean).join('\n'),
+          file: { base64, name, mime: file.mime_type || (m.photo ? 'image/jpeg' : 'application/octet-stream'), index: index + 1 } };
+      }
+      return { text: caption };
+    }));
+    const files = prepared.flatMap(p => p.file ? [p.file] : []);
+    const attachment = packAttachments(files);
+    const task = prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') +
+      (files.length > 1 ? '\n\nВсе вложения находятся в приложенном TAR-архиве. Распакуй его и прочитай каждый файл; номер в имени соответствует сообщению.' : '');
+    await handleText(chatId, session, task, env, {
+      ...opts, ...attachment, isVoice: prepared.some(p => p.isVoice),
+    });
+    return;
   }
 
   // Media branches take precedence over `text`. On the buffered/dispatch path

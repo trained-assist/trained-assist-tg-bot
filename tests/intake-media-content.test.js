@@ -41,6 +41,8 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: (...a) => sendMessage(...a),
   sendDocument: (...a) => sendDocument(...a),
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
+  editMessage: vi.fn(async () => ({ ok: true })),
+  editMessageReplyMarkup: vi.fn(async () => ({ ok: true })),
 }));
 vi.mock('../src/handlers/commands.js', () => ({ renderSessionList: () => ({ text: '', buttons: [] }) }));
 
@@ -57,6 +59,7 @@ beforeEach(() => {
   getProjectDecision.mockResolvedValue({ action: 'auto' });
   runTask.mockResolvedValue({ pinnedMsgId: null });
   sendMessage.mockResolvedValue({ ok: true, result: { message_id: 10 } });
+  sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 11 } });
   setSession.mockResolvedValue();
   // Stub Telegram getFile + file download (downloadTgFileBase64 / transcribeVoice)
   // and the Deepgram transcription endpoint.
@@ -186,4 +189,79 @@ describe('oversized media is rejected before hitting Telegram\'s getFile limit',
     await handleMessage(msg, env);
     expect(runTask).toHaveBeenCalledTimes(1);
   });
+});
+
+// Real DO → real media handler → captured agent boundary.
+import { IntakeBuffer } from '../src/intake-buffer.js';
+async function launchBatch(messages) {
+  const data = new Map();
+  const state = { storage: {
+    get: async k => structuredClone(data.get(k)),
+    put: async (k, v) => data.set(k, structuredClone(v)),
+    delete: async k => data.delete(k), setAlarm: async () => {}, deleteAlarm: async () => {},
+  }};
+  const intake = new IntakeBuffer(state, env);
+  for (const msg of messages) await intake.fetch(new Request('https://intake/append', {
+    method: 'POST', body: JSON.stringify({ msg, text: msg.text }),
+  }));
+  await intake.fetch(new Request('https://intake/flush', { method: 'POST' }));
+  return data;
+}
+
+describe('complete accumulated batch at agent boundary', () => {
+  it('five voices produce five transcripts in ONE deep task', async () => {
+    let n = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, opts) => String(url).includes('deepgram.com')
+      ? new Response(JSON.stringify({ results: { channels: [{ alternatives: [{ transcript: `вопрос ${++n}` }] }] } }))
+      : original(url, opts));
+    await launchBatch(Array.from({ length: 5 }, (_, i) => ({ chat: { id: 42 }, message_id: i + 1, voice: { file_id: `v${i}` } })));
+    expect(runTask).toHaveBeenCalledTimes(1);
+    const task = runTask.mock.calls[0][1];
+    for (let i = 1; i <= 5; i++) expect(task.task).toContain(`вопрос ${i}`);
+    expect(task.mode).toBe('deep');
+    expect(task.task).not.toMatch(/voice:v/);
+  });
+
+  it('voice, captioned photo, then text retain all three contents', async () => {
+    await launchBatch([
+      { chat: { id: 42 }, message_id: 1, voice: { file_id: 'v1' } },
+      { chat: { id: 42 }, message_id: 2, photo: [{ file_id: 'p1' }], caption: 'подпись скриншота' },
+      { chat: { id: 42 }, message_id: 3, text: 'последний вопрос' },
+    ]);
+    expect(runTask).toHaveBeenCalledTimes(1);
+    const task = runTask.mock.calls[0][1];
+    expect(task.task).toContain('привет как дела');
+    expect(task.task).toContain('подпись скриншота');
+    expect(task.task).toContain('последний вопрос');
+    expect(task.fileBase64).toBe(Buffer.from(PHOTO_BYTES).toString('base64'));
+  });
+
+  it('a failed earlier transcription keeps the entire batch for retry and launches nothing', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: false })));
+    const data = await launchBatch([
+      { chat: { id: 42 }, message_id: 1, voice: { file_id: 'bad' } },
+      { chat: { id: 42 }, message_id: 2, text: 'последний вопрос' },
+    ]);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(data.get('buf')).toHaveLength(2);
+  });
+});
+
+
+import { execFileSync } from 'node:child_process';
+it('two photos and a document arrive together as a valid archive with distinct safe names', async () => {
+  await launchBatch([
+    { chat: { id: 42 }, message_id: 1, photo: [{ file_id: 'p1' }] },
+    { chat: { id: 42 }, message_id: 2, photo: [{ file_id: 'p2' }] },
+    { chat: { id: 42 }, message_id: 3, document: { file_id: 'd1', file_name: '../report.txt' } },
+    { chat: { id: 42 }, message_id: 4, text: 'проверь все файлы' },
+  ]);
+  expect(runTask).toHaveBeenCalledTimes(1);
+  const arg = runTask.mock.calls[0][1];
+  const archive = Buffer.from(arg.fileBase64, 'base64');
+  const names = execFileSync('tar', ['-tf', '-'], { input: archive }).toString().trim().split('\n');
+  expect(names).toEqual(['1-photo.jpg', '2-photo.jpg', '3-.._report.txt']);
+  for (const name of names) expect(execFileSync('tar', ['-xOf', '-', name], { input: archive })).toEqual(Buffer.from(PHOTO_BYTES));
+  expect(arg.task).toContain('проверь все файлы');
 });
