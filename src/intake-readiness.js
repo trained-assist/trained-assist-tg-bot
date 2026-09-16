@@ -5,7 +5,8 @@ export async function intakeReadiness(env) {
   if (env.INTAKE_DEBOUNCE === 'off' || !env.INTAKE || !env.SESSIONS || !env.AGENT_SECRET || !env.AGENT_URL || !env.DEEPGRAM_API_KEY) {
     return { ready: false, quickBeforeCollect: true, reason: 'intake configuration missing or disabled' };
   }
-  const backends = await Promise.all([...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))].map(async url => {
+  const urls = [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))];
+  const backends = await Promise.all(urls.map(async url => {
     try {
       const response = await fetch(`${url}/intake-quick`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.AGENT_SECRET}` },
@@ -15,5 +16,20 @@ export async function intakeReadiness(env) {
       return { ready: response.status === 400 && body?.error === 'invalid intake request', status: response.status };
     } catch { return { ready: false, status: 0 }; }
   }));
-  return { ready: backends.every(b => b.ready), quickBeforeCollect: true, backends: backends.map(b => b.ready), backendStatuses: backends.map(b => b.status) };
+  // pickAgentUrl already falls back to primary when regional capabilities cannot
+  // be read. An offline optional region cannot receive quick queries; don't call
+  // that an incompatible release. An online region missing /intake-quick MUST fail.
+  let regionalFallback = false;
+  if (backends[1] && !backends[1].ready) {
+    try {
+      const response = await fetch(`${env.AGENT_RU_URL}/capabilities?userId=intake-readiness-probe`, {
+        headers: { Authorization: `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(2500),
+      });
+      const body = await response.json().catch(() => null);
+      regionalFallback = !response.ok || !Array.isArray(body?.capabilities);
+    } catch { regionalFallback = true; }
+  }
+  return { ready: backends[0].ready && (backends.length === 1 || backends[1].ready || regionalFallback),
+    quickBeforeCollect: true, backends: backends.map(b => b.ready),
+    backendStatuses: backends.map(b => b.status), regionalFallback };
 }

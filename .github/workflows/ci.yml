@@ -76,7 +76,7 @@ jobs:
         run: |
           curl --fail --silent --show-error --retry 3 --retry-delay 5 \
             "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev/health/intake" \
-            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends | all(. == true))'
+            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends[0] == true) and ((.backends | all(. == true)) or .regionalFallback == true)'
 
   smoke-test:
     runs-on: ubuntu-latest
@@ -99,4 +99,4 @@ jobs:
         run: |
           curl --fail --silent --show-error --retry 3 --retry-delay 5 \
             "https://trained-assist-tg-bot.skillset-apply.workers.dev/health/intake" \
-            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends | all(. == true))'
+            | jq -e '.ready == true and .quickBeforeCollect == true and (.backends | length > 0) and (.backends[0] == true) and ((.backends | all(. == true)) or .regionalFallback == true)'
