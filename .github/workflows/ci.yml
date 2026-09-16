@@ -21,6 +21,50 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  staging-gate:
+    needs: [ci, deploy-staging, smoke-test-staging]
+    if: always() && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require the actual staging deploy and smoke on this revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+          PUSH_RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          if os.environ['EVENT'] == 'push':
+              results = os.environ['PUSH_RESULTS'].split(',')
+              assert len(results) == 3 and all(r == 'success' for r in results), results
+              raise SystemExit(0)
+          base = 'https://api.github.com/repos/' + os.environ['REPO']
+          def get(path):
+              request = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+          required = {'ci', 'deploy-staging', 'smoke-test-staging'}
+          for _ in range(60):
+              runs = get('/actions/workflows/ci.yml/runs?event=push&head_sha=' + os.environ['HEAD_SHA'])['workflow_runs']
+              runs = [run for run in runs if run['head_sha'] == os.environ['HEAD_SHA']]
+              if runs:
+                  run = max(runs, key=lambda item: item['id'])
+                  jobs = get('/actions/runs/' + str(run['id']) + '/jobs')['jobs']
+                  checks = {job['name']: job for job in jobs if job['name'] in required}
+                  if checks.keys() == required and all(job['status'] == 'completed' for job in checks.values()):
+                      assert all(job['conclusion'] == 'success' for job in checks.values()), checks
+                      print('Staging deploy and smoke passed on', os.environ['HEAD_SHA'])
+                      raise SystemExit(0)
+              time.sleep(5)
+          raise SystemExit('No successful staging deployment and smoke for this revision')
+          PY
+
   deploy:
     runs-on: ubuntu-latest
     needs: ci
