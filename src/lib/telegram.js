@@ -1,3 +1,4 @@
+import { trackUI, forgetUI } from './transient-ui.js';
 // Telegram Bot API helpers
 
 export async function sendMessage(token, chatId, text, extra = {}) {
@@ -10,12 +11,19 @@ export async function sendMessage(token, chatId, text, extra = {}) {
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
+  const { lifecycleEnv, ...telegramExtra } = extra;
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', ...extra }),
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', ...telegramExtra }),
   });
-  return res.json();
+  const result = await res.json();
+  if (result.ok && lifecycleEnv) {
+    const keyboard = telegramExtra.reply_markup?.inline_keyboard;
+    if (keyboard?.length) await trackUI(lifecycleEnv, chatId, messageId, keyboard, result.result?.date ? result.result.date * 1000 : Date.now());
+    else if (keyboard) await forgetUI(lifecycleEnv, chatId, messageId);
+  }
+  return result;
 }
 
 export async function editMessageReplyMarkup(token, chatId, messageId, inlineKeyboard = []) {
@@ -27,11 +35,13 @@ export async function editMessageReplyMarkup(token, chatId, messageId, inlineKey
   return res.json();
 }
 
-export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboard, extra = {}) {
-  return sendMessage(token, chatId, text, {
+export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboard, extra = {}, lifecycleEnv) {
+  const result = await sendMessage(token, chatId, text, {
     reply_markup: { inline_keyboard: inlineKeyboard },
     ...extra,
   });
+  if (result.ok) await trackUI(lifecycleEnv, chatId, result.result?.message_id, inlineKeyboard, result.result?.date ? result.result.date * 1000 : Date.now());
+  return result;
 }
 
 export async function answerCallbackQuery(token, callbackQueryId, text = '') {

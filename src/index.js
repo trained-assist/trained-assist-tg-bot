@@ -1,3 +1,4 @@
+import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
 import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
@@ -164,7 +165,7 @@ export async function routeText(msg, env, chatId) {
     }
     const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
-    await stub.fetch('https://intake/append', {
+    await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',
       body: JSON.stringify({ text: msg.text, msg, flush }),
     });
@@ -205,6 +206,7 @@ async function getGroupMemberCount(env, chatId) {
 // alive past the return — scheduled handlers have no separate "response" to wait on.
 async function scheduled(event, env, ctx) {
   ctx.waitUntil(processDueRetries(env));
+  ctx.waitUntil(processExpiredUI(env));
 }
 
 export { IntakeBuffer } from './intake-buffer.js';
