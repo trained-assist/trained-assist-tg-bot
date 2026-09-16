@@ -28,9 +28,9 @@ it('release graph has unique jobs, valid dependencies and no cycles', () => {
 it('production requires actual staging, smoke and scenarios; health verifies deployed revision', () => {
   const graph = jobs();
   expect(graph.get('deploy')).toContain('needs: [ci, staging-gate]');
-  expect(graph.get('deploy-staging')).toContain('needs: [ci, scenario-gate]');
+  expect(graph.get('deploy-staging')).toContain('needs: [ci, scenario-gate, restart-integration]');
   expect(graph.get('deploy-staging')).toContain('BUILD_SHA:${{ github.sha }}');
-  expect(graph.get('staging-gate')).toContain('needs: [ci, scenario-gate, deploy-staging, smoke-test-staging]');
+  expect(graph.get('staging-gate')).toContain('needs: [ci, scenario-gate, restart-integration, deploy-staging, smoke-test-staging]');
   expect(graph.get('staging-gate')).toContain("all(r == 'success' for r in results)");
   expect(graph.get('smoke-test-staging')).toContain('["buildSha"] == "${{ github.sha }}"');
   expect(source).not.toContain('continue-on-error');

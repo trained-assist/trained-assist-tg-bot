@@ -48,8 +48,36 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  restart-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-assist-agent
+          ref: 60e1f295c595f6841f5c739d1e0e6d09f833114a
+          path: .restart-agent
+          persist-credentials: false
+      - run: npm ci --include=dev
+        working-directory: .restart-agent
+      - name: Bundle this revision's real gateway callback
+        run: npx esbuild src/lib/restart-confirmations.js --bundle --platform=node --format=esm --outfile=/tmp/restart-gateway-adapter.mjs
+      - name: Gateway to agent restart and confirmation cycle
+        working-directory: .restart-agent
+        env:
+          RESTART_GATEWAY_ADAPTER: /tmp/restart-gateway-adapter.mjs
+        run: npx vitest run tests/planned-restart-http.test.js
+
   staging-gate:
-    needs: [ci, scenario-gate, deploy-staging, smoke-test-staging]
+    needs: [ci, scenario-gate, restart-integration, deploy-staging, smoke-test-staging]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -69,14 +97,14 @@ jobs:
           import json, os, time, urllib.request
           if os.environ['EVENT'] == 'push':
               results = os.environ['PUSH_RESULTS'].split(',')
-              assert len(results) == 4 and all(r == 'success' for r in results), results
+              assert len(results) == 5 and all(r == 'success' for r in results), results
               raise SystemExit(0)
           base = 'https://api.github.com/repos/' + os.environ['REPO']
           def get(path):
               request = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
               with urllib.request.urlopen(request, timeout=15) as response:
                   return json.load(response)
-          required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
+          required = {'ci', 'scenario-gate', 'restart-integration', 'deploy-staging', 'smoke-test-staging'}
           for _ in range(60):
               runs = get('/actions/workflows/ci.yml/runs?event=push&head_sha=' + os.environ['HEAD_SHA'])['workflow_runs']
               runs = [run for run in runs if run['head_sha'] == os.environ['HEAD_SHA']]
@@ -113,7 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       worker: ${{ steps.preview.outputs.worker }}
-    needs: [ci, scenario-gate]
+    needs: [ci, scenario-gate, restart-integration]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
