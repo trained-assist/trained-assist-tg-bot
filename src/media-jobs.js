@@ -65,9 +65,9 @@ export async function serveMedia(request, env) {
   const object = await env.MEDIA_BUCKET.get(key);
   if (!object) return new Response('Not found', { status: 404 });
   return new Response(object.body, { headers: {
-    'Content-Type': object.httpMetadata.contentType || 'application/octet-stream',
+    'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
     'Content-Length': String(object.size), 'Cache-Control': 'private, no-store',
-    'X-Media-SHA256': object.customMetadata.sha256,
+    'X-Media-SHA256': object.customMetadata?.sha256 || '',
   } });
 }
 export class MediaJob {

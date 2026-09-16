@@ -160,3 +160,12 @@ new_sqlite_classes = ["MediaJob"]
 [[env.recruiter.durable_objects.bindings]]
 name = "MEDIA_JOBS"
 class_name = "MediaJob"
+
+# Provisioned privately on 2026-09-16. Keep ingress off until both VM probes pass.
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media"
+
+[[env.staging.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media-staging"
