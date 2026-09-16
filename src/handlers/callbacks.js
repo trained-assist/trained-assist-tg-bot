@@ -1,3 +1,4 @@
+import { rejectExpiredUI, PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
@@ -12,6 +13,8 @@ export async function handleCallbackQuery(cq, env) {
 
   const session = await getSession(env.SESSIONS, chatId);
 
+  if (await rejectExpiredUI(cq, env, session)) return;
+
   // ── Session picker (from message.js disambiguation) ──────────────────────
   // sp:<id> or sp:new — triggered when routing was ambiguous
   if (data?.startsWith('sp:')) {
@@ -19,7 +22,7 @@ export async function handleCallbackQuery(cq, env) {
 
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
+    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
 
     const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
@@ -44,7 +47,7 @@ export async function handleCallbackQuery(cq, env) {
       };
       await setSession(env.SESSIONS, chatId, updatedSession);
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
-      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
       // MUST await so the dispatch→waitUntil chain keeps the Worker alive until the HTTP call lands.
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
@@ -82,7 +85,7 @@ export async function handleCallbackQuery(cq, env) {
         ? '✨ Новый диалог — напиши свою задачу!'
         : '↩️ Диалог выбран — напиши следующее сообщение.';
       if (msgId) {
-        editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
         await sendMessage(env.BOT_TOKEN, chatId, promptText);
       }
@@ -97,14 +100,14 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const raw = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
+    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
     const msgId = message?.message_id;
 
     if (!pendingFresh) {
       await answerCallbackQuery(env.BOT_TOKEN, id);
       await setSession(env.SESSIONS, chatId, { ...session, pendingMessage: null, pendingMessageAt: null });
       const t = '⌛ Сообщение устарело — напиши задачу заново, спрошу проект снова.';
-      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, t, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, t, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       else await sendMessage(env.BOT_TOKEN, chatId, t);
       return;
     }
@@ -139,7 +142,7 @@ export async function handleCallbackQuery(cq, env) {
       projectId: projectId || session.projectId || null,
     };
     await setSession(env.SESSIONS, chatId, updatedSession);
-    if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
 
     try {
       const result = await runTask(env, {
@@ -181,7 +184,7 @@ export async function handleCallbackQuery(cq, env) {
         [{ text: '✨ Новый диалог с этим контекстом',    callback_data: `sn:${sessionId}` }],
         [{ text: '🗑 Архивировать этот диалог',          callback_data: `sa:${sessionId}` }],
         [{ text: '← Назад к списку',                    callback_data: 'sl:' }],
-      ]
+      ], {}, env
     );
     return;
   }
@@ -289,7 +292,7 @@ export async function handleCallbackQuery(cq, env) {
       { text: '✨ Новый диалог', callback_data: 'nd:' },
       { text: '🗂 Архивировать', callback_data: 'ar:menu' },
     ]);
-    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
     return;
   }
 
@@ -309,13 +312,13 @@ export async function handleCallbackQuery(cq, env) {
       const msgId = message?.message_id;
       const text = '✏️ <b>Новый диалог</b>\n\nПиши задачу — если проектов несколько, спрошу в какой добавить.';
       const buttons = [[{ text: '✏️ Создать', callback_data: 'nd:clean' }]];
-      const kb = { reply_markup: { inline_keyboard: buttons } };
+      const kb = { lifecycleEnv: env, reply_markup: { inline_keyboard: buttons } };
       if (msgId) {
         await editMessage(env.BOT_TOKEN, chatId, msgId, text, kb).catch(() =>
-          sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons)
+          sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env)
         );
       } else {
-        await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+        await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
       }
       return;
     }
@@ -356,7 +359,7 @@ export async function handleCallbackQuery(cq, env) {
         header: '📚 <b>Загрузить контекст в новый диалог</b>',
         hint: 'Выбери номер диалога ниже — его контекст загрузится в новый:',
       });
-      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
       return;
     }
 
@@ -447,7 +450,7 @@ export async function handleCallbackQuery(cq, env) {
           [{ text: '🗂 Оставить 3 последних',                  callback_data: 'ar:keep:3' }],
           [{ text: '📋 Выбрать отдельный диалог',              callback_data: 'ar:pick' }],
           [{ text: '← Назад к диалогам',                      callback_data: 'sl:' }],
-        ]
+        ], {}, env
       );
       return;
     }
@@ -468,7 +471,7 @@ export async function handleCallbackQuery(cq, env) {
       await sendMessageWithKeyboard(
         env.BOT_TOKEN, chatId,
         '📋 <b>Выбери диалог для архивирования:</b>',
-        buttons
+        buttons, {}, env
       );
       return;
     }
@@ -528,7 +531,7 @@ export async function handleCallbackQuery(cq, env) {
       const msgId = message?.message_id;
       const text = '✅ <b>Диалог архивирован.</b>';
       if (msgId) {
-        editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
         await sendMessage(env.BOT_TOKEN, chatId, text);
       }

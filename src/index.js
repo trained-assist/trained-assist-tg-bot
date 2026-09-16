@@ -1,3 +1,4 @@
+import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
 import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
@@ -205,6 +206,7 @@ async function getGroupMemberCount(env, chatId) {
 // alive past the return — scheduled handlers have no separate "response" to wait on.
 async function scheduled(event, env, ctx) {
   ctx.waitUntil(processDueRetries(env));
+  ctx.waitUntil(processExpiredUI(env));
 }
 
 export { IntakeBuffer } from './intake-buffer.js';

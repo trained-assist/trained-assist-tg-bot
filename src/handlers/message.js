@@ -174,10 +174,15 @@ async function handleText(chatId, session, text, env, opts = {}) {
       // Store the pending message, show session picker
       await setSession(env.SESSIONS, chatId, {
         ...session,
+        pendingPickerId: null,
         pendingMessage: text,
         pendingMessageAt: Date.now(),
       });
-      await sendDisambiguationKeyboard(env.BOT_TOKEN, chatId, route.sessions, session.activeSessionId);
+      const picker = await sendDisambiguationKeyboard(env.BOT_TOKEN, chatId, route.sessions, session.activeSessionId, env);
+      if (picker?.result?.message_id) {
+        const current = await getSession(env.SESSIONS, chatId);
+        if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
+      }
       return;
     }
 
@@ -191,10 +196,15 @@ async function handleText(chatId, session, text, env, opts = {}) {
       if (shouldAskProject({ isNewDialog, hasFile, decision })) {
         await setSession(env.SESSIONS, chatId, {
           ...session,
+          pendingPickerId: null,
           pendingMessage: text,
           pendingMessageAt: Date.now(),
         });
-        await sendProjectPicker(env.BOT_TOKEN, chatId, decision.choices, decision.active);
+        const picker = await sendProjectPicker(env.BOT_TOKEN, chatId, decision.choices, decision.active, env);
+        if (picker?.result?.message_id) {
+          const current = await getSession(env.SESSIONS, chatId);
+          if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
+        }
         return;
       }
     }
@@ -351,7 +361,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 // (pp:<i>) — typed project ids can be long Cyrillic slugs that blow the 64-byte
 // callback_data limit. The pp: handler re-fetches the list and looks up by index
 // (same ordering as GET /project-decision → listProjects, most-recent first).
-export async function sendProjectPicker(botToken, chatId, choices, activeId) {
+export async function sendProjectPicker(botToken, chatId, choices, activeId, env) {
   // Descriptive body + numbered tap-buttons — same shape as the session picker
   // (renderSessionList). A project carries a durable 3-sense summary (start/middle/end)
   // from the agent; render it so the user can tell projects apart, instead of a bare
@@ -378,10 +388,10 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId) {
   const rows = [];
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
-  return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows);
+  return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows, {}, env);
 }
 
-async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) {
+async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId, env) {
   // Descriptive text body (project · title · gist · meta) + numbered tap-buttons,
   // same renderer as /sessions and the new-dialog context picker. Replaces the old
   // 28-char truncated button labels that made dialogs indistinguishable.
@@ -392,7 +402,7 @@ async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId) 
   });
   buttons.push([{ text: '✨ Новый диалог', callback_data: 'sp:new' }]);
 
-  return sendMessageWithKeyboard(botToken, chatId, text, buttons);
+  return sendMessageWithKeyboard(botToken, chatId, text, buttons, {}, env);
 }
 
 function transcriptPreview(text, maxSentences = 3) {

@@ -192,7 +192,7 @@ async function cmdProfile(chatId, env) {
     `👤 <b>Профиль</b>\n\n` +
     `Имя: <b>${session.name}</b>\n` +
     `Логин: <code>${session.username}</code>`,
-    buttons
+    buttons, {}, env
   );
 }
 
@@ -455,7 +455,7 @@ async function cmdSessions(chatId, env) {
     { text: '🗂 Архивировать', callback_data: 'ar:menu' },
   ]);
 
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
 }
 
 async function cmdClose(chatId, env) {
@@ -485,7 +485,7 @@ async function cmdNewDialog(chatId, env) {
     [
       [{ text: '✏️ Чистый лист — просто начну писать', callback_data: 'nd:clean' }],
       [{ text: '📚 Выбрать диалог и загрузить контекст', callback_data: 'nd:ctx' }],
-    ]
+    ], {}, env
   );
 }
 
@@ -538,7 +538,7 @@ export async function cmdFiles(chatId, env, relPath = '') {
   }
 
   const title = currentPath ? `📂 <code>${currentPath}</code>` : '📂 <b>Файлы</b>';
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons);
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons, {}, env);
 }
 
 async function cmdSkills(chatId, env) {

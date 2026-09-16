@@ -26,6 +26,8 @@ vi.mock('../src/lib/kv.js', () => ({
     username: 'testuser',
     activeSessionId: 's-123',
     lastSessionId: 's-123',
+    pendingMessage: 'task',
+    pendingMessageAt: Date.now(),
   }),
   setSession: vi.fn().mockResolvedValue(undefined),
   deleteSession: vi.fn().mockResolvedValue(undefined),
