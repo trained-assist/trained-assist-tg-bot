@@ -59,26 +59,38 @@ export class IntakeBuffer {
     try { return await fn(); } finally { release(); }
   }
 
+  async _controlFor(items = []) {
+    let sessionId = items.find(x => x.msg?.intakeRoute?.sessionId)?.msg.intakeRoute.sessionId;
+    const chatId = items[0]?.msg?.chat?.id ?? await this.state.storage.get('chatId');
+    if (!sessionId && this.env.SESSIONS && chatId != null) {
+      const { getSession } = await import('./lib/kv.js');
+      const session = await getSession(this.env.SESSIONS, chatId);
+      sessionId = session?.activeSessionId || session?.lastSessionId || null;
+    }
+    const key = `control:${sessionId || 'chat'}`;
+    return { key, sessionId, state: (await this.state.storage.get(key)) || {} };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
 
     if (url.pathname === '/pause' && request.method === 'POST') {
-      const { chatId } = await request.json();
+      const { chatId, sessionId } = await request.json();
       await this.state.storage.put('chatId', chatId);
       await this._exclusive(async () => {
-        await this.state.storage.put('paused', true);
-        await this.state.storage.delete('fenceReady');
-        await this.state.storage.put('generation', ((await this.state.storage.get('generation')) || 0) + 1);
+        const generation = ((await this.state.storage.get('generation')) || 0) + 1;
+        await this.state.storage.put(`control:${sessionId || 'chat'}`, { paused: true, fenceReady: false, generation });
+        await this.state.storage.put('generation', generation);
       });
       return json({ paused: true, generation: await this.state.storage.get('generation') });
     }
     if (url.pathname === '/fence' && request.method === 'POST') {
-      const { generation, epoch, epochs } = await request.json();
+      const { generation, epoch, epochs, sessionId } = await request.json();
       await this._exclusive(async () => {
-        if (generation !== await this.state.storage.get('generation')) return;
-        await this.state.storage.put('controlEpoch', epoch);
-        if (epochs) await this.state.storage.put('controlEpochs', epochs);
-        await this.state.storage.put('fenceReady', true);
+        const key = `control:${sessionId || 'chat'}`;
+        const control = (await this.state.storage.get(key)) || {};
+        if (generation !== control.generation) return;
+        await this.state.storage.put(key, { ...control, epoch, epochs, fenceReady: true });
       });
       return json({ ok: true });
     }
@@ -87,6 +99,7 @@ export class IntakeBuffer {
       return json({ current: generation === ((await this.state.storage.get('generation')) || 0) });
     }
     if (url.pathname === '/fresh' && request.method === 'POST') {
+      const { sessionId } = await request.json();
       await this._exclusive(async () => {
         const buf = (await this.state.storage.get('buf')) || [];
         const launching = (await this.state.storage.get('launching')) || [];
@@ -95,7 +108,7 @@ export class IntakeBuffer {
         await this.state.storage.put('freshGeneration', (await this.state.storage.get('generation')) || 0);
         await this.state.storage.delete('buf');
         await this.state.storage.delete('launching');
-        await this.state.storage.delete('paused');
+        await this.state.storage.delete(`control:${sessionId || 'chat'}`);
       });
       return json({ fresh: true });
     }
@@ -170,11 +183,12 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
-      if (await this.state.storage.get('paused') && !await this.state.storage.get('fenceReady')) return json({ stopping: true });
+      const control = await this._controlFor((await this.state.storage.get('buf')) || []);
+      if (control.state.paused && !control.state.fenceReady) return json({ stopping: true });
       // Button tap. If a run is somehow already going, ignore (don't double-fire).
       if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
       let buf = (await this.state.storage.get('buf')) || [];
-      if (!buf.length && await this.state.storage.get('paused')) {
+      if (!buf.length && control.state.paused) {
         const chatId = await this.state.storage.get('chatId');
         if (chatId != null) {
           buf = [{ text: '[Явный повторный запуск остановленной сессии]', msg: { chat: { id: chatId }, message_id: 0 } }];
@@ -287,9 +301,10 @@ export class IntakeBuffer {
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
       if (((await this.state.storage.get('generation')) || 0) !== generation) throw new Error('Сессия остановлена во время подготовки');
-      const controlEpoch = (await this.state.storage.get('controlEpoch')) || 0;
-      const controlEpochs = await this.state.storage.get('controlEpochs');
-      if (this.env.SESSIONS && await this.state.storage.get('paused')) {
+      const control = await this._controlFor(buf);
+      const controlEpoch = control.state.epoch || 0;
+      const controlEpochs = control.state.epochs;
+      if (this.env.SESSIONS && control.state.paused) {
         const { getSession } = await import('./lib/kv.js');
         const { stopTask } = await import('./lib/agent-client.js');
         const session = await getSession(this.env.SESSIONS, chatId);
@@ -310,7 +325,7 @@ export class IntakeBuffer {
           await stopTask(this.env, { ...target, action: 'ack', taskIds: held.map(x => x.taskId) });
         }
         if (((await this.state.storage.get('generation')) || 0) !== generation) throw new Error('Сессия остановлена');
-        await this.state.storage.delete('paused');
+        await this.state.storage.put(control.key, { ...control.state, paused: false });
       }
       await handleMessage(msg, this.env, { mode: 'deep', initialMsgId: collectorMsgId || null, ...(controlEpoch ? { controlEpoch } : {}), ...(controlEpochs ? { controlEpochs } : {}), intakeGeneration: generation });
       await this.state.storage.delete('launching');

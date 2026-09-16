@@ -591,10 +591,10 @@ export async function cmdStop(msg, env, action = 'stop', taskId) {
     const stub = env.INTAKE?.get(env.INTAKE.idFromName(String(chatId)));
     // Close the intake fence before killing the engine: no buffered auto-launch.
     const paused = stub && action !== 'skip'
-      ? await stub.fetch('https://intake/pause', { method: 'POST', body: JSON.stringify({ chatId }) }).then(r => r.json()) : null;
+      ? await stub.fetch('https://intake/pause', { method: 'POST', body: JSON.stringify({ chatId, sessionId }) }).then(r => r.json()) : null;
     if (action === 'fresh') await stopTask(env, { username: session.username, chatId, sessionId, action: 'stop' });
     const result = await stopTask(env, { username: session.username, chatId, sessionId, action, taskId });
-    if (stub && paused) await stub.fetch('https://intake/fence', { method: 'POST', body: JSON.stringify({ generation: paused.generation, epoch: result.epoch, epochs: result.epochs }) });
+    if (stub && paused) await stub.fetch('https://intake/fence', { method: 'POST', body: JSON.stringify({ generation: paused.generation, epoch: result.epoch, epochs: result.epochs, sessionId }) });
     if (action === 'skip' && stub) {
       const r = await stub.fetch('https://intake/flush', { method: 'POST' }).then(r => r.json());
       return sendMessage(env.BOT_TOKEN, chatId, r.empty
@@ -602,7 +602,7 @@ export async function cmdStop(msg, env, action = 'stop', taskId) {
         : '⏭ Перехожу к следующему накопленному вводу в этом диалоге.');
     }
     if (action === 'fresh') {
-      if (stub) await stub.fetch('https://intake/fresh', { method: 'POST' });
+      if (stub) await stub.fetch('https://intake/fresh', { method: 'POST', body: JSON.stringify({ sessionId }) });
       const id = newSessionId(chatId);
       await setSession(env.SESSIONS, chatId, { ...session, activeSessionId: id, activeSessionIsNew: true,
         lastSessionId: null, contextFromSession: null });

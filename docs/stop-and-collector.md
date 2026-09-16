@@ -11,3 +11,5 @@ Changed test contract: intake-buffer.test.js / "falls back to a plain-text ack w
 Release requires the companion agent protocol deployed on both configured VMs first. Unsupported agents fail closed with HTTP 404 on /tasks/control. All required checks, including staging deployment/smoke, must succeed on the current PR head before merge. Local regression tests do not substitute for a failed staging deployment.
 
 Costs: durable storage for paused input and retries; menu synchronization uses Telegram calls once per bot/version. No extra LLM calls. Revert together with the agent PR; archive files stay intact.
+
+Automatic merge now waits for all four positive job results from one CI run and matches the current PR head. Missing, failed, cancelled or skipped staging blocks it. The previously enabled native auto-merge workflow is replaced; drafts remain drafts.

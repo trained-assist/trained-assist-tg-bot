@@ -45,8 +45,8 @@ describe('session stop protocol',()=>{
     await append(11,'first chat'); await append(22,'other chat');
     await command(11,'/stop');
     expect(controls[0]).toMatchObject({ username:'shared',chatId:11,sessionId:'a',action:'stop' });
-    expect(states.get('11').get('paused')).toBe(true);
-    expect(states.get('22').get('paused')).toBeUndefined();
+    expect(states.get('11').get('control:a')?.paused).toBe(true);
+    expect(states.get('22').get('control:b')?.paused).toBeUndefined();
     expect(dispatch).not.toHaveBeenCalled();
     await flush(11);
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -64,7 +64,7 @@ describe('session stop protocol',()=>{
     await append(11,'new important information'); await command(11,'/skip');
     expect(controls[0]).toMatchObject({ chatId:11,sessionId:'a',action:'skip' });
     expect(dispatch.mock.calls[0][0].text).toContain('new important information');
-    expect(states.get('11').get('paused')).toBeUndefined();
+    expect(states.get('11').get('control:a')?.paused).toBeUndefined();
   });
   it('/fresh archives pending input and creates a valid new session id',async()=>{
     await append(11,'old input'); await command(11,'/fresh');
@@ -77,7 +77,7 @@ describe('session stop protocol',()=>{
     vi.stubGlobal('fetch',vi.fn(async(url,init)=>String(url).includes('/tasks/control')
       ? new Response('{}',{status:409}) : original(url,init)));
     await handleCallbackQuery({id:'cb',data:'stop|old-task',message:{chat:{id:11},message_id:9},from:{id:99}},env);
-    expect(states.get('11')?.get('paused')).not.toBe(true);
+    expect(states.get('11')?.get('control:a')?.paused).not.toBe(true);
     expect(dispatch).not.toHaveBeenCalled();
   });
   it('controls both configured agents with the same chat scope',async()=>{
@@ -115,4 +115,17 @@ it('fresh during a failing in-flight dispatch never restores excluded input',asy
   await running;
   expect(states.get('11').get('buf')).toBeUndefined();
   expect([...states.get('11').keys()].some(k=>k.startsWith('archived-dispatch:'))).toBe(true);
+});
+
+it('stopping session A does not block a new session B selected in the same chat',async()=>{
+  await command(11,'/stop');
+  kv.set('11',JSON.stringify({username:'shared',activeSessionId:'new-b'}));
+  await append(11,'work in B'); await flush(11);
+  expect(dispatch).toHaveBeenCalledTimes(1);
+  expect(dispatch.mock.calls[0][0].text).not.toContain('saved important input');
+  expect(dispatch.mock.calls[0][2].controlEpoch).toBeUndefined();
+  expect(states.get('11').get('control:a').paused).toBe(true);
+  kv.set('11',JSON.stringify({username:'shared',activeSessionId:'a'}));
+  await flush(11);
+  expect(dispatch.mock.calls[1][0].text).toContain('saved important input');
 });
