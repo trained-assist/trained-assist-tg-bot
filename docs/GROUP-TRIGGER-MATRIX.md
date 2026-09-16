@@ -1,58 +1,28 @@
-# Group message trigger matrix (когда бот реагирует в группе)
+# Group message admission and shared intake
 
-Owner requirement (2026-09-14, voice): «чётко разметить и проверить, на что бот
-реагирует в группах». Three concrete demands + one old bug:
+Owner decision, 2026-09-16: private and group chats use identical processing.
+The group-specific rule only selects which messages are addressed to the bot.
+This supersedes the earlier immediate-answer bypass for mentions and replies.
 
-1. **2-member group (bot + 1 human)** → react to ALL messages, not only replies.
-2. **@mention** → ALWAYS react (immediately, with an answer — not just "накапливаю").
-3. **Large group, all-messages OFF** → react to nothing that isn't a command or
-   addressed to the bot.
-4. **Old bug:** large group, all-messages OFF → bot still reacted to **voice/audio**.
-
-## Root cause (pre-fix)
-
-The whole "react or not" decision lived inline in `dispatchInner` (index.js) with
-**zero test coverage** — so it drifted. Two concrete defects:
-
-- **Audio leak (#4):** the member-count gate was *skipped for voice/audio* when
-  `allMsgMode` had never been set (`undefined`). Condition was
-  `!allMsgMode && (!isVoiceOrAudio || allMsgMode === false)` → for undefined+voice
-  this is `true && (false || false)` = `false` → gate skipped → bot answered voice
-  in a 100-person group. Text obeyed the gate; voice didn't. Exactly the reported mess.
-- **Mention buffered, not answered (#2):** an @mention passed the gate but then went
-  through `routeText` → the intake accumulator, which only bypasses on
-  `reply_to_message`. So a mention got «📥 Накапливаю ▶️» instead of an answer —
-  felt like "mention doesn't react".
-
-Empirical check: current QA group `-5496844108` is `type=group`, memberCount **2**
-(you + bot). So the `>2` gate does NOT block it; plain messages there already reach
-the accumulator and get the ▶️ collector. The "only replies react" feel in a
-2-member group is the accumulator buffering ambient text — a deliberate #530
-design (manual ▶️ launch), NOT a gate bug. See "Open fork" below.
-
-## Corrected matrix (post-fix)
-
-Decision extracted to pure, unit-tested `src/group-routing.js`. For a non-admin group:
-
-| message | condition | disposition |
+| Message | Condition | Route |
 |---|---|---|
-| `/command` | any | → handleCommand (mention stripped) |
-| addressed = **mention (text OR caption, case-insensitive) OR reply-to-bot** | any group size | → **handleMessage directly** (bypass buffer → immediate answer) |
-| ambient (not addressed, not command), no content | — | ignore |
-| ambient | `allMsgMode` ON | → routeText (accumulate) |
-| ambient | `memberCount <= 2` (bot + 1 human) | → routeText (accumulate) |
-| ambient | `memberCount > 2`, all-msg not ON | **ignore — text AND voice/audio alike** (fixes #4) |
+| Slash command | Any | Command handler |
+| Mention in text/caption or reply to bot | Any group size | Shared routeText intake |
+| Ambient text or media | allMsgMode on | Shared routeText intake |
+| Ambient text or media | At most 2 members, including bot | Shared routeText intake |
+| Ambient text or media, including reply to another human | More than 2 members, allMsgMode off/unset | Ignore |
+| Ambient message, unknown member count | allMsgMode off/unset | Ignore |
+| Service update | No actionable content | Ignore |
 
-Key changes vs pre-fix:
-- **No voice special-casing.** Audio obeys the same gate as text.
-- **Addressed → immediate answer.** Mention now bypasses the accumulator like a reply.
-- **Case-insensitive** mention + reply-to-bot matching; mention detected in **caption** too (photo/doc with `@bot` caption in a big group used to be ignored).
+The administrative control group retains its dedicated command-only policy.
+Admitted replies collect attachments and pin the current continuation using the
+same code as private chats. Launch remains explicit. The intake kill switch and
+missing-binding fallback are also shared. In large all_off groups each added
+message must address the bot; an open collector does not admit other conversation.
 
-## Open fork (NOT changed here — needs an owner decision)
+Quick-answer-first activation remains separately pending in agent #636 and
+gateway #97. This routing fix uses the common path where that feature will run.
+No extra service, storage model, or API cost is introduced.
 
-Requirement #1 taken literally ("2-member group → answer plain messages, not just
-accumulate") conflicts with the deliberate #530 manual-launch accumulator, which
-buffers ambient text in *both* private and 2-member-group chats and waits for ▶️.
-The gate already lets those messages through; whether ambient plain text should
-*bypass* the ▶️ buffer in a 1-on-1 is the standing intake-refactor fork
-([[intake-swallows-conversation]]), not a trigger-gate bug. Flagged to owner.
+Tests: group-routing.test.js and intake-group-uniform.test.js cover admission,
+reply session pinning, and private/small/all_on/addressed text/media parity.
