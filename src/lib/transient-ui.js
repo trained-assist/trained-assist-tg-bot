@@ -1,3 +1,5 @@
+import { withKvConsistencyRetry } from './kv.js';
+
 // Only disposable navigation/picker messages belong here. Results, intake
 // collectors, login replies and URL buttons are never deleted by this policy.
 export const PICKER_TTL_MS = 10 * 60 * 1000;
@@ -88,6 +90,12 @@ export function projectChoiceExpired(pending, cq) {
   return pending.messageId !== cq.message.message_id;
 }
 
+function pendingMessageMissing(session, cq) {
+  const noPendingRecord = !session?.pendingMessage || !session.pendingMessageAt;
+  const pendingExpired = session?.pendingMessageAt && Date.now() >= session.pendingMessageAt + PICKER_TTL_MS;
+  return (noPendingRecord && graceElapsed(cq)) || pendingExpired;
+}
+
 // Also covers old menus that predate the queue. Never execute a stale callback
 // against a newer pending task, even if scheduled cleanup is late.
 export async function rejectExpiredUI(cq, env, session) {
@@ -97,10 +105,24 @@ export async function rejectExpiredUI(cq, env, session) {
   const picker = /^(pp|sp):/.test(cq.data);
   const expired = cq.message.date && Date.now() >= cq.message.date * 1000 + ttl;
   const superseded = picker && session?.pendingPickerId && session.pendingPickerId !== cq.message.message_id;
-  const noPendingRecord = !session?.pendingMessage || !session.pendingMessageAt;
-  const pendingExpired = session?.pendingMessageAt && Date.now() >= session.pendingMessageAt + PICKER_TTL_MS;
-  const missing = picker && ((noPendingRecord && graceElapsed(cq)) || pendingExpired);
-  const projectMissing = projectPicker && projectChoiceExpired(session?.pendingProjectChoice, cq);
+  let missing = picker && pendingMessageMissing(session, cq);
+  let projectMissing = projectPicker && projectChoiceExpired(session?.pendingProjectChoice, cq);
+
+  // KV_PROPAGATION_GRACE_MS only covers propagation that finishes within ~20s of the
+  // picker being shown. sp:/pp:'s happy path and chooseProject() both do a further
+  // withKvConsistencyRetry re-read before trusting "looks absent" — but this gate runs
+  // first and returns `true` (hard reject) on `missing`/`projectMissing` before either
+  // of those ever gets a chance to run. A real user who takes longer than 20s to tap
+  // (the common case, not the edge case) or a colo whose replication lags past the
+  // grace window got permanently rejected here even though the record was about to
+  // show up. Give this gate the same one-retry chance before it commits to "expired".
+  if ((missing || projectMissing) && env?.SESSIONS && cq.message.chat?.id != null) {
+    session = await withKvConsistencyRetry(env.SESSIONS, cq.message.chat.id, session, s =>
+      (picker && !pendingMessageMissing(s, cq)) || (projectPicker && !projectChoiceExpired(s?.pendingProjectChoice, cq)));
+    missing = picker && pendingMessageMissing(session, cq);
+    projectMissing = projectPicker && projectChoiceExpired(session?.pendingProjectChoice, cq);
+  }
+
   if (!expired && !superseded && !missing && !projectMissing) return false;
   await telegram(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: '⌛ Меню устарело. Открой его заново или отправь задачу.' });
   if (await retireUI(env, cq.message.chat.id, cq.message.message_id)) await forgetUI(env, cq.message.chat.id, cq.message.message_id);
