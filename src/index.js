@@ -1,3 +1,4 @@
+import { ensureControlCommands } from './lib/control-commands.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
@@ -208,6 +209,7 @@ async function getGroupMemberCount(env, chatId) {
 // the Cron Trigger declared in wrangler.toml. waitUntil keeps the invocation
 // alive past the return — scheduled handlers have no separate "response" to wait on.
 async function scheduled(event, env, ctx) {
+  ctx.waitUntil(ensureControlCommands(env).catch(err => console.error('[commands]', err.message)));
   ctx.waitUntil(processDueRetries(env));
   ctx.waitUntil(processExpiredUI(env));
 }

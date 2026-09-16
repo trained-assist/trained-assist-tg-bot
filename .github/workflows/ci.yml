@@ -21,9 +21,23 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  staging-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Isolated intake/control staging (two chats, Telegram failures, races)
+        run: npx vitest run tests/stop-control.test.js tests/intake-buffer.test.js tests/intake-conversation.test.js
+
   deploy:
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, staging-regressions]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +54,7 @@ jobs:
 
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: ci
+    needs: [ci, staging-regressions]
     if: github.ref != 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4

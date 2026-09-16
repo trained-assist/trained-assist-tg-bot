@@ -62,6 +62,44 @@ export class IntakeBuffer {
   async fetch(request) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/pause' && request.method === 'POST') {
+      const { chatId } = await request.json();
+      await this.state.storage.put('chatId', chatId);
+      await this._exclusive(async () => {
+        await this.state.storage.put('paused', true);
+        await this.state.storage.delete('fenceReady');
+        await this.state.storage.put('generation', ((await this.state.storage.get('generation')) || 0) + 1);
+      });
+      return json({ paused: true, generation: await this.state.storage.get('generation') });
+    }
+    if (url.pathname === '/fence' && request.method === 'POST') {
+      const { generation, epoch, epochs } = await request.json();
+      await this._exclusive(async () => {
+        if (generation !== await this.state.storage.get('generation')) return;
+        await this.state.storage.put('controlEpoch', epoch);
+        if (epochs) await this.state.storage.put('controlEpochs', epochs);
+        await this.state.storage.put('fenceReady', true);
+      });
+      return json({ ok: true });
+    }
+    if (url.pathname === '/check-generation' && request.method === 'POST') {
+      const { generation } = await request.json();
+      return json({ current: generation === ((await this.state.storage.get('generation')) || 0) });
+    }
+    if (url.pathname === '/fresh' && request.method === 'POST') {
+      await this._exclusive(async () => {
+        const buf = (await this.state.storage.get('buf')) || [];
+        const launching = (await this.state.storage.get('launching')) || [];
+        // Exclude from launch, retain history/media references durably.
+        await this.state.storage.put(`archived:${Date.now()}`, [...launching, ...buf]);
+        await this.state.storage.put('freshGeneration', (await this.state.storage.get('generation')) || 0);
+        await this.state.storage.delete('buf');
+        await this.state.storage.delete('launching');
+        await this.state.storage.delete('paused');
+      });
+      return json({ fresh: true });
+    }
+
     if (url.pathname === '/ingest' && request.method === 'POST') {
       const { msg } = await request.json();
       // Reserve BEFORE STT/network awaits: launch must not silently omit a slow voice.
@@ -132,9 +170,17 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
+      if (await this.state.storage.get('paused') && !await this.state.storage.get('fenceReady')) return json({ stopping: true });
       // Button tap. If a run is somehow already going, ignore (don't double-fire).
       if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
-      const buf = (await this.state.storage.get('buf')) || [];
+      let buf = (await this.state.storage.get('buf')) || [];
+      if (!buf.length && await this.state.storage.get('paused')) {
+        const chatId = await this.state.storage.get('chatId');
+        if (chatId != null) {
+          buf = [{ text: '[Явный повторный запуск остановленной сессии]', msg: { chat: { id: chatId }, message_id: 0 } }];
+          await this.state.storage.put('buf', buf);
+        }
+      }
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000);
       if (pending) {
@@ -157,29 +203,32 @@ export class IntakeBuffer {
   // clutter at worst, but one live button reads cleaner.
   async _showCollector(chatId, count, replyToMessageId) {
     if (!chatId) return;
-    const prevId = await this.state.storage.get('collectorMsgId');
-    if (prevId) {
-      await editMessageReplyMarkup(this.env.BOT_TOKEN, chatId, prevId, [])
-        .catch(err => console.error(`[intake ${chatId}] strip prior collector button failed:`, err?.message));
-    }
-    const sent = await sendMessageWithKeyboard(
-      this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId),
-    ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
-    const newId = sent?.result?.message_id;
-    if (newId) {
-      await this.state.storage.put('collectorMsgId', newId);
-      return;
-    }
-    console.error(`[intake ${chatId}] collector-with-keyboard not delivered, retrying without keyboard:`, sent?.description || sent);
-    // The buffer already has the message (buf.push happened before this call) — losing
-    // the ack here reads as "the bot ate my message" even though nothing was lost. Try
-    // once more without the inline keyboard in case the markup itself is what Telegram
-    // rejected; the force word (see FORCE_RUN_RE) still launches without a button.
-    const plain = await sendMessage(this.env.BOT_TOKEN, chatId, collectorText(count), anchor(replyToMessageId))
-      .catch(err => { console.error(`[intake ${chatId}] plain-text collector retry failed:`, err?.message); return null; });
-    const plainId = plain?.result?.message_id;
-    if (plainId) await this.state.storage.put('collectorMsgId', plainId);
-    else console.error(`[intake ${chatId}] collector message not delivered at all — buf accepted silently, user sees no ack:`, plain?.description || plain);
+    // Serialize collector delivery: overlapping voice/text completions must not
+    // retire each other's only usable button. Data ingestion has its own lock.
+    const previous = this.collectorDelivery || Promise.resolve();
+    const current = previous.catch(() => {}).then(async () => {
+      const prevId = await this.state.storage.get('collectorMsgId');
+      const sent = await sendMessageWithKeyboard(
+        this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId),
+      ).catch(err => { console.error('[intake] collector delivery:', err.message); return null; });
+      const newId = sent?.ok !== false && sent?.result?.message_id;
+      if (newId) {
+        await this.state.storage.put('collectorMsgId', newId);
+        if (prevId) await editMessageReplyMarkup(this.env.BOT_TOKEN, chatId, prevId, [])
+          .catch(err => console.error('[intake] retire collector:', err.message));
+        await this.state.storage.delete('collectorRetry');
+        return;
+      }
+      // Never replace the pointer with a buttonless message. The old button
+      // remains usable, and a durable alarm repairs delivery after an outage.
+      await this.state.storage.put('collectorRetry', { chatId, replyToMessageId });
+      await this.state.storage.setAlarm(Date.now() + 15000);
+      await sendMessage(this.env.BOT_TOKEN, chatId,
+        `📥 Сообщения сохранены (${count}). Кнопку не удалось доставить. Напиши «запускай» или нажми предыдущую кнопку запуска.`,
+        anchor(replyToMessageId)).catch(err => console.error('[intake] fallback:', err.message));
+    });
+    this.collectorDelivery = current;
+    return current;
   }
 
   // Confirm receipt of a message held during an in-flight run. Same rule as the
@@ -197,6 +246,7 @@ export class IntakeBuffer {
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a new button afterwards).
   async _dispatch() {
+    const generation = (await this.state.storage.get('generation')) || 0;
     const buf = await this._exclusive(async () => {
       if (await this.state.storage.get('busy')) return [];
       const items = (await this.state.storage.get('buf')) || [];
@@ -236,14 +286,42 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId: collectorMsgId || null });
+      if (((await this.state.storage.get('generation')) || 0) !== generation) throw new Error('Сессия остановлена во время подготовки');
+      const controlEpoch = (await this.state.storage.get('controlEpoch')) || 0;
+      const controlEpochs = await this.state.storage.get('controlEpochs');
+      if (this.env.SESSIONS && await this.state.storage.get('paused')) {
+        const { getSession } = await import('./lib/kv.js');
+        const { stopTask } = await import('./lib/agent-client.js');
+        const session = await getSession(this.env.SESSIONS, chatId);
+        if (!session) throw new Error('Войди в профиль перед запуском');
+        const target = { username: session.username, chatId,
+          sessionId: msg.intakeRoute?.sessionId || session.activeSessionId || session.lastSessionId || null };
+        if (((await this.state.storage.get('generation')) || 0) !== generation) throw new Error('Сессия остановлена');
+        const resumed = await stopTask(this.env, { ...target, action: 'resume', expectedEpoch: controlEpoch, expectedEpochs: controlEpochs });
+        const held = resumed.held || [];
+        if (held.length) {
+          const text = '[Сохранённый незавершённый ввод]\n' + held.map(x => [x.context, x.task].filter(Boolean).join('\n')).join('\n\n');
+          const retained = { text, msg: { chat: { id: chatId }, message_id: 0 } };
+          buf.unshift(retained);
+          msg.intakeItems = buf;
+          msg.text = coalesceBuffer(buf);
+          // Durable local handoff precedes server acknowledgement.
+          await this.state.storage.put('launching', buf);
+          await stopTask(this.env, { ...target, action: 'ack', taskIds: held.map(x => x.taskId) });
+        }
+        if (((await this.state.storage.get('generation')) || 0) !== generation) throw new Error('Сессия остановлена');
+        await this.state.storage.delete('paused');
+      }
+      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId: collectorMsgId || null, ...(controlEpoch ? { controlEpoch } : {}), ...(controlEpochs ? { controlEpochs } : {}), intakeGeneration: generation });
       await this.state.storage.delete('launching');
     } catch (err) {
       // Preparation failed: keep the original Telegram references, never launch
       // a partial task or require the user to dictate everything again.
       await this._exclusive(async () => {
         const remaining = (await this.state.storage.get('buf')) || [];
-        await this.state.storage.put('buf', [...buf, ...remaining]);
+        if (((await this.state.storage.get('freshGeneration')) || 0) > generation) {
+          await this.state.storage.put(`archived-dispatch:${Date.now()}`, buf);
+        } else await this.state.storage.put('buf', [...buf, ...remaining]);
         await this.state.storage.delete('launching');
       });
       await sendMessage(this.env.BOT_TOKEN, chatId,

@@ -49,7 +49,7 @@ export async function handleMessage(msg, env, opts = {}) {
       return;
     }
   }
-  opts = { ...opts, resolvedRoute: route, originalMessage: msg };
+  opts = { ...opts, resolvedRoute: route, originalMessage: msg, intakeOwned: !!msg.intakeItems };
 
   if (msg.intakeItems) {
     // Resolve EVERY original message before making the single agent request.
@@ -131,6 +131,8 @@ export async function handleMessage(msg, env, opts = {}) {
           fileName: 'photo.jpg',
           fileMimeType: 'image/jpeg',
           mode: opts.mode || null,
+      controlEpoch: opts.controlEpoch,
+      controlEpochs: opts.controlEpochs,
         });
       }
     } catch (e) {
@@ -155,6 +157,8 @@ export async function handleMessage(msg, env, opts = {}) {
           fileName: doc.file_name || 'document',
           fileMimeType: doc.mime_type || 'application/octet-stream',
           mode: opts.mode || null,
+      controlEpoch: opts.controlEpoch,
+      controlEpochs: opts.controlEpochs,
         });
       }
     } catch (e) {
@@ -214,6 +218,13 @@ async function handleText(chatId, session, text, env, opts = {}) {
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
     // If agent creates a new pinned message it returns the new ID; we store it for next time
+    const checkGeneration = async () => {
+      if (opts.intakeGeneration === undefined || !env.INTAKE) return true;
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+      const value = await stub.fetch('https://intake/check-generation', { method: 'POST', body: JSON.stringify({ generation: opts.intakeGeneration }) }).then(r => r.json());
+      return value.current;
+    };
+    if (!await checkGeneration()) throw new Error('Передача отменена остановкой сессии');
     const result = await runTask(env, {
       userId: chatId,
       username: session.username,
@@ -223,6 +234,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       forceNew: !!route.forceNew,
       contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
+      controlEpoch: opts.controlEpoch,
+      controlEpochs: opts.controlEpochs,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
@@ -234,6 +247,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       fileMimeType: opts.fileMimeType || null,
     });
 
+    if (!await checkGeneration()) return; // /fresh must keep its new session binding.
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
 
     await setSession(env.SESSIONS, chatId, {
@@ -252,6 +266,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: newPinnedMsgId,
     });
   } catch (err) {
+    // The durable accumulator owns retry/retention. Never ACK a failed batch
+    // or move it into the independent timed retry queue after /stop.
+    if (opts.intakeOwned) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);

@@ -4,7 +4,7 @@ import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.j
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
-import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
+import { cmdFiles, timeAgo, renderSessionList, cmdStop } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
@@ -15,6 +15,11 @@ export async function handleCallbackQuery(cq, env) {
   const session = await getSession(env.SESSIONS, chatId);
 
   if (await rejectExpiredUI(cq, env, session)) return;
+
+  if (data?.startsWith('stop|')) {
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю эту сессию…');
+    return cmdStop({ chat: message.chat, from }, env, 'stop', data.slice(5));
+  }
 
   if (data?.startsWith('pc:')) return chooseProject(cq, env, session);
 
@@ -529,6 +534,7 @@ export async function handleCallbackQuery(cq, env) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
         .then(x => x.json()).catch(err => { sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`); return null; });
+      if (r?.stopping || r?.busy) await sendMessage(env.BOT_TOKEN, chatId, '⏳ Завершаю предыдущую передачу. Нажми запуск ещё раз через несколько секунд.');
       if (r?.empty) {
         await sendMessage(env.BOT_TOKEN, chatId,
           '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
@@ -549,6 +555,13 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Продолжаю по плану…');
     const sessionId = data.slice('plan|'.length) || session.activeSessionId || session.lastSessionId;
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+      const text = '[Продолжай по согласованному плану до конца.]';
+      return stub.fetch('https://intake/append', { method: 'POST', body: JSON.stringify({ text, flush: true,
+        msg: { chat: { id: chatId }, from, text,
+          intakeRoute: { type: 'run', sessionId, forceNew: false, projectChosen: true, projectId: session.projectId || null } } }) });
+    }
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {

@@ -76,6 +76,8 @@ export async function handleCommand(msg, env) {
     case '/ru':                return cmdRu(msg, env);
     case '/стоп':
     case '/stop':              return cmdStop(msg, env);
+    case '/skip':              return cmdStop(msg, env, 'skip');
+    case '/fresh':             return cmdStop(msg, env, 'fresh');
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
@@ -100,6 +102,9 @@ async function cmdStart(chatId, env) {
     `<b>Команды:</b>\n` +
     `/skills — что умеет агент (список скиллов)\n` +
     `/sessions — мои диалоги\n` +
+    `/stop — остановить сессию и сохранить ввод\n` +
+    `/skip — перейти к следующему вводу, если появилась новая информация\n` +
+    `/fresh — начать без незавершённого ввода\n` +
     `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
     `/project — проекты профиля: список / сменить / создать (новые сессии идут в активный)\n` +
     `/files — файлы и папки\n` +
@@ -573,21 +578,40 @@ async function cmdPrivacy(chatId, env) {
   );
 }
 
-async function cmdStop(msg, env) {
-  const { chat } = msg;
-  const chatId = chat.id;
+export async function cmdStop(msg, env, action = 'stop', taskId) {
+  const chatId = msg.chat.id;
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
-
   try {
-    const result = await stopTask(env, { username: session.username });
-    if (result.killed > 0) {
-      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
-    } else {
-      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
+    let sessionId = session.activeSessionId || session.lastSessionId || null;
+    if (taskId) {
+      const active = await stopTask(env, { username: session.username, chatId, sessionId, taskId, action: 'validate' });
+      sessionId = active.sessionId;
     }
+    const stub = env.INTAKE?.get(env.INTAKE.idFromName(String(chatId)));
+    // Close the intake fence before killing the engine: no buffered auto-launch.
+    const paused = stub && action !== 'skip'
+      ? await stub.fetch('https://intake/pause', { method: 'POST', body: JSON.stringify({ chatId }) }).then(r => r.json()) : null;
+    if (action === 'fresh') await stopTask(env, { username: session.username, chatId, sessionId, action: 'stop' });
+    const result = await stopTask(env, { username: session.username, chatId, sessionId, action, taskId });
+    if (stub && paused) await stub.fetch('https://intake/fence', { method: 'POST', body: JSON.stringify({ generation: paused.generation, epoch: result.epoch, epochs: result.epochs }) });
+    if (action === 'skip' && stub) {
+      const r = await stub.fetch('https://intake/flush', { method: 'POST' }).then(r => r.json());
+      return sendMessage(env.BOT_TOKEN, chatId, r.empty
+        ? '⏭ Текущая работа пропущена. Следующего ввода нет — пришли новую информацию.'
+        : '⏭ Перехожу к следующему накопленному вводу в этом диалоге.');
+    }
+    if (action === 'fresh') {
+      if (stub) await stub.fetch('https://intake/fresh', { method: 'POST' });
+      const id = newSessionId(chatId);
+      await setSession(env.SESSIONS, chatId, { ...session, activeSessionId: id, activeSessionIsNew: true,
+        lastSessionId: null, contextFromSession: null });
+      return sendMessage(env.BOT_TOKEN, chatId, '🆕 Новый запуск будет без незавершённого ввода. История и файлы проекта сохранены.');
+    }
+    return sendMessage(env.BOT_TOKEN, chatId,
+      '⛔ Сессия остановлена, очередь не запускается. Вся полученная информация сохранена — при явном запуске продолжу с ней работать. Другие чаты не затронуты.');
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Остановку не удалось подтвердить: ${e.message}. Накопленный ввод сохранён.`);
   }
 }
 

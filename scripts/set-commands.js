@@ -9,6 +9,9 @@ if (!token) {
 }
 
 const commands = [
+  { command: 'stop', description: 'Остановить сессию и сохранить весь ввод' },
+  { command: 'skip', description: 'Перейти к следующему вводу — появилась новая информация' },
+  { command: 'fresh', description: 'Начать без незавершённого ввода' },
   { command: 'profile',          description: 'Мой профиль и смена аккаунта' },
   { command: 'sessions',         description: 'Мои диалоги' },
   { command: 'new_dialog',       description: 'Новый диалог' },
