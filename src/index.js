@@ -214,3 +214,5 @@ async function scheduled(event, env, ctx) {
 
 export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };
+
+export { RetryQueue } from './retry-queue.js';

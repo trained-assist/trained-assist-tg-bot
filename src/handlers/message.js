@@ -1,9 +1,10 @@
+import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject } from '../intake-routing.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
+import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 
@@ -94,6 +95,8 @@ function stripMediaTags(text) {
 }
 
 async function handleText(chatId, session, text, env, opts = {}) {
+  let retryOpts = opts;
+  let accepted = false;
   try {
     const route = opts.resolvedRoute || opts.intakeRoute || await resolveSessionRoute(chatId, session, text, env);
 
@@ -117,6 +120,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
 
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
+    retryOpts = { ...opts, resolvedRoute: route, retryUsername: session.username, durableInput: false,
+      intakeRoute: { ...route, projectId: route.projectChosen ? route.projectId : (opts.intakeRoute?.projectId ?? session.projectId ?? null),
+        contextFromSession: opts.intakeRoute?.contextFromSession ?? session.contextFromSession ?? null } };
     const context = opts.isVoice ? '[voice-message]' : null;
 
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
@@ -149,6 +155,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       fileMimeType: opts.fileMimeType || null,
     });
 
+    accepted = true;
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
 
     await setSession(env.SESSIONS, chatId, {
@@ -166,48 +173,94 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
+    if (opts.isRetry) return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
   } catch (err) {
-    // The durable caller owns retry and must not discard its input on HTTP failure.
-    if (opts.durableInput) throw err;
+    // Telegram/session bookkeeping failures after ACK must never resubmit work.
+    if (accepted) {
+      console.warn('[recovery] accepted, bookkeeping failed:', err.message);
+      return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
+    }
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);
 
-    // Class B self-heal (issue #604): the FIRST time we see 'down', queue one
-    // delayed retry instead of dead-ending on the user. opts.isRetry marks the
-    // scheduled retry itself — it must never queue a second one (cap-at-1).
-    // Skip queueing when a file payload is attached: base64-inflated, it can
-    // approach KV's 25MB value limit, and resending a file is trivial for the
-    // user anyway — not worth the failure mode of scheduleRetry itself throwing.
-    if (kind === 'down' && !opts.isRetry && !opts.fileBase64) {
-      await scheduleRetry(env.SESSIONS, { chatId, text, opts });
-      await sendMessage(env.BOT_TOKEN, chatId,
-        '⏸ Агент временно недоступен. Попробую снова через 3 минуты — не отправляй повторно.'
-      );
-      return;
+    if (opts.durableInput && kind !== 'down') throw err;
+    const attempt = opts.retryAttempt || 0;
+    const reason = kind === 'down' ? 'сервер агента недоступен'
+      : kind === 'busy' ? 'сервер отвечает, но подтверждение приёма не пришло'
+      : 'ошибка при передаче задачи';
+    console.warn(`[recovery] chat=${chatId} attempt=${attempt} kind=${kind} error=${err.message}`);
+    if (kind === 'down' && attempt < 2 && !opts.fileBase64) {
+      try {
+        await enqueueRecovery(env, { chatId, text, opts: { ...retryOpts, retryAttempt: attempt } });
+      } catch (queueError) {
+        console.error('[recovery] enqueue failed', queueError.message);
+        if (opts.durableInput) throw queueError;
+        const notice = `⚠️ Восстановление не запланировано: ${reason}; не удалось сохранить повтор в очередь. Нужен ручной запуск.`;
+        if (opts.isRetry) return { outcome: 'queue_failed', notice };
+        await sendMessage(env.BOT_TOKEN, chatId, notice);
+        return 'queue_failed';
+      }
+      const notice = attempt
+        ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. Следующая попытка через 3 минуты.`
+        : '⏸ Агент временно недоступен. Попробую снова через 3 минуты (до двух попыток) — не отправляй повторно.';
+      if (opts.isRetry) return { outcome: 'scheduled', notice };
+      await sendMessage(env.BOT_TOKEN, chatId, notice).catch(e => console.warn('[recovery] queued notification failed:', e.message));
+      return 'scheduled';
     }
-
-    const userMsg = kind === 'busy'
+    const userMsg = opts.isRetry
+      ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. ${kind === 'busy' ? 'Запрос мог быть принят; повторять автоматически не буду, чтобы не создать дубль.' : 'Автоповторы остановлены.'}`
+      : kind === 'busy'
       ? '↪️ Сервер отвечает, но подтверждение приёма задачи не пришло. Пока не отправляй повторно: запрос мог быть принят.'
-      : kind === 'down' && opts.isRetry
-      ? '⏸ Агент всё ещё недоступен после повторной попытки. Попробуй позже вручную.'
       : kind === 'down'
-      ? '⏸ Агент временно недоступен. Попробуй прислать файл ещё раз через пару минут.'
-      : `❌ Ошибка: ${err.message}`;
+      ? '⏸ Агент временно недоступен. Файл не удалось поставить на автоповтор; попробуй прислать его ещё раз через пару минут.'
+      : `❌ Ошибка: ${reason}`;
+    if (opts.isRetry) return { outcome: kind, notice: userMsg };
     await sendMessage(env.BOT_TOKEN, chatId, userMsg);
+    return kind;
   }
 }
 
-// Class B self-heal (issue #604): drained by the Cron Trigger in index.js's
-// scheduled() every ~1min. Re-fetches the session fresh (not a stale snapshot)
-// so a retry doesn't fight a session the user has since moved on from; skips
-// silently if the user logged out in the meantime.
+async function recoveryNotice(env, chatId, text) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text);
+  if (!result?.ok) throw new Error(`Recovery notification rejected: ${result?.description || 'unknown'}`);
+}
+
 export async function processDueRetries(env) {
-  const due = await takeDueRetries(env.SESSIONS);
-  for (const { chatId, text, opts } of due) {
-    const session = await getSession(env.SESSIONS, chatId);
-    if (!session) continue;
-    await handleText(chatId, session, text, env, { ...opts, isRetry: true });
+  if (env.RETRY_QUEUE && !env.RECOVERY_STORE) {
+    const stub = env.RETRY_QUEUE.get(env.RETRY_QUEUE.idFromName('recovery'));
+    const response = await stub.fetch('https://recovery/drain', { method: 'POST' });
+    if (!response.ok) throw new Error(`Recovery drain HTTP ${response.status}`);
+    return;
+  }
+  const store = env.RECOVERY_STORE || env.SESSIONS;
+  const due = await takeDueRetries(store);
+  for (const entry of due) {
+    const { chatId, text, opts = {} } = entry;
+    try {
+      let result = entry.terminal;
+      if (!result) {
+        const session = await getSession(env.SESSIONS, chatId);
+        if (!session || (opts.retryUsername && opts.retryUsername !== session.username)) {
+          result = { outcome: 'profile_changed', notice: '⚠️ Восстановление отменено: вход в профиль завершён или выбран другой профиль.' };
+        } else if (entry.startedAt) {
+          result = { outcome: 'outcome_unknown', notice: '⚠️ Попытка восстановления прервалась без подтверждённого результата. Задача могла быть принята; автоматический повтор остановлен, чтобы не создать дубль.' };
+        } else {
+          const attempt = (opts.retryAttempt || 0) + 1;
+          await recoveryNotice(env, chatId, `🔄 Пробую восстановить сессию: попытка ${attempt}/2.`);
+          await markRetryStarted(store, entry);
+          result = await handleText(chatId, session, text, env, { ...opts, initialMsgId: null, isRetry: true, retryAttempt: attempt });
+          result ||= { outcome: 'awaiting_choice', notice: '↪️ Для восстановления нужно выбрать диалог.' };
+        }
+        await saveRetryOutcome(store, entry, result);
+      }
+      await recoveryNotice(env, chatId, result.notice);
+      await finishRetry(store, entry, result.outcome);
+    } catch (err) {
+      console.error(`[recovery] chat=${chatId} worker failed:`, err.message);
+      // Keep the entry: a later cron reports an interrupted attempt. One broken
+      // chat must not prevent recovery attempts for all other due entries.
+    }
   }
 }
 
