@@ -148,3 +148,7 @@ new_sqlite_classes = ["RunOutbox"]
 [[env.staging.durable_objects.bindings]]
 name = "RUN_OUTBOX"
 class_name = "RunOutbox"
+
+# Isolated previews do not process scheduled tasks.
+[env.staging.triggers]
+crons = []

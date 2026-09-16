@@ -11,6 +11,13 @@ import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, bot
 
 const app = new Hono();
 
+// Preview deployments have no Telegram credentials or webhook ownership.
+// Reject ingress before touching even the dedicated staging KV bindings.
+app.use('*', async (c, next) => {
+  if (c.env.PREVIEW_ONLY === 'true' && c.req.path !== '/health') return c.json({ error: 'preview only' }, 403);
+  return next();
+});
+
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
 
@@ -208,6 +215,7 @@ async function getGroupMemberCount(env, chatId) {
 // the Cron Trigger declared in wrangler.toml. waitUntil keeps the invocation
 // alive past the return — scheduled handlers have no separate "response" to wait on.
 async function scheduled(event, env, ctx) {
+  if (env.PREVIEW_ONLY === 'true') return;
   ctx.waitUntil(processDueRetries(env));
   ctx.waitUntil(processExpiredUI(env));
 }
