@@ -61,3 +61,15 @@ export async function copyRefsToAgent(env, username, refs, agentUrl) {
     });
   }
 }
+
+// Release only the buffer pin after durable acceptance; this never deletes bytes.
+// Failure retains the pin (disk cost) and cannot invalidate an accepted task.
+export async function releaseBufferPins(env, username, refs, base = env.AGENT_URL) {
+  const ids=[...new Set((refs||[]).map(ref=>ref.id).filter(id=>/^[a-f0-9]{64}$/.test(id)))];
+  if(!ids.length)return;
+  try {
+    const response=await fetch(`${base}/intake-files/release`,{method:'POST',
+      headers:{...auth(env),'Content-Type':'application/json'},body:JSON.stringify({username,ids}),signal:AbortSignal.timeout(5000)});
+    if(!response.ok)console.warn('[intake pins] release deferred',response.status);
+  }catch{console.warn('[intake pins] release deferred');}
+}

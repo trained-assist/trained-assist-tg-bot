@@ -1,4 +1,4 @@
-import { copyRefsToAgent } from './intake-files.js';
+import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -114,7 +114,11 @@ export async function runTask(env, { userId, username, task, context, sessionId,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
-    if (res.ok) return res.json();
+    if (res.ok) {
+      const ack=await res.json();
+      if(ack.durable){await releaseBufferPins(env,username,fileRefs);if(agentUrl!==env.AGENT_URL)await releaseBufferPins(env,username,fileRefs,agentUrl);}
+      return ack;
+    }
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
       throw Object.assign(new Error(`agent /run HTTP ${res.status}`), { rejected: res.status >= 400 && res.status < 500 });

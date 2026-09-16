@@ -14,7 +14,9 @@
     "tests/run-outbox.test.js",
     "tests/restart-command.test.js",
     "tests/release-gates.test.js",
-    "tests/restart-confirmations.test.js"
+    "tests/restart-confirmations.test.js",
+    "tests/media-retry.test.js",
+    "tests/intake-preflight.test.js"
   ],
   "node": []
 }

@@ -1,3 +1,4 @@
+import { releaseBufferPins } from './lib/intake-files.js';
 // One durable outbox per profile/chat. Alarms retry until the agent acknowledges
 // the stable requestId. Files are chunked below DO's per-value storage limit.
 export class RunOutbox {
@@ -65,6 +66,9 @@ export class RunOutbox {
           // Require valid acknowledgement; a proxy's HTML 200 isn't acceptance.
           const ack = await res.json();
           if (!ack.durable || ack.requestId !== job.id || !ack.taskId) throw Error('No matching durable acknowledgement');
+          const accepted=JSON.parse(data);
+          await releaseBufferPins(this.env,accepted.username,accepted.fileRefs);
+          if(job.agentUrl!==this.env.AGENT_URL)await releaseBufferPins(this.env,accepted.username,accepted.fileRefs,job.agentUrl);
           await this.state.storage.transaction(async txn => {
             await txn.put(`done:${job.id}`, { taskId: ack.taskId });
             await txn.delete(`job:${job.id}`);
