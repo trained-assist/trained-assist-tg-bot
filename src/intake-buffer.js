@@ -98,6 +98,18 @@ export class IntakeBuffer {
       const { generation } = await request.json();
       return json({ current: generation === ((await this.state.storage.get('generation')) || 0) });
     }
+    if (url.pathname === '/skip-ready' && request.method === 'POST') {
+      const { sessionId, generation } = await request.json();
+      await this._exclusive(async () => {
+        const key = `control:${sessionId || 'chat'}`;
+        const control = (await this.state.storage.get(key)) || {};
+        if (control.generation !== generation) return;
+        await this.state.storage.put(key, { ...control, paused: false });
+        await this.state.storage.put('skipGeneration', generation);
+        if (await this.state.storage.get('busy')) await this.state.storage.put('skipPending', true);
+      });
+      return json({ ok: true });
+    }
     if (url.pathname === '/fresh' && request.method === 'POST') {
       const { sessionId } = await request.json();
       await this._exclusive(async () => {
@@ -334,7 +346,7 @@ export class IntakeBuffer {
       // a partial task or require the user to dictate everything again.
       await this._exclusive(async () => {
         const remaining = (await this.state.storage.get('buf')) || [];
-        if (((await this.state.storage.get('freshGeneration')) || 0) > generation) {
+        if (Math.max((await this.state.storage.get('freshGeneration')) || 0, (await this.state.storage.get('skipGeneration')) || 0) > generation) {
           await this.state.storage.put(`archived-dispatch:${Date.now()}`, buf);
         } else await this.state.storage.put('buf', [...buf, ...remaining]);
         await this.state.storage.delete('launching');
@@ -347,6 +359,11 @@ export class IntakeBuffer {
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
       const remaining = (await this.state.storage.get('buf')) || [];
+      if (await this.state.storage.get('skipPending')) {
+        await this.state.storage.delete('skipPending');
+        if (remaining.length) await this._dispatch();
+        return;
+      }
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
         await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);

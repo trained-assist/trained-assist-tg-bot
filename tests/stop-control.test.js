@@ -64,7 +64,7 @@ describe('session stop protocol',()=>{
     await append(11,'new important information'); await command(11,'/skip');
     expect(controls[0]).toMatchObject({ chatId:11,sessionId:'a',action:'skip' });
     expect(dispatch.mock.calls[0][0].text).toContain('new important information');
-    expect(states.get('11').get('control:a')?.paused).toBeUndefined();
+    expect(states.get('11').get('control:a')?.paused).toBe(false);
   });
   it('/fresh archives pending input and creates a valid new session id',async()=>{
     await append(11,'old input'); await command(11,'/fresh');
@@ -128,4 +128,18 @@ it('stopping session A does not block a new session B selected in the same chat'
   kv.set('11',JSON.stringify({username:'shared',activeSessionId:'a'}));
   await flush(11);
   expect(dispatch.mock.calls[1][0].text).toContain('saved important input');
+});
+
+it('skip during preparation excludes the old batch and runs newly accumulated input after cancellation',async()=>{
+  let reject;
+  dispatch.mockImplementationOnce(()=>new Promise((_,r)=>{reject=r}));
+  await append(11,'old preparing batch');
+  const running=flush(11);
+  for(let i=0;i<20 && !reject;i++) await new Promise(r=>setTimeout(r,1));
+  await append(11,'new important input');
+  await command(11,'/skip');
+  reject(new Error('old dispatch cancelled'));
+  await running;
+  expect(dispatch).toHaveBeenCalledTimes(2);
+  expect(dispatch.mock.calls[1][0].text).toBe('new important input');
 });

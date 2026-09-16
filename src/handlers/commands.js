@@ -590,12 +590,13 @@ export async function cmdStop(msg, env, action = 'stop', taskId) {
     }
     const stub = env.INTAKE?.get(env.INTAKE.idFromName(String(chatId)));
     // Close the intake fence before killing the engine: no buffered auto-launch.
-    const paused = stub && action !== 'skip'
+    const paused = stub
       ? await stub.fetch('https://intake/pause', { method: 'POST', body: JSON.stringify({ chatId, sessionId }) }).then(r => r.json()) : null;
     if (action === 'fresh') await stopTask(env, { username: session.username, chatId, sessionId, action: 'stop' });
     const result = await stopTask(env, { username: session.username, chatId, sessionId, action, taskId });
     if (stub && paused) await stub.fetch('https://intake/fence', { method: 'POST', body: JSON.stringify({ generation: paused.generation, epoch: result.epoch, epochs: result.epochs, sessionId }) });
     if (action === 'skip' && stub) {
+      await stub.fetch('https://intake/skip-ready', { method: 'POST', body: JSON.stringify({ sessionId, generation: paused.generation }) });
       const r = await stub.fetch('https://intake/flush', { method: 'POST' }).then(r => r.json());
       return sendMessage(env.BOT_TOKEN, chatId, r.empty
         ? '⏭ Текущая работа пропущена. Следующего ввода нет — пришли новую информацию.'
