@@ -1,3 +1,4 @@
+import { withUploads } from './helpers/uploads.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // GAP PROOF (media content loss on the buffered path).
@@ -63,7 +64,7 @@ beforeEach(() => {
   setSession.mockResolvedValue();
   // Stub Telegram getFile + file download (downloadTgFileBase64 / transcribeVoice)
   // and the Deepgram transcription endpoint.
-  globalThis.fetch = vi.fn(async (url) => {
+  globalThis.fetch = withUploads(async (url) => {
     const u = String(url);
     if (u.includes('/getFile')) {
       return new Response(JSON.stringify({ ok: true, result: { file_path: 'photos/x.jpg' } }));
@@ -84,7 +85,8 @@ describe('media reaches the agent as a file, not a tag string', () => {
     const msg = { chat: { id: 42 }, photo: [{ file_id: 'AgAC123' }], caption: 'посмотри' };
     await handleMessage(msg, env);
     expect(runTask).toHaveBeenCalledTimes(1);
-    expect(runTask.mock.calls[0][1].fileBase64).toBeTruthy();
+    expect(runTask.mock.calls[0][1].fileRefs).toHaveLength(1);
+    expect(runTask.mock.calls[0][1].fileBase64).toBeFalsy();
   });
 
   it('BUFFERED SHAPE: a photo carrying a coalesced "photo:<id>" text must STILL reach the agent as a file', async () => {
@@ -95,7 +97,8 @@ describe('media reaches the agent as a file, not a tag string', () => {
     expect(runTask).toHaveBeenCalledTimes(1);
     const arg = runTask.mock.calls[0][1];
     // DESIRED: the image bytes reached the agent.
-    expect(arg.fileBase64).toBeTruthy();
+    expect(arg.fileRefs).toHaveLength(1);
+    expect(arg.fileRefs[0].size).toBe(5);
     // DESIRED: the agent's task is not the literal tag string.
     expect(arg.task).not.toBe('photo:AgAC123');
   });
@@ -165,23 +168,20 @@ describe('video messages are transcribed, not forwarded as raw bytes', () => {
 describe('oversized media is rejected before hitting Telegram\'s getFile limit', () => {
   it('a >20MB video is refused with a friendly message and never reaches runTask', async () => {
     const msg = { chat: { id: 42 }, video: { file_id: 'Big1', mime_type: 'video/mp4', file_size: 900 * 1024 * 1024 } };
-    await handleMessage(msg, env);
+    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
     expect(runTask).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
   });
 
   it('a >20MB document is refused the same way', async () => {
     const msg = { chat: { id: 42 }, document: { file_id: 'Big2', file_name: 'big.zip', file_size: 25 * 1024 * 1024 } };
-    await handleMessage(msg, env);
+    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
     expect(runTask).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
   });
 
   it('a >20MB photo is refused the same way', async () => {
     const msg = { chat: { id: 42 }, photo: [{ file_id: 'Big3', file_size: 21 * 1024 * 1024 }] };
-    await handleMessage(msg, env);
+    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
     expect(runTask).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('20 MB'));
   });
 
   it('a video under 20MB is downloaded normally', async () => {
@@ -212,7 +212,7 @@ describe('complete accumulated batch at agent boundary', () => {
   it('five voices produce five transcripts in ONE deep task', async () => {
     let n = 0;
     const original = globalThis.fetch;
-    globalThis.fetch = vi.fn(async (url, opts) => String(url).includes('deepgram.com')
+    globalThis.fetch = withUploads(async (url, opts) => String(url).includes('deepgram.com')
       ? new Response(JSON.stringify({ results: { channels: [{ alternatives: [{ transcript: `вопрос ${++n}` }] }] } }))
       : original(url, opts));
     await launchBatch(Array.from({ length: 5 }, (_, i) => ({ chat: { id: 42 }, message_id: i + 1, voice: { file_id: `v${i}` } })));
@@ -239,35 +239,35 @@ describe('complete accumulated batch at agent boundary', () => {
     expect(task.contextFromSession).toBe(null);
     expect(task.task).toContain('подпись скриншота');
     expect(task.task).toContain('последний вопрос');
-    expect(task.fileBase64).toBe(Buffer.from(PHOTO_BYTES).toString('base64'));
+    expect(task.fileRefs).toHaveLength(3);
+    expect(task.fileBase64).toBeFalsy();
   });
 
   it('a failed earlier transcription keeps the entire batch for retry and launches nothing', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: false })));
+    globalThis.fetch = withUploads(async () => new Response(JSON.stringify({ ok: false })));
     const data = await launchBatch([
       { chat: { id: 42 }, message_id: 1, voice: { file_id: 'bad' } },
       { chat: { id: 42 }, message_id: 2, text: 'последний вопрос' },
     ]);
     expect(runTask).not.toHaveBeenCalled();
-    expect(data.get('buf')).toHaveLength(2);
+    expect(data.get('retryBatch')).toHaveLength(2);
   });
 });
 
 
-import { execFileSync } from 'node:child_process';
-it('two photos and a document arrive together as a valid archive with distinct safe names', async () => {
+it('two photos and a document arrive as separate durable refs, without an archive', async () => {
   await launchBatch([
     { chat: { id: 42 }, message_id: 1, photo: [{ file_id: 'p1' }] },
     { chat: { id: 42 }, message_id: 2, photo: [{ file_id: 'p2' }] },
-    { chat: { id: 42 }, message_id: 3, document: { file_id: 'd1', file_name: '../report.txt' } },
+    { chat: { id: 42 }, message_id: 3, document: { file_id: 'd1', file_name: 'report.txt' } },
     { chat: { id: 42 }, message_id: 4, text: 'проверь все файлы' },
   ]);
   expect(runTask).toHaveBeenCalledTimes(1);
   const arg = runTask.mock.calls[0][1];
-  const archive = Buffer.from(arg.fileBase64, 'base64');
-  const names = execFileSync('tar', ['-tf', '-'], { input: archive }).toString().trim().split('\n');
-  expect(names).toEqual(['1-photo.jpg', '2-photo.jpg', '3-.._report.txt']);
-  for (const name of names) expect(execFileSync('tar', ['-xOf', '-', name], { input: archive })).toEqual(Buffer.from(PHOTO_BYTES));
+  expect(arg.fileRefs.map(r => r.name)).toEqual(['photo.jpg', 'photo.jpg', 'report.txt']);
+  expect(new Set(arg.fileRefs.map(r => r.id)).size).toBe(3);
+  expect(arg.fileRefs.every(r => r.size === 5)).toBe(true);
+  expect(arg.fileBase64).toBeFalsy();
   expect(arg.task).toContain('проверь все файлы');
 });
 

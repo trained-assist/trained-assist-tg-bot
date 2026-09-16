@@ -1,7 +1,7 @@
 import { shouldAskProject } from '../intake-routing.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
-import { packAttachments } from '../lib/attachment-bundle.js';
+import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
@@ -36,6 +36,15 @@ export async function handleMessage(msg, env, opts = {}) {
     );
   }
 
+  if (msg.intakeItems) {
+    const items = [];
+    // Sequential uploads bound peak memory for old cached batches and large media.
+    for (const item of msg.intakeItems) items.push({ ...item, msg: await prepareIntake({ chat: msg.chat, ...item.msg }, env, session) });
+    msg = { ...msg, intakeItems: items };
+  } else {
+    msg = await prepareIntake(msg, env, session);
+  }
+
   const route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
@@ -49,124 +58,28 @@ export async function handleMessage(msg, env, opts = {}) {
       return;
     }
   }
-  opts = { ...opts, resolvedRoute: route, originalMessage: msg };
+  opts = { ...opts, intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
 
-  if (msg.intakeItems) {
-    // Resolve EVERY original message before making the single agent request.
-    // Parallel I/O preserves array order while avoiding N sequential STT waits.
-    const prepared = await Promise.all(msg.intakeItems.map(async (item, index) => {
-      const m = item.msg || {};
-      const caption = item.text || m.text || m.caption || '';
-      const media = m.voice || m.audio || m.video ||
-        (m.document && /^(audio|video)\//i.test(m.document.mime_type || '') ? m.document : null);
-      const file = m.photo?.[m.photo.length - 1] || m.document;
-      if ((media || file)?.file_size > MAX_TG_DOWNLOAD_BYTES) {
-        throw new Error(`Сообщение ${index + 1}: файл больше 20 MB`);
-      }
-      if (media) {
-        const { transcript, error } = m.transcript
-          ? { transcript: m.transcript }
-          : await transcribeVoice(media.file_id, media.mime_type || null, env);
-        if (!transcript) throw new Error(`Сообщение ${index + 1}: ${error || 'пустая расшифровка'}`);
-        return { text: [caption, transcript].filter(Boolean).join('\n'), isVoice: true };
-      }
-      if (file) {
-        const cached = m.attachmentKey ? await env.SESSIONS.get(m.attachmentKey, { type: 'json' }) : null;
-        const { base64, error } = cached || await downloadTgFileBase64(file.file_id, env);
-        if (error) throw new Error(`Сообщение ${index + 1}: ${error}`);
-        const name = file.file_name || 'photo.jpg';
-        return { text: [caption, `Вложение ${index + 1}: ${name}`].filter(Boolean).join('\n'),
-          file: { base64, name, mime: file.mime_type || (m.photo ? 'image/jpeg' : 'application/octet-stream'), index: index + 1 } };
-      }
-      return { text: caption };
-    }));
-    const files = prepared.flatMap(p => p.file ? [p.file] : []);
-    const attachment = packAttachments(files);
-    const task = prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') +
-      (files.length > 1 ? '\n\nВсе вложения находятся в приложенном TAR-архиве. Распакуй его и прочитай каждый файл; номер в имени соответствует сообщению.' : '');
-    await handleText(chatId, session, task, env, {
-      ...opts, intakeRoute: opts.intakeRoute || msg.intakeRoute, ...attachment, isVoice: prepared.some(p => p.isVoice),
-    });
-    return;
-  }
+  const items = msg.intakeItems || [{ text: msg.text || msg.caption || '', msg }];
+  const prepared = items.map((item, index) => {
+    const m = item.msg;
+    const caption = stripMediaTags(item.text || m.text || m.caption || '');
+    return { text: [caption, m.transcript,
+      m.fileRef ? `Вложение ${index + 1}: ${m.fileRef.name}` : ''].filter(Boolean).join('\n'),
+      refs: [m.fileRef, m.transcriptRef].filter(Boolean), isVoice: !!m.transcript };
+  });
+  const task = msg.intakeItems ? prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') : prepared[0].text;
+  return handleText(chatId, session, task, env, { ...opts,
+    requestId: opts.requestId || (items.every(i => i.msg.message_id)
+      ? `intake-${await batchIdentity(chatId, items)}` : crypto.randomUUID()),
+    fileRefs: prepared.flatMap(p => p.refs), isVoice: prepared.some(p => p.isVoice),
+    durableInput: !!(msg.intakeItems || opts.intakeRoute || msg.intakeRoute),
+  });
+}
 
-  // Media branches take precedence over `text`. On the buffered/dispatch path
-  // (IntakeBuffer._dispatch) a media message keeps its .photo/.voice/.document
-  // field but gets .text overwritten with a coalesced tag string ("photo:<id>").
-  // If we checked `text` first, that raw tag would be sent to the agent as the
-  // task and the file would never be downloaded (voice never transcribed).
-  // Instead: download/transcribe the media, and pass the human text — the
-  // coalesced buffer with its own media tag-lines stripped — as the caption/task,
-  // so BOTH the file and the surrounding words reach the agent.
-  const humanCaption = msg.caption || stripMediaTags(text);
-  const docIsMedia = doc && /^(audio|video)\//i.test(doc.mime_type || '');
-  if (voice || audio) {
-    const fileId = (voice || audio).file_id;
-    const mimeType = (voice || audio).mime_type || null;
-    await transcribeAndDispatch(chatId, session, env, opts, humanCaption, fileId, mimeType, '🎤');
-  } else if (video || docIsMedia) {
-    const src = video || doc;
-    if (src.file_size && src.file_size > MAX_TG_DOWNLOAD_BYTES) {
-      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(src.file_size));
-    } else {
-      await transcribeAndDispatch(chatId, session, env, opts, humanCaption, src.file_id, src.mime_type || 'video/mp4', '🎬');
-    }
-  } else if (photo) {
-    const largest = photo[photo.length - 1];
-    if (largest.file_size && largest.file_size > MAX_TG_DOWNLOAD_BYTES) {
-      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(largest.file_size));
-      return;
-    }
-    const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю фото…');
-    const initialMsgId = placeholder?.result?.message_id ?? null;
-    try {
-      const { base64, error } = await downloadTgFileBase64(largest.file_id, env);
-      if (error) {
-        await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать фото: ${error}`);
-      } else {
-        const task = humanCaption || 'Фото';
-        await handleText(chatId, session, task, env, {
-          ...opts, initialMsgId,
-          fileBase64: base64,
-          fileName: 'photo.jpg',
-          fileMimeType: 'image/jpeg',
-          mode: opts.mode || null,
-        });
-      }
-    } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке фото: ${e.message}`);
-    }
-  } else if (doc) {
-    if (doc.file_size && doc.file_size > MAX_TG_DOWNLOAD_BYTES) {
-      await sendMessage(env.BOT_TOKEN, chatId, tooBigMessage(doc.file_size));
-      return;
-    }
-    const placeholder = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Загружаю документ…');
-    const initialMsgId = placeholder?.result?.message_id ?? null;
-    try {
-      const { base64, error } = await downloadTgFileBase64(doc.file_id, env);
-      if (error) {
-        await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось скачать файл: ${error}`);
-      } else {
-        const task = humanCaption || `Документ: ${doc.file_name || 'файл'}`;
-        await handleText(chatId, session, task, env, {
-          ...opts, initialMsgId,
-          fileBase64: base64,
-          fileName: doc.file_name || 'document',
-          fileMimeType: doc.mime_type || 'application/octet-stream',
-          mode: opts.mode || null,
-        });
-      }
-    } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке: ${e.message}`);
-    }
-  } else if (text) {
-    await handleText(chatId, session, text, env, opts);
-  } else {
-    await sendMessage(env.BOT_TOKEN, chatId,
-      '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
-    );
-  }
+async function batchIdentity(chatId, items) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${chatId}:${items.map(i => i.msg.message_id).join(',')}`));
+  return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Strip coalesced media tag-lines ("photo:<id>", "voice:<id>", …) that
@@ -229,6 +142,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       projectId: route.projectChosen ? route.projectId : (opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null)),
       newProjectName: route.forceNew && (route.newProject || (session.projectSelectionSessionId === route.sessionId && session.pendingNewProject))
         ? text.replace(/^\[Сообщение \d+\]\s*/u, '').split('\n')[0].trim().slice(0, 60) || 'Новый проект' : null,
+      requestId: opts.requestId,
+      fileRefs: opts.fileRefs || [],
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
@@ -252,6 +167,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: newPinnedMsgId,
     });
   } catch (err) {
+    // The durable caller owns retry and must not discard its input on HTTP failure.
+    if (opts.durableInput) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);

@@ -80,7 +80,7 @@ export class IntakeBuffer {
         result = await preflight(msg, this.env);
       } catch (error) {
         await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
-          '⚠️ Не удалось подготовить сообщение сразу. Оно сохранено; повторю при запуске проработки.');
+          '⚠️ Сообщение сохранено для повтора, но подготовка файла или расшифровки ещё не завершена. Повторю при запуске проработки.');
         console.warn('[intake prepare]', error.message);
       }
       await this._exclusive(async () => {
@@ -134,7 +134,7 @@ export class IntakeBuffer {
     if (url.pathname === '/flush' && request.method === 'POST') {
       // Button tap. If a run is somehow already going, ignore (don't double-fire).
       if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
-      const buf = (await this.state.storage.get('buf')) || [];
+      const buf = (await this.state.storage.get('retryBatch')) || (await this.state.storage.get('buf')) || [];
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000);
       if (pending) {
@@ -199,7 +199,8 @@ export class IntakeBuffer {
   async _dispatch() {
     const buf = await this._exclusive(async () => {
       if (await this.state.storage.get('busy')) return [];
-      const items = (await this.state.storage.get('buf')) || [];
+      const retryBatch = await this.state.storage.get('retryBatch');
+      const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
       if (items.some(i => i.preparingAt && Date.now() - i.preparingAt < 120000)) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
@@ -207,7 +208,8 @@ export class IntakeBuffer {
       await this.state.storage.put('busySince', Date.now());
       await this.state.storage.put('launching', items);
       await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
-      await this.state.storage.delete('buf');
+      if (!retryBatch) await this.state.storage.delete('buf');
+      await this.state.storage.delete('retryBatch');
       return items;
     });
     if (!buf.length) return;
@@ -242,18 +244,17 @@ export class IntakeBuffer {
       // Preparation failed: keep the original Telegram references, never launch
       // a partial task or require the user to dictate everything again.
       await this._exclusive(async () => {
-        const remaining = (await this.state.storage.get('buf')) || [];
-        await this.state.storage.put('buf', [...buf, ...remaining]);
+        await this.state.storage.put('retryBatch', buf);
         await this.state.storage.delete('launching');
       });
       await sendMessage(this.env.BOT_TOKEN, chatId,
-        '⚠️ Не удалось подготовить все сообщения. Вся пачка сохранена — нажми «▶️ Запустить проработку», чтобы повторить.');
+        '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.');
       console.error(`[intake ${chatId}] batch preparation failed:`, err?.message);
     } finally {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
       await this.state.storage.deleteAlarm();
-      const remaining = (await this.state.storage.get('buf')) || [];
+      const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
         await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);
@@ -273,13 +274,13 @@ export class IntakeBuffer {
       await this._exclusive(async () => {
         const launching = (await this.state.storage.get('launching')) || [];
         const remaining = (await this.state.storage.get('buf')) || [];
-        if (launching.length) await this.state.storage.put('buf', [...launching, ...remaining]);
+        if (launching.length) await this.state.storage.put('retryBatch', launching);
         await this.state.storage.delete('launching');
         await this.state.storage.delete('busy');
         await this.state.storage.delete('busySince');
       });
     }
-    const buf = (await this.state.storage.get('buf')) || [];
+    const buf = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
     if (buf.length) {
       const last = buf[buf.length - 1].msg;
       await this._showCollector(last.chat?.id, buf.length, last.message_id);

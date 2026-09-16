@@ -1,3 +1,4 @@
+import { withUploads } from './helpers/uploads.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleMessage } from '../src/handlers/message.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
@@ -33,7 +34,7 @@ beforeEach(async () => {
   getProjectDecision.mockResolvedValue({ action: 'ask', choices: projects });
   sendMessageWithKeyboard.mockImplementation(async () => ({ result: { message_id: ++mid } }));
   await setSession(env.SESSIONS, chatId, { username: 'owner', lastSessionId: 'old', lastMessageAt: Date.now(), projectId: 'old-project' });
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ ok: true }) }));
+  vi.stubGlobal('fetch', withUploads(async url => String(url).includes('/getFile') ? Response.json({ ok: true, result: { file_path: 'voice.ogg' } }) : String(url).includes('/file/bot') ? new Response('hello') : Response.json({ ok: true })));
 });
 
 describe('project selection through actual creation, message and callback handlers', () => {
@@ -80,7 +81,8 @@ describe('project selection through actual creation, message and callback handle
     await tap('pc:1');
     expect(runTask).toHaveBeenCalledTimes(1);
     const payload = runTask.mock.calls[0][1];
-    expect(payload).toMatchObject({ projectId: 'p1', mode: 'deep', fileBase64: 'aGVsbG8=', fileName: 'резюме.txt', context: '[voice-message]' });
+    expect(payload).toMatchObject({ projectId: 'p1', mode: 'deep', context: '[voice-message]' });
+    expect(payload.fileRefs).toHaveLength(3); expect(payload.fileRefs[2].name).toBe('резюме.txt'); expect(payload.fileBase64).toBeFalsy();
     expect(payload.task).toContain('Первый текст'); expect(payload.task).toContain('Вторая мысль');
   });
   it('pending new-dialog menu forces selection even when old history is recent', async () => {
@@ -121,19 +123,22 @@ describe('project selection through actual creation, message and callback handle
     await tap('sn:source'); await tap('pc:2'); await handleMessage(message('разбери'), env);
     expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p2', contextFromSession: 'source', forceNew: true });
   });
-  it('retains the original batch after attachment preparation fails, then retries successfully', async () => {
+  it('retains file refs and pending choice after dispatch rejection, then retries successfully', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner' });
     const input = { ...message('file'), intakeItems: [{ msg: {
-      document: { file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain' }, attachmentKey: 'file-cache',
+      chat: { id: chatId }, message_id: 55,
+      document: { file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain' },
     } }] };
     await handleMessage(input, env, { mode: 'deep' });
+    runTask.mockRejectedValueOnce(new Error('agent /run HTTP 413'));
     await tap('pc:0');
-    expect(runTask).not.toHaveBeenCalled();
-    expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice.input.intakeItems).toHaveLength(1);
-    await env.SESSIONS.put('file-cache', JSON.stringify({ base64: 'aGVsbG8=' }));
+    const pending = (await getSession(env.SESSIONS, chatId)).pendingProjectChoice;
+    expect(pending.input.intakeItems[0].msg.fileRef.name).toBe('resume.txt');
+    const requestId = runTask.mock.calls[0][1].requestId;
     await tap('pc:0');
-    expect(runTask).toHaveBeenCalledTimes(1);
-    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p0', mode: 'deep', fileBase64: 'aGVsbG8=' });
+    expect(runTask).toHaveBeenCalledTimes(2);
+    expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p0', mode: 'deep', requestId });
+    expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice).toBeNull();
   });
   it('new choice from session disambiguation also opens the project picker', async () => {
     const session = await getSession(env.SESSIONS, chatId);
