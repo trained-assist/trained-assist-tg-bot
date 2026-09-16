@@ -113,9 +113,25 @@ describe('durable temporary Telegram interfaces', () => {
     expect(await rejectExpiredUI(cq, env, null)).toBe(false);
     expect(requests).toHaveLength(0);
   });
-  it('still rejects an old pp:/sp: picker with no pending record once KV should have caught up', async () => {
+  it('still rejects an old pp:/sp: picker with no pending record once KV should have caught up, even after a retry', async () => {
     const cq = { id: 'cq', data: 'pp:0', message: { message_id: 7, date: (now - KV_PROPAGATION_GRACE_MS) / 1000, chat: { id: 42 } } };
-    expect(await rejectExpiredUI(cq, env, null)).toBe(true);
+    const result = rejectExpiredUI(cq, env, null);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await result).toBe(true);
+  });
+  it('recovers a pp:/sp: picker tapped past the grace window when the retry finds the write has now propagated', async () => {
+    // The age-based grace window alone would hard-reject the instant it elapses — this
+    // is exactly what a real user who took longer than KV_PROPAGATION_GRACE_MS to tap
+    // (or a colo whose replication simply lagged past it) used to hit. The retry gives
+    // KV one more chance to catch up before this gate commits to "expired".
+    const chatId = 42;
+    const pendingMessageAt = now - KV_PROPAGATION_GRACE_MS - 5000;
+    const cq = { id: 'cq', data: 'pp:0', message: { message_id: 7, date: pendingMessageAt / 1000, chat: { id: chatId } } };
+    const result = rejectExpiredUI(cq, env, null);
+    records.set(String(chatId), { pendingMessage: 'new task', pendingMessageAt });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await result).toBe(false);
+    expect(requests).toHaveLength(0);
   });
   describe('projectChoiceExpired (pc: picker)', () => {
     it('is not expired for a freshly-shown picker with no propagated record yet', () => {
