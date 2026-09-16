@@ -144,4 +144,12 @@ describe('project selection through actual creation, message and callback handle
     expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p3', forceNew: true, task: 'saved task' });
   });
 
+  it('switching to an existing dialog suspends the menu without losing its saved task', async () => {
+    await tap('nd:'); await handleMessage(message('saved'), env, { mode: 'deep' });
+    await tap('sc:existing'); await handleMessage(message('continue'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ sessionId: 'existing', forceNew: false });
+    await tap('nd:'); await tap('pc:0');
+    expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p0', task: 'saved', mode: 'deep' });
+  });
+
 });

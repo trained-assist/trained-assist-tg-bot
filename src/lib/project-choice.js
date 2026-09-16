@@ -63,7 +63,7 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
 export async function chooseProject(cq, env, session) {
   const chatId = cq.message.chat.id;
   const pending = session?.pendingProjectChoice;
-  if (!pending || pending.dispatching || pending.messageId !== cq.message.message_id || Date.now() - pending.createdAt >= PICKER_TTL_MS) {
+  if (!pending || pending.dispatching || pending.suspended || pending.messageId !== cq.message.message_id || Date.now() - pending.createdAt >= PICKER_TTL_MS) {
     await answerCallbackQuery(env.BOT_TOKEN, cq.id, '⌛ Открой «Новый диалог» заново.');
     return;
   }
