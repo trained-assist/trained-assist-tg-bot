@@ -16,6 +16,7 @@ vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(), getOrCreateMappedSessi
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: vi.fn() }));
 
 import { routeText } from '../src/index.js';
+import { getSession } from '../src/lib/kv.js';
 
 function makeEnv() {
   const appended = [];
@@ -53,11 +54,13 @@ describe('routeText — shared private+group intake rule', () => {
     expect(_appended[0].flush).toBe(false);
   });
 
-  it('bypasses the buffer for a reply-to-bot (answering a question)', async () => {
+  it('buffers a reply-to-bot so the user can add attachments', async () => {
     const { env, _appended } = makeEnv();
+    getSession.mockResolvedValueOnce({ lastSessionId: 'original', projectId: 'project-1' });
     await routeText({ chat: { id: 42 }, text: 'да', reply_to_message: { message_id: 1 } }, env, 42);
-    expect(_appended).toHaveLength(0);
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(_appended).toHaveLength(1);
+    expect(_appended[0].msg.intakeRoute).toEqual({ sessionId: 'original', projectId: 'project-1', forceNew: false, contextFromSession: null });
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('honours the kill-switch — routes straight to the agent when off', async () => {

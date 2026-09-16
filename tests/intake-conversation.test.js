@@ -172,14 +172,23 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(opts).toEqual({ mode: 'deep' });
   });
 
-  it('C4: replying to the bot bypasses the buffer and reaches the agent directly', async () => {
+  it('C4: voice reply plus photo and pasted text wait for one explicit launch', async () => {
     const { env } = makeWorld();
-    await say(env, 42, 'первый кусок задачи');               // accumulates
+    for (const msg of [
+      { message_id: 10, voice: { file_id: 'voice-1' }, reply_to_message: { message_id: 1 } },
+      { message_id: 11, photo: [{ file_id: 'photo-1' }] },
+      { message_id: 12, text: 'скопированный текст' },
+    ]) await routeText({ chat: { id: 42 }, ...msg }, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
-
-    await replyToBot(env, 42, 'да, именно так');             // conversation turn
+    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][0].text).toBe('да, именно так');
+    const batch = handleMessage.mock.calls[0][0].intakeItems;
+    expect(batch).toHaveLength(3);
+    expect(batch[0].msg.voice.file_id).toBe('voice-1');
+    expect(batch[0].msg.reply_to_message.message_id).toBe(1);
+    expect(batch[1].msg.photo[0].file_id).toBe('photo-1');
+    expect(batch[2].text).toBe('скопированный текст');
   });
 
   it('C5: an 8-message conversation — accumulate, launch, follow-ups held+acked, re-launch', async () => {
@@ -218,11 +227,8 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep' });
   });
 
-  // PENDING (#71): describes unbuilt behavior — hold the follow-up after a run and
-  // ask «это всё, или дополнишь?» offering ▶️, instead of silently swallowing /
-  // auto-launching a 2nd run. Kept as an executable spec but skipped so it doesn't
-  // hold main RED under the now-required `ci` gate. Un-skip when #71 lands.
-  it.skip('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
+  // Regression: a follow-up reply must offer time to add supporting material.
+  it('C6: after the agent responded, a follow-up must be CONFIRMED («это всё, или дополнишь?»), not auto-launched', async () => {
     // The user's rationale: Telegram can't carry a comment + an explaining
     // screenshot in one message. So after the agent answers, the very next
     // contribution is usually the SECOND half of one thought — it must be held

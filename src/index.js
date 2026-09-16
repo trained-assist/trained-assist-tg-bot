@@ -154,6 +154,14 @@ export async function dispatchInner(update, env) {
 // silently drift from the private path again (#530).
 export async function routeText(msg, env, chatId) {
   if (shouldDebounce(msg, env)) {
+    // Pin continuation at receipt: later session selection must not move this batch.
+    if (msg.reply_to_message) {
+      const session = await getSession(env.SESSIONS, chatId);
+      const sessionId = session?.activeSessionId || session?.lastSessionId;
+      if (sessionId) msg = { ...msg, intakeRoute: { sessionId,
+        forceNew: !!(session.activeSessionId && session.activeSessionIsNew),
+        projectId: session.projectId || null, contextFromSession: session.contextFromSession || null } };
+    }
     const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
     await stub.fetch('https://intake/append', {
