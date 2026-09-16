@@ -195,3 +195,18 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
   expect(handleMessage).not.toHaveBeenCalled();
   expect(await state.storage.get('launching')).toBeUndefined();
 });
+
+ it('preparation failure retains original batch and reports media failure, not missing launch ACK', async () => {
+   const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+   const original = { text: 'screenshot', msg: { chat: { id: 42 }, message_id: 123, photo: [{ file_id: 'original' }] } };
+   await state.storage.put('buf', [original]);
+   handleMessage.mockRejectedValueOnce(Object.assign(new Error('upload failed'), { code: 'INTAKE_PREPARATION_FAILED' }));
+   await io.fetch(flushReq());
+   expect(await state.storage.get('retryBatch')).toEqual([original]);
+   const warning = sendMessage.mock.calls.find(call => String(call[2]).includes('Не удалось подготовить вложение'));
+   expect(warning).toBeTruthy();
+   expect(warning[2]).not.toContain('Подтверждение запуска');
+   handleMessage.mockResolvedValueOnce(undefined);
+   await io.fetch(flushReq());
+   expect(await state.storage.get('retryBatch')).toBeUndefined();
+ });

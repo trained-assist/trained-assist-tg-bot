@@ -279,3 +279,14 @@ it('reuses collector status for a voice batch instead of leaving two launching b
   expect(runTask.mock.calls[0][1]).toMatchObject({ initialMsgId: 777, mode: 'deep' });
   expect(sendMessage).not.toHaveBeenCalled();
 });
+
+it('failed screenshot persistence is tagged before dispatch and cannot launch text-only work', async () => {
+  globalThis.fetch = vi.fn(async url => String(url).includes('/getFile')
+    ? new Response(JSON.stringify({ ok: true, result: { file_path: 'photos/x.jpg' } }))
+    : String(url).includes('/intake-files') ? new Response('unavailable', { status: 503 }) : new Response(PHOTO_BYTES));
+  await expect(handleMessage({ chat: { id: 42 }, message_id: 999,
+    photo: [{ file_id: 'screenshot', file_unique_id: 'unique' }] },
+    { BOT_TOKEN: 't', AGENT_URL: 'https://agent.example', AGENT_SECRET: 's' }))
+    .rejects.toMatchObject({ code: 'INTAKE_PREPARATION_FAILED' });
+  expect(runTask).not.toHaveBeenCalled();
+});

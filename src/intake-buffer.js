@@ -350,8 +350,10 @@ export class IntakeBuffer {
         await this.state.storage.delete('launching');
       });
       await sendMessage(this.env.BOT_TOKEN, chatId,
-        '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.');
-      console.error(`[intake ${chatId}] batch preparation failed:`, err?.message);
+        err?.code === 'INTAKE_PREPARATION_FAILED'
+          ? '⚠️ Не удалось подготовить вложение. Пачка и ссылки на исходные сообщения сохранены. Повтори запуск позже — отправлять всё заново не нужно.'
+          : '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.');
+      console.error(`[intake ${chatId}] batch preparation failed:`, err?.cause?.message || err?.message);
     } finally {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');
