@@ -11,8 +11,8 @@ export async function intakeReadiness(env) {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.AGENT_SECRET}` },
         body: '{}', signal: AbortSignal.timeout(5000),
       });
-      const body = await response.json();
-      return { ready: response.status === 400 && body.error === 'invalid intake request', status: response.status };
+      const body = await response.json().catch(() => null);
+      return { ready: response.status === 400 && body?.error === 'invalid intake request', status: response.status };
     } catch { return { ready: false, status: 0 }; }
   }));
   return { ready: backends.every(b => b.ready), quickBeforeCollect: true, backends: backends.map(b => b.ready), backendStatuses: backends.map(b => b.status) };
