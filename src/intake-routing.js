@@ -22,7 +22,6 @@ export function hasIntakeContent(msg) {
 export function shouldDebounce(msg, env) {
   if (env.INTAKE_DEBOUNCE === 'off') return false; // kill-switch; default ON
   if (!env.INTAKE) return false;                   // binding missing → fail open
-  if (msg.reply_to_message) return false;          // answering the bot bypasses
   const text = msg.text;
   if (text && text.startsWith('/')) return false;  // commands bypass
   // Media WITHOUT text (photo/voice/doc/audio/video) MUST also accumulate — the

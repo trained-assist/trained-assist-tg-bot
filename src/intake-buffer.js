@@ -36,7 +36,7 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
 const collectorText = n =>
-  `📥 Принял ✅ Накапливаю (${n}). Пиши ещё — или жми «▶️ Запустить проработку», когда закончишь.`;
+  `📥 Принял ✅ Накапливаю (${n}). Можешь дополнить текстом, фото или голосовым — или жми «▶️ Запустить проработку», когда закончишь.`;
 
 // Shown while a run is in flight: the buffer holds new messages (never auto-runs),
 // but the user MUST still see they were received. Silence here was the «спросил
@@ -215,7 +215,9 @@ export class IntakeBuffer {
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
     const coalescedText = coalesceBuffer(buf);
-    const msg = { ...base, text: coalescedText, intakeItems: buf };
+    const continuation = buf.find(item => item.msg.intakeRoute)?.msg;
+    const msg = { ...base, text: coalescedText, intakeItems: buf,
+      intakeRoute: continuation?.intakeRoute };
 
     // Retire the collector button so it can't be tapped twice.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
