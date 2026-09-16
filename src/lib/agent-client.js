@@ -107,20 +107,27 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   }
 }
 
-// What the gateway should do when a NEW dialog starts (issue #517):
-// {action:'auto'|'create'|'ask', choices:[{id,name,label}], active}. On any failure
-// returns action:'auto' so we never block dispatch — the agent will auto-bind.
+// The list remains available even if optional decision enrichment is broken.
+// Failure is explicit: never turn an unavailable project service into "no projects".
 export async function getProjectDecision(env, { username, chatId }) {
+  const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
   try {
     const res = await fetch(
       `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
-      { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(9000) }
+      { headers, signal: AbortSignal.timeout(9000) }
     );
-    if (!res.ok) return { action: 'auto', choices: [], active: null };
-    return await res.json();
-  } catch {
-    return { action: 'auto', choices: [], active: null };
-  }
+    if (res.ok) {
+      const data = await res.json();
+      if (!data.note && ['auto', 'ask', 'create'].includes(data.action) && Array.isArray(data.choices)) return data;
+    }
+  } catch { /* use the same agent's basic project list */ }
+  const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+    { headers, signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  const data = await res.json();
+  if (data.note || !Array.isArray(data.projects)) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  return { action: data.projects.length > 1 ? 'ask' : data.projects.length ? 'auto' : 'create',
+    choices: data.projects, active: null };
 }
 
 export async function getSessions(env, { username, limit = 10 }) {

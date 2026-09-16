@@ -59,8 +59,18 @@ describe('routeText — shared private+group intake rule', () => {
     getSession.mockResolvedValueOnce({ lastSessionId: 'original', projectId: 'project-1' });
     await routeText({ chat: { id: 42 }, text: 'да', reply_to_message: { message_id: 1 } }, env, 42);
     expect(_appended).toHaveLength(1);
-    expect(_appended[0].msg.intakeRoute).toEqual({ sessionId: 'original', projectId: 'project-1', forceNew: false, contextFromSession: null });
+    expect(_appended[0].msg.intakeRoute).toEqual({ sessionId: 'original', projectId: 'project-1', forceNew: false, projectChosen: false, newProject: false, contextFromSession: null });
     expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it('pins an explicitly chosen project for plain text before later menu changes', async () => {
+    const { getSession } = await import('../src/lib/kv.js');
+    getSession.mockResolvedValueOnce({ activeSessionId: 'fresh', activeSessionIsNew: true,
+      projectSelectionSessionId: 'fresh', projectId: 'chosen', pendingNewProject: false });
+    const { env, _appended } = makeEnv();
+    await routeText({ chat: { id: 42 }, text: 'task' }, env, 42);
+    expect(_appended[0].msg.intakeRoute).toMatchObject({ sessionId: 'fresh', projectChosen: true,
+      projectId: 'chosen', forceNew: true });
   });
 
   it('honours the kill-switch — routes straight to the agent when off', async () => {

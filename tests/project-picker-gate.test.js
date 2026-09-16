@@ -16,8 +16,8 @@ describe('shouldAskProject — R14 new-dialog project gate', () => {
     expect(shouldAskProject({ isNewDialog: false, hasFile: false, decision: ask2 })).toBe(false);
   });
 
-  it('file upload → skip picker (file cannot be re-attached from deferred msg)', () => {
-    expect(shouldAskProject({ isNewDialog: true, hasFile: true, decision: ask2 })).toBe(false);
+  it('file upload → same picker, originals retained before download)', () => {
+    expect(shouldAskProject({ isNewDialog: true, hasFile: true, decision: ask2 })).toBe(true);
   });
 
   it('single project (action=auto) → no ask', () => {

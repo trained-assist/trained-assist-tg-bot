@@ -1,10 +1,11 @@
+import { shouldAskProject } from '../intake-routing.js';
+import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { packAttachments } from '../lib/attachment-bundle.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
-import { shouldAskProject } from '../intake-routing.js';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -34,6 +35,21 @@ export async function handleMessage(msg, env, opts = {}) {
       '👋 Сначала войди: /login username password'
     );
   }
+
+  const route = opts.intakeRoute || msg.intakeRoute ||
+    await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
+  const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
+  const pendingCreation = !!session.pendingProjectChoice && !route.projectChosen;
+  if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
+    const decision = await getProjectDecision(env, { username: session.username, chatId });
+    if (pendingCreation || shouldAskProject({ isNewDialog: true, decision })) {
+      await openProjectChoice(env, chatId, session, { decision, input: msg,
+        opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
+        contextFromSession: route.contextFromSession || session.contextFromSession || null });
+      return;
+    }
+  }
+  opts = { ...opts, resolvedRoute: route, originalMessage: msg };
 
   if (msg.intakeItems) {
     // Resolve EVERY original message before making the single agent request.
@@ -69,7 +85,7 @@ export async function handleMessage(msg, env, opts = {}) {
     const task = prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') +
       (files.length > 1 ? '\n\nВсе вложения находятся в приложенном TAR-архиве. Распакуй его и прочитай каждый файл; номер в имени соответствует сообщению.' : '');
     await handleText(chatId, session, task, env, {
-      ...opts, intakeRoute: msg.intakeRoute, ...attachment, isVoice: prepared.some(p => p.isVoice),
+      ...opts, intakeRoute: opts.intakeRoute || msg.intakeRoute, ...attachment, isVoice: prepared.some(p => p.isVoice),
     });
     return;
   }
@@ -110,7 +126,7 @@ export async function handleMessage(msg, env, opts = {}) {
       } else {
         const task = humanCaption || 'Фото';
         await handleText(chatId, session, task, env, {
-          initialMsgId,
+          ...opts, initialMsgId,
           fileBase64: base64,
           fileName: 'photo.jpg',
           fileMimeType: 'image/jpeg',
@@ -134,7 +150,7 @@ export async function handleMessage(msg, env, opts = {}) {
       } else {
         const task = humanCaption || `Документ: ${doc.file_name || 'файл'}`;
         await handleText(chatId, session, task, env, {
-          initialMsgId,
+          ...opts, initialMsgId,
           fileBase64: base64,
           fileName: doc.file_name || 'document',
           fileMimeType: doc.mime_type || 'application/octet-stream',
@@ -145,7 +161,7 @@ export async function handleMessage(msg, env, opts = {}) {
       await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка при загрузке: ${e.message}`);
     }
   } else if (text) {
-    await handleText(chatId, session, text, env, { mode: opts.mode || null });
+    await handleText(chatId, session, text, env, opts);
   } else {
     await sendMessage(env.BOT_TOKEN, chatId,
       '⚠️ Не могу обработать этот тип сообщения. Отправь текст, голосовое или аудиофайл.'
@@ -166,9 +182,7 @@ function stripMediaTags(text) {
 
 async function handleText(chatId, session, text, env, opts = {}) {
   try {
-    const route = opts.intakeRoute
-      ? { type: 'run', ...opts.intakeRoute }
-      : await resolveSessionRoute(chatId, session, text, env);
+    const route = opts.resolvedRoute || opts.intakeRoute || await resolveSessionRoute(chatId, session, text, env);
 
     if (route.type === 'disambiguate') {
       // Store the pending message, show session picker
@@ -177,6 +191,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
         pendingPickerId: null,
         pendingMessage: text,
         pendingMessageAt: Date.now(),
+        pendingOriginalMessage: opts.originalMessage || null,
+        pendingOriginalOpts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
       });
       const picker = await sendDisambiguationKeyboard(env.BOT_TOKEN, chatId, route.sessions, session.activeSessionId, env);
       if (picker?.result?.message_id) {
@@ -184,29 +200,6 @@ async function handleText(chatId, session, text, env, opts = {}) {
         if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
       }
       return;
-    }
-
-    // New-dialog project picker (issue #517): when this message starts a FRESH dialog
-    // and the profile has ≥2 projects, ask which project before dispatching. Skip for
-    // file uploads (the file can't be re-attached from the deferred pending message).
-    const isNewDialog = route.forceNew || !session.lastSessionId;
-    const hasFile = !!opts.fileBase64;
-    if (isNewDialog && !hasFile) {
-      const decision = await getProjectDecision(env, { username: session.username, chatId });
-      if (shouldAskProject({ isNewDialog, hasFile, decision })) {
-        await setSession(env.SESSIONS, chatId, {
-          ...session,
-          pendingPickerId: null,
-          pendingMessage: text,
-          pendingMessageAt: Date.now(),
-        });
-        const picker = await sendProjectPicker(env.BOT_TOKEN, chatId, decision.choices, decision.active, env);
-        if (picker?.result?.message_id) {
-          const current = await getSession(env.SESSIONS, chatId);
-          if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
-        }
-        return;
-      }
     }
 
     // Run the task — agent creates/continues session
@@ -233,7 +226,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
-      projectId: opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null),
+      projectId: route.projectChosen ? route.projectId : (opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null)),
+      newProjectName: route.forceNew && (route.newProject || (session.projectSelectionSessionId === route.sessionId && session.pendingNewProject))
+        ? text.replace(/^\[Сообщение \d+\]\s*/u, '').split('\n')[0].trim().slice(0, 60) || 'Новый проект' : null,
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
@@ -247,8 +242,12 @@ async function handleText(chatId, session, text, env, opts = {}) {
       lastMessageAt: Date.now(),
       pendingMessage: null,
       pendingMessageAt: null,
+      pendingOriginalMessage: null,
+      pendingOriginalOpts: null,
       activeSessionId: null,
       activeSessionIsNew: null,
+      projectSelectionSessionId: null,
+      pendingNewProject: false,
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
@@ -302,6 +301,12 @@ export async function processDueRetries(env) {
  */
 async function resolveSessionRoute(chatId, session, text, env) {
   const lc = text.toLowerCase();
+  if (session.activeSessionId && session.projectSelectionSessionId === session.activeSessionId) {
+    return { type: 'run', sessionId: session.activeSessionId, forceNew: true, projectChosen: true,
+      projectId: session.projectId || null, newProject: !!session.pendingNewProject,
+      contextFromSession: session.contextFromSession || null };
+  }
+
 
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {
@@ -437,7 +442,7 @@ async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, f
   }
   // Prepend any accumulated human text so buffered "текст + медиа" keeps both.
   const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;
-  await handleText(chatId, session, task, env, { isVoice: true, mode: opts.mode || null });
+  await handleText(chatId, session, task, env, { ...opts, isVoice: true, mode: opts.mode || null });
 }
 
 export async function transcribeVoice(fileId, mimeType, env) {
