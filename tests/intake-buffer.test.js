@@ -86,7 +86,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, intakeGeneration: 0 });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +100,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: null }); // force word also launches deep
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: null, intakeGeneration: 0 }); // force word also launches deep
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -143,7 +143,9 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledTimes(1); // plain-text retry fired
-    expect(await state.storage.get('collectorMsgId')).toBe(55);
+    expect(await state.storage.get('collectorMsgId')).toBeUndefined();
+    expect(await state.storage.get('collectorRetry')).toEqual({ chatId: 42, replyToMessageId: undefined });
+    expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now());
   });
 
   it('recovers a buffer trapped by a dead run once BUSY_MAX elapses', async () => {
@@ -193,4 +195,53 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
   expect((await state.storage.get('buf')).map(i => i.text)).toEqual(['original', 'new']);
   expect(handleMessage).not.toHaveBeenCalled();
   expect(await state.storage.get('launching')).toBeUndefined();
+});
+
+it('keeps the previous launch button when Telegram rejects the replacement', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  await io.fetch(appendReq('first'));
+  sendMessageWithKeyboard.mockResolvedValue({ ok: false, description: 'Too Many Requests' });
+  await io.fetch(appendReq('second'));
+  expect(editMessageReplyMarkup).not.toHaveBeenCalledWith('t', 42, 99, []);
+  expect(await state.storage.get('collectorMsgId')).toBe(99);
+  expect(sendMessage.mock.calls.at(-1)[2]).toContain('запускай');
+});
+
+it('delivers a replacement before removing the previous launch button', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  await io.fetch(appendReq('first'));
+  sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 100 } });
+  await io.fetch(appendReq('second'));
+  expect(sendMessageWithKeyboard.mock.invocationCallOrder[1]).toBeLessThan(editMessageReplyMarkup.mock.invocationCallOrder[0]);
+});
+
+it('repairs a rejected collector on its durable alarm without launching work', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Temporary outage' });
+  await io.fetch(appendReq('saved input'));
+  expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now());
+  await io.alarm();
+  expect(await state.storage.get('collectorMsgId')).toBe(99);
+  expect(await state.storage.get('collectorRetry')).toBeUndefined();
+  expect(handleMessage).not.toHaveBeenCalled();
+});
+
+it('serializes overlapping collector deliveries so the final pointer retains a live button', async () => {
+  const state = makeState();
+  const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  let release;
+  sendMessageWithKeyboard.mockImplementationOnce(() => new Promise(r => { release = r; }));
+  const first = io.fetch(appendReq('voice one'));
+  await drain();
+  const second = io.fetch(appendReq('text two'));
+  await drain();
+  expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+  release({ ok:true,result:{message_id:100} });
+  await Promise.all([first,second]);
+  expect(await state.storage.get('collectorMsgId')).toBe(99);
+  expect(editMessageReplyMarkup).toHaveBeenCalledWith('t',42,100,[]);
+  expect(editMessageReplyMarkup).not.toHaveBeenCalledWith('t',42,99,[]);
 });

@@ -70,9 +70,10 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, controlEpoch, controlEpochs }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   const body = { userId, username, context, sessionId, contextFromSession };
+  if (controlEpoch !== undefined || controlEpochs) body.controlEpoch = controlEpochs?.[agentUrl] ?? controlEpoch ?? 0;
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
   if (forceNew) body.forceNew = true;
@@ -273,16 +274,28 @@ export async function getAgentHealth(env) {
   }
 }
 
-export async function stopTask(env, { username }) {
-  const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${env.AGENT_SECRET}`,
-    },
-    body: JSON.stringify({ username }),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
-  return res.json();
+export async function stopTask(env, { username, chatId, sessionId, action = 'stop', taskIds = [], expectedEpoch, expectedEpochs, taskId }) {
+  const urls = [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))];
+  const responses = await Promise.all(urls.map(async agentUrl => {
+    const res = await fetch(`${agentUrl}/tasks/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.AGENT_SECRET}` },
+      body: JSON.stringify({ username, chatId, sessionId, action, taskIds,
+        expectedEpoch: expectedEpochs?.[agentUrl] ?? expectedEpoch,
+        ...(action === 'validate' ? { taskId } : {}) }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      if (action === 'validate' && res.status === 409) return null;
+      throw new Error(`agent /tasks/control HTTP ${res.status}`);
+    }
+    return { agentUrl, data: await res.json() };
+  }));
+  const found = responses.filter(Boolean);
+  if (!found.length) throw new Error('Эта задача уже завершилась');
+  return { ok: true, sessionId: found[0].data.sessionId,
+    killed: found.reduce((n, x) => n + (x.data.killed || 0), 0),
+    held: found.flatMap(x => x.data.held || []),
+    epoch: found[0].data.epoch,
+    epochs: Object.fromEntries(found.map(x => [x.agentUrl, x.data.epoch || 0])) };
 }

@@ -11,6 +11,9 @@ if (!token) {
 }
 
 const commands = [
+  { command: 'stop', description: 'Остановить сессию и сохранить весь ввод' },
+  { command: 'skip', description: 'Перейти к следующему вводу — появилась новая информация' },
+  { command: 'fresh', description: 'Начать без незавершённого ввода' },
   { command: 'login',            description: 'Войти: /login username password' },
   { command: 'new_job_post',     description: 'Новая вакансия HeadHunter' },
   { command: 'hh_status',        description: 'Статус фоновой оценки кандидатов' },

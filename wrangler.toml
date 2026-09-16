@@ -16,6 +16,7 @@ enabled = true
 crons = ["* * * * *"]
 
 [vars]
+CONTROL_COMMANDS_ENABLED = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
 
@@ -80,6 +81,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-recruiter"
 
 [env.recruiter.vars]
+CONTROL_COMMANDS_ENABLED = "on"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
 

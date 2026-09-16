@@ -1,29 +1,37 @@
-# Auto-merge workflow — ENABLED (blocker #49 resolved 2026-09-14)
-#
-# History: while the repo was GitHub Free + private, branch protection (and thus a
-# required `ci` gate) was unavailable, so this job was guarded with `if: false` to
-# avoid merging PRs before CI ran. That blocker is now gone:
-#   1. Repo is PUBLIC → branch protection is free.
-#   2. `main` has a branch-protection rule requiring the `ci` status check.
-#   3. Repo-level auto-merge is enabled (allow_auto_merge: true).
-# So `gh pr merge --auto --squash` now safely queues the merge and GitHub holds it
-# until `ci` is green. See issue #49.
-
 name: Auto-merge
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
+  workflow_run:
+    workflows: ['CI + Deploy']
+    types: [completed]
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
 
 jobs:
-  enable-auto-merge:
+  merge-green-head:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Enable auto-merge (squash)
-        run: gh pr merge --auto --squash "${{ github.event.pull_request.html_url }}"
+      # No checkout or execution of PR-controlled code with write credentials.
+      - name: Require all staging jobs and merge only the tested PR head
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" > jobs.json
+          jq -e '
+            .jobs as $jobs |
+            ["ci", "staging-regressions", "deploy-staging", "smoke-test-staging"] |
+            all(. as $name | any($jobs[]; .name == $name and .conclusion == "success"))
+          ' jobs.json
+          gh api "repos/$REPO/commits/$HEAD_SHA/pulls" > pulls.json
+          jq -r --arg sha "$HEAD_SHA" '.[] | select(.state == "open" and .draft == false and .base.ref == "main" and .head.sha == $sha) | .number' pulls.json |
+          while read -r number; do
+            gh pr merge "$number" --repo "$REPO" --squash --match-head-commit "$HEAD_SHA"
+          done
