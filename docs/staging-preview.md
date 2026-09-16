@@ -14,6 +14,6 @@ routing/recovery scenarios continue running against isolated fixtures.
 Cost/lifecycle: one Worker and private Durable Object namespaces per branch;
 existing dedicated staging KV is bound but inaccessible in preview mode. No
 periodic traffic. The owning release must delete its preview after closure using
-wrangler delete --env staging --name <computed name> (after checking the exact
+wrangler delete --name <computed name> (after checking the exact
 branch/name), retaining required CI evidence first. Main's preview remains for
 subsequent releases. Existing shared staging and its MediaJob data stay untouched.

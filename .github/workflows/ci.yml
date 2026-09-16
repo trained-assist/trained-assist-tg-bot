@@ -157,12 +157,13 @@ jobs:
         run: |
           SUFFIX=$(printf '%s' "$STAGING_BRANCH" | sha256sum | cut -c1-12)
           echo "worker=ta-tg-staging-$SUFFIX" >> "$GITHUB_OUTPUT"
+          node scripts/staging/prepare-preview.mjs "ta-tg-staging-$SUFFIX"
       - name: Deploy isolated staging
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy --env staging --name ${{ steps.preview.outputs.worker }} --var BUILD_SHA:${{ github.sha }} --var PREVIEW_ONLY:true
+          command: deploy --config wrangler.preview.toml --env staging --var BUILD_SHA:${{ github.sha }} --var PREVIEW_ONLY:true
 
   smoke-test-staging:
     runs-on: ubuntu-latest
