@@ -1,3 +1,4 @@
+import { readMedia } from '../lib/media-retry.js';
 import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject } from '../intake-routing.js';
 import { openProjectChoice } from '../lib/project-choice.js';
@@ -426,23 +427,18 @@ async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, f
 
 export async function transcribeVoice(fileId, mimeType, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const fileRes = await fetch(
+  const fileData = await readMedia(
     `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
   );
-  const fileData = await fileRes.json();
   if (!fileData.ok) {
     return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
   }
 
   // File download always goes through api.telegram.org/file/ — use same proxy base
   const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
-  const audioRes = await fetch(audioUrl);
-  if (!audioRes.ok) {
-    return { transcript: null, error: `audio download ${audioRes.status}` };
-  }
-  const audioBuffer = await audioRes.arrayBuffer();
+  const audioBuffer = await readMedia(audioUrl, {}, 'arrayBuffer', 120000);
 
-  const dgRes = await fetch(
+  const dgText = await readMedia(
     'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
     {
       method: 'POST',
@@ -451,12 +447,8 @@ export async function transcribeVoice(fileId, mimeType, env) {
         'Content-Type': mimeType || 'audio/ogg; codecs=opus',
       },
       body: audioBuffer,
-    }
+    }, 'text', 120000
   );
-  const dgText = await dgRes.text();
-  if (!dgRes.ok) {
-    return { transcript: null, error: `deepgram ${dgRes.status}: ${dgText.slice(0, 200)}` };
-  }
   const dgData = JSON.parse(dgText);
   const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
   if (!transcript) {
