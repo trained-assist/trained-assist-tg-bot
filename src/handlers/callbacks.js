@@ -30,9 +30,9 @@ export async function handleCallbackQuery(cq, env) {
 
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
-      await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+      await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
 
-      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
       // Capture post-write state so .then() below spreads from the same base,
@@ -47,7 +47,7 @@ export async function handleCallbackQuery(cq, env) {
       };
       await setSession(env.SESSIONS, chatId, updatedSession);
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
-      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
       // MUST await so the dispatch→waitUntil chain keeps the Worker alive until the HTTP call lands.
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
@@ -125,9 +125,9 @@ export async function handleCallbackQuery(cq, env) {
       label = `📁 ${chosen.label || chosen.name}`;
     }
 
-    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
     const resolvedId = newSessionId(chatId);
-    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
     const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
     const updatedSession = {
@@ -142,7 +142,7 @@ export async function handleCallbackQuery(cq, env) {
       projectId: projectId || session.projectId || null,
     };
     await setSession(env.SESSIONS, chatId, updatedSession);
-    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
 
     try {
       const result = await runTask(env, {
@@ -551,7 +551,7 @@ export async function handleCallbackQuery(cq, env) {
   // буфера (десинк «ушло не на то», #530 §B). Теперь ведёт в тот же flush — один источник.
   if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })

@@ -222,7 +222,7 @@ export class IntakeBuffer {
     // Retire the collector button so it can't be tapped twice.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
     if (collectorMsgId && chatId) {
-      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '⚙️ Запускаю…', {
+      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '📨 Передаю задачу агенту…', {
         reply_markup: { inline_keyboard: [] },
       }).catch(() => {});
     }
@@ -236,7 +236,7 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep' });
+      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId: collectorMsgId || null });
       await this.state.storage.delete('launching');
     } catch (err) {
       // Preparation failed: keep the original Telegram references, never launch

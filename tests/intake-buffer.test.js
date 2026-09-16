@@ -86,7 +86,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +100,7 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep' }); // force word also launches deep
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: null }); // force word also launches deep
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
