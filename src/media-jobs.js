@@ -90,6 +90,9 @@ export class MediaJob {
       } else if (job.stage === 'done' && input.retry) {
         // Redeliver a completed result if intake previously failed to persist it.
         job.stage = 'deliver'; await tx.put('job', job); await tx.setAlarm(Date.now() + 1);
+      } else if (!['done', 'failed'].includes(job.stage) && await tx.getAlarm() === null) {
+        // Reconciliation can revive a job after platform alarm retries exhausted.
+        await tx.setAlarm(Date.now() + 1);
       }
     });
     return Response.json({ accepted: true, id });
@@ -116,8 +119,8 @@ export class MediaJob {
           const bytes = await boundedBytes(await fetch(`${tg}/file/bot${this.env.BOT_TOKEN}/${meta.result.file_path}`, { signal: AbortSignal.timeout(120000) }));
           const expected = meta.result.file_size ?? file.file_size;
           if (expected != null && expected !== bytes.byteLength) throw new Error('Incomplete Telegram file');
-          const name = (file.file_name || (job.msg.photo ? 'photo.jpg' : job.msg.video ? 'video.mp4' : 'audio.ogg')).replace(/[^a-zA-Z0-9._() -]/g, '_').slice(0, 200);
-          job.fileRef = await saveObject(this.env, job.username, job.id, bytes, name, file.mime_type || (job.msg.photo ? 'image/jpeg' : 'audio/ogg'));
+          const name = (file.file_name || (job.msg.photo ? 'photo.jpg' : job.msg.video ? 'video.mp4' : job.msg.voice || job.msg.audio ? 'audio.ogg' : 'file')).replace(/[^a-zA-Z0-9._() -]/g, '_').slice(0, 200);
+          job.fileRef = await saveObject(this.env, job.username, job.id, bytes, name, file.mime_type || (job.msg.photo ? 'image/jpeg' : job.msg.voice ? 'audio/ogg' : job.msg.video ? 'video/mp4' : 'application/octet-stream'));
         }
         job.stage = needsTranscript(job.msg) ? 'transcribe' : 'deliver';
       } else if (job.stage === 'transcribe') {

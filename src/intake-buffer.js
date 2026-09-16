@@ -239,7 +239,7 @@ export class IntakeBuffer {
     });
     if (notify) {
       const text = result.error
-        ? '⚠️ Не удалось обработать вложение после повторных попыток. Оно сохранено отдельно и не войдёт в следующую задачу. Можно продолжать текстом; для повторной обработки отправь вложение ещё раз.'
+        ? `⚠️ ${result.error}. Ссылка на вложение сохранена для восстановления; в следующую задачу оно не войдёт. Можно продолжать текстом; для повторной обработки отправь вложение ещё раз.`
         : result.transcript ? `🎤 ${result.transcript}` : '✅ Вложение сохранено. Можно запускать проработку.';
       if (!result.error && result.transcript?.length >= 800) {
         await sendDocument(this.env.BOT_TOKEN, notify.chatId, `transcript-${notify.messageId}.txt`, result.transcript, '🎤 Расшифровка голосового').catch(() => {});

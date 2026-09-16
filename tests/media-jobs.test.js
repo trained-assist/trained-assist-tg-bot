@@ -8,7 +8,7 @@ vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(async()=>({username:'alic
 function state() {
   const data = new Map(); let alarm;
   const storage = {get: async k=>structuredClone(data.get(k)), put:async(k,v)=>data.set(k,structuredClone(v)), delete:async k=>data.delete(k),
-    setAlarm:async t=>{alarm=t;},deleteAlarm:async()=>{alarm=null;},transaction:async fn=>fn(storage)};
+    getAlarm:async()=>alarm ?? null,setAlarm:async t=>{alarm=t;},deleteAlarm:async()=>{alarm=null;},transaction:async fn=>fn(storage)};
   return {storage,data,get alarm(){return alarm;}};
 }
 function bucket() {
@@ -88,6 +88,10 @@ describe('durable R2 pipeline',()=>{
   const real=f.env.INTAKE;f.env.INTAKE={idFromName:n=>n,get:()=>({fetch:async()=>new Response('',{status:503})})};
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');const calls=f.net.mock.calls.length;
   f.env.INTAKE=real;await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');expect(f.net).toHaveBeenCalledTimes(calls);
+ });
+ it('reconciliation rearms a stranded active job without repeating a completed phase',async()=>{
+  const f=await fixture();await f.job.alarm();await f.s.storage.deleteAlarm();await f.io._recoverMedia();
+  expect(f.s.alarm).toBeGreaterThan(0);expect(f.s.data.get('job').stage).toBe('transcribe');expect(f.b.put).toHaveBeenCalledTimes(1);
  });
  it('honors short Retry-After without keeping the intake request open',async()=>{
   const f=await fixture();await f.job.alarm();
