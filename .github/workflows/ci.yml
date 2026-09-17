@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: trained-assist/trained-assist-agent
-          ref: f8662085b9ee7630a45fc3174495d392876b8b14
+          ref: b30f63d27ecc9b6ff5469d322ce251b0a913e958
           path: .restart-agent
           persist-credentials: false
       - run: npm ci --include=dev
@@ -172,18 +172,12 @@ jobs:
     needs: deploy-staging
     if: github.event_name == 'push'
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Staging health check
-        run: |
-          for i in $(seq 1 6); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              "https://${{ needs.deploy-staging.outputs.worker }}.skillset-apply.workers.dev/health" 2>/dev/null || echo 000)
-            echo "  attempt $i: HTTP $STATUS"
-            [ "$STATUS" = "200" ] && break
-            sleep 5
-          done
-          [ "$STATUS" = "200" ] || { echo "Staging HTTP $STATUS"; exit 1; }
-          curl --fail --silent --show-error "https://${{ needs.deploy-staging.outputs.worker }}.skillset-apply.workers.dev/health" > /tmp/staging-health.json
-          python3 -c 'import json; assert json.load(open("/tmp/staging-health.json"))["buildSha"] == "${{ github.sha }}", "Wrong staging revision"'
+        run: node scripts/staging/check-health.mjs "https://${{ needs.deploy-staging.outputs.worker }}.skillset-apply.workers.dev/health" "${{ github.sha }}"
 
   smoke-test:
     runs-on: ubuntu-latest

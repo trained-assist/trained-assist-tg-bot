@@ -17,7 +17,8 @@
     "tests/restart-confirmations.test.js",
     "tests/media-retry.test.js",
     "tests/intake-preflight.test.js",
-    "tests/staging-preview.test.js"
+    "tests/staging-preview.test.js",
+    "tests/staging-health.test.js"
   ],
   "node": []
 }

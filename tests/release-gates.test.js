@@ -32,6 +32,7 @@ it('production requires actual staging, smoke and scenarios; health verifies dep
   expect(graph.get('deploy-staging')).toContain('BUILD_SHA:${{ github.sha }}');
   expect(graph.get('staging-gate')).toContain('needs: [ci, scenario-gate, restart-integration, deploy-staging, smoke-test-staging]');
   expect(graph.get('staging-gate')).toContain("all(r == 'success' for r in results)");
-  expect(graph.get('smoke-test-staging')).toContain('["buildSha"] == "${{ github.sha }}"');
+  expect(graph.get('smoke-test-staging')).toContain('scripts/staging/check-health.mjs');
+  expect(graph.get('smoke-test-staging')).toContain('"${{ github.sha }}"');
   expect(source).not.toContain('continue-on-error');
 });
