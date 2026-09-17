@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: trained-assist/trained-assist-agent
-          ref: 82e64bba511f9149fd8982dee9d0e6a0c79b61f4
+          ref: 0113af07eef0ceecfbf293b25d1802b08f67f715
           path: .restart-agent
           persist-credentials: false
       - run: npm ci --include=dev
