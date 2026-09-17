@@ -4,6 +4,7 @@ import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
+import { handleMessage } from './message.js';
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
@@ -42,7 +43,9 @@ export async function handleCommand(msg, env) {
     case '/report':
     case '/report_bug_or_feature_request': return cmdReport(msg, env);
     default:
-      return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
+      // Forward unknown slash commands to the agent — it handles /switch2opencode,
+      // /switch2klod, /switch2codex, and other agent-side quick commands.
+      return handleMessage(msg, env);
   }
 }
 
