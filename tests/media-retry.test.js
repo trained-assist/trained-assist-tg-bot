@@ -66,3 +66,17 @@ it('retries transcription without re-downloading audio', async () => {
   await vi.runAllTimersAsync();
   expect(await result).toEqual({ transcript: 'hello', error: null }); expect(fetcher).toHaveBeenCalledTimes(4);
 });
+it('same media in different buffered messages has independent retention identity', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+    if (url.includes('/getFile')) return json({ ok: true, result: { file_path: 'same.pdf' } });
+    if (url.includes('/file/bot')) return new Response('same bytes');
+    return json({ id: new URL(url).searchParams.get('id'), size: 10 });
+  }));
+  const file = { file_id: 'same', file_unique_id: 'same-unique' };
+  const first = await storeTelegramFile({ chat: { id: 1 }, message_id: 2 }, file, env, { username: 'test' });
+  const second = await storeTelegramFile({ chat: { id: 1 }, message_id: 3 }, file, env, { username: 'test' });
+  const otherChat = await storeTelegramFile({ chat: { id: 2 }, message_id: 2 }, file, env, { username: 'test' });
+  const retry = await storeTelegramFile({ chat: { id: 1 }, message_id: 2 }, file, env, { username: 'test' });
+  expect(new Set([first.id, second.id, otherChat.id]).size).toBe(3);
+  expect(retry.id).toBe(first.id);
+});

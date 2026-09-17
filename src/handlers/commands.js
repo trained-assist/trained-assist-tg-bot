@@ -242,6 +242,8 @@ async function cmdRu(msg, env) {
   try {
     const sessionId = newSessionId(chatId);
     await runTask(env, {
+      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: msg.message_thread_id || null,
+      requestId: `command-${chatId}-${msg.message_id}`,
       userId: chatId,
       username: session.username,
       task,
