@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // If you add a new inline button in runner.js or anywhere else in trained-assist-agent,
 // add its prefix here AND add a handler in src/handlers/callbacks.js.
 const KNOWN_CALLBACK_PREFIXES = [
+  'ri:',        // durable restart confirmation, no navigation TTL
   'sp:',        // session picker
   'sd:',        // session detail
   'sc:',        // session continue

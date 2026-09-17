@@ -67,3 +67,15 @@ describe('pickAgentUrl', () => {
     expect(await pickAgentUrl(env, USER, 'зайди на na log.ru')).toBe(RU);
   });
 });
+
+it('durable dispatch keeps original request time and forum topic before network delivery', async () => {
+  const { runTask } = await import('../src/lib/agent-client.js');
+  const delivered = [];
+  const env = { AGENT_URL: BASE, RUN_OUTBOX: {
+    idFromName: x => x, get: () => ({ fetch: async (_, options) => {
+      delivered.push(JSON.parse(options.body)); return Response.json({queued:true,outbox:true});
+    } }),
+  } };
+  await runTask(env,{userId:-10,username:USER,task:'work',requestId:'one',initiatedAt:1234,threadId:42});
+  expect(delivered[0].body).toMatchObject({initiatedAt:1234,threadId:42,requestId:'one'});
+});

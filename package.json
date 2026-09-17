@@ -1,7 +1,7 @@
 {
   "name": "trained-assist-tg-bot",
   "version": "0.1.0",
-  "description": "Trained Assist — Telegram bot (Cloudflare Worker)",
+  "description": "Trained Assist \u2014 Telegram bot (Cloudflare Worker)",
   "main": "src/index.js",
   "scripts": {
     "dev": "wrangler dev",
@@ -9,6 +9,7 @@
     "check": "node --check src/index.js src/handlers/message.js src/handlers/commands.js src/handlers/callbacks.js src/handlers/user-mgmt.js src/lib/telegram.js src/lib/kv.js src/lib/agent-client.js && node scripts/check-commands-registry.mjs",
     "set-commands": "node scripts/set-commands.js",
     "test": "vitest run",
+    "test:staging": "node scripts/staging/run.mjs",
     "test:media-runtime": "node scripts/test-media-runtime.mjs"
   },
   "dependencies": {
