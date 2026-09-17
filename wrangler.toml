@@ -14,7 +14,7 @@ enabled = true
 crons = ["* * * * *"]
 
 [vars]
-MEDIA_PIPELINE = "off" # Enable only after R2 provisioning and both VM readers are verified.
+MEDIA_PIPELINE = "r2" # Release controller enables only after both VM readers pass.
 RECOVERY_IMPORT_LEGACY = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
