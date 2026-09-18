@@ -83,7 +83,15 @@ export async function sendMessage(token, chatId, text, extra = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!data.ok) {
+    // Surface Telegram rejections — silent swallow here is how /start went dark
+    // when a raw "<id>" slipped into commands-registry.json (cmdStart's HTML
+    // message was 400-rejected and the user saw "ноль реакции"). Caller still
+    // gets `data` back so existing flows don't break; we just log it loudly.
+    console.error(`[sendMessage] chat=${chatId} failed:`, JSON.stringify(data));
+  }
+  return data;
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
