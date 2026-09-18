@@ -43,6 +43,8 @@
     { "command": "/context_off", "aliases": [], "handler": "forward", "description": "Скрыть карточку статуса контекста" },
     { "command": "/wakeup", "aliases": [], "handler": "forward", "description": "Разбудить зависшую задачу агента" },
     { "command": "/hh_status", "aliases": [], "handler": "forward", "description": "Статус фоновой оценки кандидатов HeadHunter" },
+    { "command": "/hh_connect", "aliases": ["/hh_auth"], "handler": "forward", "description": "OAuth-подключение HeadHunter (как работодатель)" },
+    { "command": "/hh_disconnect", "aliases": [], "handler": "forward", "description": "Отключить HeadHunter (revoke токена)" },
     { "command": "/hh_vacancies", "aliases": ["/hh_switch"], "handler": "forward", "description": "Список активных вакансий HeadHunter (HH)" },
     { "command": "/hh_funnel", "aliases": [], "handler": "forward", "description": "Статистика воронки кандидатов на активной вакансии" },
     { "command": "/hh_responses", "aliases": ["/hh_new"], "handler": "forward", "description": "Новые отклики на активной вакансии" },
