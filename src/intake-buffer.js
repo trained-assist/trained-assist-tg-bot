@@ -177,7 +177,14 @@ export class IntakeBuffer {
     await enqueueMedia(msg, this.env, session).catch(() => {}); // watchdog retries
     const remaining = (await this.state.storage.get('buf')) || [];
     if (await this.state.storage.get('busy')) await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
-    else await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+    else {
+      // Show a receipt without the launch button — the button will appear once
+      // transcription is done (in _mediaResult). Showing the button first and
+      // transcript second was confusing users: they'd tap launch, get "still
+      // transcribing", and not know to tap again after the transcript arrived.
+      await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
+        '🎙 Принял голосовое, расшифровываю…', anchor(msg.message_id)).catch(() => {});
+    }
     return json({ queued: true, id });
   }
 
@@ -245,6 +252,17 @@ export class IntakeBuffer {
         await sendDocument(this.env.BOT_TOKEN, notify.chatId, `transcript-${notify.messageId}.txt`, result.transcript, '🎤 Расшифровка голосового').catch(() => {});
       } else {
         await sendMessage(this.env.BOT_TOKEN, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }).catch(() => {});
+      }
+      // After the transcript arrives, show a fresh launch button so the user
+      // doesn't have to find and tap the old collector. Without this, users saw
+      // the transcript but had no obvious next step ("Нажми запуск после
+      // расшифровки" was confusing because the old button was scrolled off-screen).
+      if (!result.error) {
+        const remaining = (await this.state.storage.get('buf')) || [];
+        const busy = await this.state.storage.get('busy');
+        if (!busy && remaining.length && !remaining.some(i => i.mediaPending)) {
+          await this._showCollector(notify.chatId, remaining.length, notify.messageId);
+        }
       }
     }
     return response;
