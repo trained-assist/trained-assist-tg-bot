@@ -38,6 +38,21 @@ app.post('/webhook', async (c) => {
   return c.json({ ok: true });
 });
 
+// Prefix all SESSIONS KV keys so per-profile bots (recruiter, sales) can share
+// the same KV namespace without inheriting each other's login sessions.
+// Main bot omits SESSION_NAMESPACE → raw chatId keys (backward-compatible).
+function applySessionNamespace(env) {
+  if (!env.SESSION_NAMESPACE) return env;
+  const ns = env.SESSION_NAMESPACE;
+  const raw = env.SESSIONS;
+  return { ...env, SESSIONS: {
+    get: k => raw.get(`${ns}:${k}`),
+    put: (k, v, opts) => raw.put(`${ns}:${k}`, v, opts),
+    delete: k => raw.delete(`${ns}:${k}`),
+    list: opts => raw.list(opts),
+  }};
+}
+
 async function dispatch(update, env) {
   const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
   try {
@@ -53,6 +68,7 @@ async function dispatch(update, env) {
 }
 
 export async function dispatchInner(update, env) {
+  env = applySessionNamespace(env);
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query, env);
     return;

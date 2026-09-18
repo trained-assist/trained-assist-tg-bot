@@ -93,6 +93,7 @@ name = "trained-assist-tg-bot-recruiter"
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
+SESSION_NAMESPACE = "recruiter"
 
 [[env.recruiter.durable_objects.bindings]]
 name = "INTAKE"

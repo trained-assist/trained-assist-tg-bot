@@ -49,6 +49,20 @@ const heldText = n =>
 export class IntakeBuffer {
   constructor(state, env) {
     this.state = state;
+    // Apply the same SESSION_NAMESPACE wrapping as dispatchInner — DO receives env
+    // directly from the Workers runtime so it can't piggyback on the fetch-handler
+    // wrapper. Without this, session reads inside the DO ignore the namespace and
+    // can find sessions from a different bot (cross-bot auto-login bug).
+    if (env.SESSION_NAMESPACE) {
+      const ns = env.SESSION_NAMESPACE;
+      const raw = env.SESSIONS;
+      env = { ...env, SESSIONS: {
+        get: k => raw.get(`${ns}:${k}`),
+        put: (k, v, opts) => raw.put(`${ns}:${k}`, v, opts),
+        delete: k => raw.delete(`${ns}:${k}`),
+        list: opts => raw.list(opts),
+      }};
+    }
     this.env = env;
     this.mutation = Promise.resolve();
   }
