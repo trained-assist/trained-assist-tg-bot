@@ -12,10 +12,16 @@ import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, bot
 
 const app = new Hono();
 
+// Preview deployments have no Telegram credentials or webhook ownership.
+// Reject ingress before touching even the dedicated staging KV bindings.
+app.use('*', async (c, next) => {
+  if (c.env.PREVIEW_ONLY === 'true' && c.req.path !== '/health') return c.json({ error: 'preview only' }, 403);
+  return next();
+});
 app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
 // Health check
-app.get('/health', (c) => c.json({ status: 'alive' }));
+app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
 
 // Telegram webhook
 app.post('/webhook', async (c) => {
@@ -89,7 +95,7 @@ export async function dispatchInner(update, env) {
   if (String(chatId) === env.ADMIN_GROUP_ID) {
     if (isUserMgmtCommand(text)) {
       await handleUserMgmt(msg, env);
-    } else if (isAdminForwardedCommand(text)) {
+    } else if (isAdminForwardedCommand(text) || /^\/restart(?:@\w+)?(?:\s|$)/i.test(text)) {
       // Strip the bot mention so the agent sees a clean "/get_webpass <username>".
       const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
       await handleCommand({ ...msg, text: cleanText }, env);
@@ -211,16 +217,15 @@ async function getGroupMemberCount(env, chatId) {
 // the Cron Trigger declared in wrangler.toml. waitUntil keeps the invocation
 // alive past the return — scheduled handlers have no separate "response" to wait on.
 async function scheduled(event, env, ctx) {
+  if (env.PREVIEW_ONLY === 'true') return;
   ctx.waitUntil(processDueRetries(env));
   ctx.waitUntil(processExpiredUI(env));
 }
 
+export { RunOutbox } from './run-outbox.js';
 export { IntakeBuffer } from './intake-buffer.js';
 export default { fetch: app.fetch, scheduled };
 
 export { RetryQueue } from './retry-queue.js';
-
-// Compatibility export: staging already owns RunOutbox instances (PR #103).
-export { RunOutbox } from './run-outbox.js';
 
 export { MediaJob } from './media-jobs.js';

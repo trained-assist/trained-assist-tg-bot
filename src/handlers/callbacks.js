@@ -1,3 +1,4 @@
+import { handleRestartConfirmation } from '../lib/restart-confirmations.js';
 import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
 import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
@@ -8,11 +9,14 @@ import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
+  const initiatedAt = Date.now();
   const chatId = message?.chat?.id || from?.id;
 
   if (!chatId) return;
 
   let session = await getSession(env.SESSIONS, chatId);
+
+  if (data?.startsWith('ri:')) return handleRestartConfirmation(cq, env, session);
 
   if (await rejectExpiredUI(cq, env, session)) return;
 
@@ -68,6 +72,8 @@ export async function handleCallbackQuery(cq, env) {
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
       try {
         const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
           userId: chatId,
           username: updatedSession.username,
           task: pending,
@@ -162,6 +168,8 @@ export async function handleCallbackQuery(cq, env) {
 
     try {
       const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
         userId: chatId,
         username: updatedSession.username,
         task: pending,
@@ -554,6 +562,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -583,6 +593,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -612,6 +624,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,

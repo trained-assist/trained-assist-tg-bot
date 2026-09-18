@@ -1,3 +1,4 @@
+import { releaseBufferPins } from './lib/intake-files.js';
 // One durable outbox per profile/chat. Alarms retry until the agent acknowledges
 // the stable requestId. Files are chunked below DO's per-value storage limit.
 export class RunOutbox {
@@ -16,7 +17,7 @@ export class RunOutbox {
           for (let i = 0; i < chunks; i++) await txn.put(`${id}:${i}`, data.slice(i * 32000, (i + 1) * 32000));
           const sequence = (await txn.get('sequence') || 0) + 1;
           await txn.put('sequence', sequence);
-          await txn.put(key, { id, agentUrl, chunks, sequence, createdAt: Date.now(), chatId: body.userId, initialMsgId: body.initialMsgId });
+          await txn.put(key, { id, agentUrl, chunks, sequence, createdAt: Date.now(), chatId: body.userId, threadId: body.threadId || null, initialMsgId: body.initialMsgId });
           await txn.setAlarm(Date.now() + 1000);
         });
       }
@@ -65,6 +66,9 @@ export class RunOutbox {
           // Require valid acknowledgement; a proxy's HTML 200 isn't acceptance.
           const ack = await res.json();
           if (!ack.durable || ack.requestId !== job.id || !ack.taskId) throw Error('No matching durable acknowledgement');
+          const accepted=JSON.parse(data);
+          await releaseBufferPins(this.env,accepted.username,accepted.fileRefs);
+          if(job.agentUrl!==this.env.AGENT_URL)await releaseBufferPins(this.env,accepted.username,accepted.fileRefs,job.agentUrl);
           await this.state.storage.transaction(async txn => {
             await txn.put(`done:${job.id}`, { taskId: ack.taskId });
             await txn.delete(`job:${job.id}`);
@@ -87,7 +91,7 @@ export class RunOutbox {
     try {
       await fetch(`https://api.telegram.org/bot${this.env.BOT_TOKEN}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: job.chatId, ...(job.initialMsgId ? { message_id: job.initialMsgId } : {}), text }),
+        body: JSON.stringify({ chat_id: job.chatId, ...(job.initialMsgId ? { message_id: job.initialMsgId } : (job.threadId ? { message_thread_id: job.threadId } : {})), text }),
         signal: AbortSignal.timeout(5000),
       });
     } catch { /* Delivery status must not remove the queued payload. */ }

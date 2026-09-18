@@ -30,6 +30,12 @@ function tooBigMessage(fileSize) {
 export async function handleMessage(msg, env, opts = {}) {
   const { chat, text, voice, audio, photo, document: doc, video } = msg;
   const chatId = chat.id;
+  const ids = msg.intakeItems?.map(i => i.msg?.message_id).filter(Boolean) || [msg.message_id].filter(Boolean);
+  if (ids.length && !opts.requestId) {
+    const bytes = new TextEncoder().encode(`${chatId}:${ids.join(',')}`);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    opts = { ...opts, requestId: `tg-${Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')}` };
+  }
 
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
@@ -64,7 +70,7 @@ export async function handleMessage(msg, env, opts = {}) {
       return;
     }
   }
-  opts = { ...opts, intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
+  opts = { ...opts, initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
 
   const items = msg.intakeItems || [{ text: msg.text || msg.caption || '', msg }];
   const prepared = items.map((item, index) => {
@@ -139,7 +145,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
     // If agent creates a new pinned message it returns the new ID; we store it for next time
     const result = await runTask(env, {
+      initiatedAt: opts.initiatedAt, threadId: opts.originalMessage?.message_thread_id || null,
       userId: chatId,
+      requestId: opts.requestId,
       username: session.username,
       task: text,
       context,
@@ -185,6 +193,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       console.warn('[recovery] accepted, bookkeeping failed:', err.message);
       return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
     }
+    if (env.RUN_OUTBOX) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);
