@@ -63,6 +63,20 @@ export async function ensureCommandsRegisteredOnce(env) {
   await registerBotCommands(env.BOT_TOKEN);
 }
 
+// Read what Telegram currently has registered (debug/verification only — not
+// used in hot path). Returns {ok, commands[]} on success, {ok:false, error} on
+// failure. Useful to prove that setMyCommands actually reached Telegram.
+export async function getRegisteredCommands(token) {
+  if (!token) return { ok: false, reason: 'no token' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`);
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 export async function sendMessage(token, chatId, text, extra = {}) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',

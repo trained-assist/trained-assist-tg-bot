@@ -6,7 +6,7 @@ import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
-import { sendMessage, ensureCommandsRegisteredOnce } from './lib/telegram.js';
+import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
@@ -16,6 +16,15 @@ app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive' }));
+
+// Debug: dump what Telegram currently has registered as the bot's command
+// menu. Used to verify that commands-registry.json → setMyCommands actually
+// reached the Bot API. Returns {ok, count, commands[]} on success.
+app.get('/debug/commands', async (c) => {
+  const data = await getRegisteredCommands(c.env.BOT_TOKEN);
+  if (!data.ok) return c.json(data, 500);
+  return c.json({ ok: true, count: data.result.length, commands: data.result });
+});
 
 // Telegram webhook
 app.post('/webhook', async (c) => {
