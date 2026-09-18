@@ -15,6 +15,12 @@ const commandsSource = readFileSync(join(__dirname, '../src/handlers/commands.js
 const errors = [];
 const seen = new Set();
 
+// Allowed HTML tags in description text. /start renders these inside parse_mode=HTML
+// messages via src/handlers/commands.js#cmdStart — Telegram rejects the whole batch
+// if any other <…> looks like an opening tag (the "ноль реакции на /start" bug,
+// traced to a raw "<id>" in /hh_send's description).
+const ALLOWED_TAGS = new Set(['b', 'i', 'u', 's', 'code', 'pre']);
+
 for (const entry of registry.commands) {
   for (const cmd of [entry.command, ...entry.aliases]) {
     if (seen.has(cmd)) errors.push(`"${cmd}" is listed more than once in commands-registry.json`);
@@ -27,6 +33,20 @@ for (const entry of registry.commands) {
       }
     } else if (entry.handler !== 'forward') {
       errors.push(`"${cmd}" has unknown handler "${entry.handler}" (expected "local" or "forward")`);
+    }
+  }
+
+  // Reject descriptions containing raw HTML tags that /start would later try to
+  // render with parse_mode=HTML — escape them with &lt;/&gt; instead. Catches
+  // the bug class at build time so a future registry edit can't ship the same
+  // silent-failure regression to /start.
+  const desc = entry.description || '';
+  const tagRe = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
+  let m;
+  while ((m = tagRe.exec(desc)) !== null) {
+    const tag = m[1].toLowerCase();
+    if (!ALLOWED_TAGS.has(tag)) {
+      errors.push(`"${entry.command}" description has unescaped <${tag}> — Telegram HTML parser will reject the whole /start message. Use &lt;${tag}&gt; instead.`);
     }
   }
 }

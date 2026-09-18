@@ -49,7 +49,7 @@
     { "command": "/hh_review", "aliases": [], "handler": "forward", "description": "Ссылка на страницу ревью кандидатов" },
     { "command": "/hh_ats", "aliases": ["/hh_ats_editor"], "handler": "forward", "description": "Текущий ATS конфиг и ссылка на редактор" },
     { "command": "/hh_evaluate", "aliases": ["/hh_score"], "handler": "forward", "description": "Запустить пакетную оценку новых откликов" },
-    { "command": "/hh_send", "aliases": [], "handler": "forward", "description": "Отправить сообщение кандидату (HH): /hh_send <id> <текст> — сначала покажет preview" },
+    { "command": "/hh_send", "aliases": [], "handler": "forward", "description": "Отправить сообщение кандидату (HH): /hh_send &lt;id&gt; &lt;текст&gt; — сначала покажет preview" },
     { "command": "/hh_reject", "aliases": [], "handler": "forward", "description": "Массовый отказ кандидатам (HH): dry-run + confirm-step" },
     { "command": "/hh_scan", "aliases": [], "handler": "forward", "description": "Ручной запуск сканирования новых откликов (вне расписания)" },
     { "command": "/enable_illustrate", "aliases": [], "handler": "forward", "description": "Включить скил генерации иллюстраций" },
