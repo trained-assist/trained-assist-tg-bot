@@ -28,13 +28,22 @@ class_name = "IntakeBuffer"
 name = "RETRY_QUEUE"
 class_name = "RetryQueue"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["IntakeBuffer"]
-
-[[migrations]]
-tag = "v2-recovery"
-new_sqlite_classes = ["RetryQueue"]
+# NOTE (2026-09-18): existing deploys already created IntakeBuffer /
+# RetryQueue / MediaJob namespaces in their respective environments with
+# SQLite storage, so re-declaring `new_sqlite_classes` here fails CF API
+# code 10074 ("Cannot apply new-sqlite-class migration to class X that is
+# already depended on by existing Durable Objects"). Once applied,
+# `new_sqlite_classes` is permanent — it must NOT be re-declared. The
+# migrations below are kept commented as a record of the sequence that
+# was originally applied to default+staging+recruiter environments.
+#
+# [[migrations]]
+# tag = "v1"
+# new_sqlite_classes = ["IntakeBuffer"]
+#
+# [[migrations]]
+# tag = "v2-recovery"
+# new_sqlite_classes = ["RetryQueue"]
 
 # Secrets / private config (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
@@ -145,17 +154,23 @@ new_sqlite_classes = ["RetryQueue"]
 name = "MEDIA_JOBS"
 class_name = "MediaJob"
 
-[[migrations]]
-tag = "v3-media"
-new_sqlite_classes = ["MediaJob"]
+# NOTE: the v3-media `new_sqlite_classes = ["MediaJob"]` migration was
+# already applied to default+staging+recruiter and is now permanent. It
+# must NOT be re-declared (CF API code 10074). See top-level comment
+# above for the full sequence.
 
 [[env.staging.durable_objects.bindings]]
 name = "MEDIA_JOBS"
 class_name = "MediaJob"
 
-[[env.staging.migrations]]
-tag = "v4-media"
-new_sqlite_classes = ["MediaJob"]
+# Staging-only history — staging additionally deployed RunOutbox
+# ([[env.staging.migrations]] below). The IntakeBuffer/RetryQueue/MediaJob
+# sqlite-class tags must not be re-declared here either, for the same
+# reason.
+#
+# [[env.staging.migrations]]
+# tag = "v4-media"
+# new_sqlite_classes = ["MediaJob"]
 
 [[env.recruiter.durable_objects.bindings]]
 name = "MEDIA_JOBS"

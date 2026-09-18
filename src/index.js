@@ -26,6 +26,37 @@ app.get('/debug/commands', async (c) => {
   return c.json({ ok: true, count: data.result.length, commands: data.result });
 });
 
+// Debug: dump what URL Telegram is currently posting updates to for this
+// bot. Lets us verify that the Telegram webhook is actually pointed at the
+// worker URL we expect (e.g. trained-assist-tg-bot-recruiter.skillset-apply.workers.dev
+// for @super_recruiter_assistant_bot — not at the default worker, which would
+// silently route the bot's updates to the wrong token/handler).
+app.get('/debug/webhook', async (c) => {
+  const token = c.env.BOT_TOKEN;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+    const data = await res.json();
+    if (!data.ok) return c.json(data, 500);
+    return c.json({ ok: true, webhook: data.result });
+  } catch (e) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// Debug: dump the bot's identity (id, username, first_name) so a quick
+// /debug/whoami tells us whose token the worker is actually wired to.
+app.get('/debug/whoami', async (c) => {
+  const token = c.env.BOT_TOKEN;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const data = await res.json();
+    if (!data.ok) return c.json(data, 500);
+    return c.json({ ok: true, bot: data.result });
+  } catch (e) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
 // Telegram webhook
 app.post('/webhook', async (c) => {
   const env = c.env;
