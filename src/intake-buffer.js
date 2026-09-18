@@ -1,23 +1,26 @@
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
+import { checkCompleteness } from './lib/agent-client.js';
 // Durable Object: per-chat intake buffer.
 //
-// Model (manual launch, no timer): the bot ALWAYS accumulates a user's plain-text
-// messages and never fires on its own. The user launches the run explicitly — by
-// tapping «▶️ Запустить» on the collector message, or by typing a force word
-// (запускай / го / поехали, see index.js). This replaces the old 10s debounce:
-// once the launch is a deliberate button press, guessing "did the user finish
-// typing?" (silence timer + LLM completeness nudge) is dead weight, so it's gone.
+// Model (smart debounce + manual launch): the bot accumulates a user's plain-text
+// messages and auto-dispatches after DEBOUNCE_MS of silence if the task looks
+// complete. If the completeness gate says the thought is unfinished, the user gets
+// a single nudge ("мысль не закончена, допиши") and a SOFT_REARM_MS grace period;
+// after that second timer fires (or if the user already received the nudge), the
+// task is dispatched regardless. The user can also launch explicitly — by tapping
+// «▶️ Запустить» on the collector message, or by typing a force word (запускай / го
+// / поехали, see index.js).
 //
 // Two states, both owned here so the rule is one place for every user:
 //   • idle     — messages pile into `buf`; a single collector message shows the
-//                launch button and its live count. No alarm is armed.
+//                launch button and its live count. A debounce alarm is armed.
 //   • busy     — a run is in flight for this chat: new messages accumulate
 //                silently and are surfaced with a fresh launch button once the run
 //                finishes (never auto-dispatched).
 //
-// One instance per chat_id (idFromName(chatId)). DO fetch/alarm handlers are
-// can interleave at external awaits. Short state mutations use an explicit lock;
+// One instance per chat_id (idFromName(chatId)). DO fetch/alarm handlers can
+// interleave at external awaits. Short state mutations use an explicit lock;
 // Telegram and transcription I/O must never hold that lock.
 // The alarm also recovers reserved media jobs; for runs it is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
@@ -34,6 +37,8 @@ const anchor = messageId => (messageId ? { reply_to_message_id: messageId, allow
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
+const DEBOUNCE_MS = 10_000;      // auto-launch delay after last message when task looks complete
+const SOFT_REARM_MS = 15_000;    // grace period after "incomplete" nudge before force-dispatch
 
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
@@ -121,8 +126,16 @@ export class IntakeBuffer {
       if (result.handled) return json({ handled: true });
       const remaining = (await this.state.storage.get('buf')) || [];
       if (remaining.length) {
-        if (await this.state.storage.get('busy')) await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
-        else await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+        if (await this.state.storage.get('busy')) {
+          await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
+        } else {
+          // Idle: arm the debounce timer and show the launch button.
+          await this.state.storage.delete('nudged');
+          const expiresAt = Date.now() + DEBOUNCE_MS;
+          await this.state.storage.put('debounceExpiresAt', expiresAt);
+          await this.state.storage.setAlarm(expiresAt);
+          await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+        }
       }
       return json({ buffered: remaining.length });
     }
@@ -150,7 +163,11 @@ export class IntakeBuffer {
         // Force word (запускай/го) — launch immediately, coalescing everything.
         return this.fetch(new Request('https://intake/flush', { method: 'POST' }));
       }
-      // Idle: (re)show the launch button with the live count. No timer.
+      // Idle: arm the debounce timer and show the launch button with the live count.
+      await this.state.storage.delete('nudged');
+      const expiresAt = Date.now() + DEBOUNCE_MS;
+      await this.state.storage.put('debounceExpiresAt', expiresAt);
+      await this.state.storage.setAlarm(expiresAt);
       await this._showCollector(msg.chat?.id, buf.length, msg.message_id);
       return json({ buffered: buf.length });
     }
@@ -185,6 +202,10 @@ export class IntakeBuffer {
         await tx.put('received', [...seen, msg.message_id].slice(-1000));
         await tx.setAlarm(Date.now() + 60000);
       });
+      // Media buffered: cancel any pending debounce so the auto-dispatch timer
+      // doesn't fire while we're still waiting for the transcript.
+      await this.state.storage.delete('debounceExpiresAt');
+      await this.state.storage.delete('nudged');
       return true;
     });
     if (!accepted) return json({ duplicate: true });
@@ -333,6 +354,10 @@ export class IntakeBuffer {
   async _dispatch() {
     const buf = await this._exclusive(async () => {
       if (await this.state.storage.get('busy')) return [];
+      // Cancel any pending debounce alarm — dispatch is happening now (manually or
+      // via the timer itself). Without this the alarm could fire a second dispatch.
+      await this.state.storage.delete('debounceExpiresAt');
+      await this.state.storage.delete('nudged');
       const retryBatch = await this.state.storage.get('retryBatch');
       const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
@@ -421,9 +446,51 @@ export class IntakeBuffer {
 
   async alarm() {
     await this._recoverMedia();
-    if (!(await this.state.storage.get('busy')) && ((await this.state.storage.get('buf')) || []).some(i => i.mediaPending)) return;
-    // Media recovery ran above. Also recover a run whose isolate died before
-    // its finally cleared `busy`. Release the hold and re-offer the launch button.
+
+    // If not busy and media still pending — _recoverMedia re-armed the alarm; wait.
+    const bufCheck = (await this.state.storage.get('buf')) || [];
+    if (!(await this.state.storage.get('busy')) && bufCheck.some(i => i.mediaPending)) return;
+
+    // ── Debounce auto-dispatch ──────────────────────────────────────────────────
+    const debounceExpiresAt = await this.state.storage.get('debounceExpiresAt');
+    if (debounceExpiresAt && Date.now() >= debounceExpiresAt - 1000 &&
+        !(await this.state.storage.get('busy'))) {
+      await this.state.storage.delete('debounceExpiresAt');
+      const buf = (await this.state.storage.get('buf')) || [];
+      if (buf.length && !buf.some(i => i.mediaPending)) {
+        const base = buf[buf.length - 1].msg;
+        const chatId = base.chat?.id;
+        const coalescedText = coalesceBuffer(buf);
+
+        const alreadyNudged = (await this.state.storage.get('nudged')) === true;
+        if (!alreadyNudged) {
+          const { complete } = await checkCompleteness(this.env, { text: coalescedText });
+          if (!complete) {
+            // Task looks unfinished — nudge once, give the user more time.
+            await this.state.storage.put('nudged', true);
+            const expiresAt = Date.now() + SOFT_REARM_MS;
+            await this.state.storage.put('debounceExpiresAt', expiresAt);
+            await this.state.storage.setAlarm(expiresAt);
+            if (chatId) {
+              await sendMessage(
+                this.env.BOT_TOKEN, chatId,
+                'Не запускаю автоматически — похоже, мысль не закончена. Дополни или нажми ▶️.',
+              );
+            }
+            return;
+          }
+        }
+
+        // Complete (or already nudged) → dispatch.
+        await this.state.storage.delete('nudged');
+        await this._dispatch();
+        return;
+      }
+    }
+    // ── End debounce ────────────────────────────────────────────────────────────
+
+    // Busy release: if a run's isolate died before its finally cleared `busy`, release it.
+    // Also re-offer the launch button after releasing the hold.
     if ((await this.state.storage.get('busy')) === true) {
       const since = (await this.state.storage.get('busySince')) || 0;
       if (Date.now() - since < BUSY_MAX_MS) {
