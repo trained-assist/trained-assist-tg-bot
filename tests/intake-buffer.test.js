@@ -86,7 +86,9 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
+    // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
+    // so the agent response always appears below any voice transcript already posted.
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +102,8 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: null }); // force word also launches deep
+    // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {

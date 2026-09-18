@@ -356,13 +356,29 @@ export class IntakeBuffer {
       intakeRoute: continuation?.intakeRoute };
 
     // Retire the collector button so it can't be tapped twice.
+    // Do NOT stream the agent response into the old collector — it may have been
+    // sent before the voice transcript was posted (the collector's message_id is
+    // lower, so it appears above the transcript in the chat). Instead, edit it
+    // to a neutral "launched" state and send a fresh placeholder whose message_id
+    // is guaranteed to be higher than any already-posted transcript.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
     if (collectorMsgId && chatId) {
-      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '📨 Передаю задачу агенту…', {
+      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '▶️ Запустил проработку', {
         reply_markup: { inline_keyboard: [] },
       }).catch(() => {});
     }
     await this.state.storage.delete('collectorMsgId');
+
+    // Send a fresh placeholder anchored to the last user message. This message
+    // is always below whatever transcript was already posted, so the agent
+    // response will appear below the transcript — correct reading order.
+    const lastMsgId = base.message_id || null;
+    const placeholderRes = await sendMessage(
+      this.env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…',
+      lastMsgId ? { reply_to_message_id: lastMsgId, allow_sending_without_reply: true } : {},
+    ).catch(() => null);
+    const initialMsgId = placeholderRes?.result?.message_id ?? collectorMsgId ?? null;
+
     // Safety net: only fires if the run's isolate dies before finally clears busy.
     await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
 
@@ -372,7 +388,7 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId: collectorMsgId || null });
+      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId });
       await this.state.storage.delete('launching');
     } catch (err) {
       // Preparation failed: keep the original Telegram references, never launch
