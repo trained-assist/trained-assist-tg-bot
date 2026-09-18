@@ -56,7 +56,7 @@
     { "command": "/new_job_post", "aliases": [], "handler": "forward", "description": "Начать создание новой вакансии HeadHunter" },
     { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "description": "Отменить текущее создание вакансии" },
     { "command": "/bugreport", "aliases": [], "handler": "forward", "description": "Короткий алиас для /bug_or_feature" },
-    { "command": "/google_drive_sharing_notifications_switch_off", "aliases": [], "handler": "forward", "description": "Выключить уведомления о шаринге Google Drive" },
-    { "command": "/google_drive_sharing_notifications_switch_on", "aliases": [], "handler": "forward", "description": "Включить уведомления о шаринге Google Drive" }
+    { "command": "/gdrive_notif_off", "aliases": ["/google_drive_sharing_notifications_switch_off"], "handler": "forward", "description": "Выключить уведомления о шаринге Google Drive" },
+    { "command": "/gdrive_notif_on", "aliases": ["/google_drive_sharing_notifications_switch_on"], "handler": "forward", "description": "Включить уведомления о шаринге Google Drive" }
   ]
 }

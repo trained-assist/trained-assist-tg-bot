@@ -95,22 +95,26 @@ async function cmdStart(chatId, env) {
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
   }
+
+  // Render the help from commands-registry.json — single source of truth shared
+  // with the Telegram native menu (set on boot via lib/telegram.js#registerBotCommands).
+  // Hidden and adminOnly entries are excluded so /start matches what users see in
+  // the menu — same gate, no drift.
+  const lines = [];
+  const seen = new Set();
+  for (const entry of commandsRegistry.commands) {
+    if (entry.hidden || entry.adminOnly) continue;
+    if (seen.has(entry.command)) continue;
+    seen.add(entry.command);
+    const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
+    lines.push(`<code>${entry.command}</code>${aliases} — ${entry.description}`);
+  }
+
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
-    `Просто пиши задачи — я передам их Claude Code.\n\n` +
+    `Просто пиши задачи — я передам их агенту.\n\n` +
     `<b>Команды:</b>\n` +
-    `/skills — что умеет агент (список скиллов)\n` +
-    `/sessions — мои диалоги\n` +
-    `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
-    `/project — проекты профиля: список / сменить / создать (новые сессии идут в активный)\n` +
-    `/files — файлы и папки\n` +
-    `/status — статус агента\n` +
-    `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
-    `/settoken — сохранить токен сервиса\n` +
-    `/report &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
-    `/chromeext_connect — подключить Chrome-расширение\n` +
-    `/chromeext_install — установить расширение\n` +
-    `/logout — выйти`
+    lines.join('\n')
   );
 }
 

@@ -6,7 +6,7 @@ import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
-import { sendMessage } from './lib/telegram.js';
+import { sendMessage, ensureCommandsRegisteredOnce } from './lib/telegram.js';
 import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
@@ -29,6 +29,9 @@ app.post('/webhook', async (c) => {
 
   // Fire-and-forget — Telegram expects 200 within 5s
   c.executionCtx.waitUntil(dispatch(update, env));
+  // Register the Telegram command menu once per isolate (commands-registry.json
+  // is the single source of truth — see lib/telegram.js#registerBotCommands).
+  c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
   return c.json({ ok: true });
 });
 
