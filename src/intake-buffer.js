@@ -37,7 +37,7 @@ const anchor = messageId => (messageId ? { reply_to_message_id: messageId, allow
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
-const DEBOUNCE_MS = 10_000;      // auto-launch delay after last message when task looks complete
+const DEBOUNCE_MS = 120_000;     // auto-launch delay after last message when task looks complete (2 min)
 const SOFT_REARM_MS = 15_000;    // grace period after "incomplete" nudge before force-dispatch
 
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
