@@ -394,7 +394,11 @@ export class IntakeBuffer {
       const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (remaining.length && chatId) {
         // Messages piled up mid-run — surface a fresh launch button, never auto-run.
-        await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);
+        // Skip if media is still pending: _mediaResult will show the collector once the
+        // transcript arrives, so the button never appears above the transcript in chat.
+        if (!remaining.some(i => i.mediaPending)) {
+          await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);
+        }
       }
     }
   }
