@@ -312,6 +312,13 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: newId, forceNew: true };
   }
 
+  // 3.5 Slash commands are quick-actions / explicit bot commands — never show
+  // the session picker. They don't carry conversational context so disambiguation
+  // adds friction without value. Always route to the last known session.
+  if (text.startsWith('/')) {
+    return { type: 'run', sessionId: session.lastSessionId };
+  }
+
   // 4. Recent session (< 2h) → continue it automatically, no friction
   if (session.lastMessageAt && (Date.now() - session.lastMessageAt) < RECENT_SESSION_THRESHOLD_MS) {
     return { type: 'run', sessionId: session.lastSessionId };
