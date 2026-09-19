@@ -100,23 +100,45 @@ async function cmdStart(chatId, env) {
   // with the Telegram native menu (set on boot via lib/telegram.js#registerBotCommands).
   // Hidden and adminOnly entries are excluded so /start matches what users see in
   // the menu — same gate, no drift.
-  const lines = [];
+  //
+  // Recruiter bot: HH-секция первая (это рабочий домен бота), остальное — поддержка.
+  // Сортировка по домену, а не flat list — это то что юзер просил («/start ещё в том боте
+  // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
+  // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
+  const hhLines = [];
+  const otherLines = [];
   const seen = new Set();
   for (const entry of commandsRegistry.commands) {
     if (entry.hidden || entry.adminOnly) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
-    lines.push(`<code>${entry.command}</code>${aliases} — ${entry.description}`);
+    const line = `<code>${entry.command}</code>${aliases} — ${entry.description}`;
+    if (HH_START_COMMANDS.has(entry.command)) {
+      hhLines.push(line);
+    } else {
+      otherLines.push(line);
+    }
   }
 
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
+    `Это бот для работы с HeadHunter и ассистентом.\n` +
     `Просто пиши задачи — я передам их агенту.\n\n` +
-    `<b>Команды:</b>\n` +
-    lines.join('\n')
+    `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n` +
+    `<b>💼 Остальное (${otherLines.length}):</b>\n${otherLines.join('\n')}`
   );
 }
+
+// Commands that belong to the HH section in /start. Hardcoded list (not regex on
+// command prefix) because /new_job_post and /cancel_vacancy are HH-adjacent but
+// don't start with /hh_. New HH commands: add here + to commands-registry.json.
+const HH_START_COMMANDS = new Set([
+  '/hh_status', '/hh_connect', '/hh_disconnect',
+  '/hh_vacancies', '/hh_funnel', '/hh_responses', '/hh_review',
+  '/hh_ats', '/hh_evaluate', '/hh_send', '/hh_reject', '/hh_scan',
+  '/new_job_post', '/cancel_vacancy',
+]);
 
 export async function cmdLogin(msg, env) {
   const { chat, text, from } = msg;
