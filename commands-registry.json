@@ -55,6 +55,8 @@
     { "command": "/hh_send", "aliases": [], "handler": "forward", "description": "Отправить сообщение кандидату (HH): /hh_send &lt;id&gt; &lt;текст&gt; — сначала покажет preview" },
     { "command": "/hh_reject", "aliases": [], "handler": "forward", "description": "Массовый отказ кандидатам (HH): dry-run + confirm-step" },
     { "command": "/hh_scan", "aliases": [], "handler": "forward", "description": "Ручной запуск сканирования новых откликов (вне расписания)" },
+    { "command": "/hh_notify_on", "aliases": [], "handler": "forward", "description": "Включить авто-уведомления о новых кандидатах в холодном поиске" },
+    { "command": "/hh_notify_off", "aliases": [], "handler": "forward", "description": "Выключить авто-уведомления о новых кандидатах" },
     { "command": "/enable_illustrate", "aliases": [], "handler": "forward", "description": "Включить скил генерации иллюстраций" },
     { "command": "/new_job_post", "aliases": [], "handler": "forward", "description": "Начать создание новой вакансии HeadHunter" },
     { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "description": "Отменить текущее создание вакансии" },
