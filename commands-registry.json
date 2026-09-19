@@ -57,6 +57,12 @@
     { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "description": "Отменить текущее создание вакансии" },
     { "command": "/bugreport", "aliases": [], "handler": "forward", "description": "Короткий алиас для /bug_or_feature" },
     { "command": "/google_drive_sharing_notifications_switch_off", "aliases": [], "handler": "forward", "description": "Выключить уведомления о шаринге Google Drive" },
-    { "command": "/google_drive_sharing_notifications_switch_on", "aliases": [], "handler": "forward", "description": "Включить уведомления о шаринге Google Drive" }
+    { "command": "/google_drive_sharing_notifications_switch_on", "aliases": [], "handler": "forward", "description": "Включить уведомления о шаринге Google Drive" },
+
+    { "command": "/oc_value", "aliases": [], "handler": "forward", "description": "OpenCode профиль: VALUE (DeepSeek V4 Flash :free, дефолт)" },
+    { "command": "/oc_quality", "aliases": [], "handler": "forward", "description": "OpenCode профиль: QUALITY (DeepSeek paid + GigaChat Ultra plan)" },
+    { "command": "/oc_free", "aliases": [], "handler": "forward", "description": "OpenCode профиль: FREE (только бесплатный inference, Nemotron)" },
+    { "command": "/oc_mimo", "aliases": [], "handler": "forward", "description": "OpenCode профиль: MIMO (A/B-тест MiMo V2.5)" },
+    { "command": "/oc_ru", "aliases": ["/oc_russian_recruiter"], "handler": "forward", "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)" }
   ]
 }
