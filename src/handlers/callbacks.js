@@ -4,7 +4,7 @@ import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/tran
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
@@ -636,6 +636,24 @@ export async function handleCallbackQuery(cq, env) {
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Stop task button (⛔ Стоп, sent by agent on task start) ─────────────────
+  // stop|{taskId} — stop the running task for this chat's profile.
+  // taskId is informational (one task per user, username is what matters).
+  if (data?.startsWith('stop|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    const msgId = message?.message_id;
+    try {
+      const result = await stopTask(env, { username: session.username });
+      const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      else await sendMessage(env.BOT_TOKEN, chatId, text);
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    }
     return;
   }
 
