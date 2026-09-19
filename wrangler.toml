@@ -164,14 +164,17 @@ class_name = "MediaJob"
 name = "MEDIA_JOBS"
 class_name = "MediaJob"
 
-# Staging-only history — staging additionally deployed RunOutbox
-# ([[env.staging.migrations]] below). The IntakeBuffer/RetryQueue/MediaJob
-# sqlite-class tags must not be re-declared here either, for the same
-# reason.
-#
-# [[env.staging.migrations]]
-# tag = "v4-media"
-# new_sqlite_classes = ["MediaJob"]
+# Per-branch staging is an isolated worker (ta-tg-staging-<SUFFIX>) — created
+# fresh on every PR, so the SQLite migrations for staging's DO classes must
+# stay declared (they're new for that worker, never re-applied to existing
+# state). PR #153 / staging-gate fails with CF code 10061 without v4-media
+# because the binding [[env.staging.durable_objects.bindings]] MEDIA_JOBS
+# references a class the new worker has no migration for. Default+recruiter
+# workers already have MediaJob applied, so the top-level [[migrations]] v3-media
+# stays commented (see NOTE above) — only env.staging.migrations needs v4-media.
+[[env.staging.migrations]]
+tag = "v4-media"
+new_sqlite_classes = ["MediaJob"]
 
 [[env.recruiter.durable_objects.bindings]]
 name = "MEDIA_JOBS"
