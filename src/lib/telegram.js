@@ -1,5 +1,81 @@
 import { trackUI, forgetUI } from './transient-ui.js';
+import commandsRegistry from '../../commands-registry.json';
 // Telegram Bot API helpers
+
+// One-shot per isolate: register the bot's command menu on Telegram as soon as
+// the worker boots. Driven by commands-registry.json (already imported for the
+// AGENT_FORWARDED_COMMANDS set in handlers/commands.js) so the menu and the
+// switch stay in sync forever — the old hardcoded lists in scripts/set-commands*.js
+// kept drifting and the menu went stale (issue: "/hh_* отсутствует в меню").
+//
+// Hidden and adminOnly entries are intentionally excluded: a hidden command is
+// hidden by definition, and adminOnly ones must not be advertised to regular
+// users via the menu (they're still callable when typed directly).
+//
+// Telegram limits: 100 commands/scope, 30 setMyCommands/min. Per-isolate call
+// is fine even under burst cold-start; if many isolates race, Telegram returns
+// 429 and we silently log — next boot retries.
+export async function registerBotCommands(token) {
+  if (!token) return { ok: false, reason: 'no token' };
+  const seen = new Set();
+  const commands = [];
+  for (const entry of commandsRegistry.commands) {
+    if (entry.hidden || entry.adminOnly) continue;
+    if (seen.has(entry.command)) continue;
+    seen.add(entry.command);
+    const name = entry.command.replace(/^\//, '');
+    // Telegram rejects the whole batch if any single command >32 chars.
+    // Skip oversize entries with a loud log rather than failing the whole menu.
+    if (name.length > 32) {
+      console.error(`[setMyCommands] skipping "${name}" (${name.length} chars, Telegram limit is 32). Rename or hide via hidden:true.`);
+      continue;
+    }
+    if ((entry.description || '').length > 256) {
+      console.error(`[setMyCommands] skipping "${name}" (description >256 chars).`);
+      continue;
+    }
+    commands.push({ command: name, description: entry.description });
+  }
+  if (commands.length === 0) return { ok: false, reason: 'no commands' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commands }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      console.log(`[setMyCommands] registered ${commands.length} commands`);
+    } else {
+      console.error(`[setMyCommands] failed:`, JSON.stringify(data));
+    }
+    return data;
+  } catch (e) {
+    console.error(`[setMyCommands] error:`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+let bootRegistered = false;
+export async function ensureCommandsRegisteredOnce(env) {
+  if (bootRegistered) return;
+  bootRegistered = true;
+  await registerBotCommands(env.BOT_TOKEN);
+}
+
+// Read what Telegram currently has registered (debug/verification only — not
+// used in hot path). Returns {ok, commands[]} on success, {ok:false, error} on
+// failure. Useful to prove that setMyCommands actually reached Telegram.
+export async function getRegisteredCommands(token) {
+  if (!token) return { ok: false, reason: 'no token' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`);
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
 
 export async function sendMessage(token, chatId, text, extra = {}) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -7,7 +83,15 @@ export async function sendMessage(token, chatId, text, extra = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!data.ok) {
+    // Surface Telegram rejections — silent swallow here is how /start went dark
+    // when a raw "<id>" slipped into commands-registry.json (cmdStart's HTML
+    // message was 400-rejected and the user saw "ноль реакции"). Caller still
+    // gets `data` back so existing flows don't break; we just log it loudly.
+    console.error(`[sendMessage] chat=${chatId} failed:`, JSON.stringify(data));
+  }
+  return data;
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
