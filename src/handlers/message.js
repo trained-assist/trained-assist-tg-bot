@@ -57,6 +57,14 @@ export async function handleMessage(msg, env, opts = {}) {
     throw Object.assign(new Error(error?.message || 'Attachment preparation failed', { cause: error }), { code: 'INTAKE_PREPARATION_FAILED' });
   }
 
+  // prepareIntake already notified the user for oversized files; skip agent dispatch.
+  if (msg.fileTooLarge) return;
+  if (msg.intakeItems) {
+    const validItems = msg.intakeItems.filter(i => !i.msg?.fileTooLarge);
+    if (!validItems.length) return;
+    msg = { ...msg, intakeItems: validItems };
+  }
+
   const route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
