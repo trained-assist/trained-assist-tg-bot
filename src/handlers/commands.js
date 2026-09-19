@@ -95,10 +95,6 @@ async function cmdStart(chatId, env) {
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
   }
-  // Render the help from commands-registry.json — single source of truth shared
-  // with the Telegram native menu (set on boot via lib/telegram.js#registerBotCommands).
-  // Hidden and adminOnly entries are excluded so /start matches what users see in
-  // the menu — same gate, no drift.
   //
   // Recruiter bot: HH-секция первая (это рабочий домен бота), остальное — поддержка.
   // Сортировка по домену, а не flat list — это то что юзер просил («/start ещё в том боте

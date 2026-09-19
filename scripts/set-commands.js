@@ -1,6 +1,14 @@
 #!/usr/bin/env node
-// One-time script: registers bot command list in Telegram
+// One-shot script: registers bot command list in Telegram from commands-registry.json
+// (single source of truth shared with src/handlers/commands.js#cmdStart and
+//  src/lib/telegram.js#registerBotCommands). The worker also calls setMyCommands
+//  on boot, so this script only needs to be run by hand if the worker is offline.
+//
 // Usage: BOT_TOKEN=xxx node scripts/set-commands.js
+
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 const token = process.env.BOT_TOKEN || process.argv[2];
 if (!token) {
@@ -8,20 +16,16 @@ if (!token) {
   process.exit(1);
 }
 
-const commands = [
-  { command: 'profile',          description: 'Мой профиль и смена аккаунта' },
-  { command: 'sessions',         description: 'Мои диалоги' },
-  { command: 'new_dialog',       description: 'Новый диалог' },
-  { command: 'skills',           description: 'Что умеет агент' },
-  { command: 'files',            description: 'Файлы и папки' },
-  { command: 'status',           description: 'Статус агента' },
-  { command: 'settoken',         description: 'Сохранить токен сервиса' },
-  { command: 'chromeext_install',description: 'Установить Chrome-расширение' },
-  { command: 'chromeext_connect',description: 'Подключить расширение' },
-  { command: 'chromeext_status', description: 'Статус расширения' },
-  { command: 'ru',               description: 'Задача через РФ IP (nalog.ru и т.п.)' },
-  { command: 'logout',           description: 'Выйти' },
-];
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.json'), 'utf8'));
+const commands = [];
+const seen = new Set();
+for (const entry of registry.commands) {
+  if (entry.hidden || entry.adminOnly) continue;
+  if (seen.has(entry.command)) continue;
+  seen.add(entry.command);
+  commands.push({ command: entry.command.replace(/^\//, ''), description: entry.description });
+}
 
 const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
   method: 'POST',
