@@ -7,8 +7,10 @@ import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { sendMessage } from './lib/telegram.js';
-import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
+import { shouldDebounce, shouldAskProject, FORCE_RUN_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
+import { getProjectDecision } from './lib/agent-client.js';
+import { openProjectChoice } from './lib/project-choice.js';
 
 const app = new Hono();
 
@@ -184,6 +186,20 @@ export async function routeText(msg, env, chatId) {
     // menus before launch cannot move an already collected batch to another project.
     const session = await getSession(env.SESSIONS, chatId);
     const sessionId = session?.activeSessionId || session?.lastSessionId;
+
+    // Show the project picker immediately for new sessions with multiple projects,
+    // instead of waiting for the user to press ▶️ and the debounce to expire.
+    // This restores the pre-debounce UX where the picker appeared right after the first message.
+    if (!sessionId && session && !session.pendingProjectChoice) {
+      try {
+        const decision = await getProjectDecision(env, { username: session.username, chatId });
+        if (shouldAskProject({ isNewDialog: true, decision })) {
+          await openProjectChoice(env, chatId, session, { decision, input: msg });
+          return;
+        }
+      } catch { /* fail open — fall through to normal debounce path */ }
+    }
+
     if (msg.reply_to_message || (sessionId && session?.projectSelectionSessionId === sessionId)) {
       if (sessionId) msg = { ...msg, intakeRoute: { sessionId,
         forceNew: !!(session.activeSessionId && session.activeSessionIsNew),
