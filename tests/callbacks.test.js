@@ -19,6 +19,10 @@ const KNOWN_CALLBACK_PREFIXES = [
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
   'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
+  'stop|',      // ⛔ Стоп button sent by agent on task start — stop running task
+  'qa_more|',   // 🔎 Разобраться подробнее — escalate quick answer to Claude
+  'ar:',        // archive sessions menu
+  'sa:',        // archive single session
 ];
 
 // Mock all external dependencies so we can import the handler
@@ -52,6 +56,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
     { name: '', label: '🏠 Корень', count: 3 },
     { name: 'efimova-school', label: 'efimova-school', count: 5 },
   ]),
+  stopTask: vi.fn().mockResolvedValue({ killed: 1 }),
 }));
 
 vi.mock('../src/handlers/commands.js', () => ({
