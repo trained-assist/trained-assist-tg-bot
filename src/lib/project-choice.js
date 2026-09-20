@@ -46,7 +46,7 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     input = previous;
     opts = session.pendingProjectChoice.opts;
   }
-  const pending = { choices: decision.choices || [], createdAt: Date.now(), token: crypto.randomUUID(), input,
+  const pending = { choices: decision.choices || [], createdAt: Date.now(), expiresAt: Date.now() + PICKER_TTL_MS, token: crypto.randomUUID(), input,
     opts, contextFromSession, messageId: null };
   await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: pending });
   const messageId = await render(env, chatId, pending);
