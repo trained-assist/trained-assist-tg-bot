@@ -9,12 +9,19 @@ import { transcribeVoice } from './handlers/message.js';
 export async function prepareIntake(msg, env, session) {
   if (msg.fileRef?.storage === 'r2') return msg;
   if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
+  const MAX_BYTES = 20 * 1024 * 1024;
   const media = msg.voice || msg.audio || msg.video ||
     (msg.document && /^(audio|video)\//i.test(msg.document.mime_type || '') ? msg.document : null);
   if (media) {
+    if (!msg.voice && media.file_size && media.file_size > MAX_BYTES) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+      );
+      return { ...msg, fileTooLarge: true };
+    }
     const fileRef = await storeTelegramFile(msg, media, env, session);
     msg.fileRef = fileRef;
-    if (media.file_size > 20 * 1024 * 1024) throw new Error('Файл больше 20 MB');
     const { transcript, error } = msg.transcript ? { transcript: msg.transcript }
       : await transcribeVoice(media.file_id, media.mime_type || null, env);
     if (!transcript) throw new Error(error || 'Пустая расшифровка');
@@ -29,6 +36,13 @@ export async function prepareIntake(msg, env, session) {
   }
   const file = msg.photo?.[msg.photo.length - 1] || msg.document;
   if (file) {
+    if (file.file_size && file.file_size > MAX_BYTES) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+      );
+      return { ...msg, fileTooLarge: true };
+    }
     const fileRef = await storeTelegramFile(msg, file, env, session);
     const { attachmentKey, ...rest } = msg;
     return { ...rest, fileRef };
