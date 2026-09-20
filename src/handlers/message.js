@@ -70,7 +70,7 @@ export async function handleMessage(msg, env, opts = {}) {
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
   const pendingCreation = !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
-    const decision = await getProjectDecision(env, { username: session.username, chatId });
+    const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (pendingCreation || shouldAskProject({ isNewDialog: true, decision })) {
       await openProjectChoice(env, chatId, session, { decision, input: msg,
         opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
