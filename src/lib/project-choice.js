@@ -36,7 +36,7 @@ async function render(env, chatId, pending, page = 0) {
 // Persist Telegram references, never base64 payloads; media can be reloaded after
 // selection. Indices refer to this snapshot, not a freshly sorted server list.
 export async function openProjectChoice(env, chatId, session, { decision, input = null, opts = {}, contextFromSession = null } = {}) {
-  decision ||= await getProjectDecision(env, { username: session.username, chatId });
+  decision ||= await getProjectDecision(env, { username: session.username, chatId, task: input?.text || input?.caption || '' });
   const previous = session.pendingProjectChoice?.input;
   if (previous) contextFromSession ||= session.pendingProjectChoice.contextFromSession;
   if (previous && input) {
