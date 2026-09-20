@@ -137,7 +137,7 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
     );
     if (res.ok) {
       const data = await res.json();
-      if (!data.note && ['auto', 'ask', 'create'].includes(data.action) && Array.isArray(data.choices)) return data;
+      if (!data.note && ['auto', 'ask', 'create', 'quick'].includes(data.action) && Array.isArray(data.choices)) return data;
     }
   } catch { /* use the same agent's basic project list */ }
   const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
