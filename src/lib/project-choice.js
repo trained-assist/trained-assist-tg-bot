@@ -63,9 +63,9 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
 export async function chooseProject(cq, env, session) {
   const chatId = cq.message.chat.id;
   session = await withKvConsistencyRetry(env.SESSIONS, chatId, session,
-    s => !projectChoiceExpired(s?.pendingProjectChoice, cq));
+    s => { const p = s?.pendingProjectChoice; return !!p && !projectChoiceExpired(p, cq); });
   const pending = session?.pendingProjectChoice;
-  if (projectChoiceExpired(pending, cq)) {
+  if (!pending || projectChoiceExpired(pending, cq)) {
     await answerCallbackQuery(env.BOT_TOKEN, cq.id, '⌛ Открой «Новый диалог» заново.');
     return;
   }
