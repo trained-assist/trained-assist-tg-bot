@@ -68,6 +68,7 @@
     { "command": "/oc_quality", "aliases": [], "handler": "forward", "description": "OpenCode профиль: QUALITY (DeepSeek paid + GigaChat Ultra plan)" },
     { "command": "/oc_free", "aliases": [], "handler": "forward", "description": "OpenCode профиль: FREE (только бесплатный inference, Nemotron)" },
     { "command": "/oc_mimo", "aliases": [], "handler": "forward", "description": "OpenCode профиль: MIMO (A/B-тест MiMo V2.5)" },
-    { "command": "/oc_ru", "aliases": ["/oc_russian_recruiter"], "handler": "forward", "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)" }
+    { "command": "/oc_ru", "aliases": ["/oc_russian_recruiter"], "handler": "forward", "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)" },
+    { "command": "/oc_lavish-luna", "aliases": ["/oc_ll"], "handler": "forward", "description": "OpenCode профиль: LAVISH LUNA (GPT-5.6 Luna + DeepSeek/Kimi/Qwen)" }
   ]
 }
