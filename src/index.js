@@ -7,7 +7,7 @@ import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
-import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
+import { shouldDebounce, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
 const app = new Hono();
@@ -234,7 +234,10 @@ export async function routeText(msg, env, chatId) {
         projectChosen: session.projectSelectionSessionId === sessionId,
         newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
-    const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
+    // FORCE_RUN_RE: explicit launch words ("запускай/го") when buffer may have content.
+    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/ок") — treated the same:
+    // dispatch the buffer (or just this one message if buffer was empty) immediately.
+    const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
     await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',
