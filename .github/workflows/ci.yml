@@ -201,3 +201,27 @@ jobs:
             sleep 5
           done
           [ "$STATUS" = "200" ] && echo "✅ Worker alive" || { echo "❌ Worker not responding (HTTP $STATUS)"; exit 1; }
+
+  autofix:
+    needs: [ci, scenario-gate, restart-integration]
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (
+        needs.ci.result == 'failure' ||
+        needs.scenario-gate.result == 'failure' ||
+        needs.restart-integration.result == 'failure'
+      ) &&
+      !startsWith(github.head_ref, 'fix/ci-')
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      original_branch: ${{ github.head_ref }}
+      run_id: ${{ github.run_id }}
+    secrets:
+      openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+      gh_token: ${{ secrets.GH_PAT || github.token }}

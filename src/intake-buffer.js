@@ -26,7 +26,7 @@ import { checkCompleteness } from './lib/agent-client.js';
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
-import { coalesceBuffer } from './intake-routing.js';
+import { coalesceBuffer, SHORT_MSG_THRESHOLD } from './intake-routing.js';
 
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
 // bubble reliably appears right after the user's own message once the chat has
@@ -38,6 +38,7 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
 const DEBOUNCE_MS = 10_000;      // auto-launch delay after last message when task looks complete
+const SHORT_DEBOUNCE_MS = 2_000; // reduced debounce for short follow-up messages (≤ SHORT_MSG_THRESHOLD chars)
 const SOFT_REARM_MS = 15_000;    // grace period after "incomplete" nudge before force-dispatch
 
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
@@ -130,8 +131,15 @@ export class IntakeBuffer {
           await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
         } else {
           // Idle: arm the debounce timer and show the launch button.
+          // Short follow-ups (≤ SHORT_MSG_THRESHOLD chars, no pending media) use a 2-second
+          // debounce and skip the completeness-nudge — they are almost always self-contained.
           await this.state.storage.delete('nudged');
-          const expiresAt = Date.now() + DEBOUNCE_MS;
+          const msgText = (msg.text || '').trim();
+          const isShort = !remaining.some(i => i.mediaPending) && msgText.length > 0 && msgText.length <= SHORT_MSG_THRESHOLD;
+          const debounceMs = isShort ? SHORT_DEBOUNCE_MS : DEBOUNCE_MS;
+          if (isShort) await this.state.storage.put('shortDebounce', true);
+          else await this.state.storage.delete('shortDebounce');
+          const expiresAt = Date.now() + debounceMs;
           await this.state.storage.put('debounceExpiresAt', expiresAt);
           await this.state.storage.setAlarm(expiresAt);
           await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
@@ -463,7 +471,9 @@ export class IntakeBuffer {
         const coalescedText = coalesceBuffer(buf);
 
         const alreadyNudged = (await this.state.storage.get('nudged')) === true;
-        if (!alreadyNudged) {
+        const isShortDebounce = (await this.state.storage.get('shortDebounce')) === true;
+        await this.state.storage.delete('shortDebounce');
+        if (!alreadyNudged && !isShortDebounce) {
           const { complete } = await checkCompleteness(this.env, { text: coalescedText });
           if (!complete) {
             // Task looks unfinished — nudge once, give the user more time.
@@ -481,7 +491,7 @@ export class IntakeBuffer {
           }
         }
 
-        // Complete (or already nudged) → dispatch.
+        // Complete (or already nudged, or short-debounce fast-path) → dispatch.
         await this.state.storage.delete('nudged');
         await this._dispatch();
         return;
