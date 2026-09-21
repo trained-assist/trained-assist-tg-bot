@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-// One-time script: registers the recruiter bot's command list in Telegram.
-// Same backend/MCP as the main bot, but the menu is pinned to the recruiting
-// domain so recruiter users aren't hunting through general-purpose commands.
+// One-shot script: registers the recruiter bot's command list in Telegram.
+// Reads from commands-registry.json (single source of truth). The recruiter
+// worker also calls setMyCommands on boot, so this script only needs to be
+// run by hand if the worker is offline.
+//
 // Usage: BOT_TOKEN=xxx node scripts/set-commands-recruiter.js
+
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 const token = process.env.BOT_TOKEN || process.argv[2];
 if (!token) {
@@ -10,21 +16,27 @@ if (!token) {
   process.exit(1);
 }
 
-const commands = [
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.json'), 'utf8'));
+const commands = [];
+const seen = new Set();
+const CONTROL_COMMANDS = [
   { command: 'stop', description: 'Остановить сессию и сохранить весь ввод' },
   { command: 'skip', description: 'Перейти к следующему вводу — появилась новая информация' },
   { command: 'fresh', description: 'Начать без незавершённого ввода' },
-  { command: 'login',            description: 'Войти: /login username password' },
-  { command: 'new_job_post',     description: 'Новая вакансия HeadHunter' },
-  { command: 'hh_status',        description: 'Статус фоновой оценки кандидатов' },
-  { command: 'cancel_vacancy',   description: 'Отменить создание вакансии' },
-  { command: 'sessions',         description: 'Мои диалоги' },
-  { command: 'new_dialog',       description: 'Новый диалог' },
-  { command: 'profile',          description: 'Мой профиль и смена аккаунта' },
-  { command: 'skills',           description: 'Что умеет агент' },
-  { command: 'status',           description: 'Статус агента' },
-  { command: 'logout',           description: 'Выйти' },
 ];
+for (const entry of registry.commands) {
+  if (entry.hidden || entry.adminOnly) continue;
+  if (seen.has(entry.command)) continue;
+  seen.add(entry.command);
+  commands.push({ command: entry.command.replace(/^\//, ''), description: entry.description });
+}
+for (const cmd of CONTROL_COMMANDS) {
+  if (!seen.has(cmd.command)) {
+    seen.add(cmd.command);
+    commands.push(cmd);
+  }
+}
 
 const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
   method: 'POST',

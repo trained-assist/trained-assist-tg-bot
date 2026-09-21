@@ -1,7 +1,7 @@
 import { getProjectDecision } from './agent-client.js';
-import { getSession, setSession, newSessionId } from './kv.js';
+import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
-import { PICKER_TTL_MS, trackUI } from './transient-ui.js';
+import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
 
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -36,7 +36,7 @@ async function render(env, chatId, pending, page = 0) {
 // Persist Telegram references, never base64 payloads; media can be reloaded after
 // selection. Indices refer to this snapshot, not a freshly sorted server list.
 export async function openProjectChoice(env, chatId, session, { decision, input = null, opts = {}, contextFromSession = null } = {}) {
-  decision ||= await getProjectDecision(env, { username: session.username, chatId });
+  decision ||= await getProjectDecision(env, { username: session.username, chatId, task: input?.text || input?.caption || '' });
   const previous = session.pendingProjectChoice?.input;
   if (previous) contextFromSession ||= session.pendingProjectChoice.contextFromSession;
   if (previous && input) {
@@ -46,7 +46,7 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     input = previous;
     opts = session.pendingProjectChoice.opts;
   }
-  const pending = { choices: decision.choices || [], createdAt: Date.now(), token: crypto.randomUUID(), input,
+  const pending = { choices: decision.choices || [], createdAt: Date.now(), expiresAt: Date.now() + PICKER_TTL_MS, token: crypto.randomUUID(), input,
     opts, contextFromSession, messageId: null };
   await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: pending });
   const messageId = await render(env, chatId, pending);
@@ -62,8 +62,10 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
 
 export async function chooseProject(cq, env, session) {
   const chatId = cq.message.chat.id;
+  session = await withKvConsistencyRetry(env.SESSIONS, chatId, session,
+    s => { const p = s?.pendingProjectChoice; return !!p && !projectChoiceExpired(p, cq); });
   const pending = session?.pendingProjectChoice;
-  if (!pending || pending.dispatching || pending.suspended || pending.messageId !== cq.message.message_id || Date.now() - pending.createdAt >= PICKER_TTL_MS) {
+  if (!pending || projectChoiceExpired(pending, cq)) {
     await answerCallbackQuery(env.BOT_TOKEN, cq.id, '⌛ Открой «Новый диалог» заново.');
     return;
   }

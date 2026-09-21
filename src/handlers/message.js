@@ -1,9 +1,11 @@
+import { readMedia } from '../lib/media-retry.js';
+import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject } from '../intake-routing.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
-import { packAttachments } from '../lib/attachment-bundle.js';
+import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { getSession, setSession, newSessionId, scheduleRetry, takeDueRetries } from '../lib/kv.js';
+import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 
@@ -28,6 +30,12 @@ function tooBigMessage(fileSize) {
 export async function handleMessage(msg, env, opts = {}) {
   const { chat, text, voice, audio, photo, document: doc, video } = msg;
   const chatId = chat.id;
+  const ids = msg.intakeItems?.map(i => i.msg?.message_id).filter(Boolean) || [msg.message_id].filter(Boolean);
+  if (ids.length && !opts.requestId) {
+    const bytes = new TextEncoder().encode(`${chatId}:${ids.join(',')}`);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    opts = { ...opts, requestId: `tg-${Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')}` };
+  }
 
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
@@ -36,59 +44,85 @@ export async function handleMessage(msg, env, opts = {}) {
     );
   }
 
+  try {
+    if (msg.intakeItems) {
+      const items = [];
+      // Sequential uploads bound peak memory for old cached batches and large media.
+      for (const item of msg.intakeItems) items.push({ ...item, msg: await prepareIntake({ chat: msg.chat, ...item.msg }, env, session) });
+      msg = { ...msg, intakeItems: items };
+    } else {
+      msg = await prepareIntake(msg, env, session);
+    }
+  } catch (error) {
+    throw Object.assign(new Error(error?.message || 'Attachment preparation failed', { cause: error }), { code: 'INTAKE_PREPARATION_FAILED' });
+  }
+
+  // prepareIntake already notified the user for oversized files; skip agent dispatch.
+  if (msg.fileTooLarge) return;
+  if (msg.intakeItems) {
+    const validItems = msg.intakeItems.filter(i => !i.msg?.fileTooLarge);
+    if (!validItems.length) return;
+    msg = { ...msg, intakeItems: validItems };
+  }
+
   const route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
-  const pendingCreation = !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
+  const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
+  if (pendingPickerExpired) {
+    const current = await getSession(env.SESSIONS, chatId);
+    if (current?.pendingProjectChoice) {
+      await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+    }
+  }
+  const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
-    const decision = await getProjectDecision(env, { username: session.username, chatId });
-    if (pendingCreation || shouldAskProject({ isNewDialog: true, decision })) {
+    const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
+    if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg,
         opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
         contextFromSession: route.contextFromSession || session.contextFromSession || null });
       return;
     }
+    // Quick command detected: clear any stuck pending project choice so the next real
+    // task doesn't re-trigger the picker.
+    if (decision.action === 'quick' && pendingCreation) {
+      const current = await getSession(env.SESSIONS, chatId);
+      if (current?.pendingProjectChoice) {
+        await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+      }
+    }
   }
-  opts = { ...opts, resolvedRoute: route, originalMessage: msg, intakeOwned: !!msg.intakeItems };
+opts = { 
+    ...opts, 
+    initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), 
+    intakeRoute: opts.intakeRoute || msg.intakeRoute, 
+    resolvedRoute: route, 
+    originalMessage: msg, 
+    intakeOwned: !!msg.intakeItems 
+  };
 
-  if (msg.intakeItems) {
-    // Resolve EVERY original message before making the single agent request.
-    // Parallel I/O preserves array order while avoiding N sequential STT waits.
-    const prepared = await Promise.all(msg.intakeItems.map(async (item, index) => {
-      const m = item.msg || {};
-      const caption = item.text || m.text || m.caption || '';
-      const media = m.voice || m.audio || m.video ||
-        (m.document && /^(audio|video)\//i.test(m.document.mime_type || '') ? m.document : null);
-      const file = m.photo?.[m.photo.length - 1] || m.document;
-      if ((media || file)?.file_size > MAX_TG_DOWNLOAD_BYTES) {
-        throw new Error(`Сообщение ${index + 1}: файл больше 20 MB`);
-      }
-      if (media) {
-        const { transcript, error } = m.transcript
-          ? { transcript: m.transcript }
-          : await transcribeVoice(media.file_id, media.mime_type || null, env);
-        if (!transcript) throw new Error(`Сообщение ${index + 1}: ${error || 'пустая расшифровка'}`);
-        return { text: [caption, transcript].filter(Boolean).join('\n'), isVoice: true };
-      }
-      if (file) {
-        const cached = m.attachmentKey ? await env.SESSIONS.get(m.attachmentKey, { type: 'json' }) : null;
-        const { base64, error } = cached || await downloadTgFileBase64(file.file_id, env);
-        if (error) throw new Error(`Сообщение ${index + 1}: ${error}`);
-        const name = file.file_name || 'photo.jpg';
-        return { text: [caption, `Вложение ${index + 1}: ${name}`].filter(Boolean).join('\n'),
-          file: { base64, name, mime: file.mime_type || (m.photo ? 'image/jpeg' : 'application/octet-stream'), index: index + 1 } };
-      }
-      return { text: caption };
-    }));
-    const files = prepared.flatMap(p => p.file ? [p.file] : []);
-    const attachment = packAttachments(files);
-    const task = prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') +
-      (files.length > 1 ? '\n\nВсе вложения находятся в приложенном TAR-архиве. Распакуй его и прочитай каждый файл; номер в имени соответствует сообщению.' : '');
-    await handleText(chatId, session, task, env, {
-      ...opts, intakeRoute: opts.intakeRoute || msg.intakeRoute, ...attachment, isVoice: prepared.some(p => p.isVoice),
-    });
-    return;
-  }
+  const items = msg.intakeItems || [{ text: msg.text || msg.caption || '', msg }];
+  const prepared = items.map((item, index) => {
+    const m = item.msg;
+    const caption = stripMediaTags(item.text || m.text || m.caption || '');
+    return { text: [caption, m.transcript,
+      m.fileRef ? `Вложение ${index + 1}: ${m.fileRef.name}` : ''].filter(Boolean).join('\n'),
+      refs: [m.fileRef, m.transcriptRef].filter(Boolean), isVoice: !!m.transcript };
+  });
+  const task = msg.intakeItems ? prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') : prepared[0].text;
+  return handleText(chatId, session, task, env, { ...opts,
+    requestId: opts.requestId || (items.every(i => i.msg.message_id)
+      ? `intake-${await batchIdentity(chatId, items)}` : crypto.randomUUID()),
+    fileRefs: prepared.flatMap(p => p.refs), isVoice: prepared.some(p => p.isVoice),
+    durableInput: !!(msg.intakeItems || opts.intakeRoute || msg.intakeRoute),
+  });
+}
+
+async function batchIdentity(chatId, items) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${chatId}:${items.map(i => i.msg.message_id).join(',')}`));
+  return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+}
 
   // Media branches take precedence over `text`. On the buffered/dispatch path
   // (IntakeBuffer._dispatch) a media message keeps its .photo/.voice/.document
@@ -131,8 +165,8 @@ export async function handleMessage(msg, env, opts = {}) {
           fileName: 'photo.jpg',
           fileMimeType: 'image/jpeg',
           mode: opts.mode || null,
-      controlEpoch: opts.controlEpoch,
-      controlEpochs: opts.controlEpochs,
+          controlEpoch: opts.controlEpoch,
+          controlEpochs: opts.controlEpochs,
         });
       }
     } catch (e) {
@@ -157,8 +191,8 @@ export async function handleMessage(msg, env, opts = {}) {
           fileName: doc.file_name || 'document',
           fileMimeType: doc.mime_type || 'application/octet-stream',
           mode: opts.mode || null,
-      controlEpoch: opts.controlEpoch,
-      controlEpochs: opts.controlEpochs,
+          controlEpoch: opts.controlEpoch,
+          controlEpochs: opts.controlEpochs,
         });
       }
     } catch (e) {
@@ -185,6 +219,8 @@ function stripMediaTags(text) {
 }
 
 async function handleText(chatId, session, text, env, opts = {}) {
+  let retryOpts = opts;
+  let accepted = false;
   try {
     const route = opts.resolvedRoute || opts.intakeRoute || await resolveSessionRoute(chatId, session, text, env);
 
@@ -208,6 +244,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
 
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
+    retryOpts = { ...opts, resolvedRoute: route, retryUsername: session.username, durableInput: false,
+      intakeRoute: { ...route, projectId: route.projectChosen ? route.projectId : (opts.intakeRoute?.projectId ?? session.projectId ?? null),
+        contextFromSession: opts.intakeRoute?.contextFromSession ?? session.contextFromSession ?? null } };
     const context = opts.isVoice ? '[voice-message]' : null;
 
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
@@ -226,7 +265,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
     };
     if (!await checkGeneration()) throw new Error('Передача отменена остановкой сессии');
     const result = await runTask(env, {
+      initiatedAt: opts.initiatedAt, threadId: opts.originalMessage?.message_thread_id || null,
       userId: chatId,
+      requestId: opts.requestId,
       username: session.username,
       task: text,
       context,
@@ -242,12 +283,17 @@ async function handleText(chatId, session, text, env, opts = {}) {
       projectId: route.projectChosen ? route.projectId : (opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null)),
       newProjectName: route.forceNew && (route.newProject || (session.projectSelectionSessionId === route.sessionId && session.pendingNewProject))
         ? text.replace(/^\[Сообщение \d+\]\s*/u, '').split('\n')[0].trim().slice(0, 60) || 'Новый проект' : null,
+      requestId: opts.requestId,
+      fileRefs: opts.fileRefs || [],
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,
     });
 
-    if (!await checkGeneration()) return; // /fresh must keep its new session binding.
+```javascript
+if (!await checkGeneration()) return; // /fresh must keep its new session binding.
+accepted = true;
+```
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
 
     await setSession(env.SESSIONS, chatId, {
@@ -265,49 +311,98 @@ async function handleText(chatId, session, text, env, opts = {}) {
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
     });
+    if (opts.isRetry) return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
   } catch (err) {
+// Telegram/session bookkeeping failures after ACK must never resubmit work.
+    if (accepted) {
+      console.warn('[recovery] accepted, bookkeeping failed:', err.message);
+      return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
+    }
     // The durable accumulator owns retry/retention. Never ACK a failed batch
     // or move it into the independent timed retry queue after /stop.
     if (opts.intakeOwned) throw err;
+    if (env.RUN_OUTBOX) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);
 
-    // Class B self-heal (issue #604): the FIRST time we see 'down', queue one
-    // delayed retry instead of dead-ending on the user. opts.isRetry marks the
-    // scheduled retry itself — it must never queue a second one (cap-at-1).
-    // Skip queueing when a file payload is attached: base64-inflated, it can
-    // approach KV's 25MB value limit, and resending a file is trivial for the
-    // user anyway — not worth the failure mode of scheduleRetry itself throwing.
-    if (kind === 'down' && !opts.isRetry && !opts.fileBase64) {
-      await scheduleRetry(env.SESSIONS, { chatId, text, opts });
-      await sendMessage(env.BOT_TOKEN, chatId,
-        '⏸ Агент временно недоступен. Попробую снова через 3 минуты — не отправляй повторно.'
-      );
-      return;
+    if (opts.durableInput && kind !== 'down') throw err;
+    const attempt = opts.retryAttempt || 0;
+    const reason = kind === 'down' ? 'сервер агента недоступен'
+      : kind === 'busy' ? 'сервер отвечает, но подтверждение приёма не пришло'
+      : 'ошибка при передаче задачи';
+    console.warn(`[recovery] chat=${chatId} attempt=${attempt} kind=${kind} error=${err.message}`);
+    if (kind === 'down' && attempt < 2 && !opts.fileBase64) {
+      try {
+        await enqueueRecovery(env, { chatId, text, opts: { ...retryOpts, retryAttempt: attempt } });
+      } catch (queueError) {
+        console.error('[recovery] enqueue failed', queueError.message);
+        if (opts.durableInput) throw queueError;
+        const notice = `⚠️ Восстановление не запланировано: ${reason}; не удалось сохранить повтор в очередь. Нужен ручной запуск.`;
+        if (opts.isRetry) return { outcome: 'queue_failed', notice };
+        await sendMessage(env.BOT_TOKEN, chatId, notice);
+        return 'queue_failed';
+      }
+      const notice = attempt
+        ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. Следующая попытка через 3 минуты.`
+        : '⏸ Агент временно недоступен. Попробую снова через 3 минуты (до двух попыток) — не отправляй повторно.';
+      if (opts.isRetry) return { outcome: 'scheduled', notice };
+      await sendMessage(env.BOT_TOKEN, chatId, notice).catch(e => console.warn('[recovery] queued notification failed:', e.message));
+      return 'scheduled';
     }
-
-    const userMsg = kind === 'busy'
+    const userMsg = opts.isRetry
+      ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. ${kind === 'busy' ? 'Запрос мог быть принят; повторять автоматически не буду, чтобы не создать дубль.' : 'Автоповторы остановлены.'}`
+      : kind === 'busy'
       ? '↪️ Сервер отвечает, но подтверждение приёма задачи не пришло. Пока не отправляй повторно: запрос мог быть принят.'
-      : kind === 'down' && opts.isRetry
-      ? '⏸ Агент всё ещё недоступен после повторной попытки. Попробуй позже вручную.'
       : kind === 'down'
-      ? '⏸ Агент временно недоступен. Попробуй прислать файл ещё раз через пару минут.'
-      : `❌ Ошибка: ${err.message}`;
+      ? '⏸ Агент временно недоступен. Файл не удалось поставить на автоповтор; попробуй прислать его ещё раз через пару минут.'
+      : `❌ Ошибка: ${reason}`;
+    if (opts.isRetry) return { outcome: kind, notice: userMsg };
     await sendMessage(env.BOT_TOKEN, chatId, userMsg);
+    return kind;
   }
 }
 
-// Class B self-heal (issue #604): drained by the Cron Trigger in index.js's
-// scheduled() every ~1min. Re-fetches the session fresh (not a stale snapshot)
-// so a retry doesn't fight a session the user has since moved on from; skips
-// silently if the user logged out in the meantime.
+async function recoveryNotice(env, chatId, text) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text);
+  if (!result?.ok) throw new Error(`Recovery notification rejected: ${result?.description || 'unknown'}`);
+}
+
 export async function processDueRetries(env) {
-  const due = await takeDueRetries(env.SESSIONS);
-  for (const { chatId, text, opts } of due) {
-    const session = await getSession(env.SESSIONS, chatId);
-    if (!session) continue;
-    await handleText(chatId, session, text, env, { ...opts, isRetry: true });
+  if (env.RETRY_QUEUE && !env.RECOVERY_STORE) {
+    const stub = env.RETRY_QUEUE.get(env.RETRY_QUEUE.idFromName('recovery'));
+    const response = await stub.fetch('https://recovery/drain', { method: 'POST' });
+    if (!response.ok) throw new Error(`Recovery drain HTTP ${response.status}`);
+    return;
+  }
+  const store = env.RECOVERY_STORE || env.SESSIONS;
+  const due = await takeDueRetries(store);
+  for (const entry of due) {
+    const { chatId, text, opts = {} } = entry;
+    try {
+      let result = entry.terminal;
+      if (!result) {
+        const session = await getSession(env.SESSIONS, chatId);
+        if (!session || (opts.retryUsername && opts.retryUsername !== session.username)) {
+          result = { outcome: 'profile_changed', notice: '⚠️ Восстановление отменено: вход в профиль завершён или выбран другой профиль.' };
+        } else if (entry.startedAt) {
+          result = { outcome: 'outcome_unknown', notice: '⚠️ Попытка восстановления прервалась без подтверждённого результата. Задача могла быть принята; автоматический повтор остановлен, чтобы не создать дубль.' };
+        } else {
+          const attempt = (opts.retryAttempt || 0) + 1;
+          await recoveryNotice(env, chatId, `🔄 Пробую восстановить сессию: попытка ${attempt}/2.`);
+          await markRetryStarted(store, entry);
+          result = await handleText(chatId, session, text, env, { ...opts, initialMsgId: null, isRetry: true, retryAttempt: attempt });
+          result ||= { outcome: 'awaiting_choice', notice: '↪️ Для восстановления нужно выбрать диалог.' };
+        }
+        await saveRetryOutcome(store, entry, result);
+      }
+      await recoveryNotice(env, chatId, result.notice);
+      await finishRetry(store, entry, result.outcome);
+    } catch (err) {
+      console.error(`[recovery] chat=${chatId} worker failed:`, err.message);
+      // Keep the entry: a later cron reports an interrupted attempt. One broken
+      // chat must not prevent recovery attempts for all other due entries.
+    }
   }
 }
 
@@ -343,6 +438,13 @@ async function resolveSessionRoute(chatId, session, text, env) {
   if (!session.lastSessionId) {
     const newId = newSessionId(chatId);
     return { type: 'run', sessionId: newId, forceNew: true };
+  }
+
+  // 3.5 Slash commands are quick-actions / explicit bot commands — never show
+  // the session picker. They don't carry conversational context so disambiguation
+  // adds friction without value. Always route to the last known session.
+  if (text.startsWith('/')) {
+    return { type: 'run', sessionId: session.lastSessionId };
   }
 
   // 4. Recent session (< 2h) → continue it automatically, no friction
@@ -464,23 +566,18 @@ async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, f
 
 export async function transcribeVoice(fileId, mimeType, env) {
   const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const fileRes = await fetch(
+  const fileData = await readMedia(
     `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
   );
-  const fileData = await fileRes.json();
   if (!fileData.ok) {
     return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
   }
 
   // File download always goes through api.telegram.org/file/ — use same proxy base
   const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
-  const audioRes = await fetch(audioUrl);
-  if (!audioRes.ok) {
-    return { transcript: null, error: `audio download ${audioRes.status}` };
-  }
-  const audioBuffer = await audioRes.arrayBuffer();
+  const audioBuffer = await readMedia(audioUrl, {}, 'arrayBuffer', 120000);
 
-  const dgRes = await fetch(
+  const dgText = await readMedia(
     'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
     {
       method: 'POST',
@@ -489,12 +586,8 @@ export async function transcribeVoice(fileId, mimeType, env) {
         'Content-Type': mimeType || 'audio/ogg; codecs=opus',
       },
       body: audioBuffer,
-    }
+    }, 'text', 120000
   );
-  const dgText = await dgRes.text();
-  if (!dgRes.ok) {
-    return { transcript: null, error: `deepgram ${dgRes.status}: ${dgText.slice(0, 200)}` };
-  }
   const dgData = JSON.parse(dgText);
   const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
   if (!transcript) {

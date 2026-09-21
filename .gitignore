@@ -2,3 +2,7 @@ node_modules/
 .wrangler/
 dist/
 .dev.vars
+
+staging-results/
+
+wrangler.preview.toml

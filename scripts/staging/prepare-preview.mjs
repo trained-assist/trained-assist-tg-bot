@@ -1,0 +1,12 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+const worker = process.argv[2];
+if (!/^ta-tg-staging-[a-f0-9]{12}$/.test(worker || '')) throw Error('Invalid preview worker name');
+const source = readFileSync('wrangler.toml', 'utf8');
+const marker = '[env.staging]\n';
+if (source.split(marker).length !== 2) throw Error('Expected exactly one staging environment');
+const offset = source.indexOf(marker) + marker.length;
+const end = source.indexOf('\n[', offset);
+const section = source.slice(offset, end);
+if (!/^name = "trained-assist-tg-bot-staging"$/m.test(section)) throw Error('Unexpected staging name');
+const renamed = section.replace(/^name = "trained-assist-tg-bot-staging"$/m, `name = "${worker}"`);
+writeFileSync('wrangler.preview.toml', source.slice(0, offset) + renamed + source.slice(end));

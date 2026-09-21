@@ -1,3 +1,4 @@
+import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -70,10 +71,14 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, controlEpoch, controlEpochs }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now(), controlEpoch, controlEpochs }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
-  const body = { userId, username, context, sessionId, contextFromSession };
+  await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
+  const body = { userId, username, context, sessionId, contextFromSession, threadId, initiatedAt };
+  if (fileRefs?.length) body.fileRefs = fileRefs;
+  if (requestId) body.requestId = requestId;
   if (controlEpoch !== undefined || controlEpochs) body.controlEpoch = controlEpochs?.[agentUrl] ?? controlEpoch ?? 0;
+}
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
   if (forceNew) body.forceNew = true;
@@ -86,6 +91,17 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
+
+  if (env.RUN_OUTBOX) {
+    // Caller supplies Telegram/batch identity; fallback uses a stable status message.
+    body.requestId = requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
+    const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(`${username}:${userId}`));
+    const res = await stub.fetch('https://outbox/enqueue', {
+      method: 'POST', body: JSON.stringify({ agentUrl, body }),
+    });
+    if (!res.ok) throw Error(`outbox HTTP ${res.status}`);
+    return res.json();
+  }
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;
@@ -100,26 +116,30 @@ export async function runTask(env, { userId, username, task, context, sessionId,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
-    if (res.ok) return res.json();
+    if (res.ok) {
+      const ack=await res.json();
+      if(ack.durable){await releaseBufferPins(env,username,fileRefs);if(agentUrl!==env.AGENT_URL)await releaseBufferPins(env,username,fileRefs,agentUrl);}
+      return ack;
+    }
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
-      throw new Error(`agent /run HTTP ${res.status}`);
+      throw Object.assign(new Error(`agent /run HTTP ${res.status}`), { rejected: res.status >= 400 && res.status < 500 });
     }
   }
 }
 
 // The list remains available even if optional decision enrichment is broken.
 // Failure is explicit: never turn an unavailable project service into "no projects".
-export async function getProjectDecision(env, { username, chatId }) {
+export async function getProjectDecision(env, { username, chatId, task = '' }) {
   const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
   try {
     const res = await fetch(
-      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
+      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}`,
       { headers, signal: AbortSignal.timeout(9000) }
     );
     if (res.ok) {
       const data = await res.json();
-      if (!data.note && ['auto', 'ask', 'create'].includes(data.action) && Array.isArray(data.choices)) return data;
+      if (!data.note && ['auto', 'ask', 'create', 'quick'].includes(data.action) && Array.isArray(data.choices)) return data;
     }
   } catch { /* use the same agent's basic project list */ }
   const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,

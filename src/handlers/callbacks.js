@@ -1,18 +1,22 @@
+import { handleRestartConfirmation } from '../lib/restart-confirmations.js';
 import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
-import { rejectExpiredUI, PICKER_TTL_MS } from '../lib/transient-ui.js';
-import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
+import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
+import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
-import { runTask, getSessions, readFile, archiveSessions, getProjects } from '../lib/agent-client.js';
-import { cmdFiles, timeAgo, renderSessionList, cmdStop } from './commands.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
+import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
+  const initiatedAt = Date.now();
   const chatId = message?.chat?.id || from?.id;
 
   if (!chatId) return;
 
-  const session = await getSession(env.SESSIONS, chatId);
+  let session = await getSession(env.SESSIONS, chatId);
+
+  if (data?.startsWith('ri:')) return handleRestartConfirmation(cq, env, session);
 
   if (await rejectExpiredUI(cq, env, session)) return;
 
@@ -28,9 +32,10 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
 
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
+    const pendingFresh = pendingMessageFresh(session);
 
     const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
@@ -72,6 +77,8 @@ export async function handleCallbackQuery(cq, env) {
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
       try {
         const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
           userId: chatId,
           username: updatedSession.username,
           task: pending,
@@ -117,9 +124,10 @@ export async function handleCallbackQuery(cq, env) {
   // message (provisional name). Runs the stashed pending message, mirroring sp:.
   if (data?.startsWith('pp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
     const raw = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) < PICKER_TTL_MS;
+    const pendingFresh = pendingMessageFresh(session);
     const msgId = message?.message_id;
 
     if (!pendingFresh) {
@@ -165,6 +173,8 @@ export async function handleCallbackQuery(cq, env) {
 
     try {
       const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
         userId: chatId,
         username: updatedSession.username,
         task: pending,
@@ -530,6 +540,10 @@ export async function handleCallbackQuery(cq, env) {
   if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
+    // Clear the button immediately so it can't be pressed twice (important in group chats).
+    if (message?.message_id) {
+      editMessageReplyMarkup(env.BOT_TOKEN, chatId, message.message_id, []).catch(() => {});
+    }
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
@@ -565,6 +579,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -594,6 +610,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -623,6 +641,8 @@ export async function handleCallbackQuery(cq, env) {
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
@@ -633,6 +653,24 @@ export async function handleCallbackQuery(cq, env) {
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Stop task button (⛔ Стоп, sent by agent on task start) ─────────────────
+  // stop|{taskId} — stop the running task for this chat's profile.
+  // taskId is informational (one task per user, username is what matters).
+  if (data?.startsWith('stop|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    const msgId = message?.message_id;
+    try {
+      const result = await stopTask(env, { username: session.username });
+      const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      else await sendMessage(env.BOT_TOKEN, chatId, text);
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    }
     return;
   }
 

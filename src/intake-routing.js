@@ -13,6 +13,15 @@
 // prose like «давай сделаем…» / «…го…» (the «стартует сразу» bug, #530).
 export const FORCE_RUN_RE = /^\s*(запускай|запусти|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
 
+// Continuation / action signals: user has nothing more to add — dispatch immediately.
+// Whole-string match only so "продолжай с вакансией" doesn't trigger.
+export const AUTO_LAUNCH_RE = /^\s*(продолжай|продолжи|давай|ок|окей|хорошо|понял|понятно|ладно|действуй|вперёд|вперед|дальше|продолжить|делай|применяй|ага|угу|ok|yes|yep|sure|done|apply)\s*[!.]*\s*$/i;
+
+// Short follow-up threshold: messages at or below this character count use a
+// 2-second debounce and skip the completeness-nudge — they are almost always
+// self-contained questions or actions that need no further accumulation.
+export const SHORT_MSG_THRESHOLD = 80;
+
 /** Does this message carry anything worth accumulating (text or media)? */
 export function hasIntakeContent(msg) {
   return !!(msg && (msg.text || msg.photo || msg.voice || msg.audio || msg.document || msg.video));

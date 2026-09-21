@@ -2,34 +2,50 @@
 import { getSession } from './lib/kv.js';
 import { sendMessage, sendDocument } from './lib/telegram.js';
 import { pickAgentUrl } from './lib/agent-client.js';
-import { transcribeVoice, downloadTgFileBase64 } from './handlers/message.js';
+import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/intake-files.js';
+import { transcribeVoice } from './handlers/message.js';
 
-export const MEDIA_TTL_SECONDS = 48 * 60 * 60;
 
 export async function prepareIntake(msg, env, session) {
+  if (msg.fileRef?.storage === 'r2') return msg;
+  if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
+  const MAX_BYTES = 20 * 1024 * 1024;
   const media = msg.voice || msg.audio || msg.video ||
     (msg.document && /^(audio|video)\//i.test(msg.document.mime_type || '') ? msg.document : null);
   if (media) {
-    if (media.file_size > 20 * 1024 * 1024) throw new Error('Файл больше 20 MB');
+    if (!msg.voice && media.file_size && media.file_size > MAX_BYTES) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+      );
+      return { ...msg, fileTooLarge: true };
+    }
+    const fileRef = await storeTelegramFile(msg, media, env, session);
+    msg.fileRef = fileRef;
     const { transcript, error } = msg.transcript ? { transcript: msg.transcript }
       : await transcribeVoice(media.file_id, media.mime_type || null, env);
     if (!transcript) throw new Error(error || 'Пустая расшифровка');
+    const transcriptRef = await storeTranscript(msg, media, transcript, env, session);
     if (!msg.transcript) {
       const anchor = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
       if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, anchor);
       else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового');
     }
     // Keep the source media metadata for retry, but do not duplicate transcript in .text.
-    return { ...msg, transcript };
+    return { ...msg, transcript, fileRef, transcriptRef };
   }
   const file = msg.photo?.[msg.photo.length - 1] || msg.document;
   if (file) {
-    if (file.file_size > 18 * 1024 * 1024) return msg; // KV limit is 25 MiB including base64; download larger files at launch.
-    const data = await downloadTgFileBase64(file.file_id, env);
-    if (data.error) throw new Error(data.error);
-    const attachmentKey = `intake-media:${session.username}:${msg.chat.id}:${msg.message_id}`;
-    await env.SESSIONS.put(attachmentKey, JSON.stringify(data), { expirationTtl: MEDIA_TTL_SECONDS });
-    return { ...msg, attachmentKey };
+    if (file.file_size && file.file_size > MAX_BYTES) {
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+      );
+      return { ...msg, fileTooLarge: true };
+    }
+    const fileRef = await storeTelegramFile(msg, file, env, session);
+    const { attachmentKey, ...rest } = msg;
+    return { ...rest, fileRef };
   }
   return msg;
 }
@@ -37,6 +53,15 @@ export async function prepareIntake(msg, env, session) {
 export async function preflight(msg, env) {
   const session = await getSession(env.SESSIONS, msg.chat.id);
   if (!session) return { msg }; // normal login path remains authoritative
+  try {
+    const response=await fetch(`${env.AGENT_URL}/restart/activity`,{method:'POST',
+      headers:{'Content-Type':'application/json',Authorization:`Bearer ${env.AGENT_SECRET}`},
+      body:JSON.stringify({username:session.username,chatId:msg.chat.id,threadId:msg.message_thread_id??null,at:msg.date?msg.date*1000:Date.now()}),
+      signal:AbortSignal.timeout(3000)});
+    if(response.ok && (await response.json()).paused) {
+      await sendMessage(env.BOT_TOKEN,msg.chat.id,'⏸ Рестарт запланирован. Сообщение сохраняется; новые задачи пока не запускаются.');
+    }
+  }catch{ /* DO retains the input even while the agent is unavailable. */ }
   const prepared = await prepareIntake(msg, env, session);
   const query = [prepared.text || prepared.caption, prepared.transcript].filter(Boolean).join('\n');
   // A photo/document must reach the agent with its caption; a text-only quick reply
@@ -58,6 +83,7 @@ export async function preflight(msg, env) {
       reply_markup: { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${result.sessionId}` }]] },
     });
     if (!sent?.ok) throw new Error('Не удалось отправить быстрый ответ');
+    await releaseBufferPins(env,session.username,[prepared.fileRef,prepared.transcriptRef].filter(Boolean));
     return { msg: prepared, handled: true };
   } catch (error) {
     console.warn('[intake preflight] quick unavailable:', error.message);

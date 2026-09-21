@@ -11,8 +11,11 @@ permissions:
   pull-requests: write
 
 jobs:
-  merge-green-head:
+merge-green-head:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+
+  enable-auto-merge:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       # No checkout or execution of PR-controlled code with write credentials.

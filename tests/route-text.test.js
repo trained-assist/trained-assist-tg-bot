@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // and that the documented bypasses still reach handleMessage directly.
 
 const handleMessage = vi.fn();
+const openProjectChoice = vi.fn();
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 // commands/callbacks/etc. are pulled in transitively by index.js; stub the heavy ones.
 vi.mock('../src/handlers/commands.js', () => ({ handleCommand: vi.fn(), isAdminForwardedCommand: () => false }));
@@ -14,9 +15,12 @@ vi.mock('../src/handlers/user-mgmt.js', () => ({ handleUserMgmt: vi.fn(), isUser
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
 vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(), getOrCreateMappedSession: vi.fn() }));
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: vi.fn() }));
+vi.mock('../src/lib/agent-client.js', () => ({ getProjectDecision: vi.fn().mockResolvedValue({ action: 'auto', choices: [] }) }));
+vi.mock('../src/lib/project-choice.js', () => ({ openProjectChoice: (...a) => openProjectChoice(...a) }));
 
 import { routeText } from '../src/index.js';
 import { getSession } from '../src/lib/kv.js';
+import { getProjectDecision } from '../src/lib/agent-client.js';
 
 function makeEnv() {
   const appended = [];
@@ -31,7 +35,7 @@ function makeEnv() {
   };
 }
 
-beforeEach(() => { handleMessage.mockClear(); });
+beforeEach(() => { vi.clearAllMocks(); getProjectDecision.mockResolvedValue({ action: 'auto', choices: [] }); });
 
 describe('routeText — shared private+group intake rule', () => {
   it('buffers a plain text message instead of launching a session per message', async () => {
@@ -79,5 +83,36 @@ describe('routeText — shared private+group intake rule', () => {
     await routeText({ chat: { id: 42 }, text: 'что угодно' }, env, 42);
     expect(_appended).toHaveLength(0);
     expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows project picker immediately for brand-new session with ≥2 projects', async () => {
+    const { env, _appended } = makeEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice' }); // no lastSessionId
+    getProjectDecision.mockResolvedValueOnce({ action: 'ask', choices: [{ id: 'p1' }, { id: 'p2' }], active: 'p1' });
+    openProjectChoice.mockResolvedValueOnce();
+    const msg = { chat: { id: 42 }, text: 'привет, хочу начать работу' };
+    await routeText(msg, env, 42);
+    expect(openProjectChoice).toHaveBeenCalledTimes(1);
+    expect(openProjectChoice.mock.calls[0][3]).toMatchObject({ input: msg });
+    expect(_appended).toHaveLength(0); // did NOT go into the buffer
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it('buffers normally when brand-new session has only one project', async () => {
+    const { env, _appended } = makeEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice' }); // no lastSessionId
+    getProjectDecision.mockResolvedValueOnce({ action: 'auto', choices: [{ id: 'p1' }] });
+    await routeText({ chat: { id: 42 }, text: 'привет' }, env, 42);
+    expect(openProjectChoice).not.toHaveBeenCalled();
+    expect(_appended).toHaveLength(1); // went into buffer normally
+  });
+
+  it('buffers normally for returning user even when multi-project (picker shown after ▶️)', async () => {
+    const { env, _appended } = makeEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 'prev-session' });
+    await routeText({ chat: { id: 42 }, text: 'новый вопрос' }, env, 42);
+    expect(openProjectChoice).not.toHaveBeenCalled();
+    expect(_appended).toHaveLength(1);
+    expect(getProjectDecision).not.toHaveBeenCalled(); // no API call for returning users
   });
 });

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-const mocks = vi.hoisted(() => ({ send: vi.fn(), doc: vi.fn(), stt: vi.fn(), download: vi.fn(), handle: vi.fn() }));
+const mocks = vi.hoisted(() => ({ send: vi.fn(), doc: vi.fn(), stt: vi.fn(), download: vi.fn(), handle: vi.fn(), store: vi.fn(), transcriptStore: vi.fn(), release: vi.fn() }));
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: mocks.send, sendDocument: mocks.doc,
   sendMessageWithKeyboard: mocks.send, editMessage: mocks.send, editMessageReplyMarkup: mocks.send }));
 vi.mock('../src/handlers/message.js', () => ({ transcribeVoice: mocks.stt, downloadTgFileBase64: mocks.download, handleMessage: mocks.handle }));
-import { preflight, prepareIntake, MEDIA_TTL_SECONDS } from '../src/intake-preflight.js';
+vi.mock('../src/lib/intake-files.js', () => ({ storeTelegramFile: mocks.store, storeTranscript: mocks.transcriptStore, releaseBufferPins: mocks.release }));
+import { preflight, prepareIntake } from '../src/intake-preflight.js';
 import { IntakeBuffer } from '../src/intake-buffer.js';
 const msg = { chat: { id: 42 }, message_id: 1, text: 'ревью кандидатов' };
 function world() {
@@ -15,6 +16,8 @@ function world() {
   return { env, map, io: new IntakeBuffer(state, env) };
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
+  mocks.store.mockResolvedValue({ id: 'a'.repeat(64), name: 'photo.jpg', size: 5 });
+  mocks.transcriptStore.mockResolvedValue({ id: 'b'.repeat(64), name: 'transcript.txt', size: 10 });
   mocks.stt.mockResolvedValue({ transcript: 'ревью кандидатов' });
   mocks.download.mockResolvedValue({ base64: 'aGVsbG8=' });
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ answer: 'https://review.test', sessionId: 'qa-1' }))); });
@@ -24,12 +27,13 @@ describe('preflight before collector', () => {
     const { io, map } = world();
     await ingest(io, msg); await ingest(io, msg);
     expect(map.get('buf')).toEqual([]); expect(mocks.handle).not.toHaveBeenCalled();
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls.filter(([url])=>url.endsWith('/intake-quick'))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url])=>url.endsWith('/restart/activity'))).toHaveLength(1);
     expect(mocks.send.mock.calls[0][3].reply_markup.inline_keyboard[0][0].callback_data).toBe('qa_more|qa-1');
   });
   it('voice transcript is shown before quick request, never retranscribed at launch', async () => {
     const { env } = world();
-    fetch.mockImplementation(async () => { expect(mocks.send.mock.calls[0][2]).toBe('🎤 ревью кандидатов'); return Response.json({ answer: null }); });
+    fetch.mockImplementation(async url => { if(url.endsWith('/restart/activity'))return Response.json({paused:false}); expect(mocks.send.mock.calls[0][2]).toBe('🎤 ревью кандидатов'); return Response.json({ answer: null }); });
     const result = await preflight({ ...msg, text: undefined, voice: { file_id: 'v' } }, env);
     expect(result.msg.transcript).toBe('ревью кандидатов');
     await prepareIntake(result.msg, env, { username: 'alice' });
@@ -57,10 +61,10 @@ describe('preflight before collector', () => {
     expect(mocks.handle).toHaveBeenCalledTimes(1);
     expect(mocks.handle.mock.calls[0][0].intakeItems.map(i => i.msg.transcript)).toEqual(Array(5).fill('сложная задача'));
   });
-  it('photo caption cannot consume file as quick answer; cache expires after 48 hours', async () => {
+  it('photo caption cannot consume file as quick answer; stores a durable file ref, no KV bytes', async () => {
     const { env } = world(); const result = await preflight({ ...msg, photo: [{ file_id: 'p' }] }, env);
-    expect(fetch).not.toHaveBeenCalled(); expect(result.msg.attachmentKey).toContain('alice:42:1');
-    expect(env.SESSIONS.put.mock.calls[0][2]).toEqual({ expirationTtl: 172800 }); expect(MEDIA_TTL_SECONDS).toBe(172800);
+    expect(fetch.mock.calls.map(([url])=>url)).toEqual(['https://agent.test/restart/activity']); expect(result.msg.fileRef.id).toBe('a'.repeat(64));
+    expect(env.SESSIONS.put).not.toHaveBeenCalled();
   });
   it('failed transcription retains original voice for retry at launch', async () => {
     const { io, map } = world(); mocks.stt.mockResolvedValue({ error: 'unavailable' });

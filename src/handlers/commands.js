@@ -54,6 +54,7 @@ export async function handleCommand(msg, env) {
   }
 
   switch (cmd) {
+    case '/restart': return cmdRestart(msg, env);
     case '/start':   return cmdStart(chatId, env);
     case '/login':   return cmdLogin(msg, env);
     case '/logout':   return cmdLogout(chatId, env);
@@ -96,27 +97,45 @@ async function cmdStart(chatId, env) {
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
   }
+  //
+  // Recruiter bot: HH-секция первая (это рабочий домен бота), остальное — поддержка.
+  // Сортировка по домену, а не flat list — это то что юзер просил («/start ещё в том боте
+  // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
+  // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
+  const hhLines = [];
+  const otherLines = [];
+  const seen = new Set();
+  for (const entry of commandsRegistry.commands) {
+    if (entry.hidden || entry.adminOnly) continue;
+    if (seen.has(entry.command)) continue;
+    seen.add(entry.command);
+    const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
+    const line = `<code>${entry.command}</code>${aliases} — ${entry.description}`;
+    if (HH_START_COMMANDS.has(entry.command)) {
+      hhLines.push(line);
+    } else {
+      otherLines.push(line);
+    }
+  }
+
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
-    `Просто пиши задачи — я передам их Claude Code.\n\n` +
-    `<b>Команды:</b>\n` +
-    `/skills — что умеет агент (список скиллов)\n` +
-    `/sessions — мои диалоги\n` +
-    `/stop — остановить сессию и сохранить ввод\n` +
-    `/skip — перейти к следующему вводу, если появилась новая информация\n` +
-    `/fresh — начать без незавершённого ввода\n` +
-    `/persona &lt;текст&gt; — роль ассистента для этого профиля (без текста — показать)\n` +
-    `/project — проекты профиля: список / сменить / создать (новые сессии идут в активный)\n` +
-    `/files — файлы и папки\n` +
-    `/status — статус агента\n` +
-    `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
-    `/settoken — сохранить токен сервиса\n` +
-    `/report &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
-    `/chromeext_connect — подключить Chrome-расширение\n` +
-    `/chromeext_install — установить расширение\n` +
-    `/logout — выйти`
+`Это бот для работы с HeadHunter и ассистентом.\n` +
+    `Просто пиши задачи — я передам их агенту.\n\n` +
+    `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n` +
+    `<b>💼 Остальное (${otherLines.length}):</b>\n${otherLines.join('\n')}`
   );
 }
+
+// Commands that belong to the HH section in /start. Hardcoded list (not regex on
+// command prefix) because /new_job_post and /cancel_vacancy are HH-adjacent but
+// don't start with /hh_. New HH commands: add here + to commands-registry.json.
+const HH_START_COMMANDS = new Set([
+  '/hh_status', '/hh_connect', '/hh_disconnect',
+  '/hh_vacancies', '/hh_funnel', '/hh_responses', '/hh_review',
+  '/hh_ats', '/hh_evaluate', '/hh_send', '/hh_reject', '/hh_scan',
+  '/new_job_post', '/cancel_vacancy',
+]);
 
 export async function cmdLogin(msg, env) {
   const { chat, text, from } = msg;
@@ -246,6 +265,8 @@ async function cmdRu(msg, env) {
   try {
     const sessionId = newSessionId(chatId);
     await runTask(env, {
+      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: msg.message_thread_id || null,
+      requestId: `command-${chatId}-${msg.message_id}`,
       userId: chatId,
       username: session.username,
       task,
@@ -678,4 +699,32 @@ async function cmdAllOff(msg, env) {
     '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
     { disable_notification: true }
   );
+}
+
+// Hidden from /start and setMyCommands, deliberately available to all logged-in users.
+async function cmdRestart(msg, env) {
+  const session = await getSession(env.SESSIONS, msg.chat.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, msg.chat.id, 'Сначала войди через /login.');
+  const arg = msg.text.trim().split(/\s+/)[1] || '';
+  if (!['', 'status', 'cancel'].includes(arg)) return sendMessage(env.BOT_TOKEN, msg.chat.id, '/restart, /restart status или /restart cancel');
+  try {
+    const res = await fetch(`${env.AGENT_URL}/maintenance`, {
+      method: arg === 'status' ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
+      ...(arg === 'status' ? {} : { body: JSON.stringify({ action: arg === 'cancel' ? 'cancel' : 'request', initiator: { username: session.username, chatId: msg.chat.id, threadId: msg.message_thread_id || null } }) }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw Error(`HTTP ${res.status}`);
+    const state = await res.json();
+    const text = state.phase === 'failed'
+      ? '⚠️ Восстановление не завершено. Задачи сохранены, запуск приостановлен; требуется проверка сервера.'
+      : state.phase === 'restarting'
+      ? '🔄 Сервер перезапускается. Задачи сохранены; отменить начавшийся перезапуск нельзя.'
+      : state.paused
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохраняются и ждут перезапуска.`
+      : arg === 'cancel' ? '✅ Ожидание рестарта отменено. Очередь продолжает работу.' : '✅ Сервер работает; ожидающего рестарта нет.';
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, text);
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status после восстановления сервера.`);
+  }
 }
