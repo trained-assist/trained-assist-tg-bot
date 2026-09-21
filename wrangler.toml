@@ -3,16 +3,56 @@ main = "src/index.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-[vars]
-ADMIN_GROUP_ID = "-5308931318"
-BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://136-65-7-197.sslip.io"
+# Persistent Workers Logs — without this, console.log/error only exist in a live
+# `wrangler tail` session; a silent-drop bug (#595) leaves zero trace to diagnose
+# after the fact. Free, no perf cost, queryable in the CF dashboard for ~3 days.
+[observability]
+enabled = true
 
-# Secrets (set via `wrangler secret put`):
+# Durable recovery queue: two visible attempts, three minutes apart.
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+MEDIA_PIPELINE = "r2" # Release controller enables only after both VM readers pass.
+RECOVERY_IMPORT_LEGACY = "on"
+BOT_USERNAME = "super_personal_assistant_bot"
+INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
+
+# Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
+[[durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+[[durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+# NOTE (2026-09-18): existing deploys already created IntakeBuffer /
+# RetryQueue / MediaJob namespaces in their respective environments with
+# SQLite storage, so re-declaring `new_sqlite_classes` here fails CF API
+# code 10074 ("Cannot apply new-sqlite-class migration to class X that is
+# already depended on by existing Durable Objects"). Once applied,
+# `new_sqlite_classes` is permanent — it must NOT be re-declared. The
+# migrations below are kept commented as a record of the sequence that
+# was originally applied to default+staging+recruiter environments.
+#
+# [[migrations]]
+# tag = "v1"
+# new_sqlite_classes = ["IntakeBuffer"]
+#
+# [[migrations]]
+# tag = "v2-recovery"
+# new_sqlite_classes = ["RetryQueue"]
+
+# Secrets / private config (set via `wrangler secret put`):
 #   BOT_TOKEN      — Telegram bot token
 #   BOT_SECRET     — shared secret for Chrome extension
 #   AGENT_URL      — URL of trained-assist-agent HTTP API
+#   AGENT_RU_URL   — (optional) URL of a secondary/regional agent
 #   AGENT_SECRET   — shared secret for bot↔agent auth
+#   RELAY_URL      — URL of the token-relay / pairing service
+#   ADMIN_GROUP_ID — Telegram group ID for admin commands
 
 [[kv_namespaces]]
 binding = "SESSIONS"
@@ -27,21 +67,140 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
-ADMIN_GROUP_ID = "-5308931318"
+MEDIA_PIPELINE = "off"
+RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
-RELAY_URL = "https://136-65-7-197.sslip.io"
+INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
 
-# Staging uses same KV namespaces as prod (OK for integration testing)
+# DO binding must be redeclared per named env (migrations are top-level, shared).
+[[env.staging.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+# Dedicated staging KV; checked before mandatory replay
 [[env.staging.kv_namespaces]]
 binding = "SESSIONS"
-id = "5753e58c86c14550930106cf9248eb72"
+id = "b150ef5968d94849a79814ba8bc4ee42"
 
 [[env.staging.kv_namespaces]]
 binding = "USERS"
-id = "74c1930ed8464f4889c056031f0d42f8"
+id = "1928a191938f4f60b01fbe12d66380e0"
 
 # Secrets for staging — set once via:
 #   wrangler secret put BOT_TOKEN --env staging
 #   wrangler secret put BOT_SECRET --env staging
 #   wrangler secret put AGENT_URL --env staging
 #   wrangler secret put AGENT_SECRET --env staging
+
+# ── Recruiter environment (separate bot, same MCP/agent backend, recruiting-
+# domain commands pinned in the menu — so recruiter users don't mix with the
+# general-purpose bot's user base and command set) ─────────────────────────
+[env.recruiter]
+name = "trained-assist-tg-bot-recruiter"
+
+[env.recruiter.vars]
+RECOVERY_IMPORT_LEGACY = "off"
+BOT_USERNAME = "super_recruiter_assistant_bot"
+INTAKE_DEBOUNCE = "on"
+SESSION_NAMESPACE = "recruiter"
+
+[[env.recruiter.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+# Same USERS KV as prod — recruiters log in with the same account/profile
+# system as the main bot. Same SESSIONS KV — its only content is a harmless
+# per-chat member-count cache, safe to share across bots.
+[[env.recruiter.kv_namespaces]]
+binding = "SESSIONS"
+id = "5753e58c86c14550930106cf9248eb72"
+
+[[env.recruiter.kv_namespaces]]
+binding = "USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+# Secrets for recruiter — set once via:
+#   wrangler secret put BOT_TOKEN --env recruiter
+#   wrangler secret put AGENT_URL --env recruiter
+#   wrangler secret put AGENT_SECRET --env recruiter
+# (ADMIN_GROUP_ID / RELAY_URL / RELAY_BOT_SECRET / DEEPGRAM_API_KEY optional —
+# only needed if the recruiter bot grows an admin group, Chrome-ext pairing,
+# or voice-note transcription.)
+
+[[env.staging.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+[[env.recruiter.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+# Staging already deployed the planned-restart outbox from PR #103. Preserve
+# its class and migration history; production has not deployed that change.
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
+
+[[env.staging.migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.staging.migrations]]
+tag = "v3-recovery"
+new_sqlite_classes = ["RetryQueue"]
+
+# Media ingestion remains off until private R2 buckets are provisioned.
+# Keep these bindings and the object-read route through any flag rollback.
+[[durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+# NOTE: the v3-media `new_sqlite_classes = ["MediaJob"]` migration was
+# already applied to default+staging+recruiter and is now permanent. It
+# must NOT be re-declared (CF API code 10074). See top-level comment
+# above for the full sequence.
+
+[[env.staging.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+# Per-branch staging is an isolated worker (ta-tg-staging-<SUFFIX>) — created
+# fresh on every PR, so the SQLite migrations for staging's DO classes must
+# stay declared (they're new for that worker, never re-applied to existing
+# state). PR #153 / staging-gate fails with CF code 10061 without v4-media
+# because the binding [[env.staging.durable_objects.bindings]] MEDIA_JOBS
+# references a class the new worker has no migration for. Default+recruiter
+# workers already have MediaJob applied, so the top-level [[migrations]] v3-media
+# stays commented (see NOTE above) — only env.staging.migrations needs v4-media.
+[[env.staging.migrations]]
+tag = "v4-media"
+new_sqlite_classes = ["MediaJob"]
+
+[[env.recruiter.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+# Provisioned privately on 2026-09-16. Keep ingress off until both VM probes pass.
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media"
+
+[[env.staging.r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "trained-assist-media-staging"
+
+[[durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[migrations]]
+tag = "v4-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.staging.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+# Isolated previews do not process scheduled tasks.
+[env.staging.triggers]
+crons = []

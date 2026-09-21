@@ -1,16 +1,60 @@
+import { openProjectChoice } from '../lib/project-choice.js';
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
-import { getSession, setSession, deleteSession, getOrCreateMappedSession, getChatProfileFromMapping } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles, runTask, getSkills, reportBugOrFeature } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
+import { handleMessage } from './message.js';
+import commandsRegistry from '../../commands-registry.json';
+
+// Commands the agent handles itself (via getQuickAnswer / a session task) rather than
+// the gateway. The gateway must forward these to the agent instead of rejecting them as
+// "unknown" — otherwise agent-side commands stay invisible until the gateway is
+// redeployed. Derived from commands-registry.json (handler: "forward") instead of a
+// hand-maintained Set — see that file for the single source of truth + scripts/
+// check-commands-registry.js, which is what used to go stale and hide agent commands
+// from Telegram until someone remembered to update this list by hand.
+const AGENT_FORWARDED_COMMANDS = new Set(
+  commandsRegistry.commands
+    .filter((c) => c.handler === 'forward')
+    .flatMap((c) => [c.command, ...c.aliases])
+);
+
+// Admin-only agent commands that must ALSO pass through the admin-group branch in
+// index.js (which otherwise only forwards user-mgmt commands and silently drops the
+// rest). Without this, /get_webpass typed in the admin group gets no reply at all.
+const ADMIN_FORWARDED_COMMANDS = new Set(
+  commandsRegistry.commands
+    .filter((c) => c.handler === 'forward' && c.adminOnly)
+    .flatMap((c) => [c.command, ...c.aliases])
+);
+export function isAdminForwardedCommand(text) {
+  const cmd = (text || '').split(' ')[0].split('@')[0].toLowerCase();
+  return ADMIN_FORWARDED_COMMANDS.has(cmd);
+}
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
   const cmd = text.split(' ')[0].split('@')[0]; // strip @botname
 
+  // Agent-side commands (e.g. /persona) are handled downstream in the agent, not here.
+  // Forward the raw message so the agent's task pipeline sees the full text + args.
+  if (AGENT_FORWARDED_COMMANDS.has(cmd.toLowerCase())) {
+    // Convenience: set the role by REPLYING to a message with just `/persona`.
+    // If there's no inline arg (and it isn't a control word), lift the replied-to
+    // message's text/caption in as the role body, so users don't retype paragraphs.
+    const inline = text.slice(cmd.length).trim();
+    const quoted = (msg.reply_to_message?.text || msg.reply_to_message?.caption || '').trim();
+    if (quoted && !inline) {
+      return handleMessage({ ...msg, text: `${cmd} ${quoted}` }, env);
+    }
+    return handleMessage(msg, env);
+  }
+
   switch (cmd) {
+    case '/restart': return cmdRestart(msg, env);
     case '/start':   return cmdStart(chatId, env);
     case '/login':   return cmdLogin(msg, env);
     case '/logout':   return cmdLogout(chatId, env);
@@ -31,51 +75,78 @@ export async function handleCommand(msg, env) {
     case '/files':
     case '/папки':             return cmdFiles(chatId, env);
     case '/ru':                return cmdRu(msg, env);
+    case '/стоп':
+    case '/stop':              return cmdStop(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
+case '/report':
     case '/bug_report_or_feature_request':
-    case '/report': return cmdReport(msg, env);
+    case '/report_bug_or_feature_request': return cmdReport(msg, env);
     default:
       return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
   }
 }
 
 async function cmdStart(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
   }
+  //
+  // Recruiter bot: HH-секция первая (это рабочий домен бота), остальное — поддержка.
+  // Сортировка по домену, а не flat list — это то что юзер просил («/start ещё в том боте
+  // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
+  // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
+  const hhLines = [];
+  const otherLines = [];
+  const seen = new Set();
+  for (const entry of commandsRegistry.commands) {
+    if (entry.hidden || entry.adminOnly) continue;
+    if (seen.has(entry.command)) continue;
+    seen.add(entry.command);
+    const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
+    const line = `<code>${entry.command}</code>${aliases} — ${entry.description}`;
+    if (HH_START_COMMANDS.has(entry.command)) {
+      hhLines.push(line);
+    } else {
+      otherLines.push(line);
+    }
+  }
+
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
-    `Просто пиши задачи — я передам их Claude Code.\n\n` +
+`Просто пиши задачи — я передам их Claude Code.\n\n` +
     `<b>Команды:</b>\n` +
     `/skills — что умеет агент (список скиллов)\n` +
     `/sessions — мои диалоги\n` +
     `/files — файлы и папки\n` +
     `/status — статус агента\n` +
-    `/ru &lt;задача&gt; — задача через РФ IP (nalog.ru и т.п.)\n` +
+    `/ru <задача> — задача через РФ IP (nalog.ru и т.п.)\n` +
     `/settoken — сохранить токен сервиса\n` +
-    `/bug_report_or_feature_request &lt;описание&gt; — сообщить о баге или предложить фичу\n` +
+    `/bug_report_or_feature_request <описание> — сообщить о баге или предложить фичу\n` +
     `/chromeext_connect — подключить Chrome-расширение\n` +
     `/chromeext_install — установить расширение\n` +
     `/logout — выйти`
   );
 }
 
-async function cmdLogin(msg, env) {
+// Commands that belong to the HH section in /start. Hardcoded list (not regex on
+// command prefix) because /new_job_post and /cancel_vacancy are HH-adjacent but
+// don't start with /hh_. New HH commands: add here + to commands-registry.json.
+const HH_START_COMMANDS = new Set([
+  '/hh_status', '/hh_connect', '/hh_disconnect',
+  '/hh_vacancies', '/hh_funnel', '/hh_responses', '/hh_review',
+  '/hh_ats', '/hh_evaluate', '/hh_send', '/hh_reject', '/hh_scan',
+  '/new_job_post', '/cancel_vacancy',
+]);
+
+export async function cmdLogin(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
-
-  const mappedProfile = getChatProfileFromMapping(chatId, env);
-  if (mappedProfile) {
-    return sendMessage(env.BOT_TOKEN, chatId,
-      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — войти вручную нельзя.`
-    );
-  }
 
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
@@ -100,19 +171,27 @@ async function cmdLogin(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
   }
 
-  await setSession(env.SESSIONS, chatId, { username, name: user.name, telegramUserId: from?.id });
+  const isGroup = ['group', 'supergroup'].includes(chat.type);
+  // Uniformity (owner 2026-09-14): a logged-in group must behave like a private chat —
+  // EVERY message reaches the intake accumulator. Previously login only asked the user
+  // to run /all_on; without it ambient messages fell to the memberCount gate, which
+  // fails closed (999) when getChatMemberCount can't read the count → "ноль реакции,
+  // старт только реплаем". Auto-enabling allMsgMode here removes that manual step and
+  // the flaky-count dependency. Reversible: /all_off turns it back off.
+  await setSession(env.SESSIONS, chatId, {
+    username, name: user.name, telegramUserId: from?.id,
+    ...(isGroup ? { allMsgMode: true } : {}),
+  });
   return sendMessage(env.BOT_TOKEN, chatId,
-    `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
+    isGroup
+      ? `✅ Добро пожаловать, ${user.name}!\n\n` +
+        `Пиши задачи как в личке — я собираю все сообщения и запускаю проработку по кнопке «▶️».\n\n` +
+        `Отключить режим «все сообщения → агенту»: <b>/all_off</b>`
+      : `✅ Добро пожаловать, ${user.name}!\n\nПросто пиши задачи — я передам их Claude Code.`
   );
 }
 
 async function cmdLogout(chatId, env) {
-  const mappedProfile = getChatProfileFromMapping(chatId, env);
-  if (mappedProfile) {
-    return sendMessage(env.BOT_TOKEN, chatId,
-      `🔗 Этот чат привязан к профилю <b>${mappedProfile}</b> — выйти вручную нельзя.`
-    );
-  }
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
@@ -124,7 +203,7 @@ async function cmdLogout(chatId, env) {
 }
 
 async function cmdProfile(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👤 <b>Профиль</b>\n\nТы не авторизован.\n\n<code>/login username password</code>'
@@ -145,12 +224,12 @@ async function cmdProfile(chatId, env) {
     `👤 <b>Профиль</b>\n\n` +
     `Имя: <b>${session.name}</b>\n` +
     `Логин: <code>${session.username}</code>`,
-    buttons
+    buttons, {}, env
   );
 }
 
 async function cmdStatus(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован. /login username password');
 
   const [agentOk, agentRuOk] = await Promise.all([
@@ -172,7 +251,7 @@ async function cmdStatus(chatId, env) {
 async function cmdRu(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const task = text.replace(/^\/ru\s*/i, '').trim();
@@ -191,8 +270,10 @@ async function cmdRu(msg, env) {
   }
 
   try {
-    const sessionId = `s-${chatId}-${Date.now()}`;
+    const sessionId = newSessionId(chatId);
     await runTask(env, {
+      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: msg.message_thread_id || null,
+      requestId: `command-${chatId}-${msg.message_id}`,
       userId: chatId,
       username: session.username,
       task,
@@ -219,7 +300,7 @@ async function cmdVersion(chatId, env) {
 async function cmdSetToken(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const args = text.trim().split(/\s+/);
@@ -307,7 +388,7 @@ async function cmdChromeExtInstall(chatId, env) {
 async function cmdReport(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   const description = text.replace(/^\/(bug_report_or_feature_request|report)\s*/i, '').trim();
@@ -315,10 +396,10 @@ async function cmdReport(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '🐛 <b>Сообщить о баге или предложить фичу</b>\n\n' +
       'Использование:\n' +
-      '<code>/bug_report_or_feature_request описание проблемы или идеи</code>\n\n' +
-      'Примеры:\n' +
-      '<code>/bug_report_or_feature_request при отправке файла бот зависает</code>\n' +
-      '<code>/bug_report_or_feature_request хочу чтобы можно было скачивать сессии в PDF</code>'
+'<code>/report описание проблемы или идеи</code>\n\n' +
+'Примеры:\n' +
+'<code>/report при отправке файла бот зависает</code>\n' +
+'<code>/report хочу чтобы можно было скачивать сессии в PDF</code>'
     );
   }
 
@@ -351,8 +432,40 @@ export function timeAgo(ts) {
   return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
 
+export function escHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Descriptive session list: a readable text body (number · project · title · gist ·
+// meta) plus a compact row of numbered tap-buttons. Replaces the old truncated-label
+// button list — users couldn't tell the dialogs apart from a 40-char button. The text
+// reads like the agent's own /sessions view (durable summary.gist); the numbers below
+// stay one-tap and robust (no ambiguous free-text number parsing).
+//   callbackPrefix: 'sd' → open action submenu (continue/info/archive);
+//                   'sn' → start new dialog loading that session's context.
+// Returns { text, buttons } for sendMessageWithKeyboard.
+export function renderSessionList(list, { callbackPrefix = 'sd', header = '💬 <b>Диалоги</b>', hint = 'Выбери номер диалога ниже, чтобы вернуться и продолжить:' } = {}) {
+  const lines = [header, '', hint, ''];
+  list.forEach((s, i) => {
+    const n = i + 1;
+    const title = (s.summary && s.summary.title) ? s.summary.title : (s.topic || 'Диалог');
+    const gist = s.summary && s.summary.gist ? s.summary.gist : '';
+    const proj = s.projectName || s.projectDir || '';
+    const count = s.messageCount || (s.messages && s.messages.length) || 0;
+    lines.push(`<b>${n}. ${escHtml(title.slice(0, 80))}</b>`);
+    if (proj) lines.push(`📁 проект: ${escHtml(proj)}`);
+    if (gist) lines.push(escHtml(gist.slice(0, 220)));
+    lines.push(`🕒 ${timeAgo(s.lastAt)} · ${count} сообщ.`);
+    lines.push('');
+  });
+  const numBtns = list.map((s, i) => ({ text: String(i + 1), callback_data: `${callbackPrefix}:${s.id}` }));
+  const rows = [];
+  for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
+  return { text: lines.join('\n').trim(), buttons: rows };
+}
+
 async function cmdSessions(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let list;
@@ -368,30 +481,28 @@ async function cmdSessions(chatId, env) {
     );
   }
 
-  // Tapping a session opens action submenu, not immediate continue
-  const buttons = list.map(s => {
-    const label = `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`;
-    return [{ text: label, callback_data: `sd:${s.id}` }];
-  });
+  // Descriptive text body + numbered tap-buttons (see renderSessionList).
+  // Tapping a number opens the action submenu (sd:), not an immediate continue.
+  const { text, buttons } = renderSessionList(list, { callbackPrefix: 'sd' });
   buttons.push([
     { text: '✨ Новый диалог', callback_data: 'nd:' },
     { text: '🗂 Архивировать', callback_data: 'ar:menu' },
   ]);
 
-  return sendMessageWithKeyboard(
-    env.BOT_TOKEN, chatId,
-    '💬 <b>Диалоги</b>\n\nВыбери диалог:',
-    buttons
-  );
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
 }
 
 async function cmdClose(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   await setSession(env.SESSIONS, chatId, {
     ...session,
     activeSessionId: null,
+    activeSessionIsNew: false,
+    projectSelectionSessionId: null,
+    pendingNewProject: false,
+    pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
     lastSessionId: null,
     pendingMessage: null,
     pendingMessageAt: null,
@@ -403,21 +514,15 @@ async function cmdClose(chatId, env) {
 }
 
 async function cmdNewDialog(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
-  return sendMessageWithKeyboard(
-    env.BOT_TOKEN, chatId,
-    '✨ <b>Новый диалог</b>\n\nМожете просто начать писать — или загрузить контекст из одного из прошлых диалогов:',
-    [
-      [{ text: '✏️ Чистый лист — просто начну писать', callback_data: 'nd:clean' }],
-      [{ text: '📚 Выбрать диалог и загрузить контекст', callback_data: 'nd:ctx' }],
-    ]
-  );
+  try { return await openProjectChoice(env, chatId, session); }
+  catch (err) { return sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
 }
 
 export async function cmdFiles(chatId, env, relPath = '') {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let data;
@@ -465,11 +570,11 @@ export async function cmdFiles(chatId, env, relPath = '') {
   }
 
   const title = currentPath ? `📂 <code>${currentPath}</code>` : '📂 <b>Файлы</b>';
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons);
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons, {}, env);
 }
 
 async function cmdSkills(chatId, env) {
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   let skills;
@@ -501,6 +606,24 @@ async function cmdPrivacy(chatId, env) {
   );
 }
 
+async function cmdStop(msg, env) {
+  const { chat } = msg;
+  const chatId = chat.id;
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  try {
+    const result = await stopTask(env, { username: session.username });
+    if (result.killed > 0) {
+      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
+    } else {
+      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
+    }
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+  }
+}
+
 async function cmdAllOn(msg, env) {
   const { chat } = msg;
   const chatId = chat.id;
@@ -510,7 +633,7 @@ async function cmdAllOn(msg, env) {
     return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Эта команда работает только в группах.');
   }
 
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   if (session.allMsgMode) {
@@ -537,7 +660,7 @@ async function cmdAllOff(msg, env) {
   const { chat } = msg;
   const chatId = chat.id;
 
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, msg.from?.id);
+  const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   if (!session.allMsgMode) {
@@ -563,4 +686,32 @@ async function cmdAllOff(msg, env) {
     '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
     { disable_notification: true }
   );
+}
+
+// Hidden from /start and setMyCommands, deliberately available to all logged-in users.
+async function cmdRestart(msg, env) {
+  const session = await getSession(env.SESSIONS, msg.chat.id);
+  if (!session) return sendMessage(env.BOT_TOKEN, msg.chat.id, 'Сначала войди через /login.');
+  const arg = msg.text.trim().split(/\s+/)[1] || '';
+  if (!['', 'status', 'cancel'].includes(arg)) return sendMessage(env.BOT_TOKEN, msg.chat.id, '/restart, /restart status или /restart cancel');
+  try {
+    const res = await fetch(`${env.AGENT_URL}/maintenance`, {
+      method: arg === 'status' ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
+      ...(arg === 'status' ? {} : { body: JSON.stringify({ action: arg === 'cancel' ? 'cancel' : 'request', initiator: { username: session.username, chatId: msg.chat.id, threadId: msg.message_thread_id || null } }) }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw Error(`HTTP ${res.status}`);
+    const state = await res.json();
+    const text = state.phase === 'failed'
+      ? '⚠️ Восстановление не завершено. Задачи сохранены, запуск приостановлен; требуется проверка сервера.'
+      : state.phase === 'restarting'
+      ? '🔄 Сервер перезапускается. Задачи сохранены; отменить начавшийся перезапуск нельзя.'
+      : state.paused
+      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохраняются и ждут перезапуска.`
+      : arg === 'cancel' ? '✅ Ожидание рестарта отменено. Очередь продолжает работу.' : '✅ Сервер работает; ожидающего рестарта нет.';
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, text);
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status после восстановления сервера.`);
+  }
 }

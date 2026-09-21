@@ -1,35 +1,57 @@
-import { getOrCreateMappedSession, setSession, deleteSession } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
+import { handleRestartConfirmation } from '../lib/restart-confirmations.js';
+import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
+import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
+import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
-import { cmdFiles, timeAgo } from './commands.js';
+import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
+  const initiatedAt = Date.now();
   const chatId = message?.chat?.id || from?.id;
 
   if (!chatId) return;
 
-  const session = await getOrCreateMappedSession(env.SESSIONS, chatId, env, from?.id);
+  let session = await getSession(env.SESSIONS, chatId);
+
+  if (data?.startsWith('ri:')) return handleRestartConfirmation(cq, env, session);
+
+  if (await rejectExpiredUI(cq, env, session)) return;
+
+  if (data?.startsWith('pc:')) return chooseProject(cq, env, session);
 
   // ── Session picker (from message.js disambiguation) ──────────────────────
   // sp:<id> or sp:new — triggered when routing was ambiguous
   if (data?.startsWith('sp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
 
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
-    const pendingFresh = pending && session.pendingMessageAt && (Date.now() - session.pendingMessageAt) <= 10 * 60 * 1000;
+    const pendingFresh = pendingMessageFresh(session);
 
-    const resolvedId = sessionId === 'new' ? `s-${chatId}-${Date.now()}` : sessionId;
+    const resolvedId = sessionId === 'new' ? newSessionId(chatId) : sessionId;
 
     const msgId = message?.message_id;
 
+    if (sessionId === 'new') {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      try {
+        await openProjectChoice(env, chatId, session, {
+          input: pendingFresh ? (session.pendingOriginalMessage || { chat: { id: chatId }, text: pending }) : null,
+          opts: session.pendingOriginalOpts || {},
+        });
+      } catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+      return;
+    }
+
     if (pendingFresh) {
       // Happy path: pending message exists and is fresh — run it
-      await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Запускаю…');
+      await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
 
-      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '⏳ Запускаю…');
+      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
       // Capture post-write state so .then() below spreads from the same base,
@@ -44,24 +66,32 @@ export async function handleCallbackQuery(cq, env) {
       };
       await setSession(env.SESSIONS, chatId, updatedSession);
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
-      if (msgId) editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — ⏳ думаю…`, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
-      runTask(env, {
-        userId: chatId,
-        username: updatedSession.username,
-        task: pending,
-        context: null,
-        sessionId: resolvedId,
-        initialMsgId,
-        pinnedMsgId: updatedSession.pinnedMsgId || null,
-        telegramUserId: updatedSession.telegramUserId,
-        projectDir: updatedSession.projectDir || null,
-      }).then(result => {
+      // MUST await so the dispatch→waitUntil chain keeps the Worker alive until the HTTP call lands.
+      // Without await, Cloudflare terminates the execution context before /run is ever fetched.
+      try {
+        const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
+          userId: chatId,
+          username: updatedSession.username,
+          task: pending,
+          context: null,
+          sessionId: resolvedId,
+          forceNew: sessionId === 'new',
+          initialMsgId,
+          pinnedMsgId: updatedSession.pinnedMsgId || null,
+          telegramUserId: updatedSession.telegramUserId,
+          projectId: updatedSession.projectId || null,
+        });
         const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
         if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
-          return setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+          await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
         }
-      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      } catch (err) {
+        sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
+      }
     } else {
       // KV stale or message expired — replace keyboard with prompt to write
       await answerCallbackQuery(env.BOT_TOKEN, id);
@@ -76,10 +106,88 @@ export async function handleCallbackQuery(cq, env) {
         ? '✨ Новый диалог — напиши свою задачу!'
         : '↩️ Диалог выбран — напиши следующее сообщение.';
       if (msgId) {
-        editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
         await sendMessage(env.BOT_TOKEN, chatId, promptText);
       }
+    }
+    return;
+  }
+
+  // ── Project picker (from message.js new-dialog, issue #517) ───────────────
+  // pp:<index> — bind chosen typed project; pp:new — create a project from the first
+  // message (provisional name). Runs the stashed pending message, mirroring sp:.
+  if (data?.startsWith('pp:')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
+    const raw = data.slice(3);
+    const pending = session.pendingMessage;
+    const pendingFresh = pendingMessageFresh(session);
+    const msgId = message?.message_id;
+
+    if (!pendingFresh) {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await setSession(env.SESSIONS, chatId, { ...session, pendingMessage: null, pendingMessageAt: null });
+      const t = '⌛ Сообщение устарело — напиши задачу заново, спрошу проект снова.';
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, t, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      else await sendMessage(env.BOT_TOKEN, chatId, t);
+      return;
+    }
+
+    // Resolve chosen project id (existing) OR a new-project name (from the first message).
+    let projectId = null, newProjectName = null, label = '';
+    if (raw === 'new') {
+      newProjectName = (pending.split('\n')[0] || '').trim().slice(0, 60) || 'Новый проект';
+      label = `➕ ${newProjectName}`;
+    } else {
+      const projects = await getProjects(env, { username: session.username, userId: chatId });
+      const chosen = projects[parseInt(raw, 10)];
+      if (!chosen) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Проект не найден'); return; }
+      projectId = chosen.id;
+      label = `📁 ${chosen.label || chosen.name}`;
+    }
+
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
+    const resolvedId = newSessionId(chatId);
+    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
+    const initialMsgId = placeholderRes?.result?.message_id ?? null;
+
+    const updatedSession = {
+      ...session,
+      lastSessionId: resolvedId,
+      lastMessageAt: Date.now(),
+      pendingMessage: null,
+      pendingMessageAt: null,
+      activeSessionId: null,
+      // Remember the picked project as the chat's hint (new-project id is unknown here;
+      // the agent stores it on the session record and re-binds on continuation).
+      projectId: projectId || session.projectId || null,
+    };
+    await setSession(env.SESSIONS, chatId, updatedSession);
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+
+    try {
+      const result = await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
+        userId: chatId,
+        username: updatedSession.username,
+        task: pending,
+        context: null,
+        sessionId: resolvedId,
+        forceNew: true,
+        initialMsgId,
+        pinnedMsgId: updatedSession.pinnedMsgId || null,
+        telegramUserId: updatedSession.telegramUserId,
+        projectId,
+        newProjectName,
+      });
+      const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
+      if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
+        await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+      }
+    } catch (err) {
+      sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
     }
     return;
   }
@@ -100,7 +208,7 @@ export async function handleCallbackQuery(cq, env) {
         [{ text: '✨ Новый диалог с этим контекстом',    callback_data: `sn:${sessionId}` }],
         [{ text: '🗑 Архивировать этот диалог',          callback_data: `sa:${sessionId}` }],
         [{ text: '← Назад к списку',                    callback_data: 'sl:' }],
-      ]
+      ], {}, env
     );
     return;
   }
@@ -112,6 +220,11 @@ export async function handleCallbackQuery(cq, env) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       activeSessionId: sessionId,
+      activeSessionIsNew: false,
+      projectSelectionSessionId: null,
+      pendingNewProject: false,
+      contextFromSession: null,
+      pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
     });
@@ -174,19 +287,9 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sn:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
-    const newId = `s-${chatId}-${Date.now()}`;
-    // Store source session ID so agent loads its context into the new session
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      activeSessionId: null,
-      lastSessionId: newId,
-      lastMessageAt: Date.now(),
-      contextFromSession: sourceSessionId,
-    });
-    await answerCallbackQuery(env.BOT_TOKEN, id, '✨ Новый диалог с контекстом');
-    await sendMessage(env.BOT_TOKEN, chatId,
-      '✨ <b>Новый диалог</b>\n\nКонтекст предыдущего диалога загружен. Пиши — начнём с чистого листа, но я буду знать историю.'
-    );
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    try { await openProjectChoice(env, chatId, session, { contextFromSession: sourceSessionId }); }
+    catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
     return;
   }
 
@@ -200,131 +303,28 @@ export async function handleCallbackQuery(cq, env) {
       await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов.');
       return;
     }
-    const buttons = list.map(s => ([{
-      text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
-      callback_data: `sd:${s.id}`,
-    }]));
+    const { text, buttons } = renderSessionList(list, { callbackPrefix: 'sd' });
     buttons.push([
       { text: '✨ Новый диалог', callback_data: 'nd:' },
       { text: '🗂 Архивировать', callback_data: 'ar:menu' },
     ]);
-    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, '💬 <b>Диалоги</b>\n\nВыбери диалог:', buttons);
-    return;
-  }
-
-  // ── Project folder picker ─────────────────────────────────────────────────
-  // fp:{folderName} — select project folder (empty = root)
-  // fpg:{page}      — navigate to page n of the folder list
-  const FP_PAGE_SIZE = 6;
-
-  async function showFolderPicker(chatId, session, msgId, page = 0) {
-    const projects = await getProjects(env, { username: session.username, userId: chatId });
-    const total = projects.length;
-    const start = page * FP_PAGE_SIZE;
-    const pageItems = projects.slice(start, start + FP_PAGE_SIZE);
-
-    // Use absolute numeric index in callback_data to avoid Telegram's 64-byte limit
-    // on long project path names. fp: handler re-fetches and looks up by index.
-    const buttons = pageItems.map((p, i) => [{
-      text: `${p.label}${p.count > 0 ? ` (${p.count})` : ''}`,
-      callback_data: `fp:${start + i}`,
-    }]);
-
-    // Always show a "skip / root" escape so users are never stuck with no exit path
-    buttons.push([{ text: '📂 Без папки (корень)', callback_data: 'fp:' }]);
-
-    // Pagination row
-    const navRow = [];
-    if (page > 0) navRow.push({ text: '⬅️', callback_data: `fpg:${page - 1}` });
-    if (start + FP_PAGE_SIZE < total) navRow.push({ text: '➡️', callback_data: `fpg:${page + 1}` });
-    if (navRow.length > 0) buttons.push(navRow);
-
-    const text = total === 0
-      ? '📁 <b>Нет проектов</b> — начнём в корневой директории.'
-      : '📁 <b>Выбери рабочую папку</b>\n\nЦифра в скобках — сколько раз запускал сессию:';
-    if (msgId) {
-      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: buttons } })
-        .catch(() => sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons));
-    } else {
-      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons);
-    }
-  }
-
-  if (data?.startsWith('fp:')) {
-    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id);
-    const raw = data.slice(3); // '' = root, numeric = absolute project index
-    let folderName;
-    if (raw === '') {
-      folderName = '';
-    } else if (/^\d+$/.test(raw)) {
-      const projects = await getProjects(env, { username: session.username, userId: chatId });
-      folderName = projects[parseInt(raw, 10)]?.name ?? '';
-    } else {
-      folderName = raw; // legacy string form
-    }
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      projectDir: folderName || null,
-      activeSessionId: null,
-      lastSessionId: null,
-      contextFromSession: null,
-    });
-    const folderLabel = folderName || 'корень';
-    const msgId = message?.message_id;
-    const text = `✏️ <b>Новый диалог</b> — папка <code>${folderLabel}</code>\n\nПиши свою задачу — начнём с нуля.`;
-    if (msgId) {
-      await editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } })
-        .catch(() => sendMessage(env.BOT_TOKEN, chatId, text));
-    } else {
-      await sendMessage(env.BOT_TOKEN, chatId, text);
-    }
-    return;
-  }
-
-  if (data?.startsWith('fpg:')) {
-    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id);
-    const page = parseInt(data.slice(4)) || 0;
-    await showFolderPicker(chatId, session, message?.message_id, page);
+    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
     return;
   }
 
   // ── New dialog flow ───────────────────────────────────────────────────────
-  // nd: — show folder picker to start fresh dialog
-  // nd:clean — fresh start without picking folder
-  // nd:ctx — pick session to load context from
+  // nd: / nd:clean — immediately choose a project before writing the task.
+  // nd:ctx   — pick session to load context from
   // nd:ctx:<id> — load context from specific session
   if (data?.startsWith('nd:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
 
     const sub = data.slice(3);
 
-    if (sub === '') {
-      // Show folder picker first
+    if (sub === '' || sub === 'clean') {
       await answerCallbackQuery(env.BOT_TOKEN, id);
-      await showFolderPicker(chatId, session, message?.message_id, 0);
-      return;
-    }
-
-    if (sub === 'clean') {
-      // Clear active session, start fresh (keep current projectDir)
-      await setSession(env.SESSIONS, chatId, {
-        ...session,
-        activeSessionId: null,
-        lastSessionId: null,
-        contextFromSession: null,
-      });
-      await answerCallbackQuery(env.BOT_TOKEN, id);
-      const msgId = message?.message_id;
-      const text = '✏️ <b>Новый диалог</b>\n\nПиши свою задачу — начнём с нуля.';
-      if (msgId) {
-        await editMessage(env.BOT_TOKEN, chatId, msgId, text).catch(() =>
-          sendMessage(env.BOT_TOKEN, chatId, text)
-        );
-      } else {
-        await sendMessage(env.BOT_TOKEN, chatId, text);
-      }
+      try { await openProjectChoice(env, chatId, session); }
+      catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
       return;
     }
 
@@ -337,15 +337,12 @@ export async function handleCallbackQuery(cq, env) {
         await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов для загрузки контекста.');
         return;
       }
-      const buttons = list.map(s => ([{
-        text: `${s.topic.slice(0, 32)} · ${timeAgo(s.lastAt)}`,
-        callback_data: `sn:${s.id}`,
-      }]));
-      await sendMessageWithKeyboard(
-        env.BOT_TOKEN, chatId,
-        '📚 <b>Выбери диалог</b>\n\nКонтекст загрузится в новый диалог:',
-        buttons
-      );
+      const { text, buttons } = renderSessionList(list, {
+        callbackPrefix: 'sn',
+        header: '📚 <b>Загрузить контекст в новый диалог</b>',
+        hint: 'Выбери номер диалога ниже — его контекст загрузится в новый:',
+      });
+      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
       return;
     }
 
@@ -436,7 +433,7 @@ export async function handleCallbackQuery(cq, env) {
           [{ text: '🗂 Оставить 3 последних',                  callback_data: 'ar:keep:3' }],
           [{ text: '📋 Выбрать отдельный диалог',              callback_data: 'ar:pick' }],
           [{ text: '← Назад к диалогам',                      callback_data: 'sl:' }],
-        ]
+        ], {}, env
       );
       return;
     }
@@ -457,7 +454,7 @@ export async function handleCallbackQuery(cq, env) {
       await sendMessageWithKeyboard(
         env.BOT_TOKEN, chatId,
         '📋 <b>Выбери диалог для архивирования:</b>',
-        buttons
+        buttons, {}, env
       );
       return;
     }
@@ -517,7 +514,7 @@ export async function handleCallbackQuery(cq, env) {
       const msgId = message?.message_id;
       const text = '✅ <b>Диалог архивирован.</b>';
       if (msgId) {
-        editMessage(env.BOT_TOKEN, chatId, msgId, text, { reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
         await sendMessage(env.BOT_TOKEN, chatId, text);
       }
@@ -527,7 +524,7 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  // ── Stop running Claude task ──────────────────────────────────────────────
+// ── Stop running Claude task ──────────────────────────────────────────────
   // stop|{taskId} — user tapped "⛔ Стоп" to kill a running Claude process
   if (data?.startsWith('stop|')) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
@@ -539,22 +536,142 @@ export async function handleCallbackQuery(cq, env) {
   // ── Expand quick answer — ask Claude for full answer ─────────────────────
   // ask_claude|{sessionId} — user tapped "↗️ вдумчивее плиз"
   if (data?.startsWith('ask_claude|')) {
+  }
+
+  // ── Intake launch (manual accumulator) ───────────────────────────────────
+  // intake_run — «▶️ Запустить» under the collector message: flush the buffered
+  // messages for this chat and run them as one. The DO derives everything from
+  // its own state (keyed by chatId), so no payload is needed.
+  // «▶️ Запустить проработку» (intake_run) — ЕДИНЫЙ путь запуска: сливает накопленный
+  // буфер и запускает по нему проработку. `workrun|…` — устаревшая кнопка «⏻ Запустить
+  // проработку» из старых чатов; раньше она перезапускала sess.lastUserMessage в обход
+  // буфера (десинк «ушло не на то», #530 §B). Теперь ведёт в тот же flush — один источник.
+  if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '⏳ Передаю Клоду…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
+    // Clear the button immediately so it can't be pressed twice (important in group chats).
+    if (message?.message_id) {
+      editMessageReplyMarkup(env.BOT_TOKEN, chatId, message.message_id, []).catch(() => {});
+    }
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+      const r = await stub.fetch('https://intake/flush', { method: 'POST' })
+        .then(x => x.json()).catch(err => { sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`); return null; });
+      if (r?.empty) {
+        await sendMessage(env.BOT_TOKEN, chatId,
+          '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
+      }
+    }
+    return;
+  }
 
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🧠 Думаю вдумчиво…');
+  // «❓ Уточнить задачу» (clarify|) removed — owner reversal (INTAKE-REFACTOR-SPEC.md
+  // §9.2, 2026-09-14): bad idea, no button generates this callback anymore. A stale
+  // clarify| tap from an old chat falls through to the plain ack at the bottom.
+
+  // ── Continue-by-plan (§C #530) ────────────────────────────────────────────
+  // plan|{sessionId} — «▶️ Действуй дальше по плану» under a deep result: continue the
+  // SAME session by the plan the agent just described, no re-ask. Reply-path (forceClaude,
+  // deep) so it runs the resilient brain and keeps the sticky deep mode.
+  if (data?.startsWith('plan|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Продолжаю по плану…');
+    const sessionId = data.slice('plan|'.length) || session.activeSessionId || session.lastSessionId;
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
-
-    const sessionId = data.slice('ask_claude|'.length) || session.activeSessionId || session.lastSessionId;
     await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      task: '[Продолжай по плану, который ты только что описал выше. Выполняй шаги по порядку до конца, не переспрашивай — план уже согласован нажатием кнопки «Действуй дальше по плану».]',
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Escalate a quick answer (requirements-log [062], 2026-09-15) ─────────
+  // qa_more|{sessionId} — «🔎 Разобраться подробнее» under a template quick-answer
+  // (ping/hh-quick/etc. never touched Claude). §9.2 killed the generic one-shot
+  // action markup, which left quick answers with NO way to hand themselves to
+  // Claude — the user had to retype the question into the accumulator and hope
+  // it landed on the same session. This reruns the SAME session forceClaude+deep;
+  // agent-side (runner.js) already wraps the prior quick reply as context when it
+  // sees forceClaude+deep+no-explicit-task, so the escalation carries the original
+  // exchange instead of losing it.
+  if (data?.startsWith('qa_more|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🔎 Разбираюсь подробнее…');
+    const sessionId = data.slice('qa_more|'.length) || session.activeSessionId || session.lastSessionId;
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
       sessionId,
       forceClaude: true,
+      mode: 'deep',
       initialMsgId,
       telegramUserId: session.telegramUserId,
-      projectDir: session.projectDir || null,
+      projectId: session.projectId || null,
     }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Multi-button menu (§D) ────────────────────────────────────────────────
+  // menu|{sessionId}|{idx} — Claude's answer offered 2-4 explicit alternatives (agent
+  // side detects this the same way it detects a plan) and we rendered one button per
+  // option. The tap carries only the index, not the label text — the session already
+  // has its own last answer in context and knows what option N means, so we don't
+  // burn callback_data bytes re-stating it.
+  if (data?.startsWith('menu|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const rest = data.slice('menu|'.length);
+    const sepIdx = rest.lastIndexOf('|');
+    const sessionId = (sepIdx === -1 ? rest : rest.slice(0, sepIdx)) || session.activeSessionId || session.lastSessionId;
+    const idxNum = Number(sepIdx === -1 ? NaN : rest.slice(sepIdx + 1));
+    const optionNo = Number.isFinite(idxNum) ? idxNum + 1 : 1;
+    await answerCallbackQuery(env.BOT_TOKEN, id, `▶️ Вариант ${optionNo}…`);
+    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `callback-${id}`,
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      task: `[Пользователь выбрал вариант ${optionNo} из меню, которое ты только что предложил выше (нумерация с 1). Действуй по этому варианту дальше, не переспрашивай — выбор уже сделан нажатием кнопки.]`,
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Stop task button (⛔ Стоп, sent by agent on task start) ─────────────────
+  // stop|{taskId} — stop the running task for this chat's profile.
+  // taskId is informational (one task per user, username is what matters).
+  if (data?.startsWith('stop|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    const msgId = message?.message_id;
+    try {
+      const result = await stopTask(env, { username: session.username });
+      const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      else await sendMessage(env.BOT_TOKEN, chatId, text);
+    } catch (e) {
+      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    }
     return;
   }
 

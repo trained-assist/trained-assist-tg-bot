@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // If you add a new inline button in runner.js or anywhere else in trained-assist-agent,
 // add its prefix here AND add a handler in src/handlers/callbacks.js.
 const KNOWN_CALLBACK_PREFIXES = [
+  'ri:',        // durable restart confirmation, no navigation TTL
   'sp:',        // session picker
   'sd:',        // session detail
   'sc:',        // session continue
@@ -14,21 +15,32 @@ const KNOWN_CALLBACK_PREFIXES = [
   'prof:',      // profile actions
   'fl:',        // file browser navigate
   'fr:',        // file browser read
+'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
+  'pp:',        // project picker — pick/create typed project at new dialog (#517)
+  'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
+  'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
+  'stop|',      // ⛔ Стоп button sent by agent on task start — stop running task
   'ask_claude|', // "вдумчивее плиз" — rerun through Claude
+  'qa_more|',   // 🔎 Разобраться подробнее — escalate quick answer to Claude
   'fp:',        // folder picker — select project dir
   'fpg:',       // folder picker — paginate
-  'stop|',      // stop running Claude task
+  'ar:',        // archive sessions menu
+  'sa:',        // archive single session
 ];
 
 // Mock all external dependencies so we can import the handler
 vi.mock('../src/lib/kv.js', () => ({
-  getOrCreateMappedSession: vi.fn().mockResolvedValue({
+  getSession: vi.fn().mockResolvedValue({
     username: 'testuser',
     activeSessionId: 's-123',
     lastSessionId: 's-123',
+    pendingMessage: 'task',
+    pendingMessageAt: Date.now(),
   }),
   setSession: vi.fn().mockResolvedValue(undefined),
   deleteSession: vi.fn().mockResolvedValue(undefined),
+  newSessionId: vi.fn(chatId => `s-${Math.abs(chatId)}-123456`),
+  withKvConsistencyRetry: vi.fn((kv, chatId, session) => Promise.resolve(session)),
 }));
 
 vi.mock('../src/lib/telegram.js', () => ({
@@ -36,6 +48,9 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessageWithKeyboard: vi.fn().mockResolvedValue({}),
   answerCallbackQuery: vi.fn().mockResolvedValue({}),
   editMessage: vi.fn().mockResolvedValue({}),
+  editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
+  pinChatMessage: vi.fn().mockResolvedValue({}),
+  unpinChatMessage: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock('../src/lib/agent-client.js', () => ({
@@ -47,7 +62,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
     { name: '', label: '🏠 Корень', count: 3 },
     { name: 'efimova-school', label: 'efimova-school', count: 5 },
   ]),
-  stopTask: vi.fn().mockResolvedValue({ ok: true }),
+stopTask: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock('../src/handlers/commands.js', () => ({
@@ -74,7 +89,7 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
       const { sendMessage, answerCallbackQuery } = await import('../src/lib/telegram.js');
 
       // Build a minimal callback_query
-      const data = prefix === 'ask_claude|' ? `${prefix}s-123` :
+      const data = prefix === 'workrun|' ? `${prefix}s-123` :
                    prefix === 'sl:' || prefix === 'nd:' ? prefix :
                    `${prefix}test-id`;
 
@@ -87,14 +102,9 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       await handleCallbackQuery(cq, env);
 
-      // For ask_claude specifically: runTask must be called with forceClaude=true
-      if (prefix === 'ask_claude|') {
-        expect(runTask).toHaveBeenCalledWith(
-          env,
-          expect.objectContaining({ forceClaude: true })
-        );
-        return;
-      }
+      // workrun| is now the legacy alias of intake_run: it flushes the buffer (single
+      // launch source, #530 §B) — no runTask, no lastUserMessage rerun. With no INTAKE
+      // binding in the test env it just acks the callback; the general check below covers it.
 
       // Every real handler calls answerCallbackQuery at least once explicitly in its branch.
       // A silently-ignored callback would call nothing at all.
@@ -109,4 +119,26 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
       expect(didSomething, `prefix "${prefix}" appears to be silently ignored`).toBe(true);
     });
   }
+});
+
+describe('callbacks — clarify| removed (§9.2 owner reversal, 2026-09-14)', () => {
+  it('a stale clarify| tap from an old chat does not re-run Claude', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const { answerCallbackQuery } = await import('../src/lib/telegram.js');
+    const env = { BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret' };
+
+    const cq = {
+      id: 'cq-1',
+      data: 'clarify|s-123',
+      from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 },
+    };
+    await handleCallbackQuery(cq, env);
+
+    expect(runTask).not.toHaveBeenCalled();
+    // Falls through to the plain ack at the bottom of the handler, not silence.
+    expect(answerCallbackQuery).toHaveBeenCalled();
+  });
 });

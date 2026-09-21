@@ -1,3 +1,14 @@
+# Auto-merge workflow — ENABLED (blocker #49 resolved 2026-09-14)
+#
+# History: while the repo was GitHub Free + private, branch protection (and thus a
+# required `ci` gate) was unavailable, so this job was guarded with `if: false` to
+# avoid merging PRs before CI ran. That blocker is now gone:
+#   1. Repo is PUBLIC → branch protection is free.
+#   2. `main` has a branch-protection rule requiring the `ci` status check.
+#   3. Repo-level auto-merge is enabled (allow_auto_merge: true).
+# So `gh pr merge --auto --squash` now safely queues the merge and GitHub holds it
+# until `ci` is green. See issue #49.
+
 name: Auto-merge
 
 on:
@@ -10,6 +21,7 @@ permissions:
 
 jobs:
   enable-auto-merge:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge (squash)

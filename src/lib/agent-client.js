@@ -1,3 +1,4 @@
+import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -26,14 +27,15 @@ async function getCapabilities(agentUrl, secret, userId) {
 
 // Returns the agent URL to use for this task.
 // Queries RU VM capabilities first; falls back to GCP on error/timeout.
-export async function pickAgentUrl(env, userId, task, forceRu = false) {
+// username: alphanumeric profile name (NOT the numeric Telegram chat ID)
+export async function pickAgentUrl(env, username, task, forceRu = false) {
   if (forceRu && env.AGENT_RU_URL) return env.AGENT_RU_URL;
   if (!env.AGENT_RU_URL) return env.AGENT_URL;
 
   // Empty task → no RU-only keyword can match → skip the 2.5s capability probe
   if (!task) return env.AGENT_URL;
 
-  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
   if (ruCaps.length === 0) return env.AGENT_URL;
 
   // Normalize task for matching (collapse STT dot-splitting like "na log.ru" → "nalog.ru")
@@ -52,8 +54,8 @@ export async function getProjects(env, { username, userId }) {
   // Probe RU VM capabilities so users with nalog/gosuslugi tokens see projects
   // from the VM their tasks actually run on, not always GCP.
   let agentUrl = env.AGENT_URL;
-  if (userId && env.AGENT_RU_URL) {
-    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, userId);
+  if (username && env.AGENT_RU_URL) {
+    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
     if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
   }
   try {
@@ -69,18 +71,35 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, initialMsgId, pinnedMsgId, telegramUserId, projectDir, fileBase64, fileName, fileMimeType }) {
-  const agentUrl = await pickAgentUrl(env, userId, task || '', forceRu);
-  const body = { userId, username, context, sessionId, contextFromSession };
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
+  const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
+  await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
+  const body = { userId, username, context, sessionId, contextFromSession, threadId, initiatedAt };
+  if (fileRefs?.length) body.fileRefs = fileRefs;
+  if (requestId) body.requestId = requestId;
   if (task) body.task = task;
   if (forceClaude) body.forceClaude = true;
+  if (forceNew) body.forceNew = true;
+  if (mode) body.mode = mode;
   if (initialMsgId) body.initialMsgId = initialMsgId;
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
-  if (projectDir) body.projectDir = projectDir;
+  if (projectId) body.projectId = projectId;
+  if (newProjectName) body.newProjectName = newProjectName;
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
+
+  if (env.RUN_OUTBOX) {
+    // Caller supplies Telegram/batch identity; fallback uses a stable status message.
+    body.requestId = requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
+    const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(`${username}:${userId}`));
+    const res = await stub.fetch('https://outbox/enqueue', {
+      method: 'POST', body: JSON.stringify({ agentUrl, body }),
+    });
+    if (!res.ok) throw Error(`outbox HTTP ${res.status}`);
+    return res.json();
+  }
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;
@@ -95,12 +114,39 @@ export async function runTask(env, { userId, username, task, context, sessionId,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
-    if (res.ok) return res.json();
+    if (res.ok) {
+      const ack=await res.json();
+      if(ack.durable){await releaseBufferPins(env,username,fileRefs);if(agentUrl!==env.AGENT_URL)await releaseBufferPins(env,username,fileRefs,agentUrl);}
+      return ack;
+    }
     const isRetryable = res.status === 502 || res.status === 503;
     if (!isRetryable || attempt === MAX_ATTEMPTS - 1) {
-      throw new Error(`agent /run HTTP ${res.status}`);
+      throw Object.assign(new Error(`agent /run HTTP ${res.status}`), { rejected: res.status >= 400 && res.status < 500 });
     }
   }
+}
+
+// The list remains available even if optional decision enrichment is broken.
+// Failure is explicit: never turn an unavailable project service into "no projects".
+export async function getProjectDecision(env, { username, chatId, task = '' }) {
+  const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
+  try {
+    const res = await fetch(
+      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}`,
+      { headers, signal: AbortSignal.timeout(9000) }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (!data.note && ['auto', 'ask', 'create', 'quick'].includes(data.action) && Array.isArray(data.choices)) return data;
+    }
+  } catch { /* use the same agent's basic project list */ }
+  const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+    { headers, signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  const data = await res.json();
+  if (data.note || !Array.isArray(data.projects)) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
+  return { action: data.projects.length > 1 ? 'ask' : data.projects.length ? 'auto' : 'create',
+    choices: data.projects, active: null };
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
@@ -142,6 +188,29 @@ export async function classifyMessage(env, { message, sessions }) {
   });
   if (!res.ok) return { sessionId: null, confidence: 'low' }; // fail safe
   return res.json();
+}
+
+/**
+ * ШАГ 1.2 completeness gate: ask the agent's cheap LLM whether a coalesced
+ * intake buffer is a finished thought or an obviously cut-off fragment.
+ * Fails open (complete:true) on any error — the gate must never trap the user.
+ */
+export async function checkCompleteness(env, { text }) {
+  try {
+    const res = await fetch(`${env.AGENT_URL}/intake-gate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.AGENT_SECRET}`,
+      },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { complete: true };
+    return res.json();
+  } catch {
+    return { complete: true };
+  }
 }
 
 export async function setUserToken(env, { userId, label, value }) {
@@ -205,6 +274,23 @@ export async function stopTask(env, taskId) {
   return res.json().catch(() => ({ ok: false }));
 }
 
+// R10: classify a runTask failure into 'down' | 'busy' | 'error'.
+// /run returns 202 immediately after enqueue, so a 15s AbortSignal timeout does
+// NOT mean the agent is dead — it may just be busy (up to 6 concurrent tasks).
+// Only 502/503 (proxy/agent genuinely failing) is 'down' outright; on timeout we
+// probe /health and report 'busy' if the agent answers, 'down' if it doesn't.
+// This prevents the false "недоступен → попробуй через минуту" that makes users
+// resend and spawn duplicate sessions.
+export async function classifyAgentError(env, err) {
+  if (/HTTP 50[23]/.test(err.message)) return 'down';
+  if (err.name === 'TimeoutError') {
+    const healthy = await getAgentHealth(env);
+    return healthy ? 'busy' : 'down';
+  }
+  return 'error';
+}
+}
+
 export async function getAgentHealth(env) {
   try {
     const res = await fetch(`${env.AGENT_URL}/health`, {
@@ -214,4 +300,18 @@ export async function getAgentHealth(env) {
   } catch {
     return false;
   }
+}
+
+export async function stopTask(env, { username }) {
+  const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify({ username }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
+  return res.json();
 }

@@ -20,8 +20,8 @@ trained-assist-tg-bot  (Cloudflare Worker — always-on, stateless)
                   │  smart routing: probe RU VM /capabilities
                   │
                   ├─── has nalog/gosuslugi token on RU VM?
-                  │         YES → POST /run → trained-assist-agent (RU VM, 178.212.14.192)
-                  │         NO  → POST /run → trained-assist-agent (GCP VM, 136.65.7.197)
+                  │         YES → POST /run → trained-assist-agent (regional VM)
+                  │         NO  → POST /run → trained-assist-agent (primary VM)
                   │
                   └─── agent runs Claude Code, streams output → Telegram API directly
 ```
@@ -66,9 +66,10 @@ Update the binding IDs in `wrangler.toml`.
 wrangler secret put BOT_TOKEN        # Telegram bot token
 wrangler secret put BOT_USERNAME     # bot username without @  (e.g. trained_assist_bot)
 wrangler secret put BOT_SECRET       # shared secret for Chrome extension auth
-wrangler secret put AGENT_URL        # https://136-65-7-197.sslip.io  (GCP VM)
-wrangler secret put AGENT_RU_URL     # https://178-212-14-192.sslip.io (RU VM, nalog/gosuslugi)
+wrangler secret put AGENT_URL        # HTTPS URL of your trained-assist-agent API
+wrangler secret put AGENT_RU_URL     # (optional) HTTPS URL of a secondary/regional agent
 wrangler secret put AGENT_SECRET     # shared secret for bot↔agent auth
+wrangler secret put RELAY_URL        # HTTPS URL of the token-relay / pairing service
 wrangler secret put ADMIN_GROUP_ID   # Telegram group ID for admin commands
 wrangler secret put DEEPGRAM_API_KEY # voice transcription
 ```

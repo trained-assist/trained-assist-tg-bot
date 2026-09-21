@@ -3,10 +3,10 @@
 ## Инфраструктура
 
 - [реализовано] Cloudflare Worker (Hono) — Telegram webhook handler, stateless, без состояния
-- [реализовано] GCP VM 136.65.7.197 — основной агент (trained-assist-agent), запускает Claude сессии через `claude --dangerously-skip-permissions`
-- [реализовано] Hostland VM 178.212.14.192 — RU IP агент (trained-assist-agent та же кодовая база), для российских гео-блокированных сервисов
+- [реализовано] GCP VM <GCP_VM_IP> — основной агент (trained-assist-agent), запускает Claude сессии через `claude --dangerously-skip-permissions`
+- [реализовано] Hostland VM <RU_VM_IP> — RU IP агент (trained-assist-agent та же кодовая база), для российских гео-блокированных сервисов
   - 8GB RAM, 4 vCore, 60GB NVMe, Москва, 862₽/мес
-  - HTTPS: https://178-212-14-192.sslip.io
+  - HTTPS: https://<RU_VM_HOST>
   - Запускается как systemd сервис assist-agent (SECRETS_SOURCE=env)
 - [реализовано] nginx + Let's Encrypt на обоих VM
 - [реализовано] Per-user изоляция: ~/users/{username}/ на каждом VM
@@ -18,7 +18,7 @@
 - [реализовано] Токены хранятся в ~/agent-tokens/{username}/{label} (ключ = имя пользователя, не chatId)
 - [реализовано] Миграция: при первом запуске из новой группы токены копируются из ~/agent-tokens/{chatId}/ в ~/agent-tokens/{username}/
 - [реализовано] .chatid файл — runner.js записывает текущий chatId для уведомлений TG (истечение nalog и connect-форм)
-- [реализовано] Форвардинг токенов на RU VM — token-relay дублирует все токены на https://178-212-14-192.sslip.io/tokens
+- [реализовано] Форвардинг токенов на RU VM — token-relay дублирует все токены на https://<RU_VM_HOST>/tokens
 - [реализовано] nalog.ru sessionStorage захват — Chrome extension читает auth.token и refresh.token через chrome.scripting.executeScript
 - [реализовано] /settoken — ручное сохранение токена через Telegram команду (ключ = username)
 - [реализовано] /chromeext_connect — паринг Chrome расширения через 6-значный код
@@ -59,7 +59,7 @@
 
 - [реализовано] Persistent Chrome on GCP VM: Xvfb :99 + Chrome (CDP :9224) + x11vnc + noVNC
   - Сервисы: xvfb-browser, wm-browser (openbox), chrome-browser, vnc-browser, novnc-browser, ntp-hider, login-server (systemd)
-  - URL: https://136-65-7-197.sslip.io/browser/
+  - URL: https://<GCP_VM_HOST>/browser/
   - Chrome profile: ~/chrome-profiles/browser-session (сессии сохраняются)
   - CDP порт 9224 (9222 был занят другим процессом Chrome)
 - [реализовано] Standalone login page (tilda-login.html):
