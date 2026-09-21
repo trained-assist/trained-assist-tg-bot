@@ -19,6 +19,13 @@ function mockFetch(fn) {
 const enqueue = (box,id,extra={}) => box.fetch(new Request('https://outbox', { method:'POST', body:JSON.stringify({agentUrl:'https://agent',body:{requestId:id,userId:1,username:'u',task:'work',...extra}}) }));
 afterEach(()=>vi.unstubAllGlobals());
 describe('durable restart outbox',()=>{
+  it('short agent downtime (a restart) is silent; a long one is reported once',async()=>{
+    const f=fixture();await enqueue(f.outbox,'a');const tg=[];let now=1000;vi.spyOn(Date,'now').mockImplementation(()=>now);
+    mockFetch(async(url,opts)=>{if(url.includes('telegram')){tg.push(JSON.parse(opts.body).text);return Response.json({ok:true});}throw Error('restarting');});
+    await f.outbox.alarm();now+=15000;await f.outbox.alarm();expect(tg).toEqual([]);expect(f.data.has('job:a')).toBe(true);
+    now+=20000;await f.outbox.alarm();now+=15000;await f.outbox.alarm();expect(tg).toHaveLength(1);expect(tg[0]).not.toContain('Задача сохранена');
+    vi.restoreAllMocks();
+  });
   it('persists a large attachment before ACK; reconstruction and retry retain the exact payload',async()=>{
     const f=fixture(); const file='abc'.repeat(100000); const sent=[];
     expect((await enqueue(f.outbox,'one',{fileBase64:file,mode:'deep',projectId:'p',initiatedAt:1234,threadId:42})).status).toBe(202);
