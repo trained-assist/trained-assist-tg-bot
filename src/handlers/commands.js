@@ -703,15 +703,10 @@ async function cmdRestart(msg, env) {
     });
     if (!res.ok) throw Error(`HTTP ${res.status}`);
     const state = await res.json();
-    const text = state.phase === 'failed'
-      ? '⚠️ Восстановление не завершено. Задачи сохранены, запуск приостановлен; требуется проверка сервера.'
-      : state.phase === 'restarting'
-      ? '🔄 Сервер перезапускается. Задачи сохранены; отменить начавшийся перезапуск нельзя.'
-      : state.paused
-      ? `⏸ Рестарт запланирован. Завершаются задач: ${state.active}. Новые задачи сохраняются и ждут перезапуска.`
-      : arg === 'cancel' ? '✅ Ожидание рестарта отменено. Очередь продолжает работу.' : '✅ Сервер работает; ожидающего рестарта нет.';
+    // The agent restarts instantly and resumes interrupted tasks by itself: nothing is paused or queued.
+    const text = state.phase === 'restarting' ? '🔄 Перезапускаюсь. Прерванные задачи продолжатся сами.' : '✅ Сервер работает.';
     return sendMessage(env.BOT_TOKEN, msg.chat.id, text);
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status после восстановления сервера.`);
+    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status.`);
   }
 }

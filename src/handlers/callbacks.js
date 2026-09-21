@@ -1,4 +1,3 @@
-import { handleRestartConfirmation } from '../lib/restart-confirmations.js';
 import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
 import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
@@ -16,7 +15,6 @@ export async function handleCallbackQuery(cq, env) {
 
   let session = await getSession(env.SESSIONS, chatId);
 
-  if (data?.startsWith('ri:')) return handleRestartConfirmation(cq, env, session);
 
   if (await rejectExpiredUI(cq, env, session)) return;
 

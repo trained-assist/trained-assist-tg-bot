@@ -1,4 +1,5 @@
 import { releaseBufferPins } from './lib/intake-files.js';
+const AGENT_DOWN_NOTICE_MS = 30_000;
 // One durable outbox per profile/chat. Alarms retry until the agent acknowledges
 // the stable requestId. Files are chunked below DO's per-value storage limit.
 export class RunOutbox {
@@ -75,9 +76,13 @@ export class RunOutbox {
             for (let i = 0; i < job.chunks; i++) await txn.delete(`${job.id}:${i}`);
           });
         } catch (e) {
-          if (!job.notified) {
-            await this.notify(job, '⏸ Задача сохранена. Сервер временно недоступен; передам её автоматически после восстановления.');
-            await this.state.storage.put(`job:${job.id}`, { ...job, notified: true });
+          // A restart takes ~2 s and the alarm retries every 15 s: stay silent through short blips and
+          // tell the user only when the agent has been unreachable for a while.
+          const firstFailAt = job.firstFailAt || Date.now();
+          const down = Date.now() - firstFailAt >= AGENT_DOWN_NOTICE_MS;
+          if (!job.firstFailAt || (down && !job.notified)) {
+            if (down) await this.notify(job, '⚠️ Сервер недоступен дольше обычного. Задача не потеряна — отправлю автоматически, когда он вернётся.');
+            await this.state.storage.put(`job:${job.id}`, { ...job, firstFailAt, ...(down ? { notified: true } : {}) });
           }
           return; // preserve FIFO on transient errors
         }
