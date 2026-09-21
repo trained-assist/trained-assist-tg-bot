@@ -165,29 +165,42 @@ describe('video messages are transcribed, not forwarded as raw bytes', () => {
   });
 });
 
-describe('oversized media is rejected before hitting Telegram\'s getFile limit', () => {
-  it('a >20MB video is refused with a friendly message and never reaches runTask', async () => {
+describe('oversized media gets a friendly message instead of an internal error', () => {
+  const TOO_BIG_PATTERN = /слишком большой|Google Drive|облако/;
+
+  it('a >20MB video sends a friendly message and never reaches runTask', async () => {
     const msg = { chat: { id: 42 }, video: { file_id: 'Big1', mime_type: 'video/mp4', file_size: 900 * 1024 * 1024 } };
-    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
+    await handleMessage(msg, env);
     expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringMatching(TOO_BIG_PATTERN), expect.any(Object));
   });
 
-  it('a >20MB document is refused the same way', async () => {
+  it('a >20MB document sends a friendly message and never reaches runTask', async () => {
     const msg = { chat: { id: 42 }, document: { file_id: 'Big2', file_name: 'big.zip', file_size: 25 * 1024 * 1024 } };
-    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
+    await handleMessage(msg, env);
     expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringMatching(TOO_BIG_PATTERN), expect.any(Object));
   });
 
-  it('a >20MB photo is refused the same way', async () => {
+  it('a >20MB photo sends a friendly message and never reaches runTask', async () => {
     const msg = { chat: { id: 42 }, photo: [{ file_id: 'Big3', file_size: 21 * 1024 * 1024 }] };
-    await expect(handleMessage(msg, env)).rejects.toThrow('20 MB');
+    await handleMessage(msg, env);
     expect(runTask).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringMatching(TOO_BIG_PATTERN), expect.any(Object));
   });
 
   it('a video under 20MB is downloaded normally', async () => {
     const msg = { chat: { id: 42 }, video: { file_id: 'Small1', mime_type: 'video/mp4', file_size: 5 * 1024 * 1024 } };
     await handleMessage(msg, env);
     expect(runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('voice message with file_size unset is never blocked (voice is always <20MB in Telegram)', async () => {
+    const msg = { chat: { id: 42 }, voice: { file_id: 'Voice42' } };
+    await handleMessage(msg, env);
+    expect(runTask).toHaveBeenCalledTimes(1);
+    const sent = sendMessage.mock.calls.map(c => c[2]);
+    expect(sent.some(t => TOO_BIG_PATTERN.test(t))).toBe(false);
   });
 });
 

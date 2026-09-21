@@ -6,8 +6,8 @@ import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
-import { sendMessage } from './lib/telegram.js';
-import { shouldDebounce, FORCE_RUN_RE } from './intake-routing.js';
+import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
+import { shouldDebounce, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 
 const app = new Hono();
@@ -22,6 +22,45 @@ app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
+// Debug: dump what Telegram currently has registered as the bot's command
+// menu. Used to verify that commands-registry.json → setMyCommands actually
+// reached the Bot API. Returns {ok, count, commands[]} on success.
+app.get('/debug/commands', async (c) => {
+  const data = await getRegisteredCommands(c.env.BOT_TOKEN);
+  if (!data.ok) return c.json(data, 500);
+  return c.json({ ok: true, count: data.result.length, commands: data.result });
+});
+
+// Debug: dump what URL Telegram is currently posting updates to for this
+// bot. Lets us verify that the Telegram webhook is actually pointed at the
+// worker URL we expect (e.g. trained-assist-tg-bot-recruiter.skillset-apply.workers.dev
+// for @super_recruiter_assistant_bot — not at the default worker, which would
+// silently route the bot's updates to the wrong token/handler).
+app.get('/debug/webhook', async (c) => {
+  const token = c.env.BOT_TOKEN;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+    const data = await res.json();
+    if (!data.ok) return c.json(data, 500);
+    return c.json({ ok: true, webhook: data.result });
+  } catch (e) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
+
+// Debug: dump the bot's identity (id, username, first_name) so a quick
+// /debug/whoami tells us whose token the worker is actually wired to.
+app.get('/debug/whoami', async (c) => {
+  const token = c.env.BOT_TOKEN;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const data = await res.json();
+    if (!data.ok) return c.json(data, 500);
+    return c.json({ ok: true, bot: data.result });
+  } catch (e) {
+    return c.json({ ok: false, error: e.message }, 500);
+  }
+});
 
 // Telegram webhook
 app.post('/webhook', async (c) => {
@@ -35,8 +74,26 @@ app.post('/webhook', async (c) => {
 
   // Fire-and-forget — Telegram expects 200 within 5s
   c.executionCtx.waitUntil(dispatch(update, env));
+  // Register the Telegram command menu once per isolate (commands-registry.json
+  // is the single source of truth — see lib/telegram.js#registerBotCommands).
+  c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
   return c.json({ ok: true });
 });
+
+// Prefix all SESSIONS KV keys so per-profile bots (recruiter, sales) can share
+// the same KV namespace without inheriting each other's login sessions.
+// Main bot omits SESSION_NAMESPACE → raw chatId keys (backward-compatible).
+function applySessionNamespace(env) {
+  if (!env.SESSION_NAMESPACE) return env;
+  const ns = env.SESSION_NAMESPACE;
+  const raw = env.SESSIONS;
+  return { ...env, SESSIONS: {
+    get: k => raw.get(`${ns}:${k}`),
+    put: (k, v, opts) => raw.put(`${ns}:${k}`, v, opts),
+    delete: k => raw.delete(`${ns}:${k}`),
+    list: opts => raw.list(opts),
+  }};
+}
 
 async function dispatch(update, env) {
   const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
@@ -53,6 +110,7 @@ async function dispatch(update, env) {
 }
 
 export async function dispatchInner(update, env) {
+  env = applySessionNamespace(env);
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query, env);
     return;
@@ -175,7 +233,10 @@ export async function routeText(msg, env, chatId) {
         projectChosen: session.projectSelectionSessionId === sessionId,
         newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
-    const flush = FORCE_RUN_RE.test(msg.text || ''); // "запускай/го" → run buffer now
+    // FORCE_RUN_RE: explicit launch words ("запускай/го") when buffer may have content.
+    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/ок") — treated the same:
+    // dispatch the buffer (or just this one message if buffer was empty) immediately.
+    const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
     await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',

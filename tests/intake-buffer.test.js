@@ -6,6 +6,7 @@ const sendMessage = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
 const editMessage = vi.fn();
 const editMessageReplyMarkup = vi.fn();
+const checkCompleteness = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -13,6 +14,9 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
   editMessage: (...a) => editMessage(...a),
   editMessageReplyMarkup: (...a) => editMessageReplyMarkup(...a),
+}));
+vi.mock('../src/lib/agent-client.js', () => ({
+  checkCompleteness: (...a) => checkCompleteness(...a),
 }));
 
 import { IntakeBuffer } from '../src/intake-buffer.js';
@@ -51,16 +55,17 @@ beforeEach(() => {
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   editMessage.mockResolvedValue({ ok: true });
   editMessageReplyMarkup.mockResolvedValue({ ok: true });
+  checkCompleteness.mockResolvedValue({ complete: true });
 });
 
-describe('IntakeBuffer — manual accumulator (no timer)', () => {
+describe('IntakeBuffer — smart debounce with completeness gate', () => {
   it('idle messages each get a FRESH anchored ack, never a silent edit (owner reversal 2026-09-15)', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
     await io.fetch(appendReq('start the task'));
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(state._dump().alarm).toBeNull();                 // no timer armed
+    expect(state._dump().alarm).not.toBeNull();              // debounce timer armed
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // collector shown
     expect(editMessageReplyMarkup).not.toHaveBeenCalled();    // nothing prior to strip
 
@@ -86,7 +91,9 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('start the task\nalso do X');
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
+    // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
+    // so the agent response always appears below any voice transcript already posted.
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
   });
@@ -100,7 +107,8 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
 
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: null }); // force word also launches deep
+    // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -161,6 +169,65 @@ describe('IntakeBuffer — manual accumulator (no timer)', () => {
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(handleMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('auto-dispatches after DEBOUNCE_MS when task is complete', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ complete: true });
+
+    await io.fetch(appendReq('do the thing'));
+    expect(state._dump().alarm).not.toBeNull(); // debounce armed
+
+    // Simulate the debounce timer elapsing by back-dating it.
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+
+    await io.alarm();
+    await drain();
+
+    expect(checkCompleteness).toHaveBeenCalledTimes(1);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
+  });
+
+  it('sends incomplete-task nudge and does not dispatch when task is incomplete', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ complete: false });
+
+    await io.fetch(appendReq('сделай так чтобы'));
+
+    // Simulate the debounce timer elapsing.
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+
+    await io.alarm();
+
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(checkCompleteness).toHaveBeenCalledTimes(1);
+    // Nudge message sent to user.
+    const nudgeCalls = sendMessage.mock.calls.filter(c =>
+      String(c[2]).includes('мысль не закончена'));
+    expect(nudgeCalls.length).toBe(1);
+    // Nudge state persisted and alarm re-armed for grace period.
+    expect(await state.storage.get('nudged')).toBe(true);
+    expect(state._dump().alarm).not.toBeNull();
+  });
+
+  it('cancels nudge state when new message arrives before debounce fires', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    // Simulate: previous debounce fired and user was nudged, timer still pending.
+    await state.storage.put('nudged', true);
+    await state.storage.put('buf', [{ text: 'partial', msg: { chat: { id: 42 }, text: 'partial', message_id: 1 } }]);
+
+    // New message arrives — should reset nudge state and re-arm the debounce.
+    await io.fetch(appendReq('completed thought'));
+
+    expect(await state.storage.get('nudged')).toBeUndefined();
+    expect(state._dump().alarm).not.toBeNull(); // new debounce armed
   });
 });
 
