@@ -68,14 +68,29 @@ export async function handleMessage(msg, env, opts = {}) {
   const route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
-  const pendingCreation = !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
+  const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
+  if (pendingPickerExpired) {
+    const current = await getSession(env.SESSIONS, chatId);
+    if (current?.pendingProjectChoice) {
+      await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+    }
+  }
+  const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
-    const decision = await getProjectDecision(env, { username: session.username, chatId });
-    if (pendingCreation || shouldAskProject({ isNewDialog: true, decision })) {
+    const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
+    if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg,
         opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
         contextFromSession: route.contextFromSession || session.contextFromSession || null });
       return;
+    }
+    // Quick command detected: clear any stuck pending project choice so the next real
+    // task doesn't re-trigger the picker.
+    if (decision.action === 'quick' && pendingCreation) {
+      const current = await getSession(env.SESSIONS, chatId);
+      if (current?.pendingProjectChoice) {
+        await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+      }
     }
   }
   opts = { ...opts, initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };

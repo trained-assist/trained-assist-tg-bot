@@ -128,16 +128,16 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 
 // The list remains available even if optional decision enrichment is broken.
 // Failure is explicit: never turn an unavailable project service into "no projects".
-export async function getProjectDecision(env, { username, chatId }) {
+export async function getProjectDecision(env, { username, chatId, task = '' }) {
   const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
   try {
     const res = await fetch(
-      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}`,
+      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}`,
       { headers, signal: AbortSignal.timeout(9000) }
     );
     if (res.ok) {
       const data = await res.json();
-      if (!data.note && ['auto', 'ask', 'create'].includes(data.action) && Array.isArray(data.choices)) return data;
+      if (!data.note && ['auto', 'ask', 'create', 'quick'].includes(data.action) && Array.isArray(data.choices)) return data;
     }
   } catch { /* use the same agent's basic project list */ }
   const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
