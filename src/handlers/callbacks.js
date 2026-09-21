@@ -2,7 +2,7 @@ import { handleRestartConfirmation } from '../lib/restart-confirmations.js';
 import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
 import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard, editMessage, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
@@ -535,6 +535,10 @@ export async function handleCallbackQuery(cq, env) {
   if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
+    // Clear the button immediately so it can't be pressed twice (important in group chats).
+    if (message?.message_id) {
+      editMessageReplyMarkup(env.BOT_TOKEN, chatId, message.message_id, []).catch(() => {});
+    }
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
