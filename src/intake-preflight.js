@@ -53,15 +53,6 @@ export async function prepareIntake(msg, env, session) {
 export async function preflight(msg, env) {
   const session = await getSession(env.SESSIONS, msg.chat.id);
   if (!session) return { msg }; // normal login path remains authoritative
-  try {
-    const response=await fetch(`${env.AGENT_URL}/restart/activity`,{method:'POST',
-      headers:{'Content-Type':'application/json',Authorization:`Bearer ${env.AGENT_SECRET}`},
-      body:JSON.stringify({username:session.username,chatId:msg.chat.id,threadId:msg.message_thread_id??null,at:msg.date?msg.date*1000:Date.now()}),
-      signal:AbortSignal.timeout(3000)});
-    if(response.ok && (await response.json()).paused) {
-      await sendMessage(env.BOT_TOKEN,msg.chat.id,'⏸ Рестарт запланирован. Сообщение сохраняется; новые задачи пока не запускаются.');
-    }
-  }catch{ /* DO retains the input even while the agent is unavailable. */ }
   const prepared = await prepareIntake(msg, env, session);
   const query = [prepared.text || prepared.caption, prepared.transcript].filter(Boolean).join('\n');
   // A photo/document must reach the agent with its caption; a text-only quick reply

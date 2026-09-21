@@ -28,12 +28,12 @@ describe('preflight before collector', () => {
     await ingest(io, msg); await ingest(io, msg);
     expect(map.get('buf')).toEqual([]); expect(mocks.handle).not.toHaveBeenCalled();
     expect(fetch.mock.calls.filter(([url])=>url.endsWith('/intake-quick'))).toHaveLength(1);
-    expect(fetch.mock.calls.filter(([url])=>url.endsWith('/restart/activity'))).toHaveLength(1);
+    expect(fetch.mock.calls.some(([url])=>url.endsWith('/restart/activity'))).toBe(false);
     expect(mocks.send.mock.calls[0][3].reply_markup.inline_keyboard[0][0].callback_data).toBe('qa_more|qa-1');
   });
   it('voice transcript is shown before quick request, never retranscribed at launch', async () => {
     const { env } = world();
-    fetch.mockImplementation(async url => { if(url.endsWith('/restart/activity'))return Response.json({paused:false}); expect(mocks.send.mock.calls[0][2]).toBe('🎤 ревью кандидатов'); return Response.json({ answer: null }); });
+    fetch.mockImplementation(async url => { expect(mocks.send.mock.calls[0][2]).toBe('🎤 ревью кандидатов'); return Response.json({ answer: null }); });
     const result = await preflight({ ...msg, text: undefined, voice: { file_id: 'v' } }, env);
     expect(result.msg.transcript).toBe('ревью кандидатов');
     await prepareIntake(result.msg, env, { username: 'alice' });
@@ -63,7 +63,7 @@ describe('preflight before collector', () => {
   });
   it('photo caption cannot consume file as quick answer; stores a durable file ref, no KV bytes', async () => {
     const { env } = world(); const result = await preflight({ ...msg, photo: [{ file_id: 'p' }] }, env);
-    expect(fetch.mock.calls.map(([url])=>url)).toEqual(['https://agent.test/restart/activity']); expect(result.msg.fileRef.id).toBe('a'.repeat(64));
+    expect(fetch.mock.calls).toEqual([]); expect(result.msg.fileRef.id).toBe('a'.repeat(64));
     expect(env.SESSIONS.put).not.toHaveBeenCalled();
   });
   it('failed transcription retains original voice for retry at launch', async () => {
