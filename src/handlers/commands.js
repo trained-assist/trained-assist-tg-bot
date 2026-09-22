@@ -100,11 +100,17 @@ async function cmdStart(chatId, env) {
   // Сортировка по домену, а не flat list — это то что юзер просил («/start ещё в том боте
   // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
   // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
+  //
+  // recruiterHidden entries are dropped here the same way they're dropped from the
+  // Telegram command menu (src/lib/telegram.js#registerBotCommands) — otherwise
+  // /start would list dev/personal-assistant commands the menu itself doesn't show.
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
   const hhLines = [];
   const otherLines = [];
   const seen = new Set();
   for (const entry of commandsRegistry.commands) {
     if (entry.hidden || entry.adminOnly) continue;
+    if (audience === 'recruiter' && entry.recruiterHidden) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';

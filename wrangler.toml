@@ -99,6 +99,7 @@ id = "1928a191938f4f60b01fbe12d66380e0"
 name = "trained-assist-tg-bot-recruiter"
 
 [env.recruiter.vars]
+MEDIA_PIPELINE = "off" # No R2 bucket declared for this env — keep media ingestion off.
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
@@ -198,6 +199,10 @@ tag = "v4-run-outbox"
 new_sqlite_classes = ["RunOutbox"]
 
 [[env.staging.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[env.recruiter.durable_objects.bindings]]
 name = "RUN_OUTBOX"
 class_name = "RunOutbox"
 
