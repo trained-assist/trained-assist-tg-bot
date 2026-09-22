@@ -73,6 +73,22 @@ https://github.com/trained-assist/trained-assist-tg-bot/pull/194
 
 ---
 
+## PR #197 — docs(user-stories): trigger-type scenario taxonomy
+
+Goal: closes the pending Phase 0 review item above. Owner feedback (voice,
+22.09 evening) asked for atomic scenarios (one reference point to the next)
+and named 3 scenario categories to classify by. Confirmed existing Stories
+already match BDD's "one scenario, one behavior" rule; added a trigger-type
+taxonomy to `docs/user-stories/README.md`; traced `getQuickAnswer`'s actual
+call order to confirm no context-load race exists. Docs-only, no code.
+
+https://github.com/trained-assist/trained-assist-tg-bot/pull/197
+
+- [ ] CI green on PR #197
+- [ ] Merged to main
+
+---
+
 ## Архив: предыдущий checklist (issue #156, закрыт)
 
 Оставлено для истории — реализация была помечена [x], смок-тесты деплоя не
