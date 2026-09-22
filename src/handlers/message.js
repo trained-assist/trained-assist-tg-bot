@@ -379,7 +379,9 @@ async function resolveSessionRoute(chatId, session, text, env) {
 // New-dialog project picker (issue #517). Uses the project INDEX in callback_data
 // (pp:<i>) — typed project ids can be long Cyrillic slugs that blow the 64-byte
 // callback_data limit. The pp: handler re-fetches the list and looks up by index
-// (same ordering as GET /project-decision → listProjects, most-recent first).
+// (same ordering as GET /project-decision → listProjects, most-used first, i.e.
+// highest session count — recency only breaks ties. Both /project-decision and
+// /projects must sort identically or the index lookup here resolves to the wrong project.)
 export async function sendProjectPicker(botToken, chatId, choices, activeId, env) {
   // Descriptive body + numbered tap-buttons — same shape as the session picker
   // (renderSessionList). A project carries a durable 3-sense summary (start/middle/end)
