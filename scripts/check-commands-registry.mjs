@@ -22,6 +22,17 @@ const seen = new Set();
 const ALLOWED_TAGS = new Set(['b', 'i', 'u', 's', 'code', 'pre']);
 
 for (const entry of registry.commands) {
+  // Telegram's setMyCommands rejects the WHOLE batch if any single command name
+  // doesn't match [a-z0-9_]{1,32} — e.g. a hyphen. Before this check existed,
+  // "/oc_lavish-luna" shipped, and every bot's menu silently stopped updating on
+  // every isolate boot (2026-09-22) with nothing but a console.error to show for
+  // it. Catch it at CI time instead of relying on the runtime skip in
+  // src/lib/telegram.js#registerBotCommands.
+  const name = entry.command.replace(/^\//, '');
+  if (!/^[a-z0-9_]{1,32}$/.test(name)) {
+    errors.push(`"${entry.command}" is not a valid Telegram command name (must be 1-32 chars, lowercase a-z0-9_ only) — it will break setMyCommands for every bot.`);
+  }
+
   for (const cmd of [entry.command, ...entry.aliases]) {
     if (seen.has(cmd)) errors.push(`"${cmd}" is listed more than once in commands-registry.json`);
     seen.add(cmd);

@@ -12,22 +12,33 @@ import commandsRegistry from '../../commands-registry.json';
 // hidden by definition, and adminOnly ones must not be advertised to regular
 // users via the menu (they're still callable when typed directly).
 //
+// audience: 'recruiter' additionally drops entries marked recruiterHidden:true —
+// dev/ops/personal-assistant commands (OpenCode profile switches, Chrome-ext
+// pairing, GTD checklists, etc.) that don't belong on a recruiter's menu. See
+// wrangler.toml env.recruiter (BOT_USERNAME=super_recruiter_assistant_bot).
+//
 // Telegram limits: 100 commands/scope, 30 setMyCommands/min. Per-isolate call
 // is fine even under burst cold-start; if many isolates race, Telegram returns
 // 429 and we silently log — next boot retries.
-export async function registerBotCommands(token) {
+export async function registerBotCommands(token, { audience = 'default' } = {}) {
   if (!token) return { ok: false, reason: 'no token' };
   const seen = new Set();
   const commands = [];
   for (const entry of commandsRegistry.commands) {
     if (entry.hidden || entry.adminOnly) continue;
+    if (audience === 'recruiter' && entry.recruiterHidden) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const name = entry.command.replace(/^\//, '');
-    // Telegram rejects the whole batch if any single command >32 chars.
-    // Skip oversize entries with a loud log rather than failing the whole menu.
-    if (name.length > 32) {
-      console.error(`[setMyCommands] skipping "${name}" (${name.length} chars, Telegram limit is 32). Rename or hide via hidden:true.`);
+    // Telegram rejects the WHOLE batch if any single command is invalid — one bad
+    // entry silently freezes every bot's menu at whatever was last registered
+    // successfully (found 2026-09-22: "/oc_lavish-luna" had a hyphen, which
+    // Telegram's command charset [a-z0-9_] forbids, and had been failing every
+    // isolate boot since #169 — nobody noticed because the failure is a log line,
+    // not a user-visible error). Validate defensively so a future bad addition
+    // degrades to "menu missing one command" instead of "menu never updates again".
+    if (!/^[a-z0-9_]{1,32}$/.test(name)) {
+      console.error(`[setMyCommands] skipping "${name}" — invalid Telegram command name (must be 1-32 chars, lowercase a-z0-9_ only). Fix in commands-registry.json or hide via hidden:true.`);
       continue;
     }
     if ((entry.description || '').length > 256) {
@@ -60,7 +71,8 @@ let bootRegistered = false;
 export async function ensureCommandsRegisteredOnce(env) {
   if (bootRegistered) return;
   bootRegistered = true;
-  await registerBotCommands(env.BOT_TOKEN);
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  await registerBotCommands(env.BOT_TOKEN, { audience });
 }
 
 // Read what Telegram currently has registered (debug/verification only — not

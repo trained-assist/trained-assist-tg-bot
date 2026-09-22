@@ -21,10 +21,17 @@ const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.j
 const commands = [];
 const seen = new Set();
 for (const entry of registry.commands) {
-  if (entry.hidden || entry.adminOnly) continue;
+  // Mirrors the audience:'recruiter' filter in src/lib/telegram.js#registerBotCommands —
+  // keep both in sync (this script is the manual fallback for when the worker is offline).
+  if (entry.hidden || entry.adminOnly || entry.recruiterHidden) continue;
   if (seen.has(entry.command)) continue;
   seen.add(entry.command);
-  commands.push({ command: entry.command.replace(/^\//, ''), description: entry.description });
+  const name = entry.command.replace(/^\//, '');
+  if (!/^[a-z0-9_]{1,32}$/.test(name)) {
+    console.error(`⚠️  skipping "${name}" — invalid Telegram command name`);
+    continue;
+  }
+  commands.push({ command: name, description: entry.description });
 }
 
 const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
