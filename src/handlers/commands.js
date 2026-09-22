@@ -101,9 +101,9 @@ async function cmdStart(chatId, env) {
   // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
   // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
   //
-  // recruiterHidden entries are dropped here the same way they're dropped from the
-  // Telegram command menu (src/lib/telegram.js#registerBotCommands) — otherwise
-  // /start would list dev/personal-assistant commands the menu itself doesn't show.
+  // recruiterHidden/recruiterOnly entries are dropped here the same way they're
+  // dropped from the Telegram command menu (src/lib/telegram.js#registerBotCommands)
+  // — otherwise /start would list commands the menu itself doesn't show.
   const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
   const hhLines = [];
   const otherLines = [];
@@ -111,6 +111,7 @@ async function cmdStart(chatId, env) {
   for (const entry of commandsRegistry.commands) {
     if (entry.hidden || entry.adminOnly) continue;
     if (audience === 'recruiter' && entry.recruiterHidden) continue;
+    if (audience !== 'recruiter' && entry.recruiterOnly) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
@@ -122,11 +123,18 @@ async function cmdStart(chatId, env) {
     }
   }
 
+  const intro = audience === 'recruiter'
+    ? 'Это бот для работы с HeadHunter и ассистентом.'
+    : 'Это персональный ассистент.';
+  const hhSection = hhLines.length
+    ? `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n`
+    : '';
+
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
-    `Это бот для работы с HeadHunter и ассистентом.\n` +
+    `${intro}\n` +
     `Просто пиши задачи — я передам их агенту.\n\n` +
-    `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n` +
+    hhSection +
     `<b>💼 Остальное (${otherLines.length}):</b>\n${otherLines.join('\n')}`
   );
 }

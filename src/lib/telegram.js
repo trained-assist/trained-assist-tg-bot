@@ -16,6 +16,9 @@ import commandsRegistry from '../../commands-registry.json';
 // dev/ops/personal-assistant commands (OpenCode profile switches, Chrome-ext
 // pairing, GTD checklists, etc.) that don't belong on a recruiter's menu. See
 // wrangler.toml env.recruiter (BOT_USERNAME=super_recruiter_assistant_bot).
+// Symmetrically, entries marked recruiterOnly:true (HH/vacancy commands) are
+// dropped for every OTHER audience — the personal-assistant bot has no HH
+// skill enabled, so those commands were dead clutter in its menu/start list.
 //
 // Telegram limits: 100 commands/scope, 30 setMyCommands/min. Per-isolate call
 // is fine even under burst cold-start; if many isolates race, Telegram returns
@@ -27,6 +30,7 @@ export async function registerBotCommands(token, { audience = 'default' } = {}) 
   for (const entry of commandsRegistry.commands) {
     if (entry.hidden || entry.adminOnly) continue;
     if (audience === 'recruiter' && entry.recruiterHidden) continue;
+    if (audience !== 'recruiter' && entry.recruiterOnly) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const name = entry.command.replace(/^\//, '');
