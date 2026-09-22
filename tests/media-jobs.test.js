@@ -3,6 +3,7 @@ import { MediaJob, mediaId, objectKey, serveMedia, digest } from '../src/media-j
 import { IntakeBuffer } from '../src/intake-buffer.js';
 import { prepareIntake } from '../src/intake-preflight.js';
 import { copyRefsToAgent } from '../src/lib/intake-files.js';
+import { sendMessage } from '../src/lib/telegram.js';
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: vi.fn(async () => ({ok:true})), sendDocument: vi.fn(), sendMessageWithKeyboard: vi.fn(async()=>({result:{message_id:100}})), editMessage: vi.fn(async()=>({ok:true})), editMessageReplyMarkup: vi.fn(async()=>({ok:true})) }));
 vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(async()=>({username:'alice'})), setSession: vi.fn() }));
 function state() {
@@ -72,6 +73,16 @@ describe('durable R2 pipeline',()=>{
    expect(f.s.data.get('job').stage).toBe('done');expect(f.intake.data.get('buf')[0].msg.caption).toBe('Посмотри');
    expect(f.net.mock.calls.some(([u])=>String(u).includes('deepgram'))).toBe(false);
   }
+ });
+ it('the initial receipt ack does not call a photo/document "voice" (owner-reported bug, 2026-09-22)',async()=>{
+  sendMessage.mockClear();
+  await fixture({chat:{id:42},message_id:9,photo:[{file_id:'p',file_unique_id:'p'}]});
+  const photoReceipt=sendMessage.mock.calls.at(-1)[2];
+  expect(photoReceipt).not.toMatch(/голосов/);
+  expect(photoReceipt).toMatch(/вложени/i);
+  sendMessage.mockClear();
+  await fixture({chat:{id:42},message_id:10,voice:{file_id:'v',file_unique_id:'v',file_size:3}});
+  expect(sendMessage.mock.calls.at(-1)[2]).toMatch(/голосов/);
  });
  it('rejects oversize and truncated originals without saving partial objects',async()=>{
   const f=await fixture();f.net.mockImplementation(async url=>String(url).includes('/getFile')?Response.json({ok:true,result:{file_path:'x',file_size:4}}):new Response('123'));

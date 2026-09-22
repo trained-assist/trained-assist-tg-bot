@@ -54,6 +54,26 @@ Goal: закрыть накопившийся класс «мелкие баги
 
 ---
 
+## PR — fix(intake): photo/document receipt ack no longer says "voice"
+
+Goal: closes US-MEDIA-02 / US-BUG-06 from Phase 1 above. `_ingestMedia`
+(`src/intake-buffer.js`) hardcoded the very first receipt ack to "🎙 Принял
+голосовое, расшифровываю…" for every media type — including photos and
+documents. Owner reported it twice (once in the KNOWN-BUGS write-up, once
+again with a screenshot on 2026-09-22). Fixed by branching on the existing
+`needsTranscript(msg)` helper (already used by `MediaJob` to decide
+transcribe-vs-skip): voice/audio/video keep the transcribing text,
+photo/document now get "📎 Принял вложение, сохраняю…".
+
+- [x] Fix `src/intake-buffer.js` receipt text
+- [x] Regression test in `tests/media-jobs.test.js` (photo receipt ≠ voice wording; voice receipt unchanged)
+- [x] Full suite green (`npm test` — 378/378)
+- [ ] PR opened, CI green, merged
+- [ ] Deployed to prod, verified live
+- [ ] Mark US-MEDIA-02/US-BUG-06 as ✅ in Phase 1 list above and in `docs/user-stories/KNOWN-BUGS-2026-09-22.md`
+
+---
+
 ## Архив: предыдущий checklist (issue #156, закрыт)
 
 Оставлено для истории — реализация была помечена [x], смок-тесты деплоя не
