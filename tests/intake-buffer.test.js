@@ -33,6 +33,12 @@ function makeState() {
       async getAlarm() { return alarm; },
       async setAlarm(t) { alarm = t; },
       async deleteAlarm() { alarm = null; },
+      // Real DurableObjectStorage#transaction hands the callback a tx with the
+      // same get/put/setAlarm surface; this in-memory fake has no rollback
+      // semantics to offer, so it just runs the callback against itself.
+      async transaction(fn) {
+        return fn(this);
+      },
     },
     _dump: () => ({ map, alarm }),
   };
@@ -55,7 +61,7 @@ beforeEach(() => {
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   editMessage.mockResolvedValue({ ok: true });
   editMessageReplyMarkup.mockResolvedValue({ ok: true });
-  checkCompleteness.mockResolvedValue({ complete: true });
+  checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
 });
 
 describe('IntakeBuffer — smart debounce with completeness gate', () => {
@@ -171,11 +177,11 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
   });
 
-  it('auto-dispatches after DEBOUNCE_MS when task is complete', async () => {
+  it('auto-dispatches after DEBOUNCE_MS when the gate says "clear"', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
-    checkCompleteness.mockResolvedValue({ complete: true });
+    checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
 
     await io.fetch(appendReq('do the thing'));
     expect(state._dump().alarm).not.toBeNull(); // debounce armed
@@ -191,43 +197,95 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
   });
 
-  it('sends incomplete-task nudge and does not dispatch when task is incomplete', async () => {
+  it('"likely" tells the user and waits LIKELY_AUTOLAUNCH_MS before dispatching, not the button-only fallback', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
-    checkCompleteness.mockResolvedValue({ complete: false });
+    checkCompleteness.mockResolvedValue({ level: 'likely', complete: true });
+
+    await io.fetch(appendReq('наверное это всё'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+
+    // Not dispatched yet — status message sent, gate decision persisted, a
+    // (longer) alarm is re-armed instead of trapping the user behind a dead end.
+    expect(handleMessage).not.toHaveBeenCalled();
+    const likelyCalls = sendMessage.mock.calls.filter(c => String(c[2]).includes('через'));
+    expect(likelyCalls.length).toBe(1);
+    expect(await state.storage.get('gateLevel')).toBe('likely');
+    expect(state._dump().alarm).not.toBeNull();
+
+    // Grace period elapses with no further input — now it dispatches.
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    await drain();
+    expect(checkCompleteness).toHaveBeenCalledTimes(1); // gate consulted once, not re-asked
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('"insufficient" never auto-dispatches — says so plainly and leaves the button, no force-fallback', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ level: 'insufficient', complete: false });
 
     await io.fetch(appendReq('сделай так чтобы'));
-
-    // Simulate the debounce timer elapsing.
     await state.storage.put('debounceExpiresAt', Date.now() - 1);
-
     await io.alarm();
 
     expect(handleMessage).not.toHaveBeenCalled();
     expect(checkCompleteness).toHaveBeenCalledTimes(1);
-    // Nudge message sent to user.
-    const nudgeCalls = sendMessage.mock.calls.filter(c =>
-      String(c[2]).includes('мысль не закончена'));
-    expect(nudgeCalls.length).toBe(1);
-    // Nudge state persisted and alarm re-armed for grace period.
-    expect(await state.storage.get('nudged')).toBe(true);
-    expect(state._dump().alarm).not.toBeNull();
+    const notice = sendMessage.mock.calls.filter(c => String(c[2]).includes('не хватает контекста'));
+    expect(notice.length).toBe(1);
+    // No re-armed alarm and no gate-decision to resume from — only a new
+    // message or the ▶️ button can move this forward.
+    expect(await state.storage.get('gateLevel')).toBeUndefined();
+    expect(await state.storage.get('debounceExpiresAt')).toBeUndefined();
+
+    // Confirm the old "force-dispatch after a grace period" fallback is gone:
+    // even a later alarm fire (no new debounce armed) must not launch it.
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
-  it('cancels nudge state when new message arrives before debounce fires', async () => {
+  it('cancels a pending gate decision when a new message arrives before its timer fires', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
-    // Simulate: previous debounce fired and user was nudged, timer still pending.
-    await state.storage.put('nudged', true);
+    // Simulate: previous debounce fired and the gate said "likely", timer still pending.
+    await state.storage.put('gateLevel', 'likely');
     await state.storage.put('buf', [{ text: 'partial', msg: { chat: { id: 42 }, text: 'partial', message_id: 1 } }]);
 
-    // New message arrives — should reset nudge state and re-arm the debounce.
+    // New message arrives — should reset the gate decision and re-arm the debounce.
     await io.fetch(appendReq('completed thought'));
 
-    expect(await state.storage.get('nudged')).toBeUndefined();
+    expect(await state.storage.get('gateLevel')).toBeUndefined();
     expect(state._dump().alarm).not.toBeNull(); // new debounce armed
+  });
+
+  it('a resolved media item (transcript in) arms auto-dispatch — a buffer ending in media is no longer button-only forever', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await state.storage.put('buf', [{
+      text: undefined,
+      msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-1' },
+      mediaPending: true,
+      mediaOwner: 'alice',
+    }]);
+
+    await io.fetch(new Request('https://intake/media-result', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'job-1', messageId: 7, username: 'alice',
+        fileRef: { id: 'job-1', storage: 'r2' }, transcript: 'сделай отчёт по вакансии',
+      }),
+    }));
+
+    // Before the fix: only a fresh collector was shown, no alarm/debounce armed —
+    // this buffer could only ever be launched by tapping the button.
+    expect(state._dump().alarm).not.toBeNull();
+    expect(await state.storage.get('debounceExpiresAt')).toBeTruthy();
   });
 });
 
