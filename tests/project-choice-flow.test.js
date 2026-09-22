@@ -92,6 +92,20 @@ describe('project selection through actual creation, message and callback handle
     await tap('pc:0');
     expect(runTask.mock.calls[0][1]).toMatchObject({ forceNew: true, projectId: 'p0' });
   });
+  it('picker copy says the task is already captured — never «write your task»', async () => {
+    await tap('nd:');
+    await handleMessage(message('моя задача уже отправлена'), env, { mode: 'deep' });
+    const text = sendMessageWithKeyboard.mock.calls.at(-1)[2];
+    expect(text).toContain('Задача уже принята');
+    expect(text).toContain('моя задача уже отправлена');
+    expect(text).not.toContain('Пиши задачу');
+  });
+  it('picker copy without a captured task still asks which project', async () => {
+    await tap('nd:');
+    const text = sendMessageWithKeyboard.mock.calls.at(-1)[2];
+    expect(text).toContain('В какой проект добавить');
+    expect(text).not.toContain('Задача уже принята');
+  });
   it('keeps additional batches received while selection is pending', async () => {
     await tap('nd:');
     await handleMessage(message('one'), env, { mode: 'deep' });

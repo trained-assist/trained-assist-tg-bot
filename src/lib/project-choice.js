@@ -6,10 +6,31 @@ import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js'
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+// First human line of the captured task, so the picker can PROVE the message
+// wasn't lost. `input` is either a raw Telegram message or a merged batch with
+// intakeItems (text / caption / voice transcript).
+function capturedPreview(input) {
+  if (!input) return '';
+  const items = input.intakeItems
+    ? input.intakeItems.map(i => i?.text || i?.msg?.text || i?.msg?.caption || i?.msg?.transcript || '')
+    : [input.text || input.caption || input.transcript || ''];
+  const line = items.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  return line ? (line.length > 120 ? `${line.slice(0, 120)}…` : line) : '';
+}
+
 async function render(env, chatId, pending, page = 0) {
   const start = page * PAGE_SIZE;
   const choices = pending.choices.slice(start, start + PAGE_SIZE);
-  const text = ['📂 <b>В какой проект добавить новый диалог?</b>', '',
+  // Copy MUST reflect state: when the task is already captured we never tell the
+  // user to «write your task» — that dead-ended a real user who had already sent
+  // it (owner, 2026-09-22). Selecting a project dispatches the captured task.
+  const preview = capturedPreview(pending.input);
+  const hasTask = !!pending.input;
+  const header = hasTask
+    ? '📂 <b>Задача уже принята — выбери проект, и сразу запущу проработку.</b>'
+    : '📂 <b>В какой проект добавить новый диалог?</b>';
+  const text = [header, '',
+    ...(preview ? [`<i>принято:</i> ${esc(preview)}`, ''] : []),
     ...choices.map((p, i) => {
       const summary = p.summary?.end || p.summary?.middle || '';
       return `${start + i + 1}. <b>${esc(String(p.name || p.label || p.id).slice(0, 80))}</b>` +
