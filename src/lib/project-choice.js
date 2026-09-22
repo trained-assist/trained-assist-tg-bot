@@ -28,7 +28,7 @@ async function render(env, chatId, pending, page = 0) {
   const hasTask = !!pending.input;
   const header = hasTask
     ? '📂 <b>Задача уже принята — выбери проект, и сразу запущу проработку.</b>'
-    : '📂 <b>В какой проект добавить новый диалог?</b>';
+    : '📂 <b>В какой проект работаем?</b>';
   const text = [header, '',
     ...(preview ? [`<i>принято:</i> ${esc(preview)}`, ''] : []),
     ...choices.map((p, i) => {
