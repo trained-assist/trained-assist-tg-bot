@@ -57,6 +57,7 @@
     { "command": "/hh_scan", "aliases": [], "handler": "forward", "description": "Ручной запуск сканирования новых откликов (вне расписания)" },
     { "command": "/hh_notify_on", "aliases": [], "handler": "forward", "description": "Включить авто-уведомления о новых кандидатах в холодном поиске" },
     { "command": "/hh_notify_off", "aliases": [], "handler": "forward", "description": "Выключить авто-уведомления о новых кандидатах" },
+    { "command": "/set_cold_candiates_search", "aliases": ["/set_cold_candidates_search", "/cold_search", "/холодный_поиск"], "handler": "forward", "description": "Запустить холодный поиск кандидатов по базе резюме HH прямо сейчас (~30 сек, с оценкой и ссылкой на результаты)" },
     { "command": "/enable_illustrate", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "Включить скил генерации иллюстраций" },
     { "command": "/new_job_post", "aliases": [], "handler": "forward", "description": "Начать создание новой вакансии HeadHunter" },
     { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "description": "Отменить текущее создание вакансии" },
