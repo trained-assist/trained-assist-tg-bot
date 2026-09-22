@@ -114,6 +114,14 @@ describe('resolveSessionRoute — /bug_or_feature always forces a fresh session'
     expect(call.forceNew).toBe(true);
   });
 
+  it('forces new session for the legacy alias /bugreport', async () => {
+    await handleMessage({ chat: { id: CHAT_ID }, text: '/bugreport', message_id: 5, date: Math.floor(Date.now() / 1000) }, env);
+
+    const call = runTask.mock.calls[0][1];
+    expect(call.sessionId).not.toBe('s-42-old-unrelated');
+    expect(call.forceNew).toBe(true);
+  });
+
   it('still continues the last session for an unrelated slash command', async () => {
     await handleMessage({ chat: { id: CHAT_ID }, text: '/hh_ats', message_id: 4, date: Math.floor(Date.now() / 1000) }, env);
 
