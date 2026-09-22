@@ -1,3 +1,15 @@
+## PR #192 — fix(intake): project picker copy confirms task already captured
+
+Смержено в main (`4f9667a`, 2026-09-22 21:02 UTC), CI зелёный (ci/smoke-test/
+staging-gate/scenario-gate/deploy — все success), deploy отработал на этом же
+коммите. Закрыто фактически, не только «лежит в коде».
+
+- [x] CI зелёный
+- [x] Смержено в main
+- [x] Задеплоено и проверено вживую (deploy check-run success на merge-коммите)
+
+---
+
 # Checklist — User Stories раздел + план отказа от «диалога» в пользу «проекта»
 
 Goal: закрыть накопившийся класс «мелкие баги диалогового слоя находятся
