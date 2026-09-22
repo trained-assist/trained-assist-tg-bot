@@ -103,7 +103,7 @@ describe('project selection through actual creation, message and callback handle
   it('picker copy without a captured task still asks which project', async () => {
     await tap('nd:');
     const text = sendMessageWithKeyboard.mock.calls.at(-1)[2];
-    expect(text).toContain('В какой проект добавить');
+    expect(text).toContain('В какой проект работаем');
     expect(text).not.toContain('Задача уже принята');
   });
   it('keeps additional batches received while selection is pending', async () => {
