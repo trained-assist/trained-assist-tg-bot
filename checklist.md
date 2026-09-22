@@ -1,3 +1,20 @@
+## PR #206 — fix(intake): delete the collector bubble once the task has launched
+
+Goal: «▶️ Запустил проработку» was an edited husk left in the chat forever —
+pure procedural noise once the real placeholder/agent response takes over.
+Delete the collector message outright at dispatch instead; fall back to the
+old neutral edit only if the placeholder send itself failed (collector id
+still needed as the streaming target then). Owner request 2026-09-22
+(screenshot of the stale bubble in-chat).
+
+https://github.com/trained-assist/trained-assist-tg-bot/pull/206
+
+- [ ] CI green on PR #206
+- [ ] Merged to main
+- [ ] Deployed and verified live — collector bubble disappears after ▶️ launch in a real chat
+
+---
+
 ## PR #192 — fix(intake): project picker copy confirms task already captured
 
 Смержено в main (`4f9667a`, 2026-09-22 21:02 UTC), CI зелёный (ci/smoke-test/
