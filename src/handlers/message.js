@@ -8,6 +8,7 @@ import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/teleg
 import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
+import commandsRegistry from '../../commands-registry.json';
 
 // Phrases that signal "start a new session" regardless of history
 const NEW_SESSION_SIGNALS = [
@@ -15,6 +16,20 @@ const NEW_SESSION_SIGNALS = [
   'по другому', 'другая тема', 'смени тему', 'начни с нуля', 'начнём с нуля',
   'новая тема', 'забудь про', 'new task', 'new session', 'другое:',
 ];
+
+// /bug_or_feature (+ aliases, from commands-registry.json — the same source
+// AGENT_FORWARDED_COMMANDS in commands.js reads) ALWAYS opens a fresh session bound
+// to the agent's reserved bugs-and-features project (BUGS-AND-FEATURES-SPEC §3.4),
+// never continues whatever the chat's last regular session was. Paired with
+// BUG_OR_FEATURE_INTENT in the agent's intent-engine.js, which honors the fresh
+// sessionId minted below for the session it creates — without this, the gateway's
+// lastSessionId stays pointed at the old session and every buffered follow-up after
+// ▶️ launches into the wrong place, disconnected from the bugs project entirely.
+const BUG_OR_FEATURE_COMMANDS = new Set(
+  (commandsRegistry.commands.find(c => c.command === '/bug_or_feature')?.aliases || [])
+    .concat('/bug_or_feature')
+    .map((c) => c.toLowerCase())
+);
 
 const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -314,6 +329,12 @@ async function resolveSessionRoute(chatId, session, text, env) {
       contextFromSession: session.contextFromSession || null };
   }
 
+  // 0.5 /bug_or_feature (+ aliases) — always a fresh session, see BUG_OR_FEATURE_COMMANDS above.
+  const firstWord = text.split(' ')[0].split('@')[0].toLowerCase();
+  if (BUG_OR_FEATURE_COMMANDS.has(firstWord)) {
+    const newId = newSessionId(chatId);
+    return { type: 'run', sessionId: newId, forceNew: true };
+  }
 
   // 1. Explicit new-session signal in text → new session
   if (NEW_SESSION_SIGNALS.some(s => lc.includes(s))) {

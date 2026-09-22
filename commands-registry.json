@@ -33,7 +33,7 @@
     { "command": "/persona", "aliases": ["/role", "/роль", "/персона", "/character", "/характер"], "handler": "forward", "recruiterHidden": true, "description": "Роль ассистента для профиля" },
     { "command": "/project", "aliases": ["/projects", "/проект", "/проекты"], "handler": "forward", "description": "Проекты профиля: список/смена/создание" },
     { "command": "/switch2klod", "aliases": ["/switch2codex", "/switch2opencode"], "handler": "forward", "recruiterHidden": true, "description": "Переключить CLI-движок (Claude Code / Codex / OpenCode) для этого чата" },
-    { "command": "/bug_or_feature", "aliases": ["/bug", "/feature", "/баг", "/фича", "/report", "/репорт"], "handler": "forward", "recruiterHidden": true, "description": "Быстрый репорт бага/фичи → GitHub issue" },
+    { "command": "/bug_or_feature", "aliases": ["/bug", "/feature", "/баг", "/фича", "/report", "/репорт"], "handler": "forward", "recruiterHidden": true, "description": "Открыть сессию в проекте «Bugs and Features» — накопи детали, запусти ▶️ проработку" },
     { "command": "/get_webpass", "aliases": ["/webpass", "/вебпароль"], "handler": "forward", "adminOnly": true, "description": "Пароль для веб-интерфейса (self-service, не эскалирует чужой профиль)" },
 
     { "command": "/ping", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "Проверка что агент онлайн" },
