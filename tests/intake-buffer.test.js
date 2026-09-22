@@ -6,6 +6,7 @@ const sendMessage = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
 const editMessage = vi.fn();
 const editMessageReplyMarkup = vi.fn();
+const deleteMessage = vi.fn();
 const checkCompleteness = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
@@ -14,6 +15,7 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
   editMessage: (...a) => editMessage(...a),
   editMessageReplyMarkup: (...a) => editMessageReplyMarkup(...a),
+  deleteMessage: (...a) => deleteMessage(...a),
 }));
 vi.mock('../src/lib/agent-client.js', () => ({
   checkCompleteness: (...a) => checkCompleteness(...a),
@@ -61,6 +63,7 @@ beforeEach(() => {
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   editMessage.mockResolvedValue({ ok: true });
   editMessageReplyMarkup.mockResolvedValue({ ok: true });
+  deleteMessage.mockResolvedValue({ ok: true });
   checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
 });
 
@@ -102,6 +105,29 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
+    // The collector ("Принял N, жми «Запустить»") is stale procedural noise once the
+    // task has launched — it's deleted outright, not left behind as an edited husk
+    // (owner request 2026-09-22).
+    expect(deleteMessage).toHaveBeenCalledWith('t', 42, 99);
+    expect(editMessage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a neutral edit of the collector if the placeholder send fails', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await io.fetch(appendReq('start the task'));
+    sendMessage.mockResolvedValueOnce(null); // placeholder delivery fails
+
+    await io.fetch(flushReq());
+    await drain();
+
+    // No usable placeholder id — the collector must stay around (edited, button
+    // stripped) as the fallback streaming target, not be deleted out from under it.
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(editMessage).toHaveBeenCalledWith('t', 42, 99, '▶️ Запустил проработку',
+      expect.objectContaining({ reply_markup: { inline_keyboard: [] } }));
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
   });
 
   it('a force word (flush:true) launches immediately without a button tap', async () => {

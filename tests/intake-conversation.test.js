@@ -44,6 +44,10 @@ vi.mock('../src/lib/telegram.js', () => ({
     return Promise.resolve({ ok: true });
   }),
   sendDocument: vi.fn(() => Promise.resolve({ ok: true, result: { message_id: nextId() } })),
+  deleteMessage: vi.fn((_t, chatId, msgId) => {
+    tg.push({ kind: 'delete', chatId, msgId });
+    return Promise.resolve({ ok: true });
+  }),
 }));
 
 import { routeText } from '../src/index.js';

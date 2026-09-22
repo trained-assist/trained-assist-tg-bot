@@ -34,7 +34,7 @@ import { checkCompleteness } from './lib/agent-client.js';
 // The alarm also recovers reserved media jobs; for runs it is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
+import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, deleteMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem, SHORT_MSG_THRESHOLD } from './intake-routing.js';
 
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
@@ -417,28 +417,34 @@ export class IntakeBuffer {
     const msg = { ...base, text: coalescedText, intakeItems: buf,
       intakeRoute: continuation?.intakeRoute };
 
-    // Retire the collector button so it can't be tapped twice.
     // Do NOT stream the agent response into the old collector — it may have been
     // sent before the voice transcript was posted (the collector's message_id is
-    // lower, so it appears above the transcript in the chat). Instead, edit it
-    // to a neutral "launched" state and send a fresh placeholder whose message_id
-    // is guaranteed to be higher than any already-posted transcript.
+    // lower, so it appears above the transcript in the chat). Send a fresh
+    // placeholder whose message_id is guaranteed to be higher than any
+    // already-posted transcript.
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
-    if (collectorMsgId && chatId) {
-      await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '▶️ Запустил проработку', {
-        reply_markup: { inline_keyboard: [] },
-      }).catch(() => {});
-    }
     await this.state.storage.delete('collectorMsgId');
-
-    // Send a fresh placeholder anchored to the last user message. This message
-    // is always below whatever transcript was already posted, so the agent
-    // response will appear below the transcript — correct reading order.
     const lastMsgId = base.message_id || null;
     const placeholderRes = await sendMessage(
       this.env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…',
       lastMsgId ? { reply_to_message_id: lastMsgId, allow_sending_without_reply: true } : {},
     ).catch(() => null);
+
+    // The collector ("Принял N, жми «Запустить»") is stale procedural noise once
+    // the task has actually launched — delete it outright rather than leaving an
+    // edited "▶️ Запустил проработку" husk in the chat (owner request 2026-09-22).
+    // Only fall back to a neutral, button-less edit if the placeholder above
+    // failed to send, since then this message id is still needed below as the
+    // streaming target.
+    if (collectorMsgId && chatId) {
+      if (placeholderRes?.result?.message_id) {
+        await deleteMessage(this.env.BOT_TOKEN, chatId, collectorMsgId).catch(() => {});
+      } else {
+        await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '▶️ Запустил проработку', {
+          reply_markup: { inline_keyboard: [] },
+        }).catch(() => {});
+      }
+    }
     const initialMsgId = placeholderRes?.result?.message_id ?? collectorMsgId ?? null;
 
     // Safety net: only fires if the run's isolate dies before finally clears busy.
