@@ -14,8 +14,10 @@
 export const FORCE_RUN_RE = /^\s*(запускай|запусти|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
 
 // Continuation / action signals: user has nothing more to add — dispatch immediately.
-// Whole-string match only so "продолжай с вакансией" doesn't trigger.
-export const AUTO_LAUNCH_RE = /^\s*(продолжай|продолжи|давай|ок|окей|хорошо|понял|понятно|ладно|действуй|вперёд|вперед|дальше|продолжить|делай|применяй|ага|угу|ok|yes|yep|sure|done|apply)\s*[!.]*\s*$/i;
+// Whole-string match only so "продолжай с вакансией" doesn't trigger. A bare "?"
+// counts too (owner, 2026-09-22 voice note): a one-character "go" the user can fire
+// off without reaching for the button.
+export const AUTO_LAUNCH_RE = /^\s*(\?|продолжай|продолжи|давай|ок|окей|хорошо|понял|понятно|ладно|действуй|вперёд|вперед|дальше|продолжить|делай|применяй|ага|угу|ok|yes|yep|sure|done|apply)\s*[!.]*\s*$/i;
 
 // Short follow-up threshold: messages at or below this character count use a
 // 2-second debounce and skip the completeness-nudge — they are almost always

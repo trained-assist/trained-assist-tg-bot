@@ -3,14 +3,23 @@ import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 // Durable Object: per-chat intake buffer.
 //
-// Model (smart debounce + manual launch): the bot accumulates a user's plain-text
-// messages and auto-dispatches after DEBOUNCE_MS of silence if the task looks
-// complete. If the completeness gate says the thought is unfinished, the user gets
-// a single nudge ("мысль не закончена, допиши") and a SOFT_REARM_MS grace period;
-// after that second timer fires (or if the user already received the nudge), the
-// task is dispatched regardless. The user can also launch explicitly — by tapping
-// «▶️ Запустить» on the collector message, or by typing a force word (запускай / го
-// / поехали, see index.js).
+// Model (smart debounce + confidence-tiered auto-launch): the bot accumulates a
+// user's messages and, DEBOUNCE_MS after the last one, asks the cheap gate how
+// confidently the buffer reads as a finished request:
+//   • "clear"        — dispatch now.
+//   • "likely"       — probably done, but not certain: tell the user, then wait
+//                       LIKELY_AUTOLAUNCH_MS more before dispatching, so someone
+//                       who forgets to tap ▶️ still gets launched, but someone
+//                       who meant to add more has time to notice and do so.
+//   • "insufficient" — NEVER auto-dispatch. Say so plainly ("не хватает
+//                       контекста, не запускаю") and leave the button up — the
+//                       owner's explicit requirement (2026-09-22 voice note):
+//                       a silently-not-launched batch reads as a broken bot.
+// A new message at any point re-arms the debounce from scratch (see
+// _armAutoDispatch), which cancels whichever tier was pending. The user can
+// also launch explicitly — by tapping «▶️ Запустить» on the collector message,
+// or by typing a force/continuation word (запускай / го / продолжай / ок /
+// see FORCE_RUN_RE / AUTO_LAUNCH_RE in intake-routing.js).
 //
 // Two states, both owned here so the rule is one place for every user:
 //   • idle     — messages pile into `buf`; a single collector message shows the
@@ -26,7 +35,7 @@ import { checkCompleteness } from './lib/agent-client.js';
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
-import { coalesceBuffer, SHORT_MSG_THRESHOLD } from './intake-routing.js';
+import { coalesceBuffer, coalesceItem, SHORT_MSG_THRESHOLD } from './intake-routing.js';
 
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
 // bubble reliably appears right after the user's own message once the chat has
@@ -37,9 +46,9 @@ const anchor = messageId => (messageId ? { reply_to_message_id: messageId, allow
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
-const DEBOUNCE_MS = 10_000;      // auto-launch delay after last message when task looks complete
-const SHORT_DEBOUNCE_MS = 2_000; // reduced debounce for short follow-up messages (≤ SHORT_MSG_THRESHOLD chars)
-const SOFT_REARM_MS = 15_000;    // grace period after "incomplete" nudge before force-dispatch
+const DEBOUNCE_MS = 10_000;        // silence wait before the gate is consulted
+const SHORT_DEBOUNCE_MS = 2_000;   // reduced debounce for short follow-up messages (≤ SHORT_MSG_THRESHOLD chars); skips the gate
+const LIKELY_AUTOLAUNCH_MS = 3 * 60_000; // extra grace period for "likely" (not certain) before auto-dispatch
 
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
@@ -51,6 +60,16 @@ const collectorText = n =>
 // "работает" — молчит» bug — a busy hold produced no Telegram output at all.
 const heldText = n =>
   `⏳ Иду по текущей задаче. Принял ещё (${n}) — покажу кнопку «▶️ Запустить», как закончу.`;
+
+// Gate said "insufficient": must NEVER auto-dispatch, and the user must be told
+// plainly that nothing was launched — a silent non-launch reads as a broken bot.
+const insufficientText =
+  '❔ Не запускаю автоматически — похоже, не хватает контекста, чтобы понять задачу. Дополни или жми «▶️ Запустить проработку», если и так достаточно.';
+
+// Gate said "likely": launch is coming, but not yet — give the user visibility
+// so a delayed launch doesn't read as "did nothing happen?".
+const likelyText =
+  `🕒 Похоже, всё понятно — запущу проработку через ${Math.round(LIKELY_AUTOLAUNCH_MS / 60000)} мин, если не допишешь. Можно нажать «▶️ Запустить проработку» сразу.`;
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -130,19 +149,7 @@ export class IntakeBuffer {
         if (await this.state.storage.get('busy')) {
           await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
         } else {
-          // Idle: arm the debounce timer and show the launch button.
-          // Short follow-ups (≤ SHORT_MSG_THRESHOLD chars, no pending media) use a 2-second
-          // debounce and skip the completeness-nudge — they are almost always self-contained.
-          await this.state.storage.delete('nudged');
-          const msgText = (msg.text || '').trim();
-          const isShort = !remaining.some(i => i.mediaPending) && msgText.length > 0 && msgText.length <= SHORT_MSG_THRESHOLD;
-          const debounceMs = isShort ? SHORT_DEBOUNCE_MS : DEBOUNCE_MS;
-          if (isShort) await this.state.storage.put('shortDebounce', true);
-          else await this.state.storage.delete('shortDebounce');
-          const expiresAt = Date.now() + debounceMs;
-          await this.state.storage.put('debounceExpiresAt', expiresAt);
-          await this.state.storage.setAlarm(expiresAt);
-          await this._showCollector(msg.chat.id, remaining.length, msg.message_id);
+          await this._armAutoDispatch(msg.chat.id, remaining, msg.message_id);
         }
       }
       return json({ buffered: remaining.length });
@@ -172,11 +179,7 @@ export class IntakeBuffer {
         return this.fetch(new Request('https://intake/flush', { method: 'POST' }));
       }
       // Idle: arm the debounce timer and show the launch button with the live count.
-      await this.state.storage.delete('nudged');
-      const expiresAt = Date.now() + DEBOUNCE_MS;
-      await this.state.storage.put('debounceExpiresAt', expiresAt);
-      await this.state.storage.setAlarm(expiresAt);
-      await this._showCollector(msg.chat?.id, buf.length, msg.message_id);
+      await this._armAutoDispatch(msg.chat?.id, buf, msg.message_id, { allowShort: false });
       return json({ buffered: buf.length });
     }
 
@@ -213,7 +216,7 @@ export class IntakeBuffer {
       // Media buffered: cancel any pending debounce so the auto-dispatch timer
       // doesn't fire while we're still waiting for the transcript.
       await this.state.storage.delete('debounceExpiresAt');
-      await this.state.storage.delete('nudged');
+      await this.state.storage.delete('gateLevel');
       return true;
     });
     if (!accepted) return json({ duplicate: true });
@@ -296,19 +299,45 @@ export class IntakeBuffer {
       } else {
         await sendMessage(this.env.BOT_TOKEN, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }).catch(() => {});
       }
-      // After the transcript arrives, show a fresh launch button so the user
-      // doesn't have to find and tap the old collector. Without this, users saw
-      // the transcript but had no obvious next step ("Нажми запуск после
-      // расшифровки" was confusing because the old button was scrolled off-screen).
+      // After the transcript arrives, arm auto-dispatch the same way a plain text
+      // message would (fresh launch button + gate). Before this fix a buffer whose
+      // newest item was media never got auto-dispatch armed at all — _ingestMedia
+      // deletes any pending debounce and nothing here re-armed it, so a batch that
+      // ended in a photo/voice message could ONLY ever be launched by hand, even
+      // once the transcript made its content fully readable (the "звонил чётко,
+      // ничего не запустилось" bug, 2026-09-22).
       if (!result.error) {
         const remaining = (await this.state.storage.get('buf')) || [];
         const busy = await this.state.storage.get('busy');
         if (!busy && remaining.length && !remaining.some(i => i.mediaPending)) {
-          await this._showCollector(notify.chatId, remaining.length, notify.messageId);
+          await this._armAutoDispatch(notify.chatId, remaining, notify.messageId);
         }
       }
     }
     return response;
+  }
+
+  // Idle + non-busy: (re)arm the debounce timer and show the launch button with
+  // the live count. One place for every caller (plain text, legacy /append, and
+  // a media item whose transcript just resolved) so the auto-dispatch gate is
+  // never silently skipped for one of them.
+  // Short follow-ups (a typed message, no pending media, ≤ SHORT_MSG_THRESHOLD
+  // chars) use a 2-second debounce and skip the gate entirely — they are almost
+  // always self-contained. A media tag or transcript never counts as "short":
+  // only `item.text` (something the user actually typed) qualifies. The legacy
+  // /append path (allowShort:false) keeps its original always-consult-the-gate
+  // behaviour — it's an unconfigured-binding fallback, not worth a new nuance.
+  async _armAutoDispatch(chatId, remaining, replyToMessageId, { allowShort = true } = {}) {
+    await this.state.storage.delete('gateLevel');
+    const lastText = (remaining[remaining.length - 1]?.text || '').trim();
+    const isShort = allowShort && !remaining.some(i => i.mediaPending) && lastText.length > 0 && lastText.length <= SHORT_MSG_THRESHOLD;
+    const debounceMs = isShort ? SHORT_DEBOUNCE_MS : DEBOUNCE_MS;
+    if (isShort) await this.state.storage.put('shortDebounce', true);
+    else await this.state.storage.delete('shortDebounce');
+    const expiresAt = Date.now() + debounceMs;
+    await this.state.storage.put('debounceExpiresAt', expiresAt);
+    await this.state.storage.setAlarm(expiresAt);
+    await this._showCollector(chatId, remaining.length, replyToMessageId);
   }
 
   // ACK every accumulated message with a FRESH bubble anchored to it — never an
@@ -365,7 +394,7 @@ export class IntakeBuffer {
       // Cancel any pending debounce alarm — dispatch is happening now (manually or
       // via the timer itself). Without this the alarm could fire a second dispatch.
       await this.state.storage.delete('debounceExpiresAt');
-      await this.state.storage.delete('nudged');
+      await this.state.storage.delete('gateLevel');
       const retryBatch = await this.state.storage.get('retryBatch');
       const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
@@ -459,7 +488,7 @@ export class IntakeBuffer {
     const bufCheck = (await this.state.storage.get('buf')) || [];
     if (!(await this.state.storage.get('busy')) && bufCheck.some(i => i.mediaPending)) return;
 
-    // ── Debounce auto-dispatch ──────────────────────────────────────────────────
+    // ── Debounce auto-dispatch (confidence-tiered) ──────────────────────────────
     const debounceExpiresAt = await this.state.storage.get('debounceExpiresAt');
     if (debounceExpiresAt && Date.now() >= debounceExpiresAt - 1000 &&
         !(await this.state.storage.get('busy'))) {
@@ -470,29 +499,43 @@ export class IntakeBuffer {
         const chatId = base.chat?.id;
         const coalescedText = coalesceBuffer(buf);
 
-        const alreadyNudged = (await this.state.storage.get('nudged')) === true;
+        const pendingLevel = await this.state.storage.get('gateLevel');
         const isShortDebounce = (await this.state.storage.get('shortDebounce')) === true;
         await this.state.storage.delete('shortDebounce');
-        if (!alreadyNudged && !isShortDebounce) {
-          const { complete } = await checkCompleteness(this.env, { text: coalescedText });
-          if (!complete) {
-            // Task looks unfinished — nudge once, give the user more time.
-            await this.state.storage.put('nudged', true);
-            const expiresAt = Date.now() + SOFT_REARM_MS;
-            await this.state.storage.put('debounceExpiresAt', expiresAt);
-            await this.state.storage.setAlarm(expiresAt);
-            if (chatId) {
-              await sendMessage(
-                this.env.BOT_TOKEN, chatId,
-                'Не запускаю автоматически — похоже, мысль не закончена. Дополни или нажми ▶️.',
-              );
-            }
-            return;
-          }
+
+        if (pendingLevel === 'likely') {
+          // The LIKELY_AUTOLAUNCH_MS grace period elapsed with no new message and
+          // no button tap (either would have re-armed via _armAutoDispatch and
+          // cleared gateLevel) — launch now, as already told to the user.
+          await this.state.storage.delete('gateLevel');
+          await this._dispatch();
+          return;
         }
 
-        // Complete (or already nudged, or short-debounce fast-path) → dispatch.
-        await this.state.storage.delete('nudged');
+        if (!pendingLevel && !isShortDebounce) {
+          const { level = 'clear' } = await checkCompleteness(this.env, { text: coalescedText });
+          if (level === 'insufficient') {
+            // Never auto-dispatch this batch — the user must add content or tap
+            // ▶️ themselves. No alarm is re-armed: silence stays silence until
+            // one of those happens (owner requirement, 2026-09-22 voice note —
+            // a batch that decided not to launch must say so, loudly, not just
+            // sit there looking identical to "still thinking").
+            if (chatId) await sendMessage(this.env.BOT_TOKEN, chatId, insufficientText);
+            return;
+          }
+          if (level === 'likely') {
+            await this.state.storage.put('gateLevel', 'likely');
+            const expiresAt = Date.now() + LIKELY_AUTOLAUNCH_MS;
+            await this.state.storage.put('debounceExpiresAt', expiresAt);
+            await this.state.storage.setAlarm(expiresAt);
+            if (chatId) await sendMessage(this.env.BOT_TOKEN, chatId, likelyText);
+            return;
+          }
+          // level === 'clear' → fall through to dispatch now.
+        }
+
+        // level === 'clear', or short-debounce fast-path (gate skipped) → dispatch.
+        await this.state.storage.delete('gateLevel');
         await this._dispatch();
         return;
       }

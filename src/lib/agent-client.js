@@ -191,9 +191,10 @@ export async function classifyMessage(env, { message, sessions }) {
 }
 
 /**
- * ШАГ 1.2 completeness gate: ask the agent's cheap LLM whether a coalesced
- * intake buffer is a finished thought or an obviously cut-off fragment.
- * Fails open (complete:true) on any error — the gate must never trap the user.
+ * ШАГ 1.2 completeness gate: ask the agent's cheap LLM how confidently a
+ * coalesced intake buffer reads as a finished, actionable request. Returns
+ * { level: 'clear'|'likely'|'insufficient' }. Fails open to 'clear' on any
+ * error — the gate must never silently trap the user.
  */
 export async function checkCompleteness(env, { text }) {
   try {
@@ -206,10 +207,10 @@ export async function checkCompleteness(env, { text }) {
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { complete: true };
+    if (!res.ok) return { level: 'clear', complete: true };
     return res.json();
   } catch {
-    return { complete: true };
+    return { level: 'clear', complete: true };
   }
 }
 
