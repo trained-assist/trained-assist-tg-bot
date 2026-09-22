@@ -54,6 +54,25 @@ Goal: закрыть накопившийся класс «мелкие баги
 
 ---
 
+## PR #194 — fix(intake): widen media-retry budget further
+
+Goal: `retryMedia` (media-retry.js) now allows 4 attempts / ~9s delay cap
+(~15.5s total headroom), up from #191's ~3.5s budget — journalctl showed
+the agent VM restarting as close as ~60-90s apart during active dev,
+tighter than #191's "isolated ~1-3s blip" assumption. A user retested #191
+live in @super_recruiter_assistant_bot post-deploy and still hit
+"Не удалось подготовить вложение". (Note: US-BUG-03 above — the IntakeBuffer
+DO race — is a separate, likely-related suspect for the same symptom; not
+addressed by this PR.)
+
+https://github.com/trained-assist/trained-assist-tg-bot/pull/194
+
+- [ ] CI green on PR #194
+- [ ] Merged to main
+- [ ] Deployed to prod (both `trained-assist-tg-bot` default env and `trained-assist-tg-bot-recruiter` env) — verified live
+
+---
+
 ## Архив: предыдущий checklist (issue #156, закрыт)
 
 Оставлено для истории — реализация была помечена [x], смок-тесты деплоя не
