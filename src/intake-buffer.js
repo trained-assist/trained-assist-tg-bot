@@ -35,7 +35,7 @@ import { checkCompleteness } from './lib/agent-client.js';
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from './lib/telegram.js';
-import { coalesceBuffer, SHORT_MSG_THRESHOLD } from './intake-routing.js';
+import { coalesceBuffer, coalesceItem, SHORT_MSG_THRESHOLD } from './intake-routing.js';
 
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
 // bubble reliably appears right after the user's own message once the chat has
