@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mocks = vi.hoisted(() => ({ send: vi.fn(), doc: vi.fn(), stt: vi.fn(), download: vi.fn(), handle: vi.fn(), store: vi.fn(), transcriptStore: vi.fn(), release: vi.fn() }));
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: mocks.send, sendDocument: mocks.doc,
-  sendMessageWithKeyboard: mocks.send, editMessage: mocks.send, editMessageReplyMarkup: mocks.send }));
+  sendMessageWithKeyboard: mocks.send, editMessage: mocks.send, editMessageReplyMarkup: mocks.send,
+  deleteMessage: mocks.send }));
 vi.mock('../src/handlers/message.js', () => ({ transcribeVoice: mocks.stt, downloadTgFileBase64: mocks.download, handleMessage: mocks.handle }));
 vi.mock('../src/lib/intake-files.js', () => ({ storeTelegramFile: mocks.store, storeTranscript: mocks.transcriptStore, releaseBufferPins: mocks.release }));
 import { preflight, prepareIntake } from '../src/intake-preflight.js';

@@ -44,6 +44,7 @@ vi.mock('../src/lib/telegram.js', () => ({
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
   editMessage: vi.fn(async () => ({ ok: true })),
   editMessageReplyMarkup: vi.fn(async () => ({ ok: true })),
+  deleteMessage: vi.fn(async () => ({ ok: true })),
 }));
 vi.mock('../src/handlers/commands.js', () => ({ renderSessionList: () => ({ text: '', buttons: [] }) }));
 
