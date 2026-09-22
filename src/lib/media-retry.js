@@ -18,8 +18,12 @@ export async function retryMedia(operation) {
         || error.status >= 500 && error.status <= 599
         || ['TypeError', 'AbortError', 'TimeoutError'].includes(error.name);
       const delay = error.retryAfterMs || 500 * 2 ** attempt;
-      // Do not ignore a long Retry-After or occupy the launch indefinitely.
-      if (!transient || attempt >= 2 || delay > 5000) throw error;
+      // Do not ignore a long Retry-After or occupy the launch indefinitely. The
+      // agent VM restarts routinely (deploys land continuously — see PR history);
+      // observed downtime per restart is ~1-3s. The old 2-attempt/1.5s budget was
+      // shorter than a single restart blip, so any attachment upload racing a
+      // deploy failed with "Не удалось подготовить вложение" for no real reason.
+      if (!transient || attempt >= 3 || delay > 6000) throw error;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
