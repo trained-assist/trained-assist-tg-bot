@@ -409,7 +409,7 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId, env
   // from the agent; render it so the user can tell projects apart, instead of a bare
   // name button. Falls back to name-only when the summary hasn't matured yet.
   const list = choices.slice(0, 8);
-  const lines = ['📂 <b>В какой проект добавить новый диалог?</b>', '', 'Выбери номер проекта ниже:', ''];
+  const lines = ['📂 <b>В какой проект работаем?</b>', '', 'Выбери номер проекта ниже:', ''];
   list.forEach((c, i) => {
     const n = i + 1;
     const name = c.name || c.label || 'Без названия';
