@@ -21,7 +21,9 @@ const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.j
 const commands = [];
 const seen = new Set();
 for (const entry of registry.commands) {
-  if (entry.hidden || entry.adminOnly) continue;
+  // Mirrors the audience:'default' filter in src/lib/telegram.js#registerBotCommands —
+  // this bot has no HH skill enabled, so recruiter-only commands don't belong here.
+  if (entry.hidden || entry.adminOnly || entry.recruiterOnly) continue;
   if (seen.has(entry.command)) continue;
   seen.add(entry.command);
   commands.push({ command: entry.command.replace(/^\//, ''), description: entry.description });
