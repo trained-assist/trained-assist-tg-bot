@@ -20,13 +20,13 @@ it.each([400, 401, 403, 413])('does not retry permanent HTTP %s', async status =
   await expect(readMedia('https://test')).rejects.toMatchObject({ status });
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
-it('bounds transient failures to four attempts', async () => {
+it('bounds transient failures to five attempts', async () => {
   vi.useFakeTimers();
   const fetcher = vi.fn().mockImplementation(async () => new Response('', { status: 503 }));
   vi.stubGlobal('fetch', fetcher);
   const result = expect(readMedia('https://test')).rejects.toMatchObject({ status: 503 });
   await vi.runAllTimersAsync(); await result;
-  expect(fetcher).toHaveBeenCalledTimes(4);
+  expect(fetcher).toHaveBeenCalledTimes(5);
 });
 it('honors Retry-After', async () => {
   vi.useFakeTimers();

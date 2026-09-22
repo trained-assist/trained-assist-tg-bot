@@ -302,4 +302,4 @@ it('failed screenshot persistence is tagged before dispatch and cannot launch te
     { BOT_TOKEN: 't', AGENT_URL: 'https://agent.example', AGENT_SECRET: 's' }))
     .rejects.toMatchObject({ code: 'INTAKE_PREPARATION_FAILED' });
   expect(runTask).not.toHaveBeenCalled();
-});
+}, 10000); // real-timer retry backoff (media-retry.js) now spans ~7.5s before giving up
