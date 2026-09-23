@@ -1,8 +1,8 @@
 Goal: Supplement flow requires explicit ✅ confirm before stop+restart (no more killing a running task by typing)
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/219
-- [ ] Merged to main
-- [ ] Deployed to prod — verified live
+- [x] CI green (ci+staging-gate success on 065dc83) on https://github.com/trained-assist/trained-assist-tg-bot/pull/219
+- [x] Merged to main (3b7a7ae)
+- [x] Deployed to prod (Version e2171f7e)
 
 Closed companions:
 - [x] PR #216 — ➕ Дополнить button (merged d774c23, deployed)
