@@ -642,12 +642,39 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   // ── Stop task button (⛔ Стоп, sent by agent on task start) ─────────────────
-  // stop|{taskId} — stop the running task for this chat's profile.
-  // taskId is informational (one task per user, username is what matters).
+  // stop|{taskId} — first tap only shows a confirm keyboard (↩️ Вернуться /
+  // ⛔ Точно остановить); the actual stop only happens on the explicit stopok|
+  // tap below (stopno| cancels back). Same confirm-before-destructive shape as
+  // the supok|/supno| supplement flow — a stray/rushed tap can no longer kill
+  // a running task.
   if (data?.startsWith('stop|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    const taskId = data.slice('stop|'.length);
+    await answerCallbackQuery(env.BOT_TOKEN, id);
     const msgId = message?.message_id;
+    const confirmText = '⛔ Точно остановить задачу?';
+    const confirmKeyboard = [[
+      { text: '↩️ Вернуться', callback_data: `stopno|${taskId}` },
+      { text: '⛔ Точно остановить', callback_data: `stopok|${taskId}` },
+    ]];
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, confirmText, { lifecycleEnv: env, reply_markup: { inline_keyboard: confirmKeyboard } }).catch(() => {});
+    else await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, confirmText, confirmKeyboard, {}, env);
+    return;
+  }
+
+  // ── Stop confirmation (⛔ Точно остановить / ↩️ Вернуться) ───────────────────
+  // stopok|{taskId} — explicit confirm, actually stops the task.
+  // stopno|{taskId} — cancels, task keeps running.
+  if (data?.startsWith('stopok|') || data?.startsWith('stopno|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const confirm = data.startsWith('stopok|');
+    const msgId = message?.message_id;
+    if (!confirm) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '↩️ Отменено — задача продолжает работать.');
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '↩️ Остановка отменена — задача продолжает работать.', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      return;
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     try {
       const result = await stopTask(env, { username: session.username });
       const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
@@ -683,7 +710,7 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  // ── Supplement confirmation (✅ Перезапустить / ❌ Отменить) ─────────────────
+  // ── Supplement confirmation (➕ Перезапуск с дополнением / ↩️ Вернуться) ────
   // supok|{taskId} — the user typed the supplement text (stashed on the session as
   // pendingSupplementDraft in message.js) and now explicitly confirms the stop +
   // restart. No accidental text message can kill the running task anymore: only this
@@ -691,6 +718,13 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('supok|') || data?.startsWith('supno|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const confirm = data.startsWith('supok|');
+    // message.js writes pendingSupplementDraft in the request right before this tap —
+    // Workers KV gives no read-after-write guarantee across requests/colos, so the
+    // session loaded at the top of this handler can still look empty here even though
+    // the draft was written moments ago. Same race the sp:/pc: pickers already guard
+    // against with withKvConsistencyRetry; this flow was missing that re-read, which is
+    // exactly why a quick confirm tap could report "draft not found" on a real draft.
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, s => !!s?.pendingSupplementDraft);
     const draft = session.pendingSupplementDraft;
     const msgId = message?.message_id;
     if (!draft) {
