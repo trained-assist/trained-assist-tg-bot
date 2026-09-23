@@ -76,7 +76,11 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
   const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
-  const body = { userId, username, context, sessionId, contextFromSession, threadId, initiatedAt, audience };
+  // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
+  // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
+  // here has always meant the Telegram chat to stream into; chatId is the forward-looking
+  // wire name for that same value. Drop userId only after agent flips chatId canonical (PR-D).
+  const body = { userId, chatId: userId, username, context, sessionId, contextFromSession, threadId, initiatedAt, audience };
   if (fileRefs?.length) body.fileRefs = fileRefs;
   if (requestId) body.requestId = requestId;
   if (task) body.task = task;
