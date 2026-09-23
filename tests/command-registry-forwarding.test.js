@@ -33,3 +33,15 @@ describe('newly-forwarded agent commands reach the agent, not the "unknown comma
     expect(sendMessage).not.toHaveBeenCalled();
   });
 });
+
+// Explicit contract: deriving every case from the registry alone misses removed commands.
+describe('requested checklist command', () => {
+  beforeEach(() => vi.clearAllMocks());
+  it.each(['/show_active_cheklist', '/active_checklist'])('%s reaches the agent intact', async (cmd) => {
+    const msg = { chat: { id: 1 }, text: cmd, from: { id: 1 } };
+    await handleCommand(msg, {});
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe(cmd);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});

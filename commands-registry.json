@@ -64,7 +64,7 @@
     { "command": "/gdrive_notif_off", "aliases": ["/google_drive_sharing_notifications_switch_off"], "handler": "forward", "recruiterHidden": true, "description": "Выключить уведомления о шаринге Google Drive" },
     { "command": "/gdrive_notif_on", "aliases": ["/google_drive_sharing_notifications_switch_on"], "handler": "forward", "recruiterHidden": true, "description": "Включить уведомления о шаринге Google Drive" },
 
-    { "command": "/active_checklist", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "Список активных GTD-чеклистов" },
+    { "command": "/show_active_cheklist", "aliases": ["/active_checklist"], "handler": "forward", "recruiterHidden": true, "description": "Список активных GTD-чеклистов" },
     { "command": "/checklist_turn_off", "aliases": ["/gtd_stop", "/stop_gtd"], "handler": "forward", "recruiterHidden": true, "description": "Отключить GTD-чеклист напоминаний" },
     { "command": "/secrets_list", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "Список подключённых сервисов профиля" },
     { "command": "/secrets_log", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "История обращений к секретам профиля" },
