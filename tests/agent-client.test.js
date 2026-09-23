@@ -107,6 +107,37 @@ describe('runTask sends audience derived from SESSION_NAMESPACE', () => {
   });
 });
 
+// P1-B of naming-conventions refactor (plan generic-naming-conventions-refactoring §4):
+// dual-send chatId alongside legacy userId so agent's /run can migrate off userId later
+// without a synchronized deploy.
+describe('runTask sends chatId as an alias of userId', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('mirrors userId into chatId on the wire body', async () => {
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x' };
+    await runTask(env, { userId: 555, username: USER, task: 'work' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.userId).toBe(555);
+    expect(body.chatId).toBe(555);
+  });
+
+  it('mirrors userId into chatId on the durable outbox path too', async () => {
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const delivered = [];
+    const env = { AGENT_URL: BASE, RUN_OUTBOX: {
+      idFromName: x => x, get: () => ({ fetch: async (_, options) => {
+        delivered.push(JSON.parse(options.body)); return Response.json({ queued: true, outbox: true });
+      } }),
+    } };
+    await runTask(env, { userId: -10, username: USER, task: 'work' });
+    expect(delivered[0].body.userId).toBe(-10);
+    expect(delivered[0].body.chatId).toBe(-10);
+  });
+});
+
 describe('getSessions sends audience derived from SESSION_NAMESPACE', () => {
   afterEach(() => vi.unstubAllGlobals());
 
