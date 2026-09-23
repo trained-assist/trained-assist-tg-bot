@@ -1,4 +1,6 @@
-## PR — fix(intake): atomic claim for the /ingest collector, kills a duplicate-bubble DO race
+## PR #211 — fix(intake): atomic claim for the /ingest collector, kills a duplicate-bubble DO race
+
+https://github.com/trained-assist/trained-assist-tg-bot/pull/211
 
 Goal: owner treated a recurring "Не удалось подготовить вложение" report (chat
 8815112204, @super_recruiter_assistant_bot) as a symptom of a broader class —
