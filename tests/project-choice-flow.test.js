@@ -133,6 +133,16 @@ describe('project selection through actual creation, message and callback handle
     await setSession(env.SESSIONS, chatId, session); await tap('pc:0');
     expect((await getSession(env.SESSIONS, chatId)).projectId).toBe('old-project');
   });
+  it('«🔀 Переструктурировать проекты» is offered on the picker and skips project selection', async () => {
+    await tap('nd:');
+    expect(sendMessageWithKeyboard.mock.calls.at(-1)[3].flat().some(b => b.callback_data === 'pc:reorg')).toBe(true);
+    await handleMessage(message('какая-то задача'), env, { mode: 'deep' });
+    await tap('pc:reorg');
+    expect(runTask).toHaveBeenCalledTimes(1);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ forceNew: true, forceClaude: true, mode: 'deep' });
+    expect(runTask.mock.calls[0][1].task).toContain('reproject_preview');
+    expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice).toBeNull();
+  });
   it('new dialog with carried context still asks project and preserves source', async () => {
     await tap('sn:source'); await tap('pc:2'); await handleMessage(message('разбери'), env);
     expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p2', contextFromSession: 'source', forceNew: true });
