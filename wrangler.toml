@@ -52,7 +52,9 @@ class_name = "RetryQueue"
 #   AGENT_RU_URL   — (optional) URL of a secondary/regional agent
 #   AGENT_SECRET   — shared secret for bot↔agent auth
 #   RELAY_URL      — URL of the token-relay / pairing service
-#   ADMIN_GROUP_ID — Telegram group ID for admin commands
+#   ADMIN_GROUP_ID — Telegram group ID for admin commands (also kept as the
+#                    ADMIN_GROUP_ID GitHub Actions secret and re-synced by the
+#                    "main" deploy job on every push to main — see ci.yml)
 
 [[kv_namespaces]]
 binding = "SESSIONS"

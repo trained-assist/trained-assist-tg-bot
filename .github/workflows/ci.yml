@@ -110,6 +110,17 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
+      # ADMIN_GROUP_ID is a Workers secret set once via `wrangler secret put` —
+      # it isn't declared in wrangler.toml and deploy doesn't touch it, so it
+      # silently went missing and every admin-group command (/adduser etc.)
+      # got dropped with no error (2026-09-23 incident). Re-asserting it here
+      # every deploy makes it self-healing instead of a one-off CLI step that
+      # nothing reproduces.
+      - name: Sync ADMIN_GROUP_ID secret (main)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: echo "${{ secrets.ADMIN_GROUP_ID }}" | npx wrangler secret put ADMIN_GROUP_ID
       - name: Deploy to Cloudflare Workers (recruiter)
         uses: cloudflare/wrangler-action@v3
         with:
