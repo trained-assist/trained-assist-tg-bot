@@ -19,6 +19,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
   'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
   'stop|',      // ⛔ Стоп button sent by agent on task start — stop running task
+  'sup|',       // ➕ Дополнить button sent by agent alongside ⛔ Стоп — arm pendingSupplement
   'qa_more|',   // 🔎 Разобраться подробнее — escalate quick answer to Claude
   'ar:',        // archive sessions menu
   'sa:',        // archive single session

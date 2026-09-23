@@ -659,5 +659,28 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Supplement running task (➕ Дополнить, sent by agent alongside ⛔ Стоп) ──
+  // sup|{taskId} — arms a one-shot "next text message restarts this session with
+  // it as extra context" flag on the session (session.pendingSupplement), same
+  // pending-state-on-session shape as pendingProjectChoice so the existing KV
+  // read-after-write race fix (withKvConsistencyRetry) already covers it. The
+  // actual stop+restart happens in message.js once the text arrives — Telegram
+  // has no composer to read from like the web UI's Дополнить (trained-assist-
+  // web#33), so the user types the addition after tapping.
+  if (data?.startsWith('sup|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const taskId = data.slice('sup|'.length);
+    const sessionId = session.activeSessionId || session.lastSessionId;
+    if (!sessionId) { await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Нет активной сессии'); return; }
+    await setSession(env.SESSIONS, chatId, {
+      ...session,
+      pendingSupplement: { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS },
+    });
+    await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Напиши, что добавить');
+    await sendMessage(env.BOT_TOKEN, chatId,
+      '✏️ Напиши текст следующим сообщением — остановлю текущую задачу и перезапущу с ним как с дополнением.');
+    return;
+  }
+
   await answerCallbackQuery(env.BOT_TOKEN, id);
 }
