@@ -75,8 +75,8 @@ export async function handleMessage(msg, env, opts = {}) {
       await sendMessageWithKeyboard(env.BOT_TOKEN, chatId,
         '➕ Остановить текущую задачу и перезапустить её с твоим дополнением?',
         [[
-          { text: '✅ Перезапустить с дополнением', callback_data: `supok|${taskId}` },
-          { text: '❌ Отменить', callback_data: `supno|${taskId}` },
+          { text: '↩️ Вернуться', callback_data: `supno|${taskId}` },
+          { text: '➕ Перезапуск с дополнением', callback_data: `supok|${taskId}` },
         ]], {}, env);
       return;
     }

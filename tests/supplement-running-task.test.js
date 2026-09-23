@@ -60,8 +60,8 @@ describe('supplement a running task via ➕ Дополнить', () => {
     expect(sendMessageWithKeyboard).toHaveBeenCalledWith('test', chatId,
       expect.stringContaining('перезапустить её с твоим дополнением'),
       [[
-        expect.objectContaining({ callback_data: 'supok|task-abc' }),
         expect.objectContaining({ callback_data: 'supno|task-abc' }),
+        expect.objectContaining({ callback_data: 'supok|task-abc' }),
       ]], {}, env);
   });
 
