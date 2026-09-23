@@ -1,4 +1,5 @@
 import { readMedia } from '../lib/media-retry.js';
+import { PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject } from '../intake-routing.js';
 import { openProjectChoice } from '../lib/project-choice.js';
@@ -59,32 +60,28 @@ export async function handleMessage(msg, env, opts = {}) {
     );
   }
 
-  // Consume a one-shot «➕ Дополнить» tap (sup| in callbacks.js): the very next
-  // plain-text message stops the running task and restarts the same session with
-  // that text folded in as extra context. Only plain text counts — media/batched
-  // intake items fall through to normal handling untouched.
-  if (session.pendingSupplement && (msg.text || '').trim() && !msg.intakeItems) {
-    const { taskId, sessionId, expiresAt } = session.pendingSupplement;
-    session = { ...session, pendingSupplement: null };
-    await setSession(env.SESSIONS, chatId, session);
+  // Consume a one-shot «➕ Дополнить» flow (sup| in callbacks.js): the next plain-text
+  // message is stashed as a DRAFT on the session and a confirmation keyboard
+  // (✅ Перезапустить / ❌ Отменить) is shown. The actual stop+restart happens only on
+  // an explicit supok| tap in callbacks.js — a stray or rushed text message can no
+  // longer kill a running task. Only plain text counts — media/batched intake items
+  // fall through to normal handling untouched.
+  if (session.pendingSupplementDraft && (msg.text || '').trim() && !msg.intakeItems) {
+    const { taskId, sessionId, expiresAt } = session.pendingSupplementDraft;
+    session = { ...session, pendingSupplementDraft: null };
     if (Date.now() < expiresAt) {
-      await stopTask(env, { username: session.username }).catch(() => {});
-      const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '➕ Останавливаю и перезапускаю с дополнением…');
-      return runTask(env, {
-        initiatedAt: Date.now(), threadId: msg.message_thread_id || null,
-        requestId: `sup-${taskId}-${msg.message_id}`,
-        userId: chatId,
-        username: session.username,
-        sessionId,
-        task: `[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]\n${msg.text}`,
-        forceClaude: true,
-        mode: 'deep',
-        initialMsgId: thinkMsg?.result?.message_id ?? null,
-        telegramUserId: session.telegramUserId,
-        projectId: session.projectId || null,
-      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      const draft = { taskId, sessionId, text: msg.text, expiresAt: Date.now() + PICKER_TTL_MS };
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: draft });
+      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId,
+        '➕ Остановить текущую задачу и перезапустить её с твоим дополнением?',
+        [[
+          { text: '✅ Перезапустить с дополнением', callback_data: `supok|${taskId}` },
+          { text: '❌ Отменить', callback_data: `supno|${taskId}` },
+        ]], {}, env);
+      return;
     }
-    // Expired — cleared above, fall through to normal handling of this message.
+    // Expired — draft dropped, fall through to normal handling of this message.
+    await setSession(env.SESSIONS, chatId, session);
   }
 
   try {

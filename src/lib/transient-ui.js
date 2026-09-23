@@ -7,6 +7,7 @@ export const MENU_TTL_MS = 15 * 60 * 1000;
 export function uiLifetime(data) {
   if (/^(pp|sp|pc):/.test(data || '')) return PICKER_TTL_MS;
   if (/^(sd|sc|si|sn|sl|nd|ar|sa|fl|fr):/.test(data || '')) return MENU_TTL_MS;
+  if (/^(stop|sup|supok|supno)\|/.test(data || '')) return PICKER_TTL_MS;
   return null;
 }
 function prefix(env) { return `ui-expiry:${String(env.BOT_TOKEN).split(':')[0]}:`; }

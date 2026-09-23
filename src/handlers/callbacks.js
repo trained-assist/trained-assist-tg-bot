@@ -660,13 +660,14 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   // ── Supplement running task (➕ Дополнить, sent by agent alongside ⛔ Стоп) ──
-  // sup|{taskId} — arms a one-shot "next text message restarts this session with
-  // it as extra context" flag on the session (session.pendingSupplement), same
-  // pending-state-on-session shape as pendingProjectChoice so the existing KV
-  // read-after-write race fix (withKvConsistencyRetry) already covers it. The
-  // actual stop+restart happens in message.js once the text arrives — Telegram
-  // has no composer to read from like the web UI's Дополнить (trained-assist-
-  // web#33), so the user types the addition after tapping.
+  // sup|{taskId} — arms a one-shot "next text message becomes the supplement draft"
+  // flag on the session (session.pendingSupplementDraft), same pending-state-on-
+  // session shape as pendingProjectChoice so the existing KV read-after-write race
+  // fix (withKvConsistencyRetry) already covers it. message.js stashes the typed
+  // text and shows a ✅/❌ confirmation keyboard; the actual stop+restart happens
+  // ONLY on the explicit supok| tap below (supno| cancels) — Telegram has no
+  // composer to read from like the web UI's Дополнить (trained-assist-web#33), and
+  // a bare typed message must never kill a running task on its own.
   if (data?.startsWith('sup|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const taskId = data.slice('sup|'.length);
@@ -674,12 +675,58 @@ export async function handleCallbackQuery(cq, env) {
     if (!sessionId) { await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Нет активной сессии'); return; }
     await setSession(env.SESSIONS, chatId, {
       ...session,
-      pendingSupplement: { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS },
+      pendingSupplementDraft: { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS },
     });
     await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Напиши, что добавить');
     await sendMessage(env.BOT_TOKEN, chatId,
       '✏️ Напиши текст следующим сообщением — остановлю текущую задачу и перезапущу с ним как с дополнением.');
     return;
+  }
+
+  // ── Supplement confirmation (✅ Перезапустить / ❌ Отменить) ─────────────────
+  // supok|{taskId} — the user typed the supplement text (stashed on the session as
+  // pendingSupplementDraft in message.js) and now explicitly confirms the stop +
+  // restart. No accidental text message can kill the running task anymore: only this
+  // button does. supno| cancels and drops the draft.
+  if (data?.startsWith('supok|') || data?.startsWith('supno|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const confirm = data.startsWith('supok|');
+    const draft = session.pendingSupplementDraft;
+    const msgId = message?.message_id;
+    if (!draft) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Черновик дополнения не найден — напиши задачу заново.');
+      if (msgId) await editMessageReplyMarkup(env.BOT_TOKEN, chatId, msgId, []).catch(() => {});
+      return;
+    }
+    if (Date.now() >= draft.expiresAt) {
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+      await answerCallbackQuery(env.BOT_TOKEN, id, '⌛ Черновик устарел.');
+      if (msgId) await editMessageReplyMarkup(env.BOT_TOKEN, chatId, msgId, []).catch(() => {});
+      return;
+    }
+    if (!confirm) {
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+      await answerCallbackQuery(env.BOT_TOKEN, id, '✖️ Отменено — задача продолжает работать.');
+      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '✖️ Дополнение отменено — задача продолжает работать.', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      return;
+    }
+    await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+    await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '➕ Останавливаю задачу и перезапускаю с дополнением…', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    await stopTask(env, { username: session.username }).catch(() => {});
+    return runTask(env, {
+      initiatedAt, threadId: message?.message_thread_id || null,
+      requestId: `sup-${draft.taskId}-${msgId || id}`,
+      userId: chatId,
+      username: session.username,
+      sessionId: draft.sessionId,
+      task: `[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]\n${draft.text}`,
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId: msgId || null,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, id);
