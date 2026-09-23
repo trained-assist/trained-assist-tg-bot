@@ -1,3 +1,67 @@
+## PR #211 — fix(intake): atomic claim for the /ingest collector, kills a duplicate-bubble DO race
+
+https://github.com/trained-assist/trained-assist-tg-bot/pull/211
+
+Goal: owner treated a recurring "Не удалось подготовить вложение" report (chat
+8815112204, @super_recruiter_assistant_bot) as a symptom of a broader class —
+"state on CloudFlare regularly acts up" — and asked to reproduce the failure
+directly against the live worker (not guess), fix with a direct point-deploy
+first, verify, then go through the normal PR flow. Investigation, in order:
+
+1. `GET /debug/intake/8815112204` on the live recruiter worker → completely
+   empty state (`retryBatch: []`, `busy: false`). PR #210 (already deployed)
+   already closed the "stuck forever" failure mode this chat had hit.
+2. Added a temp `/debug/transcribe-test` route (point-deployed to `recruiter`
+   only, no PR, per the owner's explicit ask), fed it the user's own just-sent
+   voice note — Deepgram + DEEPGRAM_API_KEY on that env both work fine. Ruled
+   out the specific external dependency that failed before 2026-09-22.
+3. Read `src/intake-buffer.js`'s `/ingest` handler end-to-end looking for the
+   *class* of bug, not another one-off: found `remaining = get('buf')` /
+   `get('busy')` read OUTSIDE `_exclusive()`, right after a lock-protected
+   write — exactly the class the checklist's own Phase-1 backlog already
+   flagged as 🔴 US-BUG-03 ("гонка в IntakeBuffer DO"), never actually
+   investigated until now.
+4. Wrote a red test first (`tests/intake-buffer.test.js`, "two ingests whose
+   preflight overlaps…"): two attachments whose `preflight()` (transcription)
+   overlaps — a realistic "two voice notes within a second" burst — each
+   compute their own stale `buf` snapshot and independently call
+   `_armAutoDispatch`. Failing before the fix: 2 collector bubbles sent, the
+   first reporting a stale count. Confirmed red, then fixed.
+
+Fix: the write (`buf`/`received`) and the decision snapshot (`items`, `busy`)
+now happen atomically inside the same `_exclusive()` block, tagged with a
+monotonic `armSeq` claim token. The actual Telegram send still happens
+outside the lock (file-level invariant: I/O must never hold it), but only
+the call that is *still* the freshest committed write (re-checked via a
+second, I/O-free `_exclusive` read of `armSeq` right before sending) actually
+sends — an earlier, now-superseded call silently defers to the fresher one.
+17/17 `intake-buffer.test.js` tests pass, 394/394 full suite passes.
+
+Point-deployed directly to `recruiter` then default env to verify live
+before this PR (owner's explicit request — fix, verify, then PR/merge):
+```
+export CLOUDFLARE_ACCOUNT_ID=d740a05e9442c1d0feacae2dfc673e93
+npx wrangler deploy --env recruiter   # verified: /health + /debug/intake/8815112204 both clean post-deploy
+npx wrangler deploy                   # default env, same bug class
+```
+The temp `/debug/transcribe-test` route from step 2 is kept (mirrors the
+existing `/debug/intake/:chatId` pattern) — useful for the next "attachment
+prep failed" report to isolate Deepgram from Telegram without needing a
+fresh `file_id`.
+
+Scope note: this closes ONE concrete instance of US-BUG-03 (the `/ingest`
+tail). `_armAutoDispatch`'s OTHER unprotected caller (`/append`, line ~202)
+and `_ingestMedia`/`_mediaResult`'s busy-checks share the same shape and were
+NOT touched here — flagged, not fixed, to keep this PR reviewable as one
+diff. Phase-1 backlog item for those: same pattern, same fix.
+
+- [ ] CI green
+- [ ] Merged to main
+- [ ] Already deployed+verified live (see above) — re-verify after merge that
+      the merge commit's deploy didn't drift from what was tested
+
+---
+
 ## PR #206 — fix(intake): delete the collector bubble once the task has launched
 
 Goal: «▶️ Запустил проработку» was an edited husk left in the chat forever —

@@ -152,7 +152,16 @@ export class IntakeBuffer {
           '⚠️ Сообщение сохранено для повтора, но подготовка файла или расшифровки ещё не завершена. Повторю при запуске проработки.');
         console.warn('[intake prepare]', error.message);
       }
-      await this._exclusive(async () => {
+      // `armSeq` is a monotonic claim token: two attachments whose slow preflight()
+      // overlaps (a realistic "two voice notes within a second" burst) used to each
+      // read `buf`/`busy` OUTSIDE any lock here and independently call
+      // _armAutoDispatch — duplicate collector bubbles, the earlier one reporting a
+      // stale count (regression test: "two ingests whose preflight overlaps...").
+      // Committing the write AND claiming the next token happen atomically, so only
+      // the call that turns out to be the LAST one committed (checked just below,
+      // itself lock-protected but I/O-free) actually sends — see the file-level
+      // comment on why the send itself still happens outside the lock.
+      const claim = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
         const index = items.findIndex(i => i.msg.message_id === msg.message_id);
         if (index >= 0) {
@@ -162,17 +171,19 @@ export class IntakeBuffer {
         await this.state.storage.put('buf', items);
         const seen = (await this.state.storage.get('received')) || [];
         await this.state.storage.put('received', [...seen, msg.message_id].slice(-1000));
+        const seq = ((await this.state.storage.get('armSeq')) || 0) + 1;
+        await this.state.storage.put('armSeq', seq);
+        return { items, busy: await this.state.storage.get('busy'), seq };
       });
       if (result.handled) return json({ handled: true });
-      const remaining = (await this.state.storage.get('buf')) || [];
-      if (remaining.length) {
-        if (await this.state.storage.get('busy')) {
-          await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id);
-        } else {
-          await this._armAutoDispatch(msg.chat.id, remaining, msg.message_id);
-        }
+      if (!claim.items.length) return json({ buffered: 0 });
+      if (claim.busy) {
+        await this._showHeldNotice(msg.chat.id, claim.items.length, msg.message_id);
+        return json({ buffered: claim.items.length });
       }
-      return json({ buffered: remaining.length });
+      const stillFreshest = await this._exclusive(async () => (await this.state.storage.get('armSeq')) === claim.seq);
+      if (stillFreshest) await this._armAutoDispatch(msg.chat.id, claim.items, msg.message_id);
+      return json({ buffered: claim.items.length });
     }
 
     if (url.pathname === '/append' && request.method === 'POST') {

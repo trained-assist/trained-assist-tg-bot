@@ -8,8 +8,10 @@ const editMessage = vi.fn();
 const editMessageReplyMarkup = vi.fn();
 const deleteMessage = vi.fn();
 const checkCompleteness = vi.fn();
+const preflight = vi.fn();
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
+vi.mock('../src/intake-preflight.js', () => ({ preflight: (...a) => preflight(...a) }));
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: (...a) => sendMessage(...a),
   sendMessageWithKeyboard: (...a) => sendMessageWithKeyboard(...a),
@@ -65,6 +67,7 @@ beforeEach(() => {
   editMessageReplyMarkup.mockResolvedValue({ ok: true });
   deleteMessage.mockResolvedValue({ ok: true });
   checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
+  preflight.mockImplementation(async msg => ({ msg }));
 });
 
 describe('IntakeBuffer — smart debounce with completeness gate', () => {
@@ -330,7 +333,56 @@ describe('intake concurrent delivery', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].intakeItems.map(i => i.msg.message_id)).toEqual([1, 2, 3, 4, 5]);
   });
+
+  // Root-cause investigation, owner request 2026-09-23 (chat 8815112204,
+  // "Не удалось подготовить вложение" kept recurring — treat the recurring
+  // class as the bug, not the one symptom). /ingest (message.js's DO route)
+  // writes the accepted item inside `_exclusive()`, but after `preflight()`
+  // resolves, the decision of what to show the user — `remaining = get('buf')`
+  // then `get('busy')` then `_armAutoDispatch`/`_showHeldNotice` — reads
+  // storage OUTSIDE any lock (src/intake-buffer.js ~166-175). Two attachments
+  // landing close together (a realistic voice-note burst) each run their own
+  // slow `preflight()` concurrently; both tails can then interleave, each
+  // computing its own stale `remaining` snapshot and independently calling
+  // `_armAutoDispatch` → duplicate collector bubbles / a debounce re-armed on
+  // stale data instead of one atomic decision per accepted item.
+  it('two ingests whose preflight overlaps each arm their own stale debounce instead of one atomic decision (race, unprotected read after _exclusive)', async () => {
+    const state = makeState();
+    const get = state.storage.get;
+    state.storage.get = async key => structuredClone(await get(key));
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    // Both preflights are in flight at once — the realistic "two voice notes
+    // arrived within a second of each other" case.
+    let resolveA, resolveB;
+    preflight.mockImplementation(msg => new Promise(resolve => {
+      if (msg.message_id === 10) resolveA = () => resolve({ msg });
+      else resolveB = () => resolve({ msg });
+    }));
+
+    const ingest = id => io.fetch(new Request('https://intake/ingest', {
+      method: 'POST', body: JSON.stringify({ msg: { chat: { id: 42 }, message_id: id } }),
+    }));
+    const reqA = ingest(10);
+    const reqB = ingest(11);
+    // Let both requests reach their (mocked) preflight() call before either resolves
+    // — the dynamic `import('./intake-preflight.js')` in the real handler adds a
+    // couple of extra microtask hops versus a static import.
+    for (let i = 0; i < 20 && (!resolveA || !resolveB); i++) await new Promise(r => setTimeout(r, 0));
+    resolveA(); resolveB();
+    await Promise.all([reqA, reqB]);
+
+    // Correct behaviour: one item accepted → one collector shown, reporting
+    // the true final count (2). The race instead fires _armAutoDispatch twice,
+    // each off a stale snapshot (1, then 1) instead of once off the real one (2).
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+    expect(collectorTextArg(sendMessageWithKeyboard)).toContain('(2)');
+  });
 });
+
+function collectorTextArg(mockFn) {
+  return mockFn.mock.calls[mockFn.mock.calls.length - 1][2];
+}
 
 
 it('recovers the persisted launch after isolate loss without auto-running it', async () => {
