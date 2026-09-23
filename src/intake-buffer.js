@@ -1,4 +1,4 @@
-import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
+import { mediaEnabled, mediaOf, mediaId, enqueueMedia, ackText } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 // Durable Object: per-chat intake buffer.
@@ -260,7 +260,7 @@ export class IntakeBuffer {
       // transcript second was confusing users: they'd tap launch, get "still
       // transcribing", and not know to tap again after the transcript arrived.
       await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
-        '🎙 Принял голосовое, расшифровываю…', anchor(msg.message_id)).catch(() => {});
+        ackText(msg), anchor(msg.message_id)).catch(() => {});
     }
     return json({ queued: true, id });
   }
