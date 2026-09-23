@@ -6,7 +6,7 @@ import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
-import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError } from '../lib/agent-client.js';
+import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError, stopTask } from '../lib/agent-client.js';
 import { renderSessionList, escHtml, timeAgo } from './commands.js';
 import commandsRegistry from '../../commands-registry.json';
 
@@ -52,11 +52,39 @@ export async function handleMessage(msg, env, opts = {}) {
     opts = { ...opts, requestId: `tg-${Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')}` };
   }
 
-  const session = await getSession(env.SESSIONS, chatId);
+  let session = await getSession(env.SESSIONS, chatId);
   if (!session) {
     return sendMessage(env.BOT_TOKEN, chatId,
       '👋 Сначала войди: /login username password'
     );
+  }
+
+  // Consume a one-shot «➕ Дополнить» tap (sup| in callbacks.js): the very next
+  // plain-text message stops the running task and restarts the same session with
+  // that text folded in as extra context. Only plain text counts — media/batched
+  // intake items fall through to normal handling untouched.
+  if (session.pendingSupplement && (msg.text || '').trim() && !msg.intakeItems) {
+    const { taskId, sessionId, expiresAt } = session.pendingSupplement;
+    session = { ...session, pendingSupplement: null };
+    await setSession(env.SESSIONS, chatId, session);
+    if (Date.now() < expiresAt) {
+      await stopTask(env, { username: session.username }).catch(() => {});
+      const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '➕ Останавливаю и перезапускаю с дополнением…');
+      return runTask(env, {
+        initiatedAt: Date.now(), threadId: msg.message_thread_id || null,
+        requestId: `sup-${taskId}-${msg.message_id}`,
+        userId: chatId,
+        username: session.username,
+        sessionId,
+        task: `[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]\n${msg.text}`,
+        forceClaude: true,
+        mode: 'deep',
+        initialMsgId: thinkMsg?.result?.message_id ?? null,
+        telegramUserId: session.telegramUserId,
+        projectId: session.projectId || null,
+      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }
+    // Expired — cleared above, fall through to normal handling of this message.
   }
 
   try {
