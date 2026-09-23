@@ -79,6 +79,8 @@
     { "command": "/oc_ru", "aliases": ["/oc_russian_recruiter"], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)" },
     { "command": "/oc_go", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: GO (opencode-go/deepseek-v4.1-flash)" },
     { "command": "/oc_openrouter", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: OPENROUTER (openrouter/deepseek-v4-flash-0731, фолбэк при лимите Go)" },
-    { "command": "/oc_deepseek", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: DEEPSEEK (общий профиль команды)" }
+    { "command": "/oc_deepseek", "aliases": [], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: DEEPSEEK (общий профиль команды)" },
+    { "command": "/oc_ds_or", "aliases": ["/oc_deepseek_openrouter"], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-openrouter (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" },
+    { "command": "/oc_ds_go", "aliases": ["/oc_deepseek_go"], "handler": "forward", "recruiterHidden": true, "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-go (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" }
   ]
 }
