@@ -65,6 +65,19 @@ app.get('/debug/whoami', async (c) => {
   }
 });
 
+// Debug: dump a chat's IntakeBuffer Durable Object state (buf/retryBatch/busy).
+// Diagnoses "stuck forever" batches — a preparation failure that keeps
+// re-throwing on every retry (non-transient cause) leaves its batch in
+// `retryBatch`, which every future message re-attempts and re-fails.
+// Gated on AGENT_SECRET since chat content (message ids, media refs) is
+// otherwise exposed.
+app.get('/debug/intake/:chatId', async (c) => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
+  const res = await stub.fetch('https://intake/debug');
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // Telegram webhook
 app.post('/webhook', async (c) => {
   const env = c.env;

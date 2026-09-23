@@ -103,6 +103,26 @@ export class IntakeBuffer {
   async fetch(request) {
     const url = new URL(request.url);
 
+    if (url.pathname === '/debug' && request.method === 'GET') {
+      const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel] =
+        await Promise.all([
+          this.state.storage.get('buf'), this.state.storage.get('retryBatch'),
+          this.state.storage.get('retryBatchAttempts'), this.state.storage.get('busy'),
+          this.state.storage.get('busySince'), this.state.storage.get('launching'),
+          this.state.storage.get('debounceExpiresAt'), this.state.storage.get('gateLevel'),
+        ]);
+      const summarize = items => (items || []).map(i => ({
+        messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
+        mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
+        preparingAt: i.preparingAt, enqueueFailures: i.enqueueFailures || 0,
+      }));
+      return json({
+        buf: summarize(buf), retryBatch: summarize(retryBatch), retryBatchAttempts: retryBatchAttempts || 0,
+        busy: !!busy, busySince: busySince || null, launching: summarize(launching),
+        debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
+      });
+    }
+
     if (url.pathname === '/media-result' && request.method === 'POST') {
       return this._mediaResult(await request.json());
     }
@@ -458,18 +478,35 @@ export class IntakeBuffer {
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(msg, this.env, { mode: 'deep', initialMsgId });
       await this.state.storage.delete('launching');
+      await this.state.storage.delete('retryBatchAttempts');
     } catch (err) {
       // Preparation failed: keep the original Telegram references, never launch
-      // a partial task or require the user to dictate everything again.
+      // a partial task or require the user to dictate everything again — UNLESS
+      // this is a non-transient failure (e.g. a permanently bad credential/file
+      // ref) that has now failed 3x in a row: without a cap, that single item
+      // re-fails on every future message forever and the chat can never launch
+      // anything again ("state accumulated and never resets" — owner report
+      // 2026-09-23, chat 8815112204). Cap mirrors the existing 3-strike
+      // convention in _recoverMedia's enqueueFailures.
+      const isPrepFailure = err?.code === 'INTAKE_PREPARATION_FAILED';
+      const attempts = isPrepFailure ? ((await this.state.storage.get('retryBatchAttempts')) || 0) + 1 : 0;
+      const giveUp = isPrepFailure && attempts >= 3;
       await this._exclusive(async () => {
-        await this.state.storage.put('retryBatch', buf);
+        if (giveUp) {
+          await this.state.storage.delete('retryBatchAttempts');
+        } else {
+          await this.state.storage.put('retryBatch', buf);
+          if (isPrepFailure) await this.state.storage.put('retryBatchAttempts', attempts);
+        }
         await this.state.storage.delete('launching');
       });
       await sendMessage(this.env.BOT_TOKEN, chatId,
-        err?.code === 'INTAKE_PREPARATION_FAILED'
+        giveUp
+          ? '⚠️ Вложение так и не удалось подготовить после нескольких попыток — похоже, проблема не временная. Пачку сбросил, чтобы не блокировать дальнейшую работу: пришли вложение ещё раз (или опиши текстом) и запусти заново.'
+          : isPrepFailure
           ? '⚠️ Не удалось подготовить вложение. Пачка и ссылки на исходные сообщения сохранены. Повтори запуск позже — отправлять всё заново не нужно.'
           : '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.');
-      console.error(`[intake ${chatId}] batch preparation failed:`, err?.cause?.message || err?.message);
+      console.error(`[intake ${chatId}] batch preparation failed (attempt ${attempts || 1}${giveUp ? ', gave up' : ''}):`, err?.cause?.message || err?.message);
     } finally {
       await this.state.storage.delete('busy');
       await this.state.storage.delete('busySince');

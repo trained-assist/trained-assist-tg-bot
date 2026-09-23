@@ -361,3 +361,39 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
    await io.fetch(flushReq());
    expect(await state.storage.get('retryBatch')).toBeUndefined();
  });
+
+ it('drops the batch after 3 consecutive preparation failures instead of retrying forever', async () => {
+   // Regression test: a non-transient preparation failure (e.g. a permanently
+   // bad credential) used to re-populate retryBatch unconditionally, so it
+   // retried and re-failed on every future message forever, blocking the chat
+   // from ever launching anything again (owner report 2026-09-23, chat
+   // 8815112204 — "где-то стейт скопился и не сбрасывается").
+   const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+   const original = { text: 'voice note', msg: { chat: { id: 42 }, message_id: 123, voice: { file_id: 'v1' } } };
+   await state.storage.put('buf', [original]);
+   const permanentErr = () => Object.assign(new Error('upload failed'), { code: 'INTAKE_PREPARATION_FAILED' });
+
+   handleMessage.mockRejectedValueOnce(permanentErr());
+   await io.fetch(flushReq());
+   expect(await state.storage.get('retryBatch')).toEqual([original]);
+   expect(await state.storage.get('retryBatchAttempts')).toBe(1);
+
+   handleMessage.mockRejectedValueOnce(permanentErr());
+   await io.fetch(flushReq());
+   expect(await state.storage.get('retryBatch')).toEqual([original]);
+   expect(await state.storage.get('retryBatchAttempts')).toBe(2);
+
+   handleMessage.mockRejectedValueOnce(permanentErr());
+   await io.fetch(flushReq());
+   // Third strike: give up rather than keep the chat permanently stuck.
+   expect(await state.storage.get('retryBatch')).toBeUndefined();
+   expect(await state.storage.get('retryBatchAttempts')).toBeUndefined();
+   const gaveUp = sendMessage.mock.calls.find(call => String(call[2]).includes('после нескольких попыток'));
+   expect(gaveUp).toBeTruthy();
+
+   // Chat is unblocked: a fresh message can buffer and dispatch normally.
+   await state.storage.put('buf', [{ text: 'hello', msg: { chat: { id: 42 }, message_id: 124 } }]);
+   handleMessage.mockResolvedValueOnce(undefined);
+   await io.fetch(flushReq());
+   expect(handleMessage).toHaveBeenCalledTimes(4);
+ });
