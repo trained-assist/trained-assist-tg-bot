@@ -1,4 +1,4 @@
-import { getProjectDecision } from './agent-client.js';
+import { getProjectDecision, runTask } from './agent-client.js';
 import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
 import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
@@ -42,6 +42,7 @@ async function render(env, chatId, pending, page = 0) {
   if (start + PAGE_SIZE < pending.choices.length) nav.push({ text: 'Дальше →', callback_data: `pc:page:${page + 1}` });
   if (nav.length) rows.push(nav);
   rows.push([{ text: '➕ Новый проект', callback_data: 'pc:new' }]);
+  rows.push([{ text: '🔀 Переструктурировать проекты', callback_data: 'pc:reorg' }]);
   if (pending.messageId) {
     await editMessage(env.BOT_TOKEN, chatId, pending.messageId, text,
       { lifecycleEnv: env, reply_markup: { inline_keyboard: rows } });
@@ -95,6 +96,29 @@ export async function chooseProject(cq, env, session) {
     const page = Number(raw.slice(5));
     await answerCallbackQuery(env.BOT_TOKEN, cq.id);
     if (page * PAGE_SIZE < pending.choices.length) await render(env, chatId, pending, page);
+    return;
+  }
+  // «🔀 Переструктурировать проекты» — standalone action, not a project pick. Any
+  // task text captured for this picker is dropped (user explicitly chose reorg
+  // over continuing it); dispatches straight to reproject_preview via Claude
+  // (agent/src/mcp-skills/tools/06-reproject.js), which never moves anything
+  // without an explicit reproject_apply({confirm:true}).
+  if (raw === 'reorg') {
+    await answerCallbackQuery(env.BOT_TOKEN, cq.id, '🔀 Запускаю переструктурирование…');
+    await editMessage(env.BOT_TOKEN, chatId, pending.messageId,
+      '🔀 <b>Переструктурирование проектов</b>\n\nСмотрю текущую структуру и предложу план — без подтверждения ничего не изменится.',
+      { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } });
+    await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: null });
+    await runTask(env, {
+      userId: chatId,
+      username: session.username,
+      sessionId: newSessionId(chatId),
+      forceNew: true,
+      forceClaude: true,
+      mode: 'deep',
+      telegramUserId: session.telegramUserId,
+      task: '[Пользователь нажал «🔀 Переструктурировать проекты» в меню выбора проекта. Вызови reproject_preview, покажи получившийся план переструктурирования пользователю и явно спроси подтверждение — применяй (reproject_apply({confirm:true})) только после его согласия.]',
+    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
     return;
   }
   const project = /^\d+$/.test(raw) ? pending.choices[Number(raw)] : null;
