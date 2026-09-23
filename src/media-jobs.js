@@ -10,6 +10,11 @@ export function mediaOf(msg) {
 export function needsTranscript(msg) {
   return !!(msg.voice || msg.audio || msg.video || /^(audio|video)\//i.test(msg.document?.mime_type || ''));
 }
+export function ackText(msg) {
+  if (needsTranscript(msg)) return '🎙 Принял голосовое, расшифровываю…';
+  if (msg.photo) return '📷 Принял фото';
+  return '📎 Принял вложение';
+}
 export async function mediaId(msg) {
   const file = mediaOf(msg);
   return digest(new TextEncoder().encode(`${msg.chat.id}:${msg.message_id}:${file.file_unique_id || file.file_id}`));

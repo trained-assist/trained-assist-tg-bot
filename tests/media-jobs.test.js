@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { MediaJob, mediaId, objectKey, serveMedia, digest } from '../src/media-jobs.js';
+import { MediaJob, mediaId, objectKey, serveMedia, digest, ackText } from '../src/media-jobs.js';
 import { IntakeBuffer } from '../src/intake-buffer.js';
 import { prepareIntake } from '../src/intake-preflight.js';
 import { copyRefsToAgent } from '../src/lib/intake-files.js';
+import { sendMessage } from '../src/lib/telegram.js';
 vi.mock('../src/lib/telegram.js', () => ({ sendMessage: vi.fn(async () => ({ok:true})), sendDocument: vi.fn(), sendMessageWithKeyboard: vi.fn(async()=>({result:{message_id:100}})), editMessage: vi.fn(async()=>({ok:true})), editMessageReplyMarkup: vi.fn(async()=>({ok:true})) }));
 vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(async()=>({username:'alice'})), setSession: vi.fn() }));
 function state() {
@@ -65,6 +66,13 @@ describe('durable R2 pipeline',()=>{
   const f=await fixture();f.s.data.clear();await f.io._recoverMedia();expect(f.s.data.get('job').stage).toBe('download');
   const buf=f.intake.data.get('buf');buf[0].preparingAt=Date.now()-300000;f.intake.data.set('buf',buf);
   const result=await f.io.fetch(new Request('https://intake/flush',{method:'POST'}));expect(await result.json()).toEqual({preparing:true});
+ });
+ it('immediate ack names the actual attachment type, not always voice', async()=>{
+  expect(ackText({voice:{}})).toBe('🎙 Принял голосовое, расшифровываю…');
+  expect(ackText({photo:[{}]})).toBe('📷 Принял фото');
+  expect(ackText({document:{mime_type:'application/pdf'}})).toBe('📎 Принял вложение');
+  await fixture({chat:{id:42},message_id:9,photo:[{file_id:'p',file_unique_id:'p'}]});
+  expect(sendMessage).toHaveBeenCalledWith('test',42,'📷 Принял фото',expect.anything());
  });
  it('photo and PDF skip transcription, retain caption and metadata',async()=>{
   for(const extra of [{photo:[{file_id:'p',file_unique_id:'p'}]}, {document:{file_id:'d',file_name:'doc.pdf',mime_type:'application/pdf'}}]) {
