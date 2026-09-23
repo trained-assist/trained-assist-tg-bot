@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { pickAgentUrl } from '../src/lib/agent-client.js';
+import { pickAgentUrl, runTask, getSessions } from '../src/lib/agent-client.js';
 
 const BASE = 'https://gcp.example.com';
 const RU   = 'https://ru.example.com';
@@ -78,4 +78,75 @@ it('durable dispatch keeps original request time and forum topic before network 
   } };
   await runTask(env,{userId:-10,username:USER,task:'work',requestId:'one',initiatedAt:1234,threadId:42});
   expect(delivered[0].body).toMatchObject({initiatedAt:1234,threadId:42,requestId:'one'});
+});
+
+// Cross-bot session leak fix: the backend keys sessions/projects by username+chatId
+// alone, so requests from the recruiter bot and the default bot for the same human
+// must be tagged with distinct `audience` values or they mix each other's sessions.
+describe('runTask sends audience derived from SESSION_NAMESPACE', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('sends audience: "default" when SESSION_NAMESPACE is not set', async () => {
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x' };
+    await runTask(env, { userId: 1, username: USER, task: 'work' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.audience).toBe('default');
+  });
+
+  it('sends audience: "recruiter" when SESSION_NAMESPACE is "recruiter"', async () => {
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'recruiter' };
+    await runTask(env, { userId: 1, username: USER, task: 'work' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.audience).toBe('recruiter');
+  });
+});
+
+describe('getSessions sends audience derived from SESSION_NAMESPACE', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('appends audience=default when SESSION_NAMESPACE is not set', async () => {
+    const { getSessions } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ sessions: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x' };
+    await getSessions(env, { username: USER });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=default');
+  });
+
+  it('appends audience=recruiter when SESSION_NAMESPACE is "recruiter"', async () => {
+    const { getSessions } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ sessions: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'recruiter' };
+    await getSessions(env, { username: USER });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=recruiter');
+  });
+});
+
+describe('getProjects sends audience derived from SESSION_NAMESPACE', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('appends audience=default when SESSION_NAMESPACE is not set', async () => {
+    const { getProjects } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ projects: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x' };
+    await getProjects(env, { username: USER, userId: 1 });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=default');
+  });
+
+  it('appends audience=recruiter when SESSION_NAMESPACE is "recruiter"', async () => {
+    const { getProjects } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ projects: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'recruiter' };
+    await getProjects(env, { username: USER, userId: 1 });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=recruiter');
+  });
 });

@@ -58,9 +58,10 @@ export async function getProjects(env, { username, userId }) {
     const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
     if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
   }
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
   try {
     const res = await fetch(
-      `${agentUrl}/projects?username=${encodeURIComponent(username)}`,
+      `${agentUrl}/projects?username=${encodeURIComponent(username)}&audience=${audience}`,
       { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` }, signal: AbortSignal.timeout(5000) }
     );
     if (!res.ok) return [];
@@ -74,7 +75,8 @@ export async function getProjects(env, { username, userId }) {
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
-  const body = { userId, username, context, sessionId, contextFromSession, threadId, initiatedAt };
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const body = { userId, username, context, sessionId, contextFromSession, threadId, initiatedAt, audience };
   if (fileRefs?.length) body.fileRefs = fileRefs;
   if (requestId) body.requestId = requestId;
   if (task) body.task = task;
@@ -130,9 +132,10 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 // Failure is explicit: never turn an unavailable project service into "no projects".
 export async function getProjectDecision(env, { username, chatId, task = '' }) {
   const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
   try {
     const res = await fetch(
-      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}`,
+      `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}&audience=${audience}`,
       { headers, signal: AbortSignal.timeout(9000) }
     );
     if (res.ok) {
@@ -140,7 +143,7 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
       if (!data.note && ['auto', 'ask', 'create', 'quick'].includes(data.action) && Array.isArray(data.choices)) return data;
     }
   } catch { /* use the same agent's basic project list */ }
-  const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}`,
+  const res = await fetch(`${env.AGENT_URL}/projects?username=${encodeURIComponent(username)}&audience=${audience}`,
     { headers, signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
   const data = await res.json();
@@ -150,8 +153,9 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
+  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
   const res = await fetch(
-    `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}`,
+    `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}&audience=${audience}`,
     { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` } }
   );
   if (!res.ok) throw new Error(`agent /sessions HTTP ${res.status}`);
