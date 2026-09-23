@@ -4,19 +4,24 @@ import { handleMessage } from '../src/handlers/message.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { getSession, setSession } from '../src/lib/kv.js';
 import { runTask, stopTask } from '../src/lib/agent-client.js';
-import { sendMessage } from '../src/lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup } from '../src/lib/telegram.js';
 
 // ➕ Дополнить (sup|{taskId}): a running task can be interrupted with more
-// context instead of only killed outright. Tap arms session.pendingSupplement;
-// the next plain-text message stops the task and restarts the same session
-// with that text folded in. Telegram mirror of trained-assist-web#33's
-// Стоп/Дополнить pair — that PR's own notes flagged the Telegram side as a
-// separate design problem (no composer to preview from), which this covers.
+// context instead of only killed outright — but never by a stray typed message.
+// Flow: sup| arms session.pendingSupplementDraft → the next plain-text message is
+// stashed as a DRAFT (message.js) and a ✅/❌ confirmation keyboard is shown →
+// only the explicit supok| tap (callbacks.js) stops the task and restarts the same
+// session with that text folded in. supno| cancels; expired drafts fall through.
+// Telegram mirror of trained-assist-web#33's Стоп/Дополнить pair.
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(), runTask: vi.fn().mockResolvedValue({}), stopTask: vi.fn().mockResolvedValue({ killed: 1 }),
 }));
 vi.mock('../src/lib/telegram.js', async original => ({
-  ...await original(), sendMessage: vi.fn().mockResolvedValue({ result: { message_id: 50 } }),
+  ...await original(),
+  sendMessage: vi.fn().mockResolvedValue({ result: { message_id: 50 } }),
+  sendMessageWithKeyboard: vi.fn().mockResolvedValue({ result: { message_id: 51 } }),
+  editMessage: vi.fn().mockResolvedValue({}),
+  editMessageReplyMarkup: vi.fn().mockResolvedValue({}),
   answerCallbackQuery: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
@@ -36,15 +41,38 @@ beforeEach(async () => {
 });
 
 describe('supplement a running task via ➕ Дополнить', () => {
-  it('arms pendingSupplement on tap, then the next text message stops + restarts with it', async () => {
+  it('arms pendingSupplementDraft on tap; a typed message stashes a draft + asks for confirmation, does NOT stop anything', async () => {
     await handleCallbackQuery({ id: 'cb-1', data: 'sup|task-abc', from: { id: chatId },
       message: { message_id: 200, chat: { id: chatId } } }, env);
 
     const armed = await getSession(env.SESSIONS, chatId);
-    expect(armed.pendingSupplement).toMatchObject({ taskId: 'task-abc', sessionId: 's-1' });
+    expect(armed.pendingSupplementDraft).toMatchObject({ taskId: 'task-abc', sessionId: 's-1' });
     expect(sendMessage).toHaveBeenCalledWith('test', chatId, expect.stringContaining('Напиши текст'));
 
     await handleMessage(message('ещё учти вот это'), env, {});
+
+    // No stop/restart on the bare text message — confirmation required first.
+    expect(stopTask).not.toHaveBeenCalled();
+    expect(runTask).not.toHaveBeenCalled();
+
+    const draft = await getSession(env.SESSIONS, chatId);
+    expect(draft.pendingSupplementDraft).toMatchObject({ taskId: 'task-abc', sessionId: 's-1', text: 'ещё учти вот это' });
+    expect(sendMessageWithKeyboard).toHaveBeenCalledWith('test', chatId,
+      expect.stringContaining('перезапустить её с твоим дополнением'),
+      [[
+        expect.objectContaining({ callback_data: 'supok|task-abc' }),
+        expect.objectContaining({ callback_data: 'supno|task-abc' }),
+      ]], {}, env);
+  });
+
+  it('supok| confirms: stops + restarts with the stashed text, then clears the draft', async () => {
+    await handleCallbackQuery({ id: 'cb-1', data: 'sup|task-abc', from: { id: chatId },
+      message: { message_id: 200, chat: { id: chatId } } }, env);
+    await handleMessage(message('ещё учти вот это'), env, {});
+    vi.clearAllMocks();
+
+    await handleCallbackQuery({ id: 'cb-2', data: 'supok|task-abc', from: { id: chatId },
+      message: { message_id: 201, chat: { id: chatId } } }, env);
 
     expect(stopTask).toHaveBeenCalledWith(env, { username: 'owner' });
     expect(runTask).toHaveBeenCalledTimes(1);
@@ -52,23 +80,49 @@ describe('supplement a running task via ➕ Дополнить', () => {
     expect(call).toMatchObject({ sessionId: 's-1', forceClaude: true, mode: 'deep' });
     expect(call.task).toContain('ещё учти вот это');
 
-    // One-shot: flag is consumed, a follow-up message behaves normally.
-    expect((await getSession(env.SESSIONS, chatId)).pendingSupplement).toBeNull();
+    // One-shot: draft is consumed.
+    expect((await getSession(env.SESSIONS, chatId)).pendingSupplementDraft).toBeNull();
   });
 
-  it('a stale (expired) flag is cleared and the message falls through to normal handling', async () => {
+  it('supno| cancels: keeps the task alive, drops the draft', async () => {
+    await handleCallbackQuery({ id: 'cb-1', data: 'sup|task-abc', from: { id: chatId },
+      message: { message_id: 200, chat: { id: chatId } } }, env);
+    await handleMessage(message('ещё учти вот это'), env, {});
+    vi.clearAllMocks();
+
+    await handleCallbackQuery({ id: 'cb-2', data: 'supno|task-abc', from: { id: chatId },
+      message: { message_id: 201, chat: { id: chatId } } }, env);
+
+    expect(stopTask).not.toHaveBeenCalled();
+    expect(runTask).not.toHaveBeenCalled();
+    expect((await getSession(env.SESSIONS, chatId)).pendingSupplementDraft).toBeNull();
+  });
+
+  it('a stale (expired) draft is cleared and the message falls through to normal handling', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner', activeSessionId: 's-1', lastSessionId: 's-1',
-      pendingSupplement: { taskId: 'task-old', sessionId: 's-1', expiresAt: Date.now() - 1000 } });
+      pendingSupplementDraft: { taskId: 'task-old', sessionId: 's-1', text: 'x', expiresAt: Date.now() - 1000 } });
 
     await handleMessage(message('обычное новое сообщение'), env, {});
 
     expect(stopTask).not.toHaveBeenCalled();
-    expect((await getSession(env.SESSIONS, chatId)).pendingSupplement).toBeNull();
+    expect((await getSession(env.SESSIONS, chatId)).pendingSupplementDraft).toBeNull();
   });
 
-  it('does not consume a batched/media message even with an armed flag', async () => {
+  it('a stale (expired) draft on supok| tap is dropped with a notice, no restart', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner', activeSessionId: 's-1', lastSessionId: 's-1',
-      pendingSupplement: { taskId: 'task-abc', sessionId: 's-1', expiresAt: Date.now() + 60_000 } });
+      pendingSupplementDraft: { taskId: 'task-old', sessionId: 's-1', text: 'x', expiresAt: Date.now() - 1000 } });
+
+    await handleCallbackQuery({ id: 'cb-1', data: 'supok|task-old', from: { id: chatId },
+      message: { message_id: 200, chat: { id: chatId } } }, env);
+
+    expect(stopTask).not.toHaveBeenCalled();
+    expect(runTask).not.toHaveBeenCalled();
+    expect((await getSession(env.SESSIONS, chatId)).pendingSupplementDraft).toBeNull();
+  });
+
+  it('does not consume a batched/media message even with an armed draft', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner', activeSessionId: 's-1', lastSessionId: 's-1',
+      pendingSupplementDraft: { taskId: 'task-abc', sessionId: 's-1', expiresAt: Date.now() + 60_000 } });
 
     await handleMessage({ ...message('caption'), intakeItems: [{ text: 'caption', msg: {} }] }, env, {});
 
