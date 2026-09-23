@@ -78,6 +78,31 @@ app.get('/debug/intake/:chatId', async (c) => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
+// Debug: POST raw audio bytes, get back exactly what Deepgram returned (or the
+// raw network error). Isolates the Deepgram leg of transcribeVoice from
+// Telegram getFile, so an "Не удалось подготовить вложение" report can be
+// narrowed to a specific external call without needing a fresh file_id from
+// the reporting chat. Added investigating a live report on chat 8815112204 /
+// recruiter env, 2026-09-23. Gated on AGENT_SECRET since it spends the
+// worker's Deepgram quota on arbitrary input.
+app.post('/debug/transcribe-test', async (c) => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const mimeType = c.req.header('X-Mime-Type') || 'audio/ogg; codecs=opus';
+  const audioBuffer = await c.req.arrayBuffer();
+  try {
+    const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true', {
+      method: 'POST',
+      headers: { Authorization: `Token ${c.env.DEEPGRAM_API_KEY}`, 'Content-Type': mimeType },
+      body: audioBuffer,
+      signal: AbortSignal.timeout(120000),
+    });
+    const text = await res.text();
+    return c.json({ ok: res.ok, status: res.status, bytesSent: audioBuffer.byteLength, body: text.slice(0, 2000) });
+  } catch (e) {
+    return c.json({ ok: false, error: e.message, name: e.name, bytesSent: audioBuffer.byteLength }, 500);
+  }
+});
+
 // Telegram webhook
 app.post('/webhook', async (c) => {
   const env = c.env;
