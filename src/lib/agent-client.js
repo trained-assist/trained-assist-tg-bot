@@ -1,4 +1,5 @@
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
+import { resolveAudience } from './audience.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -58,7 +59,7 @@ export async function getProjects(env, { username, userId }) {
     const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
     if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
   }
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   try {
     const res = await fetch(
       `${agentUrl}/projects?username=${encodeURIComponent(username)}&audience=${audience}`,
@@ -75,7 +76,7 @@ export async function getProjects(env, { username, userId }) {
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
   // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
   // here has always meant the Telegram chat to stream into; chatId is the forward-looking
@@ -136,7 +137,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 // Failure is explicit: never turn an unavailable project service into "no projects".
 export async function getProjectDecision(env, { username, chatId, task = '' }) {
   const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   try {
     const res = await fetch(
       `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}&audience=${audience}`,
@@ -157,7 +158,7 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   const res = await fetch(
     `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}&audience=${audience}`,
     { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` } }

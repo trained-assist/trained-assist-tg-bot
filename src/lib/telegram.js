@@ -1,5 +1,7 @@
 import { trackUI, forgetUI } from './transient-ui.js';
 import commandsRegistry from '../../commands-registry.json';
+import { resolveAudience } from './audience.js';
+import { isCommandVisible } from './command-visibility.js';
 // Telegram Bot API helpers
 
 // One-shot per isolate: register the bot's command menu on Telegram as soon as
@@ -8,17 +10,10 @@ import commandsRegistry from '../../commands-registry.json';
 // switch stay in sync forever — the old hardcoded lists in scripts/set-commands*.js
 // kept drifting and the menu went stale (issue: "/hh_* отсутствует в меню").
 //
-// Hidden and adminOnly entries are intentionally excluded: a hidden command is
-// hidden by definition, and adminOnly ones must not be advertised to regular
-// users via the menu (they're still callable when typed directly).
-//
-// audience: 'recruiter' additionally drops entries marked recruiterHidden:true —
-// dev/ops/personal-assistant commands (OpenCode profile switches, Chrome-ext
-// pairing, GTD checklists, etc.) that don't belong on a recruiter's menu. See
-// wrangler.toml env.recruiter (BOT_USERNAME=super_recruiter_assistant_bot).
-// Symmetrically, entries marked recruiterOnly:true (HH/vacancy commands) are
-// dropped for every OTHER audience — the personal-assistant bot has no HH
-// skill enabled, so those commands were dead clutter in its menu/start list.
+// Which commands appear is decided by lib/command-visibility.js from each
+// registry entry's `audiences` allow-list — the SAME helper /start uses, so the
+// menu and the welcome listing can never drift apart. Hidden and adminOnly
+// entries are intentionally excluded (still callable when typed directly).
 //
 // Telegram limits: 100 commands/scope, 30 setMyCommands/min. Per-isolate call
 // is fine even under burst cold-start; if many isolates race, Telegram returns
@@ -28,9 +23,7 @@ export async function registerBotCommands(token, { audience = 'default' } = {}) 
   const seen = new Set();
   const commands = [];
   for (const entry of commandsRegistry.commands) {
-    if (entry.hidden || entry.adminOnly) continue;
-    if (audience === 'recruiter' && entry.recruiterHidden) continue;
-    if (audience !== 'recruiter' && entry.recruiterOnly) continue;
+    if (!isCommandVisible(entry, audience)) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const name = entry.command.replace(/^\//, '');
@@ -71,12 +64,39 @@ export async function registerBotCommands(token, { audience = 'default' } = {}) 
   }
 }
 
-let bootRegistered = false;
+// Registered keys are `botId:digest` — NOT a single boolean. Two reasons:
+//   • a boolean per isolate marked a FAILED registration as done forever, so a
+//     transient setMyCommands failure (429, bad batch) froze the menu until the
+//     next cold start;
+//   • one isolate can serve several bots (same module scope), so the flag must
+//     be keyed per bot, not global.
+// The digest is the registry contents, so editing commands-registry.json forces
+// a re-register on the next request instead of waiting for a new isolate.
+const registeredKeys = new Set();
+
+function registryDigest() {
+  const source = JSON.stringify(commandsRegistry.commands);
+  let hash = 2166136261; // FNV-1a
+  for (let i = 0; i < source.length; i++) {
+    hash ^= source.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+// Telegram bot tokens are `<botId>:<secret>` — the numeric prefix is the bot id.
+export function botIdFromToken(token) {
+  return String(token || '').split(':')[0] || 'bot';
+}
+
 export async function ensureCommandsRegisteredOnce(env) {
-  if (bootRegistered) return;
-  bootRegistered = true;
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
-  await registerBotCommands(env.BOT_TOKEN, { audience });
+  if (!env?.BOT_TOKEN) return;
+  const key = `${botIdFromToken(env.BOT_TOKEN)}:${registryDigest()}`;
+  if (registeredKeys.has(key)) return;
+  // Flag is set only AFTER a successful await — a failed attempt must retry on
+  // the next request rather than being latched as done.
+  const data = await registerBotCommands(env.BOT_TOKEN, { audience: resolveAudience(env) });
+  if (data?.ok) registeredKeys.add(key);
 }
 
 // Read what Telegram currently has registered (debug/verification only — not

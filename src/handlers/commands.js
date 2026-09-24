@@ -5,6 +5,8 @@ import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
+import { resolveAudience } from '../lib/audience.js';
+import { isCommandVisible } from '../lib/command-visibility.js';
 import { handleMessage } from './message.js';
 import commandsRegistry from '../../commands-registry.json';
 
@@ -101,17 +103,15 @@ async function cmdStart(chatId, env) {
   // переписать»). HH_START_COMMANDS hardcoded потому что /new_job_post и /cancel_vacancy
   // HH-adjacent но не начинаются с /hh_; добавлять новые HH-команды — сюда + в реестр.
   //
-  // recruiterHidden/recruiterOnly entries are dropped here the same way they're
-  // dropped from the Telegram command menu (src/lib/telegram.js#registerBotCommands)
-  // — otherwise /start would list commands the menu itself doesn't show.
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  // Visibility is decided by the SAME helper the Telegram command menu uses
+  // (src/lib/command-visibility.js → registry `audiences`), otherwise /start
+  // would list commands the menu itself doesn't show.
+  const audience = resolveAudience(env);
   const hhLines = [];
   const otherLines = [];
   const seen = new Set();
   for (const entry of commandsRegistry.commands) {
-    if (entry.hidden || entry.adminOnly) continue;
-    if (audience === 'recruiter' && entry.recruiterHidden) continue;
-    if (audience !== 'recruiter' && entry.recruiterOnly) continue;
+    if (!isCommandVisible(entry, audience)) continue;
     if (seen.has(entry.command)) continue;
     seen.add(entry.command);
     const aliases = entry.aliases?.length ? ` (${entry.aliases.join(', ')})` : '';
