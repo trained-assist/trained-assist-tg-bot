@@ -8,7 +8,7 @@ import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError, stopTask } from '../lib/agent-client.js';
-import { renderSessionList, escHtml, timeAgo } from './commands.js';
+import { escHtml, timeAgo } from './commands.js';
 import commandsRegistry from '../../commands-registry.json';
 
 // Phrases that signal "start a new session" regardless of history
@@ -107,7 +107,7 @@ export async function handleMessage(msg, env, opts = {}) {
     msg = { ...msg, intakeItems: validItems };
   }
 
-  const route = opts.intakeRoute || msg.intakeRoute ||
+  let route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
   const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
@@ -118,13 +118,17 @@ export async function handleMessage(msg, env, opts = {}) {
     }
   }
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
-  if (pendingCreation || ((route.forceNew || (!session.lastSessionId && route.type !== 'disambiguate')) && !chosen)) {
+  if (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen)) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg,
         opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
         contextFromSession: route.contextFromSession || session.contextFromSession || null });
       return;
+    }
+    if (route.forceNew && decision.action !== 'quick') {
+      // Resolve the new session inside the selected project, never inherit a stale pointer.
+      route = { ...route, projectChosen: true, projectId: decision.project?.id || (decision.action === 'auto' ? decision.choices?.[0]?.id : null) || null };
     }
     // Quick command detected: clear any stuck pending project choice so the next real
     // task doesn't re-trigger the picker.
@@ -176,39 +180,6 @@ async function handleText(chatId, session, text, env, opts = {}) {
   try {
     const route = opts.resolvedRoute || opts.intakeRoute || await resolveSessionRoute(chatId, session, text, env);
 
-    if (route.type === 'disambiguate') {
-      // Store the pending message, show session picker
-      await setSession(env.SESSIONS, chatId, {
-        ...session,
-        pendingPickerId: null,
-        pendingMessage: text,
-        pendingMessageAt: Date.now(),
-        pendingOriginalMessage: opts.originalMessage || null,
-        pendingOriginalOpts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
-      });
-      const picker = await sendDisambiguationKeyboard(env.BOT_TOKEN, chatId, route.sessions, session.activeSessionId, env);
-      if (picker?.result?.message_id) {
-        const current = await getSession(env.SESSIONS, chatId);
-        if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
-      }
-      return;
-    }
-
-    if (route.type === 'confirm-stale') {
-      // Session was classified as matching but is stale — ask the user to confirm
-      // before running. Stores pending message so the sp: callback can dispatch it.
-      await setSession(env.SESSIONS, chatId, {
-        ...session,
-        pendingPickerId: null,
-        pendingMessage: text,
-        pendingMessageAt: Date.now(),
-        pendingOriginalMessage: opts.originalMessage || null,
-        pendingOriginalOpts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
-      });
-      await sendStaleSessionConfirm(env.BOT_TOKEN, chatId, route.session, route.sessionAge, env);
-      return;
-    }
-
     // Run the task — agent creates/continues session
     const sessionId = route.sessionId;
     retryOpts = { ...opts, resolvedRoute: route, retryUsername: session.username, durableInput: false,
@@ -254,6 +225,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       lastSessionId: sessionId,
+      projectId: route.projectChosen ? route.projectId : (session.projectId || null),
       lastMessageAt: Date.now(),
       pendingMessage: null,
       pendingMessageAt: null,
@@ -361,7 +333,7 @@ export async function processDueRetries(env) {
 /**
  * Decide what to do with the incoming message:
  *   { type: 'run', sessionId }           — run task with this session
- *   { type: 'disambiguate', sessions }   — show session picker first
+ * Ambiguous messages start a new session through the project-choice flow.
  */
 async function resolveSessionRoute(chatId, session, text, env) {
   const lc = text.toLowerCase();
@@ -405,7 +377,13 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: session.lastSessionId };
   }
 
-  // 4. Recent session (< 2h) → continue it automatically, no friction
+  // A captured project choice owns subsequent input; classification must not open another menu.
+  if (session.pendingProjectChoice && !session.pendingProjectChoice.suspended &&
+      (!session.pendingProjectChoice.expiresAt || Date.now() < session.pendingProjectChoice.expiresAt)) {
+    return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
+  }
+
+  // 4. Recent session (< 1h) → continue it automatically, no friction
   if (session.lastMessageAt && (Date.now() - session.lastMessageAt) < RECENT_SESSION_THRESHOLD_MS) {
     return { type: 'run', sessionId: session.lastSessionId };
   }
@@ -415,36 +393,29 @@ async function resolveSessionRoute(chatId, session, text, env) {
   try {
     recentSessions = await getSessions(env, { username: session.username, limit: 5 });
   } catch {
-    // Agent unreachable — just continue last session
-    return { type: 'run', sessionId: session.lastSessionId };
+    // No evidence of continuity: resolve a project instead of guessing a dialog.
+    return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
   }
 
-  // Only 1 session → continue it (no need to classify)
-  if (!recentSessions || recentSessions.length <= 1) {
-    return { type: 'run', sessionId: session.lastSessionId };
+  // Restrict automatic matching to the current project when one is known.
+  recentSessions = (recentSessions || []).filter(s => !session.projectId || s.projectId === session.projectId);
+  if (!recentSessions.length) {
+    return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
   }
 
-  // Multiple sessions → ask Claude Haiku which one this message belongs to
+  // Ask the classifier which eligible session this message belongs to
   let classification = { sessionId: null, confidence: 'low' };
   try {
     classification = await classifyMessage(env, { message: text, sessions: recentSessions });
-  } catch { /* fallback to picker */ }
+  } catch { /* resolve a project below */ }
 
-  if (classification.confidence === 'high' && classification.sessionId) {
+  if (classification?.confidence === 'high' && recentSessions.some(s => s.id === classification.sessionId)) {
     // Clear match — route automatically, user won't notice any friction
     return { type: 'run', sessionId: classification.sessionId };
   }
 
-  if (classification.confidence === 'medium' && classification.sessionId) {
-    // Session matched but is stale (>1h) — show a 2-button lightweight confirm
-    // instead of the full picker. The user either taps "continue" (reuses sp: handler)
-    // or taps "new" without having to read through a full session list.
-    const matched = recentSessions.find(s => s.id === classification.sessionId);
-    return { type: 'confirm-stale', session: matched, sessionAge: classification.sessionAge };
-  }
-
-  // Ambiguous — show picker with all recent sessions
-  return { type: 'disambiguate', sessions: recentSessions.slice(0, 4) };
+  // Low/medium confidence and classifier errors all use the durable project flow.
+  return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
 }
 
 // New-dialog project picker (issue #517). Uses the project INDEX in callback_data
@@ -481,33 +452,6 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId, env
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
   return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows, {}, env);
-}
-
-// Lightweight 2-button confirmation for stale-but-classified sessions.
-// Reuses the sp: callback handler (same as full picker taps) — no new callback type.
-async function sendStaleSessionConfirm(botToken, chatId, session, sessionAge, env) {
-  const topic = session?.topic ? escHtml(session.topic.slice(0, 40)) : 'прошлый диалог';
-  const ago = sessionAge ? timeAgo(Date.now() - sessionAge) : '';
-  const text = `↩ Продолжаем «${topic}»${ago ? ` (${ago})` : ''}?`;
-  const buttons = [[
-    { text: '✅ Да, продолжить', callback_data: `sp:${session.id}` },
-    { text: '✨ Новый диалог', callback_data: 'sp:new' },
-  ]];
-  return sendMessageWithKeyboard(botToken, chatId, text, buttons, {}, env);
-}
-
-async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId, env) {
-  // Descriptive text body (project · title · gist · meta) + numbered tap-buttons,
-  // same renderer as /sessions and the new-dialog context picker. Replaces the old
-  // 28-char truncated button labels that made dialogs indistinguishable.
-  const { text, buttons } = renderSessionList(sessions, {
-    callbackPrefix: 'sp',
-    header: '↩ <b>В какой диалог добавить сообщение?</b>',
-    hint: 'Выбери номер диалога ниже:',
-  });
-  buttons.push([{ text: '✨ Новый диалог', callback_data: 'sp:new' }]);
-
-  return sendMessageWithKeyboard(botToken, chatId, text, buttons, {}, env);
 }
 
 function transcriptPreview(text, maxSentences = 3) {

@@ -1,10 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Guards the session-disambiguation logic inside resolveSessionRoute:
-//   1. Slash commands never show the picker (R-slash-nopicker).
-//   2. Plain text with old session + multiple sessions → shows picker (baseline).
-// Covers the bug: /hh_ats sent when last session is >2h old showed the
-// "В какой диалог?" picker instead of executing the command directly.
+// Automatic ambiguity resolves projects, never dialog menus.
 
 const runTask = vi.fn();
 const getProjectDecision = vi.fn();
@@ -52,7 +48,7 @@ vi.mock('../src/intake-preflight.js', () => ({
 }));
 vi.mock('../src/intake-routing.js', () => ({
   shouldDebounce: () => false,
-  shouldAskProject: () => false,
+  shouldAskProject: ({ decision }) => decision?.action === 'ask',
   FORCE_RUN_RE: /^never$/,
   hasIntakeContent: () => true,
   coalesceItem: (i) => i?.text || '',
@@ -63,6 +59,7 @@ vi.mock('../src/lib/project-choice.js', () => ({
   projectChoiceExpired: vi.fn(() => false),
 }));
 
+import { openProjectChoice } from '../src/lib/project-choice.js';
 import { handleMessage } from '../src/handlers/message.js';
 
 const CHAT_ID = 42;
@@ -115,18 +112,6 @@ describe('resolveSessionRoute — R-slash-nopicker: slash commands skip disambig
   });
 });
 
-describe('resolveSessionRoute — baseline: plain text shows picker when ambiguous', () => {
-  it('shows session picker for plain text with old session and multiple sessions', async () => {
-    classifyMessage.mockResolvedValue({ sessionId: null, confidence: 'low' });
-
-    await handleMessage({ chat: { id: CHAT_ID }, text: 'что там с задачей', message_id: 3, date: Math.floor(Date.now() / 1000) }, env);
-
-    // Picker was shown (text is mocked to 'pick' by the renderSessionList stub above)
-    expect(sendMessageWithKeyboard).toHaveBeenCalledOnce();
-    expect(runTask).not.toHaveBeenCalled();
-  });
-});
-
 describe('resolveSessionRoute — 1h threshold: sessions 1-2h old now trigger classify', () => {
   it('calls classify for a session 90 min old (was auto-continued under old 2h threshold)', async () => {
     classifyMessage.mockResolvedValue({ sessionId: null, confidence: 'low' });
@@ -156,51 +141,42 @@ describe('resolveSessionRoute — 1h threshold: sessions 1-2h old now trigger cl
   });
 });
 
-describe('resolveSessionRoute — medium confidence → stale confirm dialog', () => {
-  it('shows 2-button confirm (not full picker) when classify returns medium', async () => {
-    const sessionAge = 90 * 60 * 1000; // 90 minutes in ms
-    classifyMessage.mockResolvedValue({
-      sessionId: 's-42-1',
-      confidence: 'medium',
-      sessionAge,
+describe('ambiguous routing uses projects', () => {
+  it.each(['low', 'medium', 'error', 'unknown-id', 'list-error', 'null'])('%s never opens a dialog menu', async outcome => {
+    getProjectDecision.mockResolvedValue({ action: 'ask', choices: [{ id: 'p1' }, { id: 'p2' }] });
+    getSessions.mockResolvedValue(TWO_SESSIONS.map(s => ({ ...s, lastAt: Date.now() - 60000 })));
+    if (outcome === 'error') classifyMessage.mockRejectedValue(new Error('offline'));
+    else if (outcome === 'list-error') getSessions.mockRejectedValue(new Error('offline'));
+    else classifyMessage.mockResolvedValue(outcome === 'null' ? null : {
+      confidence: outcome === 'unknown-id' ? 'high' : outcome,
+      sessionId: outcome === 'unknown-id' ? 'foreign-id' : 's-42-1',
     });
-
-    await handleMessage({ chat: { id: CHAT_ID }, text: 'саммари DS встречи', message_id: 6, date: Math.floor(Date.now() / 1000) }, env);
-
-    // Should show a keyboard (the 2-button confirm)
-    expect(sendMessageWithKeyboard).toHaveBeenCalledOnce();
-    // Should NOT have auto-run the task
-    expect(runTask).not.toHaveBeenCalled();
-
-    // The confirm keyboard should use sp: callbacks (reuses existing handler)
-    const [, , , buttons] = sendMessageWithKeyboard.mock.calls[0];
-    const allCallbacks = buttons.flat().map(b => b.callback_data);
-    expect(allCallbacks).toContain('sp:s-42-1');  // "Yes, continue"
-    expect(allCallbacks).toContain('sp:new');       // "New dialog"
-    // Only 2 buttons — not a full picker with 4+ sessions
-    expect(buttons.flat().length).toBe(2);
-  });
-
-  it('stores pending message when showing stale confirm', async () => {
-    classifyMessage.mockResolvedValue({ sessionId: 's-42-1', confidence: 'medium', sessionAge: 5400000 });
-
-    await handleMessage({ chat: { id: CHAT_ID }, text: 'саммари встречи', message_id: 7, date: Math.floor(Date.now() / 1000) }, env);
-
-    const savedSession = setSession.mock.calls.find(c => c[2]?.pendingMessage);
-    expect(savedSession).toBeTruthy();
-    expect(savedSession[2].pendingMessage).toBe('саммари встречи');
-  });
-
-  it('auto-runs when classify returns high even for stale session', async () => {
-    classifyMessage.mockResolvedValue({
-      sessionId: 's-42-1',
-      confidence: 'high',
-      sessionAge: 90 * 60 * 1000,
-    });
-
-    await handleMessage({ chat: { id: CHAT_ID }, text: 'продолжи вакансию', message_id: 8, date: Math.floor(Date.now() / 1000) }, env);
-
-    expect(runTask).toHaveBeenCalledOnce();
+    const input = { chat: { id: CHAT_ID }, text: 'проверь задачу', message_id: 90 };
+    await handleMessage(input, env, { mode: 'deep' });
+    expect(openProjectChoice).toHaveBeenCalledWith(env, CHAT_ID, expect.anything(), expect.objectContaining({
+      input, opts: { mode: 'deep', initialMsgId: null },
+    }));
     expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+    expect(runTask).not.toHaveBeenCalled();
+  });
+  it('auto-runs a validated high-confidence match', async () => {
+    classifyMessage.mockResolvedValue({ confidence: 'high', sessionId: 's-42-1' });
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'продолжи вакансию' }, env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ sessionId: 's-42-1', forceNew: false });
+    expect(openProjectChoice).not.toHaveBeenCalled();
+  });
+  it('resolves a sole project without inheriting the old project', async () => {
+    getSession.mockResolvedValue({ username: 'u', lastSessionId: 'old', projectId: 'old-project' });
+    getProjectDecision.mockResolvedValue({ action: 'auto', choices: [{ id: 'only-project' }] });
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'проверь' }, env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ forceNew: true, projectId: 'only-project' });
+    expect(setSession.mock.calls.at(-1)[2].projectId).toBe('only-project');
+  });
+  it('does not classify across project boundaries', async () => {
+    getSession.mockResolvedValue({ username: 'u', lastSessionId: 'old', projectId: 'p1' });
+    getSessions.mockResolvedValue([{ id: 'foreign', projectId: 'p2' }]);
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'проверь' }, env);
+    expect(classifyMessage).not.toHaveBeenCalled();
+    expect(runTask.mock.calls[0][1].forceNew).toBe(true);
   });
 });

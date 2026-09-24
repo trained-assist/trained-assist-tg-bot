@@ -4,11 +4,11 @@ import { handleMessage } from '../src/handlers/message.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { handleCommand } from '../src/handlers/commands.js';
 import { getSession, setSession } from '../src/lib/kv.js';
-import { getProjectDecision, runTask } from '../src/lib/agent-client.js';
+import { getProjectDecision, runTask, getSessions, classifyMessage } from '../src/lib/agent-client.js';
 import { sendMessageWithKeyboard } from '../src/lib/telegram.js';
 
 vi.mock('../src/lib/agent-client.js', async original => ({
-  ...await original(), getProjectDecision: vi.fn(), runTask: vi.fn().mockResolvedValue({}),
+  ...await original(), getProjectDecision: vi.fn(), getSessions: vi.fn(), classifyMessage: vi.fn(), runTask: vi.fn().mockResolvedValue({}),
 }));
 vi.mock('../src/lib/telegram.js', async original => ({
   ...await original(), sendMessage: vi.fn().mockResolvedValue({ result: { message_id: 50 } }),
@@ -113,6 +113,30 @@ describe('project selection through actual creation, message and callback handle
     await tap('pc:0');
     const { task } = runTask.mock.calls[0][1];
     expect(task).toContain('one'); expect(task).toContain('two');
+  });
+  it.each(['low', 'medium', 'error'])('stale ambiguous %s input retains batches and files through project selection', async outcome => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner', lastSessionId: 'old',
+      lastMessageAt: Date.now() - 3 * 3600000, projectId: 'old-project' });
+    getSessions.mockResolvedValue([{ id: 'old', projectId: 'old-project', lastAt: Date.now() - 60000 }]);
+    if (outcome === 'error') classifyMessage.mockRejectedValue(new Error('offline'));
+    else classifyMessage.mockResolvedValue({ confidence: outcome, sessionId: 'old' });
+    await handleMessage({ ...message('проверь документ'), document: {
+      file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain',
+    } }, env, { mode: 'deep' });
+    expect(runTask).not.toHaveBeenCalled();
+    const pending = (await getSession(env.SESSIONS, chatId)).pendingProjectChoice;
+    expect(pending.input.fileRef.name).toBe('resume.txt');
+    expect(sendMessageWithKeyboard.mock.calls.at(-1)[3].flat().every(b => b.callback_data.startsWith('pc:'))).toBe(true);
+    await handleMessage(message('ещё подробность'), env, { mode: 'deep' });
+    expect(classifyMessage).toHaveBeenCalledTimes(1);
+    await tap('pc:2');
+    expect(runTask).toHaveBeenCalledTimes(1);
+    const payload = runTask.mock.calls[0][1];
+    expect(payload).toMatchObject({ projectId: 'p2', forceNew: true, mode: 'deep' });
+    expect(payload.task).toContain('проверь документ');
+    expect(payload.task).toContain('ещё подробность');
+    expect(payload.fileRefs[0].name).toBe('resume.txt');
+    expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice).toBeNull();
   });
   it('continuation keeps its project without asking', async () => {
     await handleMessage(message('продолжай'), env);
