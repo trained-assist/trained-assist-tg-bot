@@ -146,9 +146,17 @@ async function cmdStart(chatId, env) {
     }
   }
 
+  // Each audience gets its own one-line self-description; the freelance bot's is a
+  // short persona (kept in sync with the agent-side default persona for that audience
+  // — src/persona.js AUDIENCE_DEFAULT).
   const intro = audience === 'recruiter'
     ? 'Это бот для работы с HeadHunter и ассистентом.'
-    : 'Это персональный ассистент.';
+    : audience === 'freelance'
+      ? 'Я — ассистент по фриланс-проектам: разбираю входящие заказы и файлы, раскладываю их по проектам, считаю риск GO/NO-GO и собираю ТЗ.'
+      : 'Это персональный ассистент.';
+  const taskHint = audience === 'freelance'
+    ? 'Пиши задачу текстом или присылай файлы — сам разберусь.'
+    : 'Просто пиши задачи — я передам их агенту.';
   const hhSection = hhLines.length
     ? `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n`
     : '';
@@ -156,7 +164,7 @@ async function cmdStart(chatId, env) {
   return sendMessage(env.BOT_TOKEN, chatId,
     `👋 Привет, ${session.name}!\n\n` +
     `${intro}\n` +
-    `Просто пиши задачи — я передам их агенту.\n\n` +
+    `${taskHint}\n\n` +
     hhSection +
     `<b>💼 Остальное (${otherLines.length}):</b>\n${otherLines.join('\n')}`
   );

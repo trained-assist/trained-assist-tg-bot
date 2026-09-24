@@ -1,92 +1,916 @@
 {
   "$comment": "Single source of truth for every Telegram command this bot responds to. 'local' = handled directly in src/handlers/commands.js (see the case in the switch). 'forward' = relayed as-is to the agent backend, which matches it against a *_INTENT regex in trained-assist-agent/src/runner.js (getQuickAnswer) — see that repo's src/telegram-commands.js for the matching agent-side registry entry. scripts/check-commands-registry.js enforces that every 'local' entry has a real switch case; AGENT_FORWARDED_COMMANDS/ADMIN_FORWARDED_COMMANDS in commands.js are derived from this file, not hand-duplicated. 'audiences' = which bots show the command in /start and setMyCommands (one Worker env == one audience: default/recruiter/freelance). Visibility is computed by src/lib/command-visibility.js — used by BOTH cmdStart and registerBotCommands so the two can never drift. Adding a new command? Add it here in the same PR — that's what keeps this list from drifting out of sync with the code again. This file drives the Telegram command MENU and which commands get a dedicated gateway handler — it does NOT gate whether a user can reach the agent: any command missing here (or simply unknown) falls through to the agent as a normal user request (see the `default:` case in src/handlers/commands.js).",
   "commands": [
-    { "command": "/restart", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "hidden": true, "description": "Плановый рестарт: status / cancel" },
-    { "command": "/start", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Приветствие / список команд" },
-    { "command": "/login", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Войти: /login username password" },
-    { "command": "/logout", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Выйти из аккаунта" },
-    { "command": "/profile", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Текущий профиль, смена профиля" },
-    { "command": "/status", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Статус агента (и RU-агента)" },
-    { "command": "/version", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Версия бота" },
-    { "command": "/privacy", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Политика приватности" },
-    { "command": "/settoken", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Сохранить токен сервиса" },
-    { "command": "/chromeext_install", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Установка Chrome-расширения" },
-    { "command": "/chromeext_connect", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Код подключения расширения" },
-    { "command": "/chromeext_status", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Статус подключения расширения" },
-    { "command": "/sessions", "aliases": ["/диалоги"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Последние диалоги" },
-    { "command": "/new_dialog", "aliases": ["/новый_диалог"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Начать новый диалог" },
-    { "command": "/close", "aliases": ["/закрыть"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Закрыть текущий диалог" },
-    { "command": "/files", "aliases": ["/папки"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Файлы и папки профиля" },
-    { "command": "/ru", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Задача через РФ IP (nalog.ru и т.п.)" },
-    { "command": "/stop", "aliases": ["/стоп"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Остановить текущую задачу" },
-    { "command": "/clean_buffer", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Очистить застрявший буфер intake (не трогает идущую задачу)" },
-    { "command": "/skills", "aliases": ["/скиллы"], "handler": "local", "audiences": ["default", "freelance"], "description": "Список доступных скиллов" },
-    { "command": "/all_on", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Включить «все сообщения → агенту» в группе" },
-    { "command": "/all_off", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Выключить «все сообщения → агенту»" },
+    {
+      "command": "/restart",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Плановый рестарт: status / cancel"
+    },
+    {
+      "command": "/start",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Приветствие / список команд"
+    },
+    {
+      "command": "/show_freelance_projects_list",
+      "aliases": [
+        "/freelance_projects"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Список фриланс-проектов"
+    },
+    {
+      "command": "/project",
+      "aliases": [
+        "/projects",
+        "/проект",
+        "/проекты"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Проекты профиля: список/смена/создание"
+    },
+    {
+      "command": "/build_spec",
+      "aliases": [
+        "/spec"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Собрать ТЗ по проекту (нужен slug)"
+    },
+    {
+      "command": "/check_project_risk",
+      "aliases": [
+        "/risk"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Риск-оценка проекта (нужен slug)"
+    },
+    {
+      "command": "/questions",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Открытые вопросы по проекту (нужен slug)"
+    },
+    {
+      "command": "/new",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Новый фриланс-проект: /new Название: описание"
+    },
+    {
+      "command": "/add",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Добавить инфо в проект: /add slug стадия текст"
+    },
+    {
+      "command": "/remember",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Запомнить правило генерации ТЗ (профиль / проект)"
+    },
+    {
+      "command": "/spec_generation_defaults",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Текущие настройки генерации ТЗ"
+    },
+    {
+      "command": "/spec_generation_explained",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "freelance"
+      ],
+      "description": "Как работает генерация ТЗ"
+    },
+    {
+      "command": "/login",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Войти: /login username password"
+    },
+    {
+      "command": "/logout",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Выйти из аккаунта"
+    },
+    {
+      "command": "/profile",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Текущий профиль, смена профиля"
+    },
+    {
+      "command": "/status",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Статус агента (и RU-агента)"
+    },
+    {
+      "command": "/version",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Версия бота"
+    },
+    {
+      "command": "/privacy",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Политика приватности"
+    },
+    {
+      "command": "/settoken",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Сохранить токен сервиса"
+    },
+    {
+      "command": "/chromeext_install",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Установка Chrome-расширения"
+    },
+    {
+      "command": "/chromeext_connect",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Код подключения расширения"
+    },
+    {
+      "command": "/chromeext_status",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Статус подключения расширения"
+    },
+    {
+      "command": "/sessions",
+      "aliases": [
+        "/диалоги"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Последние диалоги"
+    },
+    {
+      "command": "/new_dialog",
+      "aliases": [
+        "/новый_диалог"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Начать новый диалог"
+    },
+    {
+      "command": "/close",
+      "aliases": [
+        "/закрыть"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Закрыть текущий диалог"
+    },
+    {
+      "command": "/files",
+      "aliases": [
+        "/папки"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Файлы и папки профиля"
+    },
+    {
+      "command": "/ru",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Задача через РФ IP (nalog.ru и т.п.)"
+    },
+    {
+      "command": "/stop",
+      "aliases": [
+        "/стоп"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Остановить текущую задачу"
+    },
+    {
+      "command": "/clean_buffer",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Очистить застрявший буфер intake (не трогает идущую задачу)"
+    },
+    {
+      "command": "/skills",
+      "aliases": [
+        "/скиллы"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Список доступных скиллов"
+    },
+    {
+      "command": "/all_on",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Включить «все сообщения → агенту» в группе"
+    },
+    {
+      "command": "/all_off",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Выключить «все сообщения → агенту»"
+    },
     {
       "command": "/report_bug_or_feature_request",
       "aliases": [],
       "handler": "local",
-      "audiences": ["default", "recruiter", "freelance"],
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
       "description": "Сообщить о баге/фиче (форма с описанием)",
       "note": "'/report' alone is shadowed by the bug_or_feature forward group below — the gateway checks AGENT_FORWARDED_COMMANDS before the switch, so only this long alias actually reaches cmdReport."
     },
-
-    { "command": "/persona", "aliases": ["/role", "/роль", "/персона", "/character", "/характер"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "description": "Роль ассистента для профиля" },
-    { "command": "/project", "aliases": ["/projects", "/проект", "/проекты"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Проекты профиля: список/смена/создание" },
-    { "command": "/switch2klod", "aliases": ["/switch2codex", "/switch2opencode"], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "Переключить CLI-движок (Claude Code / Codex / OpenCode) для этого чата" },
-    { "command": "/bug_or_feature", "aliases": ["/bug", "/feature", "/баг", "/фича", "/report", "/репорт", "/bugreport", "/bug_report"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Открыть сессию в проекте «Bugs and Features» — накопи детали, запусти ▶️ проработку" },
-    { "command": "/get_webpass", "aliases": ["/webpass", "/вебпароль"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "adminOnly": true, "description": "Пароль для веб-интерфейса (self-service, не эскалирует чужой профиль)" },
-
-    { "command": "/ping", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Проверка что агент онлайн" },
-    { "command": "/help", "aliases": [], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "description": "Список возможностей и подсказки по настройке" },
-    { "command": "/usage", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Расход токенов и оценочная стоимость" },
-    { "command": "/context_on", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Показывать карточку статуса контекста" },
-    { "command": "/context_off", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Скрыть карточку статуса контекста" },
-    { "command": "/wakeup", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Разбудить зависшую задачу агента" },
-    { "command": "/skip", "aliases": ["/пропустить"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Пропустить текущую задачу, запустить следующую в очереди" },
-    { "command": "/hh_status", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Статус фоновой оценки кандидатов HeadHunter" },
-    { "command": "/hh_connect", "aliases": ["/hh_auth"], "handler": "forward", "audiences": ["recruiter"], "description": "OAuth-подключение HeadHunter (как работодатель)" },
-    { "command": "/hh_disconnect", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Отключить HeadHunter (revoke токена)" },
-    { "command": "/hh_vacancies", "aliases": ["/hh_switch"], "handler": "forward", "audiences": ["recruiter"], "description": "Список активных вакансий HeadHunter (HH)" },
-    { "command": "/hh_funnel", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Статистика воронки кандидатов на активной вакансии" },
-    { "command": "/hh_responses", "aliases": ["/hh_new"], "handler": "forward", "audiences": ["recruiter"], "description": "Новые отклики на активной вакансии" },
-    { "command": "/hh_review", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Ссылка на страницу ревью кандидатов" },
-    { "command": "/hh_ats", "aliases": ["/hh_ats_editor"], "handler": "forward", "audiences": ["recruiter"], "description": "Текущий ATS конфиг и ссылка на редактор" },
-    { "command": "/hh_evaluate", "aliases": ["/hh_score"], "handler": "forward", "audiences": ["recruiter"], "description": "Запустить пакетную оценку новых откликов" },
-    { "command": "/hh_send", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Отправить сообщение кандидату (HH): /hh_send &lt;id&gt; &lt;текст&gt; — сначала покажет preview" },
-    { "command": "/hh_reject", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Массовый отказ кандидатам (HH): dry-run + confirm-step" },
-    { "command": "/hh_scan", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Ручной запуск сканирования новых откликов (вне расписания)" },
-    { "command": "/hh_notify_on", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Включить авто-уведомления о новых кандидатах в холодном поиске" },
-    { "command": "/hh_notify_off", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Выключить авто-уведомления о новых кандидатах" },
-    { "command": "/set_cold_candiates_search", "aliases": ["/set_cold_candidates_search", "/cold_search", "/холодный_поиск"], "handler": "forward", "audiences": ["recruiter"], "description": "Запустить холодный поиск кандидатов по базе резюме HH прямо сейчас (~30 сек, с оценкой и ссылкой на результаты)" },
-    { "command": "/enable_illustrate", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Включить скил генерации иллюстраций" },
-    { "command": "/new_job_post", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Начать создание новой вакансии HeadHunter" },
-    { "command": "/cancel_vacancy", "aliases": [], "handler": "forward", "audiences": ["recruiter"], "description": "Отменить текущее создание вакансии" },
-    { "command": "/gdrive_notif_off", "aliases": ["/google_drive_sharing_notifications_switch_off"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Выключить уведомления о шаринге Google Drive" },
-    { "command": "/gdrive_notif_on", "aliases": ["/google_drive_sharing_notifications_switch_on"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Включить уведомления о шаринге Google Drive" },
-
-    { "command": "/show_active_cheklist", "aliases": ["/active_checklist"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Список активных GTD-чеклистов" },
-    { "command": "/checklist_turn_off", "aliases": ["/gtd_stop", "/stop_gtd"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Отключить GTD-чеклист напоминаний" },
-    { "command": "/secrets_list", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "Список подключённых сервисов профиля" },
-    { "command": "/secrets_log", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "История обращений к секретам профиля" },
-    { "command": "/agent_info", "aliases": ["/get_agent_info", "/info"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Версия/движок/VM агента" },
-    { "command": "/hh_send_yes", "aliases": ["/hh_send_confirm", "/hh_send_go"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "hidden": true, "description": "Подтвердить отправку сообщения кандидату (после /hh_send)" },
-    { "command": "/hh_send_no", "aliases": ["/hh_send_cancel", "/hh_send_stop"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "hidden": true, "description": "Отменить отправку сообщения кандидату" },
-    { "command": "/hh_reject_yes", "aliases": ["/hh_reject_confirm", "/hh_reject_go"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "hidden": true, "description": "Подтвердить массовый отказ кандидатам (после /hh_reject)" },
-    { "command": "/hh_reject_no", "aliases": ["/hh_reject_cancel", "/hh_reject_stop"], "handler": "forward", "audiences": ["default", "recruiter", "freelance"], "hidden": true, "description": "Отменить массовый отказ кандидатам" },
-
-    { "command": "/oc_value", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: VALUE (DeepSeek V4 Flash :free, дефолт)" },
-    { "command": "/oc_free", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: FREE (только бесплатный inference, Nemotron)" },
-    { "command": "/oc_ru", "aliases": ["/oc_russian_recruiter"], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)" },
-    { "command": "/oc_go", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: GO (opencode-go/deepseek-v4.1-flash)" },
-    { "command": "/oc_openrouter", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: OPENROUTER (openrouter/deepseek-v4-flash-0731, фолбэк при лимите Go)" },
-    { "command": "/oc_deepseek", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: DEEPSEEK (общий профиль команды)" },
-    { "command": "/oc_ds_or", "aliases": ["/oc_deepseek_openrouter"], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-openrouter (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" },
-    { "command": "/oc_ds_go", "aliases": ["/oc_deepseek_go"], "handler": "forward", "audiences": ["default", "freelance"], "hidden": true, "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-go (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" },
-
-    { "command": "/spec_generation_defaults", "aliases": [], "handler": "forward", "audiences": ["freelance"], "description": "Текущие настройки генерации ТЗ" },
-    { "command": "/spec_generation_explained", "aliases": [], "handler": "forward", "audiences": ["freelance"], "description": "Как работает генерация ТЗ" },
-    { "command": "/remember", "aliases": [], "handler": "forward", "audiences": ["freelance"], "description": "Запомнить правило генерации ТЗ (профиль / проект)" }
+    {
+      "command": "/persona",
+      "aliases": [
+        "/role",
+        "/роль",
+        "/персона",
+        "/character",
+        "/характер"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Роль ассистента для профиля"
+    },
+    {
+      "command": "/switch2klod",
+      "aliases": [
+        "/switch2codex",
+        "/switch2opencode"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Переключить CLI-движок (Claude Code / Codex / OpenCode) для этого чата"
+    },
+    {
+      "command": "/bug_or_feature",
+      "aliases": [
+        "/bug",
+        "/feature",
+        "/баг",
+        "/фича",
+        "/report",
+        "/репорт",
+        "/bugreport",
+        "/bug_report"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Открыть сессию в проекте «Bugs and Features» — накопи детали, запусти ▶️ проработку"
+    },
+    {
+      "command": "/get_webpass",
+      "aliases": [
+        "/webpass",
+        "/вебпароль"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "adminOnly": true,
+      "description": "Пароль для веб-интерфейса (self-service, не эскалирует чужой профиль)"
+    },
+    {
+      "command": "/ping",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Проверка что агент онлайн"
+    },
+    {
+      "command": "/help",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Список возможностей и подсказки по настройке"
+    },
+    {
+      "command": "/usage",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Расход токенов и оценочная стоимость"
+    },
+    {
+      "command": "/context_on",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Показывать карточку статуса контекста"
+    },
+    {
+      "command": "/context_off",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Скрыть карточку статуса контекста"
+    },
+    {
+      "command": "/wakeup",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Разбудить зависшую задачу агента"
+    },
+    {
+      "command": "/skip",
+      "aliases": [
+        "/пропустить"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Пропустить текущую задачу, запустить следующую в очереди"
+    },
+    {
+      "command": "/hh_status",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Статус фоновой оценки кандидатов HeadHunter"
+    },
+    {
+      "command": "/hh_connect",
+      "aliases": [
+        "/hh_auth"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "OAuth-подключение HeadHunter (как работодатель)"
+    },
+    {
+      "command": "/hh_disconnect",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Отключить HeadHunter (revoke токена)"
+    },
+    {
+      "command": "/hh_vacancies",
+      "aliases": [
+        "/hh_switch"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Список активных вакансий HeadHunter (HH)"
+    },
+    {
+      "command": "/hh_funnel",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Статистика воронки кандидатов на активной вакансии"
+    },
+    {
+      "command": "/hh_responses",
+      "aliases": [
+        "/hh_new"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Новые отклики на активной вакансии"
+    },
+    {
+      "command": "/hh_review",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Ссылка на страницу ревью кандидатов"
+    },
+    {
+      "command": "/hh_ats",
+      "aliases": [
+        "/hh_ats_editor"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Текущий ATS конфиг и ссылка на редактор"
+    },
+    {
+      "command": "/hh_evaluate",
+      "aliases": [
+        "/hh_score"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Запустить пакетную оценку новых откликов"
+    },
+    {
+      "command": "/hh_send",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Отправить сообщение кандидату (HH): /hh_send &lt;id&gt; &lt;текст&gt; — сначала покажет preview"
+    },
+    {
+      "command": "/hh_reject",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Массовый отказ кандидатам (HH): dry-run + confirm-step"
+    },
+    {
+      "command": "/hh_scan",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Ручной запуск сканирования новых откликов (вне расписания)"
+    },
+    {
+      "command": "/hh_notify_on",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Включить авто-уведомления о новых кандидатах в холодном поиске"
+    },
+    {
+      "command": "/hh_notify_off",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Выключить авто-уведомления о новых кандидатах"
+    },
+    {
+      "command": "/set_cold_candiates_search",
+      "aliases": [
+        "/set_cold_candidates_search",
+        "/cold_search",
+        "/холодный_поиск"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Запустить холодный поиск кандидатов по базе резюме HH прямо сейчас (~30 сек, с оценкой и ссылкой на результаты)"
+    },
+    {
+      "command": "/enable_illustrate",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Включить скил генерации иллюстраций"
+    },
+    {
+      "command": "/new_job_post",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Начать создание новой вакансии HeadHunter"
+    },
+    {
+      "command": "/cancel_vacancy",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "recruiter"
+      ],
+      "description": "Отменить текущее создание вакансии"
+    },
+    {
+      "command": "/gdrive_notif_off",
+      "aliases": [
+        "/google_drive_sharing_notifications_switch_off"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Выключить уведомления о шаринге Google Drive"
+    },
+    {
+      "command": "/gdrive_notif_on",
+      "aliases": [
+        "/google_drive_sharing_notifications_switch_on"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Включить уведомления о шаринге Google Drive"
+    },
+    {
+      "command": "/show_active_cheklist",
+      "aliases": [
+        "/active_checklist"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Список активных GTD-чеклистов"
+    },
+    {
+      "command": "/checklist_turn_off",
+      "aliases": [
+        "/gtd_stop",
+        "/stop_gtd"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Отключить GTD-чеклист напоминаний"
+    },
+    {
+      "command": "/secrets_list",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Список подключённых сервисов профиля"
+    },
+    {
+      "command": "/secrets_log",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "История обращений к секретам профиля"
+    },
+    {
+      "command": "/agent_info",
+      "aliases": [
+        "/get_agent_info",
+        "/info"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Версия/движок/VM агента"
+    },
+    {
+      "command": "/hh_send_yes",
+      "aliases": [
+        "/hh_send_confirm",
+        "/hh_send_go"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Подтвердить отправку сообщения кандидату (после /hh_send)"
+    },
+    {
+      "command": "/hh_send_no",
+      "aliases": [
+        "/hh_send_cancel",
+        "/hh_send_stop"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Отменить отправку сообщения кандидату"
+    },
+    {
+      "command": "/hh_reject_yes",
+      "aliases": [
+        "/hh_reject_confirm",
+        "/hh_reject_go"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Подтвердить массовый отказ кандидатам (после /hh_reject)"
+    },
+    {
+      "command": "/hh_reject_no",
+      "aliases": [
+        "/hh_reject_cancel",
+        "/hh_reject_stop"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "Отменить массовый отказ кандидатам"
+    },
+    {
+      "command": "/oc_value",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: VALUE (DeepSeek V4 Flash :free, дефолт)"
+    },
+    {
+      "command": "/oc_free",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: FREE (только бесплатный inference, Nemotron)"
+    },
+    {
+      "command": "/oc_ru",
+      "aliases": [
+        "/oc_russian_recruiter"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: RUSSIAN RECRUITER (GigaChat Pro/Ultra/Max)"
+    },
+    {
+      "command": "/oc_go",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: GO (opencode-go/deepseek-v4.1-flash)"
+    },
+    {
+      "command": "/oc_openrouter",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: OPENROUTER (openrouter/deepseek-v4-flash-0731, фолбэк при лимите Go)"
+    },
+    {
+      "command": "/oc_deepseek",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: DEEPSEEK (общий профиль команды)"
+    },
+    {
+      "command": "/oc_ds_or",
+      "aliases": [
+        "/oc_deepseek_openrouter"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-openrouter (игнорирует общий VM-тумблер /oc_go//oc_openrouter)"
+    },
+    {
+      "command": "/oc_ds_go",
+      "aliases": [
+        "/oc_deepseek_go"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "hidden": true,
+      "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-go (игнорирует общий VM-тумблер /oc_go//oc_openrouter)"
+    }
   ]
 }
