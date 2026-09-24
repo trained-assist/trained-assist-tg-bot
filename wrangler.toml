@@ -136,6 +136,13 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # token/webhook is wired here — enabling + canary is a separate step after merge.
 [env.freelance]
 name = "trained-assist-tg-bot-freelance"
+# Telegram's webhook DNS resolver could not resolve the fresh
+# *.workers.dev subdomain (main/recruiter work, this one failed with
+# "Temporary failure in name resolution"). Bind a stable custom domain on the
+# account zone instead — setWebhook targets it, not workers.dev.
+routes = [
+  { pattern = "tg-freelance.trainedassist.store", custom_domain = true }
+]
 
 [env.freelance.vars]
 MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter).
