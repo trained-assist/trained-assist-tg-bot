@@ -74,8 +74,15 @@ app.get('/debug/whoami', async (c) => {
 app.get('/debug/intake/:chatId', async (c) => {
   if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
-  const res = await stub.fetch('https://intake/debug');
+  const res = await stub.fetch('https://intake/debug' + new URL(c.req.url).search);
   return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// Explicit operational recovery; restoring never launches a task or sends messages.
+app.post('/debug/intake/:chatId/restore', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
+  return stub.fetch('https://intake/restore', { method: 'POST', body: await c.req.text() });
 });
 
 // Debug: POST raw audio bytes, get back exactly what Deepgram returned (or the

@@ -210,6 +210,7 @@ import { IntakeBuffer } from '../src/intake-buffer.js';
 async function launchBatch(messages) {
   const data = new Map();
   const state = { storage: {
+    transaction: async function(fn) { return fn(this); },
     get: async k => structuredClone(data.get(k)),
     put: async (k, v) => data.set(k, structuredClone(v)),
     delete: async k => data.delete(k), setAlarm: async () => {}, deleteAlarm: async () => {},
@@ -304,3 +305,26 @@ it('failed screenshot persistence is tagged before dispatch and cannot launch te
     .rejects.toMatchObject({ code: 'INTAKE_PREPARATION_FAILED' });
   expect(runTask).not.toHaveBeenCalled();
 }, 10000); // real-timer retry backoff (media-retry.js) now spans ~7.5s before giving up
+
+it('real batch retry reuses the first voice transcript when the second file failed', async () => {
+ const originalFetch = globalThis.fetch; let broken = true;
+ globalThis.fetch = vi.fn(async (url, opts) => {
+   if (broken && String(url).includes('file_id=bad')) return Response.json({ ok: false });
+   return originalFetch(url, opts);
+ });
+ const data = await launchBatch([
+   { chat: { id: 42 }, message_id: 1, voice: { file_id: 'voice1' } },
+   { chat: { id: 42 }, message_id: 2, photo: [{ file_id: 'bad' }] },
+   { chat: { id: 42 }, message_id: 3, text: 'таблица кандидатов' },
+ ]);
+ expect(runTask).not.toHaveBeenCalled();
+ expect(data.get('retryBatch')[0].msg.transcript).toBe('привет как дела');
+ broken = false;
+ await launchBatch(data.get('retryBatch').map(i => i.msg));
+ expect(runTask).toHaveBeenCalledTimes(1);
+ expect(runTask.mock.calls[0][1].task).toContain('привет как дела');
+ expect(runTask.mock.calls[0][1].task).toContain('таблица кандидатов');
+ expect(runTask.mock.calls[0][1].fileRefs).toHaveLength(3);
+ expect(globalThis.fetch.mock.calls.filter(([u]) => String(u).includes('deepgram.com'))).toHaveLength(1);
+ expect(sendMessage.mock.calls.filter(c => c[2] === '🎤 привет как дела')).toHaveLength(1);
+});
