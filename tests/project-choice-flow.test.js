@@ -48,6 +48,25 @@ describe('project selection through actual creation, message and callback handle
     expect(runTask).toHaveBeenCalledTimes(1);
     expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p0', forceNew: true, mode: 'deep', task: 'новая задача: текст' });
   });
+  // Pinned chat, task confidently about another project → agent returns 'ask' + mismatch.
+  it('pin mismatch: explains why it asks, and the detour does not re-pin', async () => {
+    getProjectDecision.mockResolvedValue({ action: 'ask', choices: [projects[3], projects[0]], pinned: 'p0',
+      mismatch: { suggested: 'p3', pinned: 'p0', confidence: 0.9 } });
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    await handleMessage(message('собери участников выставки и отметь целевых'), env, { mode: 'deep' });
+    const shown = sendMessageWithKeyboard.mock.calls.at(-1)[2];
+    expect(shown).toContain('Похоже, задача про «Project 3», а чат закреплён за «Project 0»');
+    await tap('pc:0');
+    expect(runTask).toHaveBeenCalledTimes(1);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p3', projectPicked: false });
+  });
+  it('regular picker (no mismatch) still pins the chosen project', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    await handleMessage(message('обычная новая задача'), env, { mode: 'deep' });
+    expect(sendMessageWithKeyboard.mock.calls.at(-1)[2]).not.toContain('Похоже');
+    await tap('pc:2');
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p2', projectPicked: true });
+  });
   it('/new_dialog opens choices before a task exists', async () => {
     await handleCommand(message('/new_dialog'), env);
     expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice.choices).toHaveLength(9);
