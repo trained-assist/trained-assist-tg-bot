@@ -82,6 +82,9 @@
     { "command": "/oc_openrouter", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "OpenCode профиль: OPENROUTER (openrouter/deepseek-v4-flash-0731, фолбэк при лимите Go)" },
     { "command": "/oc_deepseek", "aliases": [], "handler": "forward", "audiences": ["default", "freelance"], "description": "OpenCode профиль: DEEPSEEK (общий профиль команды)" },
     { "command": "/oc_ds_or", "aliases": ["/oc_deepseek_openrouter"], "handler": "forward", "audiences": ["default", "freelance"], "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-openrouter (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" },
-    { "command": "/oc_ds_go", "aliases": ["/oc_deepseek_go"], "handler": "forward", "audiences": ["default", "freelance"], "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-go (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" }
+    { "command": "/oc_ds_go", "aliases": ["/oc_deepseek_go"], "handler": "forward", "audiences": ["default", "freelance"], "description": "OpenCode профиль: закрепить ТОЛЬКО свой профиль за deepseek-go (игнорирует общий VM-тумблер /oc_go//oc_openrouter)" },
+
+    { "command": "/spec_generation_defaults", "aliases": [], "handler": "forward", "audiences": ["freelance"], "description": "Текущие настройки генерации ТЗ" },
+    { "command": "/spec_generation_explained", "aliases": [], "handler": "forward", "audiences": ["freelance"], "description": "Как работает генерация ТЗ" }
   ]
 }
