@@ -149,7 +149,9 @@ export class MediaJob {
         }
         job.stage = 'deliver';
       } else if (job.stage === 'deliver' || job.stage === 'notify-failure') {
-        const stub = this.env.INTAKE.get(this.env.INTAKE.idFromName(String(job.msg.chat.id)));
+        const threadId = job.msg.message_thread_id;
+        const key = Number.isInteger(threadId) && threadId > 0 ? `${job.msg.chat.id}:${threadId}` : String(job.msg.chat.id);
+        const stub = this.env.INTAKE.get(this.env.INTAKE.idFromName(key));
         const response = await stub.fetch('https://intake/media-result', { method: 'POST', body: JSON.stringify({
           id: job.id, messageId: job.msg.message_id, username: job.username,
           ...(job.stage === 'notify-failure' ? { error: job.error } : { fileRef: job.fileRef, transcript: job.transcript, transcriptRef: job.transcriptRef }),

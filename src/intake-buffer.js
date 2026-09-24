@@ -24,6 +24,7 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, deleteMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem } from './intake-routing.js';
+import { threadExtra } from './conversation-context.js';
 
 // Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
 // force every test that mocks that module to declare them). They call the imported
@@ -42,13 +43,13 @@ async function recordSent(env, chatId, result) {
     console.error('[sent] record failed:', e.message);
   }
 }
-async function sendTracked(env, chatId, text, extra) {
-  const result = await sendMessage(env.BOT_TOKEN, chatId, text, extra);
+async function sendTracked(env, chatId, text, extra, threadId) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text, { ...extra, ...threadExtra(threadId) });
   await recordSent(env, chatId, result);
   return result;
 }
-async function sendKeyboardTracked(env, chatId, text, keyboard, extra) {
-  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, extra);
+async function sendKeyboardTracked(env, chatId, text, keyboard, extra, threadId) {
+  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) });
   await recordSent(env, chatId, result);
   return result;
 }
