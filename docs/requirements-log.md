@@ -160,5 +160,9 @@
 - [планируется] #251 всегда копим вход (тихо при `all_off`), ACK по `all_on`, TTL 6ч, flush-all
 
 ## 2026-09-25 — forum topic isolation (#255)
-- Canonical conversation keys preserve legacy `String(chatId)` when no valid `message_thread_id` exists.
-- Forum intake/media return paths use `chatId:threadId`; delivery context carries the topic identity.
+- Canonical `conversationKey`/`deliveryContext`/`threadExtra`/`threadIdOf` helpers: no valid `message_thread_id` → exactly legacy `String(chatId)`, and no `message_thread_id` sent in any Telegram request (hard guard, no migration).
+- Intake DO is keyed by `chatId:threadId` (routeText ingest/append/flush, callbacks `intake_run`, debug routes); text A → text B → flush A keeps the buffers separate.
+- `MediaJob` deliver/notify-failure returns `media-result` to the originating topic's DO, so media in A never surfaces in B.
+- Every gateway outbound new-message path carries the topic: intake-buffer collector/held/ack/error/placeholder, handler sends, callbacks, commands, intake-preflight, transcript documents.
+- Session split: ChatState (auth/username/allMsgMode) stays at `String(chatId)`; ThreadState (dialog/project/picker/supplement/pin pointers) stored at `chatId:threadId` and merged on read; project picker mirror is topic-keyed; `stopTask` scoped by (username, chatId, threadId).
+- Tests: `conversation-context`, `forum-topics-isolation`, `forum-topics-routing`, + topic cases in `route-text` (full suite 544 green).

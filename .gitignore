@@ -6,3 +6,5 @@ dist/
 staging-results/
 
 wrangler.preview.toml
+
+node_modules

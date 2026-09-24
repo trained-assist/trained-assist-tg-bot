@@ -10,6 +10,16 @@ import { isCommandVisible } from '../lib/command-visibility.js';
 import { handleMessage } from './message.js';
 import { isProjectSwitch } from '../lib/project-command.js';
 import commandsRegistry from '../../commands-registry.json';
+import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
+
+// Topic-aware outbound helpers (issue #255): new messages must carry the forum
+// topic id; threadExtra() is empty without one (private/non-forum unchanged).
+function sendIn(env, chatId, threadId, text, extra = {}) {
+  return sendMessage(env.BOT_TOKEN, chatId, text, { ...extra, ...threadExtra(threadId) });
+}
+function sendKbIn(env, chatId, threadId, text, keyboard, extra = {}, lifecycleEnv = env) {
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) }, lifecycleEnv);
+}
 
 // Commands the agent handles itself (via getQuickAnswer / a session task) rather than
 // the gateway. The gateway must forward these to the agent instead of rejecting them as
@@ -41,19 +51,20 @@ export function isAdminForwardedCommand(text) {
 // project + dialog pointers (#1318). Otherwise continuation matching keeps looking
 // among the OLD project's sessions; with them cleared, the next message starts a new
 // dialog resolved via /project-decision, which returns the newly pinned project.
-export async function resetChatProject(env, chatId) {
-  const session = await getSession(env.SESSIONS, chatId);
+export async function resetChatProject(env, chatId, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) return;
   await setSession(env.SESSIONS, chatId, { ...session,
     projectId: null, projectPicked: false, lastSessionId: null,
     activeSessionId: null, activeSessionIsNew: false, projectSelectionSessionId: null,
-    pendingNewProject: false, contextFromSession: null });
+    pendingNewProject: false, contextFromSession: null }, threadId);
 }
 
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
   const cmd = text.split(' ')[0].split('@')[0]; // strip @botname
+  const threadId = threadIdOf(msg);
 
   // Agent-side commands (e.g. /persona) are handled downstream in the agent, not here.
   // Forward the raw message so the agent's task pipeline sees the full text + args.
@@ -65,41 +76,41 @@ export async function handleCommand(msg, env) {
     const quoted = (msg.reply_to_message?.text || msg.reply_to_message?.caption || '').trim();
     const forwarded = quoted && !inline ? { ...msg, text: `${cmd} ${quoted}` } : msg;
     const result = await handleMessage(forwarded, env);
-    if (isProjectSwitch(forwarded.text)) await resetChatProject(env, chatId);
+    if (isProjectSwitch(forwarded.text)) await resetChatProject(env, chatId, threadIdOf(forwarded));
     return result;
   }
 
   switch (cmd) {
     case '/restart': return cmdRestart(msg, env);
-    case '/start':   return cmdStart(chatId, env);
+    case '/start':   return cmdStart(chatId, env, threadId);
     case '/login':   return cmdLogin(msg, env);
-    case '/logout':   return cmdLogout(chatId, env);
-    case '/profile':  return cmdProfile(chatId, env);
-    case '/status':  return cmdStatus(chatId, env);
-    case '/version': return cmdVersion(chatId, env);
-    case '/privacy':          return cmdPrivacy(chatId, env);
+    case '/logout':   return cmdLogout(chatId, env, threadId);
+    case '/profile':  return cmdProfile(chatId, env, threadId);
+    case '/status':  return cmdStatus(chatId, env, threadId);
+    case '/version': return cmdVersion(chatId, env, threadId);
+    case '/privacy':          return cmdPrivacy(chatId, env, threadId);
     case '/settoken':          return cmdSetToken(msg, env);
-    case '/chromeext_install': return cmdChromeExtInstall(chatId, env);
+    case '/chromeext_install': return cmdChromeExtInstall(chatId, env, threadId);
     case '/chromeext_connect': return cmdChromeExtConnect(msg, env);
     case '/chromeext_status':  return cmdChromeExtStatus(msg, env);
     case '/sessions':
-    case '/диалоги':           return cmdSessions(chatId, env);
+    case '/диалоги':           return cmdSessions(chatId, env, threadId);
     case '/new_dialog':
-    case '/новый_диалог':      return cmdNewDialog(chatId, env);
+    case '/новый_диалог':      return cmdNewDialog(chatId, env, threadId);
     case '/close':
-    case '/закрыть':           return cmdClose(chatId, env);
+    case '/закрыть':           return cmdClose(chatId, env, threadId);
     case '/files':
-    case '/папки':             return cmdFiles(chatId, env);
+    case '/папки':             return cmdFiles(chatId, env, '', threadId);
     case '/ru':                return cmdRu(msg, env);
     case '/стоп':
     case '/stop':              return cmdStop(msg, env);
     case '/clean_buffer':
-    case '/очистить_буфер':    return cmdCleanBuffer(chatId, env);
+    case '/очистить_буфер':    return cmdCleanBuffer(chatId, env, threadId);
     case '/clean_up_flood':
     case '/cleanup_flood':
     case '/очистить_флуд':     return cmdCleanUpFlood(msg, env);
     case '/skills':
-    case '/скиллы':            return cmdSkills(chatId, env);
+    case '/скиллы':            return cmdSkills(chatId, env, threadId);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
     case '/report':
@@ -116,10 +127,10 @@ export async function handleCommand(msg, env) {
   }
 }
 
-async function cmdStart(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+async function cmdStart(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
   }
@@ -164,7 +175,7 @@ async function cmdStart(chatId, env) {
     ? `<b>🎯 HeadHunter (${hhLines.length}):</b>\n${hhLines.join('\n')}\n\n`
     : '';
 
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     `👋 Привет, ${session.name}!\n\n` +
     `${intro}\n` +
     `${taskHint}\n\n` +
@@ -184,30 +195,31 @@ const HH_START_COMMANDS = new Set([
 ]);
 
 export async function cmdLogin(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat, text, from } = msg;
   const chatId = chat.id;
 
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
-    return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /login username password');
+    return sendIn(env, chatId, threadId, 'Использование: /login username password');
   }
   const [, username, password] = args;
 
-  const existing = await getSession(env.SESSIONS, chatId);
+  const existing = await getSession(env.SESSIONS, chatId, threadId);
   if (existing) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       `✅ Ты уже вошёл как ${existing.name}. /logout чтобы выйти.`
     );
   }
 
   const user = await getUser(env.USERS, username);
   if (!user) {
-    return sendMessage(env.BOT_TOKEN, chatId, '❌ Пользователь не найден.');
+    return sendIn(env, chatId, threadId, '❌ Пользователь не найден.');
   }
 
   const ok = await verifyPassword(password, user.passwordHash, user.salt);
   if (!ok) {
-    return sendMessage(env.BOT_TOKEN, chatId, '❌ Неверный пароль.');
+    return sendIn(env, chatId, threadId, '❌ Неверный пароль.');
   }
 
   const isGroup = ['group', 'supergroup'].includes(chat.type);
@@ -220,8 +232,8 @@ export async function cmdLogin(msg, env) {
   await setSession(env.SESSIONS, chatId, {
     username, name: user.name, telegramUserId: from?.id,
     ...(isGroup ? { allMsgMode: true } : {}),
-  });
-  return sendMessage(env.BOT_TOKEN, chatId,
+  }, threadId);
+  return sendIn(env, chatId, threadId,
     isGroup
       ? `✅ Добро пожаловать, ${user.name}!\n\n` +
         `Пиши задачи как в личке — я собираю все сообщения и запускаю проработку по кнопке «▶️».\n\n` +
@@ -230,21 +242,21 @@ export async function cmdLogin(msg, env) {
   );
 }
 
-async function cmdLogout(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+async function cmdLogout(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
-    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.');
+    return sendIn(env, chatId, threadId, '⚠️ Ты не авторизован.');
   }
   await deleteSession(env.SESSIONS, chatId);
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     `👋 До встречи, ${session.name}! Для входа: /login username password`
   );
 }
 
-async function cmdProfile(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
+async function cmdProfile(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '👤 <b>Профиль</b>\n\nТы не авторизован.\n\n<code>/login username password</code>'
     );
   }
@@ -258,8 +270,7 @@ async function cmdProfile(chatId, env) {
   }
   buttons.push([{ text: '🚪 Выйти', callback_data: 'prof:logout' }]);
 
-  return sendMessageWithKeyboard(
-    env.BOT_TOKEN, chatId,
+  return sendKbIn(env, chatId, threadId,
     `👤 <b>Профиль</b>\n\n` +
     `Имя: <b>${session.name}</b>\n` +
     `Логин: <code>${session.username}</code>`,
@@ -267,9 +278,9 @@ async function cmdProfile(chatId, env) {
   );
 }
 
-async function cmdStatus(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован. /login username password');
+async function cmdStatus(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Ты не авторизован. /login username password');
 
   const [agentOk, agentRuOk] = await Promise.all([
     getAgentHealth(env),
@@ -280,7 +291,7 @@ async function cmdStatus(chatId, env) {
     ? `\nRU-агент: ${agentRuOk ? '✅ онлайн' : '❌ офлайн'} (nalog.ru, РФ-сервисы)`
     : '';
 
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     `📊 <b>${session.name}</b>\n` +
     `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}` +
     ruLine
@@ -290,12 +301,13 @@ async function cmdStatus(chatId, env) {
 async function cmdRu(msg, env) {
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const threadId = threadIdOf(msg);
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   const task = text.replace(/^\/ru\s*/i, '').trim();
   if (!task) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '🇷🇺 <b>Российский IP агент</b>\n\n' +
       'Используй: <code>/ru ваша задача</code>\n\n' +
       'Задачи, переданные через /ru, выполняются на VM с российским IP-адресом.\n' +
@@ -305,7 +317,7 @@ async function cmdRu(msg, env) {
   }
 
   if (!env.AGENT_RU_URL) {
-    return sendMessage(env.BOT_TOKEN, chatId, '❌ RU-агент не настроен.');
+    return sendIn(env, chatId, threadId, '❌ RU-агент не настроен.');
   }
 
   try {
@@ -324,27 +336,28 @@ async function cmdRu(msg, env) {
       ...session,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
-    });
+    }, threadId);
   } catch (err) {
-    await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка RU-агента: ${err.message}`);
+    await sendIn(env, chatId, threadId, `❌ Ошибка RU-агента: ${err.message}`);
   }
 }
 
-async function cmdVersion(chatId, env) {
-  return sendMessage(env.BOT_TOKEN, chatId,
+async function cmdVersion(chatId, env, threadId = null) {
+  return sendIn(env, chatId, threadId,
     `🤖 <b>Trained Assist Bot</b>\nWorker — Cloudflare\nAgent — GCP VM`
   );
 }
 
 async function cmdSetToken(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   const args = text.trim().split(/\s+/);
   if (args.length < 3) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '📝 Использование: <code>/settoken &lt;сервис&gt; &lt;токен&gt;</code>\n\n' +
       'Примеры:\n' +
       '<code>/settoken github ghp_xxxxxxxxxxxx</code>\n' +
@@ -357,15 +370,16 @@ async function cmdSetToken(msg, env) {
 
   try {
     await setUserToken(env, { userId: session.username, label: label.toLowerCase(), value });
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       `✅ Токен <b>${label}</b> сохранён. Клод увидит его в следующей задаче.`
     );
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
   }
 }
 
 async function cmdChromeExtConnect(msg, env) {
+  const threadId = threadIdOf(msg);
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
   try {
@@ -379,18 +393,19 @@ async function cmdChromeExtConnect(msg, env) {
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);
     const { code } = await res.json();
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       `🔗 <b>Код подключения расширения</b>\n\n` +
       `<code>${code}</code>\n\n` +
       `Действует 10 минут. Введи его в попапе расширения Cloud Auth Bridge → <b>Подключить</b>.\n\n` +
       `Расширение не установлено? → /chromeext_install`
     );
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка генерации кода: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Ошибка генерации кода: ${e.message}`);
   }
 }
 
 async function cmdChromeExtStatus(msg, env) {
+  const threadId = threadIdOf(msg);
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
   try {
@@ -399,18 +414,18 @@ async function cmdChromeExtStatus(msg, env) {
     });
     if (!res.ok) throw new Error(`relay ${res.status}`);
     const { connected } = await res.json();
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       connected
         ? '✅ Chrome-расширение подключено и активно.'
         : '❌ Расширение не подключено. Используй /chromeext_connect для привязки.'
     );
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка проверки статуса: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Ошибка проверки статуса: ${e.message}`);
   }
 }
 
-async function cmdChromeExtInstall(chatId, env) {
-  return sendMessage(env.BOT_TOKEN, chatId,
+async function cmdChromeExtInstall(chatId, env, threadId = null) {
+  return sendIn(env, chatId, threadId,
     `🧩 <b>Установка Cloud Auth Bridge</b>\n\n` +
     `<b>Шаг 1.</b> Скачай расширение:\n` +
     `<a href="https://github.com/trained-assist/cloud-auth-bridge/releases/latest/download/cloud-auth-bridge.zip">📦 cloud-auth-bridge.zip</a>\n\n` +
@@ -425,14 +440,15 @@ async function cmdChromeExtInstall(chatId, env) {
 }
 
 async function cmdReport(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat, text } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   const description = text.replace(/^\/report(_bug_or_feature_request)?\s*/i, '').trim();
   if (!description) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '🐛 <b>Сообщить о баге или предложить фичу</b>\n\n' +
       'Использование:\n' +
       '<code>/report описание проблемы или идеи</code>\n\n' +
@@ -442,7 +458,7 @@ async function cmdReport(msg, env) {
     );
   }
 
-  await sendMessage(env.BOT_TOKEN, chatId, '📤 Создаю issue...');
+  await sendIn(env, chatId, threadId, '📤 Создаю issue...');
 
   try {
     const result = await reportBugOrFeature(env, {
@@ -450,13 +466,13 @@ async function cmdReport(msg, env) {
       description,
       sessionId: session.activeSessionId || session.lastSessionId || undefined,
     });
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       `✅ <b>Issue создан!</b>\n\n` +
       `<b>#${result.number}</b> ${description.slice(0, 60)}${description.length > 60 ? '…' : ''}\n\n` +
       `<a href="${result.url}">Открыть в GitHub</a>`
     );
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось создать issue: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Не удалось создать issue: ${e.message}`);
   }
 }
 
@@ -496,26 +512,26 @@ export function renderSessionList(list, { callbackPrefix = 'sd', header = '💬 
     if (gist) lines.push(escHtml(gist.slice(0, 220)));
     lines.push(`🕒 ${timeAgo(s.lastAt)} · ${count} сообщ.`);
     lines.push('');
-  });
+  }, threadId);
   const numBtns = list.map((s, i) => ({ text: String(i + 1), callback_data: `${callbackPrefix}:${s.id}` }));
   const rows = [];
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   return { text: lines.join('\n').trim(), buttons: rows };
 }
 
-async function cmdSessions(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+async function cmdSessions(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   let list;
   try {
     list = await getSessions(env, { username: session.username, limit: 8 });
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить диалоги: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Не удалось получить диалоги: ${e.message}`);
   }
 
   if (!list || list.length === 0) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendIn(env, chatId, threadId,
       '📭 Нет сохранённых диалогов.\n\nПросто напиши задачу — она станет первым диалогом.'
     );
   }
@@ -528,12 +544,12 @@ async function cmdSessions(chatId, env) {
     { text: '🗂 Архивировать', callback_data: 'ar:menu' },
   ]);
 
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
+  return sendKbIn(env, chatId, threadId, text, buttons, {}, env);
 }
 
-async function cmdClose(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+async function cmdClose(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   await setSession(env.SESSIONS, chatId, {
     ...session,
@@ -547,35 +563,35 @@ async function cmdClose(chatId, env) {
     pendingMessage: null,
     pendingMessageAt: null,
     contextFromSession: null,
-  });
-  return sendMessage(env.BOT_TOKEN, chatId,
+  }, threadId);
+  return sendIn(env, chatId, threadId,
     '🔚 <b>Диалог закрыт.</b>\n\nСледующее сообщение начнёт новый диалог с чистого листа.'
   );
 }
 
-async function cmdNewDialog(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+async function cmdNewDialog(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
-  try { return await startNewDialog(env, chatId, session); }
-  catch (err) { return sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+  try { return await startNewDialog(env, chatId, session, { threadId }); }
+  catch (err) { return sendIn(env, chatId, threadId, `⚠️ ${err.message}`); }
 }
 
-export async function cmdFiles(chatId, env, relPath = '') {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+export async function cmdFiles(chatId, env, relPath = '', threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   let data;
   try {
     data = await getFiles(env, { username: session.username, path: relPath });
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
   }
 
   const { entries, path: currentPath } = data;
 
   if (!entries || entries.length === 0) {
-    return sendMessage(env.BOT_TOKEN, chatId, `📂 <code>${currentPath || '/'}</code>\n\n(пусто)`);
+    return sendIn(env, chatId, threadId, `📂 <code>${currentPath || '/'}</code>\n\n(пусто)`);
   }
 
   function fmtSize(bytes) {
@@ -610,18 +626,18 @@ export async function cmdFiles(chatId, env, relPath = '') {
   }
 
   const title = currentPath ? `📂 <code>${currentPath}</code>` : '📂 <b>Файлы</b>';
-  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, title, buttons, {}, env);
+  return sendKbIn(env, chatId, threadId, title, buttons, {}, env);
 }
 
-async function cmdSkills(chatId, env) {
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+async function cmdSkills(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   let skills;
   try {
     skills = await getSkills(env);
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить список скиллов: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Не удалось получить список скиллов: ${e.message}`);
   }
 
   const lines = skills.map(s => {
@@ -629,14 +645,14 @@ async function cmdSkills(chatId, env) {
     return `<b>${s.name}</b>${reqLine}\n   ${s.description}`;
   });
 
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     `🛠 <b>Доступные скиллы</b>\n\n${lines.join('\n\n')}\n\n` +
     `<i>Просто напиши задачу — Клод сам выберет нужный скилл.</i>`
   );
 }
 
-async function cmdPrivacy(chatId, env) {
-  return sendMessage(env.BOT_TOKEN, chatId,
+async function cmdPrivacy(chatId, env, threadId = null) {
+  return sendIn(env, chatId, threadId,
     `🔒 <b>Приватность</b>\n\n` +
     `Сообщения → Claude Code на GCP VM.\n` +
     `Сессии → Cloudflare KV (зашифровано).\n` +
@@ -650,20 +666,20 @@ async function cmdPrivacy(chatId, env) {
 // any pending debounce for THIS chat, without touching an in-flight run. A batch
 // that can't be prepared/prepared-checked leaves messages sitting with no button
 // and no ack — this lets the user unblock themselves instead of contacting support.
-async function cmdCleanBuffer(chatId, env) {
-  if (!env.INTAKE) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Буфер недоступен в этом окружении.');
+async function cmdCleanBuffer(chatId, env, threadId = null) {
+  if (!env.INTAKE) return sendIn(env, chatId, threadId, '⚠️ Буфер недоступен в этом окружении.');
   try {
-    const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const res = await stub.fetch('https://intake/clear', { method: 'POST', body: JSON.stringify({}) });
     const data = await res.json().catch(() => ({}));
     if (data.busy) {
-      return sendMessage(env.BOT_TOKEN, chatId, '⏳ Сейчас идёт задача — буфер очищу после её завершения. Повтори /clean_buffer позже.');
+      return sendIn(env, chatId, threadId, '⏳ Сейчас идёт задача — буфер очищу после её завершения. Повтори /clean_buffer позже.');
     }
     const parts = [`🧹 Буфер очищен: снято сообщений — ${data.cleared ?? 0}`];
     if (data.failed) parts.push(`сбоев — ${data.failed}`);
-    return sendMessage(env.BOT_TOKEN, chatId, parts.join(', ') + '. Можно отправлять задачу заново.');
+    return sendIn(env, chatId, threadId, parts.join(', ') + '. Можно отправлять задачу заново.');
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось очистить буфер: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Не удалось очистить буфер: ${e.message}`);
   }
 }
 
@@ -706,9 +722,10 @@ async function deleteManyMessages(token, chatId, ids) {
 // lets a bot delete its own messages <48h old, and in groups only with
 // can_delete_messages — failures are reported, not hidden.
 async function cmdCleanUpFlood(msg, env) {
+  const threadId = threadIdOf(msg);
   const chatId = msg.chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   // Agent side — don't block the gateway cleanup if it's down.
   let agent = null;
@@ -735,7 +752,7 @@ async function cmdCleanUpFlood(msg, env) {
   const deleted = (agent?.deleted || 0) + bot.deleted;
   const failed = (agent?.failed || 0) + bot.failed;
   const agentNote = agent ? '' : '\n\n<i>Агент был недоступен — часть его сообщений могла остаться.</i>';
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     `🧹 <b>Очистка</b>\n\n` +
     `Удалил: <b>${deleted}</b>\n` +
     `Не смог: <b>${failed}</b>\n\n` +
@@ -744,40 +761,42 @@ async function cmdCleanUpFlood(msg, env) {
 }
 
 async function cmdStop(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat } = msg;
   const chatId = chat.id;
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   try {
-    const result = await stopTask(env, { username: session.username });
+    const result = await stopTask(env, { username: session.username, chatId, threadId });
     if (result.killed > 0) {
-      return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
+      return sendIn(env, chatId, threadId, '🛑 Задача остановлена.');
     } else {
-      return sendMessage(env.BOT_TOKEN, chatId, '🤷 Нет активных задач для остановки.');
+      return sendIn(env, chatId, threadId, '🤷 Нет активных задач для остановки.');
     }
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+    return sendIn(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
   }
 }
 
 async function cmdAllOn(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat } = msg;
   const chatId = chat.id;
   const isGroup = ['group', 'supergroup'].includes(chat.type);
 
   if (!isGroup) {
-    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Эта команда работает только в группах.');
+    return sendIn(env, chatId, threadId, '⚠️ Эта команда работает только в группах.');
   }
 
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   if (session.allMsgMode) {
-    return sendMessage(env.BOT_TOKEN, chatId, '✅ Режим уже включён. Выключить: /all_off');
+    return sendIn(env, chatId, threadId, '✅ Режим уже включён. Выключить: /all_off');
   }
 
-  const res = await sendMessage(env.BOT_TOKEN, chatId,
+  const res = await sendIn(env, chatId, threadId,
     '🔴 <b>Все сообщения → агенту</b>\n\n' +
     'Все сообщения в этой группе автоматически передаются Claude Code.\n\n' +
     'Выключить: /all_off',
@@ -790,18 +809,19 @@ async function cmdAllOn(msg, env) {
     ...session,
     allMsgMode: true,
     allMsgPinnedId: modeMsg,
-  });
+  }, threadId);
 }
 
 async function cmdAllOff(msg, env) {
+  const threadId = threadIdOf(msg);
   const { chat } = msg;
   const chatId = chat.id;
 
-  const session = await getSession(env.SESSIONS, chatId);
-  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
   if (!session.allMsgMode) {
-    return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Режим уже выключен.');
+    return sendIn(env, chatId, threadId, '⚠️ Режим уже выключен.');
   }
 
   if (session.allMsgPinnedId) {
@@ -817,9 +837,9 @@ async function cmdAllOff(msg, env) {
     ...session,
     allMsgMode: false,
     allMsgPinnedId: null,
-  });
+  }, threadId);
 
-  return sendMessage(env.BOT_TOKEN, chatId,
+  return sendIn(env, chatId, threadId,
     '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
     { disable_notification: true }
   );
@@ -827,10 +847,11 @@ async function cmdAllOff(msg, env) {
 
 // Hidden from /start and setMyCommands, deliberately available to all logged-in users.
 async function cmdRestart(msg, env) {
-  const session = await getSession(env.SESSIONS, msg.chat.id);
-  if (!session) return sendMessage(env.BOT_TOKEN, msg.chat.id, 'Сначала войди через /login.');
+  const threadId = threadIdOf(msg);
+  const session = await getSession(env.SESSIONS, msg.chat.id, threadId);
+  if (!session) return sendIn(env, msg.chat.id, threadId, 'Сначала войди через /login.');
   const arg = msg.text.trim().split(/\s+/)[1] || '';
-  if (!['', 'status', 'cancel'].includes(arg)) return sendMessage(env.BOT_TOKEN, msg.chat.id, '/restart, /restart status или /restart cancel');
+  if (!['', 'status', 'cancel'].includes(arg)) return sendIn(env, msg.chat.id, threadId, '/restart, /restart status или /restart cancel');
   try {
     const res = await fetch(`${env.AGENT_URL}/maintenance`, {
       method: arg === 'status' ? 'GET' : 'POST',
@@ -842,8 +863,8 @@ async function cmdRestart(msg, env) {
     const state = await res.json();
     // The agent restarts instantly and resumes interrupted tasks by itself: nothing is paused or queued.
     const text = state.phase === 'restarting' ? '🔄 Перезапускаюсь. Прерванные задачи продолжатся сами.' : '✅ Сервер работает.';
-    return sendMessage(env.BOT_TOKEN, msg.chat.id, text);
+    return sendIn(env, msg.chat.id, threadId, text);
   } catch (e) {
-    return sendMessage(env.BOT_TOKEN, msg.chat.id, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status.`);
+    return sendIn(env, msg.chat.id, threadId, `Не удалось получить подтверждение рестарта (${e.message}). Проверь /restart status.`);
   }
 }
