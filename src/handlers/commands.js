@@ -95,6 +95,9 @@ export async function handleCommand(msg, env) {
     case '/stop':              return cmdStop(msg, env);
     case '/clean_buffer':
     case '/очистить_буфер':    return cmdCleanBuffer(chatId, env);
+    case '/clean_up_flood':
+    case '/cleanup_flood':
+    case '/очистить_флуд':     return cmdCleanUpFlood(msg, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
@@ -662,6 +665,82 @@ async function cmdCleanBuffer(chatId, env) {
   } catch (e) {
     return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось очистить буфер: ${e.message}`);
   }
+}
+
+// Delete many messages (Telegram deleteMessages, ≤100/call) with a per-id
+// deleteMessage fallback. Local to this handler so it doesn't add a named export
+// every test that mocks lib/telegram.js would have to declare.
+async function deleteManyMessages(token, chatId, ids) {
+  const list = ids.filter((n) => Number.isInteger(n));
+  let deleted = 0;
+  for (let i = 0; i < list.length; i += 100) {
+    const batch = list.slice(i, i + 100);
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/deleteMessages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_ids: batch }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok !== false) { deleted += batch.length; continue; }
+    } catch { /* fall through to per-id */ }
+    for (const id of batch) {
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, message_id: id }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok !== false) deleted += 1;
+      } catch { /* count as failed */ }
+    }
+  }
+  return { deleted, failed: list.length - deleted };
+}
+
+// Delete the bot's own TEXT messages in this chat: the agent deletes the text it
+// sent (streamed answers, context cards, notifications); the gateway deletes the
+// text it sent (collectors, notices) recorded under `sent:<chatId>` in KV. File
+// artifacts (documents/photos) are never tracked, so they survive. Telegram only
+// lets a bot delete its own messages <48h old, and in groups only with
+// can_delete_messages — failures are reported, not hidden.
+async function cmdCleanUpFlood(msg, env) {
+  const chatId = msg.chat.id;
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
+
+  // Agent side — don't block the gateway cleanup if it's down.
+  let agent = null;
+  try {
+    const res = await fetch(`${env.AGENT_URL}/cleanup-flood`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+      body: JSON.stringify({ chatId, audience: resolveAudience(env) }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (res.ok) agent = await res.json();
+    else console.warn(`[cleanup] agent /cleanup-flood HTTP ${res.status}`);
+  } catch (e) { console.warn('[cleanup] agent cleanup failed:', e.message); }
+
+  // Gateway side — its own recorded text messages.
+  let ids = [];
+  try {
+    const raw = env.SESSIONS ? await env.SESSIONS.get(`sent:${chatId}`) : null;
+    ids = raw ? JSON.parse(raw) : [];
+  } catch { ids = []; }
+  const bot = ids.length ? await deleteManyMessages(env.BOT_TOKEN, chatId, ids) : { deleted: 0, failed: 0 };
+  try { if (env.SESSIONS) await env.SESSIONS.delete(`sent:${chatId}`); } catch { /* ignore */ }
+
+  const deleted = (agent?.deleted || 0) + bot.deleted;
+  const failed = (agent?.failed || 0) + bot.failed;
+  const agentNote = agent ? '' : '\n\n<i>Агент был недоступен — часть его сообщений могла остаться.</i>';
+  return sendMessage(env.BOT_TOKEN, chatId,
+    `🧹 <b>Очистка</b>\n\n` +
+    `Удалил: <b>${deleted}</b>\n` +
+    `Не смог: <b>${failed}</b>\n\n` +
+    `Файлы (документы, фото) не трогал. Telegram не даёт удалять свои сообщения старше 48ч, а в группах — без прав на удаление.${agentNote}`
+  );
 }
 
 async function cmdStop(msg, env) {
