@@ -31,7 +31,12 @@ async function render(env, chatId, pending, page = 0) {
   const header = hasTask
     ? '📂 <b>Задача уже принята — выбери проект, и сразу запущу проработку.</b>'
     : '📂 <b>В какой проект работаем?</b>';
-  const text = [header, '',
+  // Pinned chat, but the agent is confident the task is about another project → say
+  // why we ask instead of binding silently (suggested is choice 1, pinned is choice 2).
+  const mm = pending.mismatch;
+  const nameOf = id => { const p = pending.choices.find(c => c.id === id); return esc(String(p?.name || p?.label || id).slice(0, 80)); };
+  const mismatchLine = mm ? [`🤔 Похоже, задача про «${nameOf(mm.suggested)}», а чат закреплён за «${nameOf(mm.pinned)}». Закреп не изменится.`, ''] : [];
+  const text = [header, '', ...mismatchLine,
     ...(preview ? [`<i>принято:</i> ${esc(preview)}`, ''] : []),
     ...choices.map((p, i) => {
       const summary = p.summary?.end || p.summary?.middle || '';
@@ -71,7 +76,7 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     opts = session.pendingProjectChoice.opts;
   }
   const pending = { choices: decision.choices || [], createdAt: Date.now(), expiresAt: Date.now() + PICKER_TTL_MS, token: crypto.randomUUID(), input,
-    opts, contextFromSession, messageId: null };
+    opts, contextFromSession, messageId: null, mismatch: decision.mismatch || null };
   await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: pending });
   const messageId = await render(env, chatId, pending);
   if (input && opts.initialMsgId) {
@@ -154,8 +159,10 @@ export async function chooseProject(cq, env, session) {
   }
   // projectPicked: the user explicitly chose an existing project in the menu → the agent
   // pins the chat to it (#1318). «➕ Новый проект» pins via newProjectName instead.
+  // Exception: a mismatch prompt (pinned chat, task looked like another project) is a
+  // one-off detour — the chosen project binds this session only, the pin stays.
   const route = { sessionId: newSessionId(chatId), forceNew: true, projectChosen: true,
-    projectId: project?.id || null, projectPicked: !!project, newProject: raw === 'new', contextFromSession: pending.contextFromSession };
+    projectId: project?.id || null, projectPicked: !!project && !pending.mismatch, newProject: raw === 'new', contextFromSession: pending.contextFromSession };
   await setSession(env.SESSIONS, chatId, { ...session,
     pendingProjectChoice: pending.input ? { ...pending, dispatching: true } : null, pendingMessage: null, pendingMessageAt: null, pendingPickerId: null, pendingOriginalMessage: null, pendingOriginalOpts: null,
     activeSessionId: route.sessionId, activeSessionIsNew: true, lastSessionId: null,
