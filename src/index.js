@@ -1,4 +1,5 @@
 import { serveMedia } from './media-jobs.js';
+import { resolveBotContext, envForBot } from './lib/bot-context.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
 import { handleMessage, processDueRetries } from './handlers/message.js';
@@ -113,18 +114,31 @@ app.post('/debug/transcribe-test', async (c) => {
   }
 });
 
-// Telegram webhook
-app.post('/webhook', async (c) => {
-  const env = c.env;
+// Telegram webhook. `/webhook` is the legacy per-env route; `/webhook/:botId`
+// serves a bot from the BOTS registry (epic trained-assist-agent#1342, one Worker
+// for N bots). Both share one handler; the bot comes from the transport only.
+app.post('/webhook', (c) => handleWebhook(c, undefined));
+app.post('/webhook/:botId', (c) => handleWebhook(c, c.req.param('botId')));
+
+async function handleWebhook(c, pathBotId) {
+  const secretHeader = c.req.header('X-Telegram-Bot-Api-Secret-Token');
+  let bot;
+  try {
+    bot = resolveBotContext(c.env, { pathBotId, secretHeader });
+  } catch (e) {
+    console.error('[webhook] bad BOTS registry:', e.message);
+    return c.json({ error: 'bot registry misconfigured' }, 500);
+  }
+  if (!bot) return c.json({ error: 'unknown bot' }, 404);
   // Per-bot webhook secret. New bots set it when calling setWebhook (secret_token);
   // Telegram then echoes it in X-Telegram-Bot-Api-Secret-Token on every delivery.
   // Validate BEFORE parsing the body or touching any state — an unsigned update
   // must never reach dispatch. Unset secret = legacy bots (main/recruiter) keep
   // working unchanged. Durable ACK is deliberately not implemented (issue #1302 §4.3).
-  const expectedSecret = env.TELEGRAM_WEBHOOK_SECRET;
-  if (expectedSecret && c.req.header('X-Telegram-Bot-Api-Secret-Token') !== expectedSecret) {
+  if (bot.webhookSecret && secretHeader !== bot.webhookSecret) {
     return c.json({ error: 'unauthorized' }, 401);
   }
+  const env = envForBot(c.env, bot);
   let update;
   try {
     update = await c.req.json();
@@ -138,7 +152,7 @@ app.post('/webhook', async (c) => {
   // is the single source of truth — see lib/telegram.js#registerBotCommands).
   c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
   return c.json({ ok: true });
-});
+}
 
 async function dispatch(update, env) {
   const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
