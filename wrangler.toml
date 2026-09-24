@@ -142,10 +142,9 @@ MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (lik
 RECOVERY_IMPORT_LEGACY = "off"
 INTAKE_DEBOUNCE = "on"
 SESSION_NAMESPACE = "freelance"
-# BOT_USERNAME is intentionally not set yet: the real third bot's @username must
-# be confirmed before enabling (group mention/reply routing and the /start
-# greeting depend on it). Set it in the same change that turns the env on:
-#   BOT_USERNAME = "<freelance bot username>"
+# Real third bot confirmed via getMe: id 8912732465, @freelance_spec_bot.
+# Group mention/reply routing and the /start greeting depend on this value.
+BOT_USERNAME = "freelance_spec_bot"
 
 # USERS — shared with production, exactly like recruiter: the new bot works with
 # the existing profile/login system, not a separate registration.
