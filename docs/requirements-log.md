@@ -143,3 +143,7 @@
 - [реализовано] ensureCommandsRegisteredOnce: ключ botId+digest, флаг ставится только после успешного await
 - [реализовано] ci.yml: deploy/smoke loop по main/recruiter/freelance; smoke проверяет buildSha + getMe; freelance пропускается с warning без токена
 - [планируется] Включить freelance env + canary на тестовом чате с реальным третьим ботом (отдельный шаг после merge)
+
+## Команды — единый fallback для незарегистрированных
+
+- [реализовано] Единый fallback для незарегистрированных команд (#249): `known command → свой handler`, `unknown command → агенту как обычный запрос`. `default:` в `src/handlers/commands.js` вызывает `handleMessage(msg, env)` вместо «❓ Неизвестная команда». Generic — без списка/registry неизвестных команд, без нового логирования. `commands-registry.json` остаётся для меню и маршрутизации известных команд, но отсутствие команды в нём не мешает обратиться к агенту. Покрывает все окружения этого воркера (main/recruiter/freelance/будущие).
