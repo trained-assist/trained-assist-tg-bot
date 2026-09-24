@@ -7,6 +7,35 @@ import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
+
+// Local tracked-send wrappers (see intake-buffer.js for rationale): call the
+// imported sendMessage/sendMessageWithKeyboard so existing mocks still intercept,
+// and remember the id for /clean_up_flood. Text only — documents are artifacts.
+async function recordSent(env, chatId, result) {
+  const id = result?.result?.message_id;
+  if (id == null || !env?.SESSIONS) return;
+  try {
+    const key = `sent:${chatId}`;
+    const val = await env.SESSIONS.get(key);
+    const ids = val ? JSON.parse(val) : [];
+    if (!ids.includes(id)) ids.push(id);
+    await env.SESSIONS.put(key, JSON.stringify(ids.slice(-300)), { expirationTtl: 3 * 24 * 60 * 60 });
+  } catch (e) {
+    console.error('[sent] record failed:', e.message);
+  }
+}
+async function sendTracked(env, chatId, text, extra) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text, extra);
+  await recordSent(env, chatId, result);
+  return result;
+}
+async function sendKeyboardTracked(env, chatId, text, keyboard, extra) {
+  // Pass env as the lifecycleEnv arg (6th) exactly like the original call sites did,
+  // so transient-UI tracking is preserved.
+  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, extra, env);
+  await recordSent(env, chatId, result);
+  return result;
+}
 import { getSession, setSession, newSessionId, takeDueRetries, markRetryStarted, finishRetry, saveRetryOutcome } from '../lib/kv.js';
 import { runTask, getSessions, classifyMessage, getProjectDecision, classifyAgentError, stopTask } from '../lib/agent-client.js';
 import { escHtml, timeAgo } from './commands.js';
@@ -58,7 +87,7 @@ export async function handleMessage(msg, env, opts = {}) {
 
   let session = await getSession(env.SESSIONS, chatId);
   if (!session) {
-    return sendMessage(env.BOT_TOKEN, chatId,
+    return sendTracked(env, chatId,
       '👋 Сначала войди: /login username password'
     );
   }
@@ -75,7 +104,7 @@ export async function handleMessage(msg, env, opts = {}) {
     if (Date.now() < expiresAt) {
       const draft = { taskId, sessionId, text: msg.text, expiresAt: Date.now() + PICKER_TTL_MS };
       await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: draft });
-      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId,
+      await sendKeyboardTracked(env, chatId,
         '➕ Остановить текущую задачу и перезапустить её с твоим дополнением?',
         [[
           { text: '↩️ Вернуться', callback_data: `supno|${taskId}` },
@@ -203,7 +232,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
     const placeholderRes = opts.initialMsgId
       ? null
-      : await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
+      : await sendTracked(env, chatId, '📨 Передаю задачу агенту…');
     const initialMsgId = opts.initialMsgId ?? (placeholderRes?.result?.message_id ?? null);
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
@@ -280,14 +309,14 @@ async function handleText(chatId, session, text, env, opts = {}) {
         if (opts.durableInput) throw queueError;
         const notice = `⚠️ Восстановление не запланировано: ${reason}; не удалось сохранить повтор в очередь. Нужен ручной запуск.`;
         if (opts.isRetry) return { outcome: 'queue_failed', notice };
-        await sendMessage(env.BOT_TOKEN, chatId, notice);
+        await sendTracked(env, chatId, notice);
         return 'queue_failed';
       }
       const notice = attempt
         ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. Следующая попытка через 3 минуты.`
         : '⏸ Агент временно недоступен. Попробую снова через 3 минуты (до двух попыток) — не отправляй повторно.';
       if (opts.isRetry) return { outcome: 'scheduled', notice };
-      await sendMessage(env.BOT_TOKEN, chatId, notice).catch(e => console.warn('[recovery] queued notification failed:', e.message));
+      await sendTracked(env, chatId, notice).catch(e => console.warn('[recovery] queued notification failed:', e.message));
       return 'scheduled';
     }
     const userMsg = opts.isRetry
@@ -298,13 +327,13 @@ async function handleText(chatId, session, text, env, opts = {}) {
       ? '⏸ Агент временно недоступен. Файл не удалось поставить на автоповтор; попробуй прислать его ещё раз через пару минут.'
       : `❌ Ошибка: ${reason}`;
     if (opts.isRetry) return { outcome: kind, notice: userMsg };
-    await sendMessage(env.BOT_TOKEN, chatId, userMsg);
+    await sendTracked(env, chatId, userMsg);
     return kind;
   }
 }
 
 async function recoveryNotice(env, chatId, text) {
-  const result = await sendMessage(env.BOT_TOKEN, chatId, text);
+  const result = await sendTracked(env, chatId, text);
   if (!result?.ok) throw new Error(`Recovery notification rejected: ${result?.description || 'unknown'}`);
 }
 
@@ -467,7 +496,7 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId, env
   const rows = [];
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
-  return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows, {}, env);
+  return sendKeyboardTracked(env, chatId, lines.join('\n').trim(), rows, {});
 }
 
 function transcriptPreview(text, maxSentences = 3) {
@@ -488,11 +517,11 @@ function transcriptPreview(text, maxSentences = 3) {
 async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, fileId, mimeType, emoji) {
   const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
   if (!transcript) {
-    await sendMessage(env.BOT_TOKEN, chatId, `❌ Транскрипция не удалась: ${error}`);
+    await sendTracked(env, chatId, `❌ Транскрипция не удалась: ${error}`);
     return;
   }
   if (transcript.length < 800) {
-    await sendMessage(env.BOT_TOKEN, chatId, `${emoji} ${transcript}`);
+    await sendTracked(env, chatId, `${emoji} ${transcript}`);
   } else {
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');

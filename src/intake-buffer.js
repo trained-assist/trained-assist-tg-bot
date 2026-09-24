@@ -25,6 +25,34 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, deleteMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem } from './intake-routing.js';
 
+// Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
+// force every test that mocks that module to declare them). They call the imported
+// sendMessage/sendMessageWithKeyboard (so existing mocks/assertions still work) and
+// remember the id for /clean_up_flood. Only text; documents are artifacts.
+async function recordSent(env, chatId, result) {
+  const id = result?.result?.message_id;
+  if (id == null || !env?.SESSIONS) return;
+  try {
+    const key = `sent:${chatId}`;
+    const val = await env.SESSIONS.get(key);
+    const ids = val ? JSON.parse(val) : [];
+    if (!ids.includes(id)) ids.push(id);
+    await env.SESSIONS.put(key, JSON.stringify(ids.slice(-300)), { expirationTtl: 3 * 24 * 60 * 60 });
+  } catch (e) {
+    console.error('[sent] record failed:', e.message);
+  }
+}
+async function sendTracked(env, chatId, text, extra) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text, extra);
+  await recordSent(env, chatId, result);
+  return result;
+}
+async function sendKeyboardTracked(env, chatId, text, keyboard, extra) {
+  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, extra);
+  await recordSent(env, chatId, result);
+  return result;
+}
+
 // Reply-anchor a new message to the one that triggered it — the only way a fresh
 // bubble reliably appears right after the user's own message once the chat has
 // scrolled (an edit to an older bubble is invisible off-screen). Best-effort:
@@ -188,7 +216,7 @@ export class IntakeBuffer {
           });
         });
       } catch (error) {
-        await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
+        await sendTracked(this.env, msg.chat.id,
           '⚠️ Сообщение сохранено для повтора, но подготовка файла или расшифровки ещё не завершена. Повторю при запуске проработки.');
         console.warn('[intake prepare]', error.message);
       }
@@ -261,7 +289,7 @@ export class IntakeBuffer {
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
       if (pending) {
-        await sendMessage(this.env.BOT_TOKEN, buf[0].msg.chat.id, '⏳ Ещё расшифровываю полученные сообщения. Нажми запуск после расшифровки — пачка сохранена.');
+        await sendTracked(this.env, buf[0].msg.chat.id, '⏳ Ещё расшифровываю полученные сообщения. Нажми запуск после расшифровки — пачка сохранена.');
         return json({ preparing: true });
       }
       await this._dispatch();
@@ -299,7 +327,7 @@ export class IntakeBuffer {
       // transcription is done (in _mediaResult). Showing the button first and
       // transcript second was confusing users: they'd tap launch, get "still
       // transcribing", and not know to tap again after the transcript arrived.
-      await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
+      await sendTracked(this.env, msg.chat.id,
         ackText(msg), anchor(msg.message_id)).catch(() => {});
     }
     return json({ queued: true, id });
@@ -368,7 +396,7 @@ export class IntakeBuffer {
       if (!result.error && result.transcript?.length >= 800) {
         await sendDocument(this.env.BOT_TOKEN, notify.chatId, `transcript-${notify.messageId}.txt`, result.transcript, '🎤 Расшифровка голосового').catch(() => {});
       } else {
-        await sendMessage(this.env.BOT_TOKEN, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }).catch(() => {});
+        await sendTracked(this.env, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }).catch(() => {});
       }
       // After the transcript arrives, arm auto-dispatch the same way a plain text
       // message would (fresh launch button + gate). Before this fix a buffer whose
@@ -417,8 +445,8 @@ export class IntakeBuffer {
       await editMessageReplyMarkup(this.env.BOT_TOKEN, chatId, prevId, [])
         .catch(err => console.error(`[intake ${chatId}] strip prior collector button failed:`, err?.message));
     }
-    const sent = await sendMessageWithKeyboard(
-      this.env.BOT_TOKEN, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId),
+    const sent = await sendKeyboardTracked(
+      this.env, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId),
     ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
     const newId = sent?.result?.message_id;
     if (newId) {
@@ -430,7 +458,7 @@ export class IntakeBuffer {
     // the ack here reads as "the bot ate my message" even though nothing was lost. Try
     // once more without the inline keyboard in case the markup itself is what Telegram
     // rejected; the force word (see FORCE_RUN_RE) still launches without a button.
-    const plain = await sendMessage(this.env.BOT_TOKEN, chatId, collectorText(count), anchor(replyToMessageId))
+    const plain = await sendTracked(this.env, chatId, collectorText(count), anchor(replyToMessageId))
       .catch(err => { console.error(`[intake ${chatId}] plain-text collector retry failed:`, err?.message); return null; });
     const plainId = plain?.result?.message_id;
     if (plainId) await this.state.storage.put('collectorMsgId', plainId);
@@ -442,7 +470,7 @@ export class IntakeBuffer {
   // rolling notice — the rolling edit was invisible once scrolled past.
   async _showHeldNotice(chatId, count, replyToMessageId) {
     if (!chatId) return;
-    const sent = await sendMessage(this.env.BOT_TOKEN, chatId, heldText(count), anchor(replyToMessageId))
+    const sent = await sendTracked(this.env, chatId, heldText(count), anchor(replyToMessageId))
       .catch(err => { console.error(`[intake ${chatId}] send held-notice failed:`, err?.message); return null; });
     if (!sent?.result?.message_id) {
       console.error(`[intake ${chatId}] held-notice not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
@@ -489,8 +517,8 @@ export class IntakeBuffer {
     const collectorMsgId = await this.state.storage.get('collectorMsgId');
     await this.state.storage.delete('collectorMsgId');
     const lastMsgId = base.message_id || null;
-    const placeholderRes = await sendMessage(
-      this.env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…',
+    const placeholderRes = await sendTracked(
+      this.env, chatId, '📨 Передаю задачу агенту…',
       lastMsgId ? { reply_to_message_id: lastMsgId, allow_sending_without_reply: true } : {},
     ).catch(() => null);
 
@@ -546,7 +574,7 @@ export class IntakeBuffer {
         }
         await tx.delete('launching');
       }));
-      await sendMessage(this.env.BOT_TOKEN, chatId,
+      await sendTracked(this.env, chatId,
         giveUp
           ? '⚠️ Вложение не удалось подготовить после нескольких попыток. Сообщения и готовые расшифровки сохранены для восстановления. Новые задачи можно отправлять; для возврата этой пачки обратись в поддержку.'
           : isPrepFailure
@@ -614,7 +642,7 @@ export class IntakeBuffer {
         if (verdict?.level === 'clear' || verdict?.level === 'likely') {
           await this._dispatch(snapshot);
         } else if (chatId) {
-          await sendMessage(this.env.BOT_TOKEN, chatId, insufficientText);
+          await sendTracked(this.env, chatId, insufficientText);
         }
         return;
       }

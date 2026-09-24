@@ -318,6 +318,20 @@
       "description": "Очистить застрявший буфер intake (не трогает идущую задачу)"
     },
     {
+      "command": "/clean_up_flood",
+      "aliases": [
+        "/cleanup_flood",
+        "/очистить_флуд"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Удалить свои текстовые сообщения в чате (файлы не трогает)"
+    },
+    {
       "command": "/skills",
       "aliases": [
         "/скиллы"
