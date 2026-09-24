@@ -66,12 +66,14 @@ vi.mock('../src/lib/project-choice.js', () => ({
 import { handleMessage } from '../src/handlers/message.js';
 
 const CHAT_ID = 42;
-const TWO_HOURS_AGO = Date.now() - 3 * 60 * 60 * 1000; // 3h ago → old session
+const THREE_HOURS_AGO = Date.now() - 3 * 60 * 60 * 1000; // 3h ago → old session (well past 1h threshold)
+const TWO_HOURS_AGO = THREE_HOURS_AGO; // alias kept for existing tests
+const NINETY_MIN_AGO = Date.now() - 90 * 60 * 1000; // 1.5h ago → also past new 1h threshold
 
 // Two sessions → classifier would normally be invoked.
 const TWO_SESSIONS = [
-  { id: 's-42-1', topic: 'холодный поиск', lastAt: TWO_HOURS_AGO },
-  { id: 's-42-2', topic: 'установка вакансии', lastAt: TWO_HOURS_AGO - 1000 },
+  { id: 's-42-1', topic: 'холодный поиск', lastAt: THREE_HOURS_AGO },
+  { id: 's-42-2', topic: 'установка вакансии', lastAt: THREE_HOURS_AGO - 1000 },
 ];
 
 const env = { BOT_TOKEN: 't', SESSIONS: {} };
@@ -122,5 +124,83 @@ describe('resolveSessionRoute — baseline: plain text shows picker when ambiguo
     // Picker was shown (text is mocked to 'pick' by the renderSessionList stub above)
     expect(sendMessageWithKeyboard).toHaveBeenCalledOnce();
     expect(runTask).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveSessionRoute — 1h threshold: sessions 1-2h old now trigger classify', () => {
+  it('calls classify for a session 90 min old (was auto-continued under old 2h threshold)', async () => {
+    classifyMessage.mockResolvedValue({ sessionId: null, confidence: 'low' });
+    getSession.mockResolvedValue({
+      username: 'u',
+      lastSessionId: 's-42-1',
+      lastMessageAt: NINETY_MIN_AGO,
+    });
+
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'расскажи про DS встречу', message_id: 4, date: Math.floor(Date.now() / 1000) }, env);
+
+    expect(classifyMessage).toHaveBeenCalledOnce();
+  });
+
+  it('auto-continues a session that is 30 min old without classify', async () => {
+    getSession.mockResolvedValue({
+      username: 'u',
+      lastSessionId: 's-42-1',
+      lastMessageAt: Date.now() - 30 * 60 * 1000,
+    });
+
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'продолжим', message_id: 5, date: Math.floor(Date.now() / 1000) }, env);
+
+    expect(classifyMessage).not.toHaveBeenCalled();
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(runTask.mock.calls[0][1].sessionId).toBe('s-42-1');
+  });
+});
+
+describe('resolveSessionRoute — medium confidence → stale confirm dialog', () => {
+  it('shows 2-button confirm (not full picker) when classify returns medium', async () => {
+    const sessionAge = 90 * 60 * 1000; // 90 minutes in ms
+    classifyMessage.mockResolvedValue({
+      sessionId: 's-42-1',
+      confidence: 'medium',
+      sessionAge,
+    });
+
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'саммари DS встречи', message_id: 6, date: Math.floor(Date.now() / 1000) }, env);
+
+    // Should show a keyboard (the 2-button confirm)
+    expect(sendMessageWithKeyboard).toHaveBeenCalledOnce();
+    // Should NOT have auto-run the task
+    expect(runTask).not.toHaveBeenCalled();
+
+    // The confirm keyboard should use sp: callbacks (reuses existing handler)
+    const [, , , buttons] = sendMessageWithKeyboard.mock.calls[0];
+    const allCallbacks = buttons.flat().map(b => b.callback_data);
+    expect(allCallbacks).toContain('sp:s-42-1');  // "Yes, continue"
+    expect(allCallbacks).toContain('sp:new');       // "New dialog"
+    // Only 2 buttons — not a full picker with 4+ sessions
+    expect(buttons.flat().length).toBe(2);
+  });
+
+  it('stores pending message when showing stale confirm', async () => {
+    classifyMessage.mockResolvedValue({ sessionId: 's-42-1', confidence: 'medium', sessionAge: 5400000 });
+
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'саммари встречи', message_id: 7, date: Math.floor(Date.now() / 1000) }, env);
+
+    const savedSession = setSession.mock.calls.find(c => c[2]?.pendingMessage);
+    expect(savedSession).toBeTruthy();
+    expect(savedSession[2].pendingMessage).toBe('саммари встречи');
+  });
+
+  it('auto-runs when classify returns high even for stale session', async () => {
+    classifyMessage.mockResolvedValue({
+      sessionId: 's-42-1',
+      confidence: 'high',
+      sessionAge: 90 * 60 * 1000,
+    });
+
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'продолжи вакансию', message_id: 8, date: Math.floor(Date.now() / 1000) }, env);
+
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
   });
 });

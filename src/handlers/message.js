@@ -32,7 +32,9 @@ const BUG_OR_FEATURE_COMMANDS = new Set(
     .map((c) => c.toLowerCase())
 );
 
-const RECENT_SESSION_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+// Sessions newer than this are continued automatically without classify or confirmation.
+// 1h is recent enough to assume continuity; beyond that the topic may have shifted.
+const RECENT_SESSION_THRESHOLD_MS = 1 * 60 * 60 * 1000; // 1 hour
 
 // Telegram's Bot API cloud servers refuse getFile above this size — it's a
 // platform limit, not something we can raise from the worker side.
@@ -189,6 +191,21 @@ async function handleText(chatId, session, text, env, opts = {}) {
         const current = await getSession(env.SESSIONS, chatId);
         if (current?.pendingMessage === text) await setSession(env.SESSIONS, chatId, { ...current, pendingPickerId: picker.result.message_id });
       }
+      return;
+    }
+
+    if (route.type === 'confirm-stale') {
+      // Session was classified as matching but is stale — ask the user to confirm
+      // before running. Stores pending message so the sp: callback can dispatch it.
+      await setSession(env.SESSIONS, chatId, {
+        ...session,
+        pendingPickerId: null,
+        pendingMessage: text,
+        pendingMessageAt: Date.now(),
+        pendingOriginalMessage: opts.originalMessage || null,
+        pendingOriginalOpts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
+      });
+      await sendStaleSessionConfirm(env.BOT_TOKEN, chatId, route.session, route.sessionAge, env);
       return;
     }
 
@@ -418,6 +435,14 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: classification.sessionId };
   }
 
+  if (classification.confidence === 'medium' && classification.sessionId) {
+    // Session matched but is stale (>1h) — show a 2-button lightweight confirm
+    // instead of the full picker. The user either taps "continue" (reuses sp: handler)
+    // or taps "new" without having to read through a full session list.
+    const matched = recentSessions.find(s => s.id === classification.sessionId);
+    return { type: 'confirm-stale', session: matched, sessionAge: classification.sessionAge };
+  }
+
   // Ambiguous — show picker with all recent sessions
   return { type: 'disambiguate', sessions: recentSessions.slice(0, 4) };
 }
@@ -456,6 +481,19 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId, env
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
   return sendMessageWithKeyboard(botToken, chatId, lines.join('\n').trim(), rows, {}, env);
+}
+
+// Lightweight 2-button confirmation for stale-but-classified sessions.
+// Reuses the sp: callback handler (same as full picker taps) — no new callback type.
+async function sendStaleSessionConfirm(botToken, chatId, session, sessionAge, env) {
+  const topic = session?.topic ? escHtml(session.topic.slice(0, 40)) : 'прошлый диалог';
+  const ago = sessionAge ? timeAgo(Date.now() - sessionAge) : '';
+  const text = `↩ Продолжаем «${topic}»${ago ? ` (${ago})` : ''}?`;
+  const buttons = [[
+    { text: '✅ Да, продолжить', callback_data: `sp:${session.id}` },
+    { text: '✨ Новый диалог', callback_data: 'sp:new' },
+  ]];
+  return sendMessageWithKeyboard(botToken, chatId, text, buttons, {}, env);
 }
 
 async function sendDisambiguationKeyboard(botToken, chatId, sessions, activeId, env) {
