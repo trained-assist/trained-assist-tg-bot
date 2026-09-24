@@ -8,7 +8,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
-import { conversationKey, threadExtra } from './conversation-context.js';
+import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
@@ -84,7 +84,7 @@ app.get('/debug/intake/:chatId', async (c) => {
 // Explicit operational recovery; restoring never launches a task or sends messages.
 app.post('/debug/intake/:chatId/restore', async c => {
   if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
-  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
   return stub.fetch('https://intake/restore', { method: 'POST', body: await c.req.text() });
 });
 
@@ -141,14 +141,16 @@ app.post('/webhook', async (c) => {
 });
 
 async function dispatch(update, env) {
-  const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
+  const source = update?.message ?? update?.callback_query?.message;
+  const chatId = source?.chat?.id;
+  const threadId = threadIdOf(source);
   try {
     await dispatchInner(update, env);
   } catch (err) {
     console.error(`[dispatch] unhandled error chatId=${chatId}:`, err?.message, err?.stack);
     if (chatId) {
       try {
-        await sendMessage(env.BOT_TOKEN, chatId, `❌ Внутренняя ошибка: ${err?.message || err}`);
+        await sendMessage(env.BOT_TOKEN, chatId, `❌ Внутренняя ошибка: ${err?.message || err}`, threadExtra(threadId));
       } catch { /* ignore */ }
     }
   }
@@ -172,7 +174,8 @@ export async function dispatchInner(update, env) {
     // Notify user for semi-old messages (5–30 min), silently drop very old ones
     if (isPrivate && !isCommand && msgAge < 1800) {
       await sendMessage(env.BOT_TOKEN, msg.chat.id,
-        `📬 Сообщение получено с задержкой ${Math.round(msgAge / 60)} мин — отправь снова если актуально.`
+        `📬 Сообщение получено с задержкой ${Math.round(msgAge / 60)} мин — отправь снова если актуально.`,
+        threadExtra(threadIdOf(msg))
       );
     }
     return;
@@ -184,7 +187,7 @@ export async function dispatchInner(update, env) {
     // If WE were just added, don't sit silent (the "ноль реакции, старт только
     // реплаем" complaint) — greet and spell out how to talk to the bot here.
     if (botWasAddedToGroup(msg, env.BOT_USERNAME)) {
-      await sendMessage(env.BOT_TOKEN, msg.chat.id, groupWelcomeText(env.BOT_USERNAME));
+      await sendMessage(env.BOT_TOKEN, msg.chat.id, groupWelcomeText(env.BOT_USERNAME), threadExtra(threadIdOf(msg)));
     }
     return;
   }
@@ -214,7 +217,7 @@ export async function dispatchInner(update, env) {
   // "Неизвестная команда" — that message hid the supergroup-id drift above.
   if (isAdminOnlyCommand(stripBotMention(text, env.BOT_USERNAME))) {
     console.warn(`[admin] admin-only command from non-admin chat ${chatId} (ADMIN_GROUP_ID=${env.ADMIN_GROUP_ID || 'unset'})`);
-    await sendMessage(env.BOT_TOKEN, chatId, adminOnlyHint(chatId));
+    await sendMessage(env.BOT_TOKEN, chatId, adminOnlyHint(chatId), threadExtra(threadIdOf(msg)));
     return;
   }
 
@@ -278,10 +281,11 @@ export async function dispatchInner(update, env) {
 // straight to the agent. Keeping this in one place is why the group path can't
 // silently drift from the private path again (#530).
 export async function routeText(msg, env, chatId) {
+  const threadId = threadIdOf(msg);
   if (shouldDebounce(msg, env)) {
     // Pin replies AND an explicitly chosen new project at receipt, so switching
     // menus before launch cannot move an already collected batch to another project.
-    const session = await getSession(env.SESSIONS, chatId);
+    const session = await getSession(env.SESSIONS, chatId, threadId);
     const sessionId = session?.activeSessionId || session?.lastSessionId;
 
     // Show the project picker immediately for new sessions with multiple projects,
@@ -291,7 +295,7 @@ export async function routeText(msg, env, chatId) {
       try {
         const decision = await getProjectDecision(env, { username: session.username, chatId });
         if (shouldAskProject({ isNewDialog: true, decision })) {
-          await openProjectChoice(env, chatId, session, { decision, input: msg });
+          await openProjectChoice(env, chatId, session, { decision, input: msg, threadId });
           return;
         }
       } catch { /* fail open — fall through to normal debounce path */ }
@@ -309,7 +313,7 @@ export async function routeText(msg, env, chatId) {
     // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/делай") — treated the same:
     // dispatch the buffer (or just this one message if buffer was empty) immediately.
     const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
-    const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',
       body: JSON.stringify({ text: msg.text, msg, flush }),

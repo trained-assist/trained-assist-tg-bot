@@ -6,17 +6,23 @@
 // The chat's IntakeBuffer DO is strongly consistent, so the picker is mirrored there
 // and the tap handler trusts the mirror when KV looks stale. Best-effort: any failure
 // falls back to the KV-only behaviour.
-const stubFor = (env, chatId) => env?.INTAKE?.get?.(env.INTAKE.idFromName(String(chatId)));
+//
+// Forum topics (#255): the mirror is keyed by the SAME canonical conversation key as
+// the intake buffer, so a picker opened in topic A is never read by a tap in topic B.
+// With no valid threadId the key is exactly String(chatId) — legacy behavior.
+import { conversationKey } from '../conversation-context.js';
+const stubFor = (env, chatId, threadId = null) =>
+  env?.INTAKE?.get?.(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
 
-export async function mirrorPicker(env, chatId, pending) {
+export async function mirrorPicker(env, chatId, pending, threadId = null) {
   try {
-    await stubFor(env, chatId)?.fetch('https://intake/picker', { method: 'PUT', body: JSON.stringify({ pending: pending || null }) });
+    await stubFor(env, chatId, threadId)?.fetch('https://intake/picker', { method: 'PUT', body: JSON.stringify({ pending: pending || null }) });
   } catch { /* best-effort */ }
 }
 
-export async function readPicker(env, chatId) {
+export async function readPicker(env, chatId, threadId = null) {
   try {
-    const res = await stubFor(env, chatId)?.fetch('https://intake/picker');
+    const res = await stubFor(env, chatId, threadId)?.fetch('https://intake/picker');
     if (!res?.ok) return null;
     return (await res.json())?.pending || null;
   } catch { return null; }

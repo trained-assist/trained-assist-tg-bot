@@ -7,6 +7,7 @@ import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
+import { threadExtra, threadIdOf } from '../conversation-context.js';
 
 // Local tracked-send wrappers (see intake-buffer.js for rationale): call the
 // imported sendMessage/sendMessageWithKeyboard so existing mocks still intercept,
@@ -24,15 +25,15 @@ async function recordSent(env, chatId, result) {
     console.error('[sent] record failed:', e.message);
   }
 }
-async function sendTracked(env, chatId, text, extra) {
-  const result = await sendMessage(env.BOT_TOKEN, chatId, text, extra);
+async function sendTracked(env, chatId, text, extra = {}, threadId = null) {
+  const result = await sendMessage(env.BOT_TOKEN, chatId, text, { ...extra, ...threadExtra(threadId) });
   await recordSent(env, chatId, result);
   return result;
 }
-async function sendKeyboardTracked(env, chatId, text, keyboard, extra) {
+async function sendKeyboardTracked(env, chatId, text, keyboard, extra = {}, threadId = null) {
   // Pass env as the lifecycleEnv arg (6th) exactly like the original call sites did,
   // so transient-UI tracking is preserved.
-  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, extra, env);
+  const result = await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) }, env);
   await recordSent(env, chatId, result);
   return result;
 }
@@ -78,6 +79,7 @@ function tooBigMessage(fileSize) {
 export async function handleMessage(msg, env, opts = {}) {
   const { chat, text, voice, audio, photo, document: doc, video } = msg;
   const chatId = chat.id;
+  const threadId = threadIdOf(msg);
   const ids = msg.intakeItems?.map(i => i.msg?.message_id).filter(Boolean) || [msg.message_id].filter(Boolean);
   if (ids.length && !opts.requestId) {
     const bytes = new TextEncoder().encode(`${chatId}:${ids.join(',')}`);
@@ -85,10 +87,10 @@ export async function handleMessage(msg, env, opts = {}) {
     opts = { ...opts, requestId: `tg-${Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')}` };
   }
 
-  let session = await getSession(env.SESSIONS, chatId);
+  let session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
     return sendTracked(env, chatId,
-      '👋 Сначала войди: /login username password'
+      '👋 Сначала войди: /login username password', {}, threadId
     );
   }
 
@@ -103,17 +105,17 @@ export async function handleMessage(msg, env, opts = {}) {
     session = { ...session, pendingSupplementDraft: null };
     if (Date.now() < expiresAt) {
       const draft = { taskId, sessionId, text: msg.text, expiresAt: Date.now() + PICKER_TTL_MS };
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: draft });
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: draft }, threadId);
       await sendKeyboardTracked(env, chatId,
         '➕ Остановить текущую задачу и перезапустить её с твоим дополнением?',
         [[
           { text: '↩️ Вернуться', callback_data: `supno|${taskId}` },
           { text: '➕ Перезапуск с дополнением', callback_data: `supok|${taskId}` },
-        ]], {}, env);
+        ]], {}, threadId, env);
       return;
     }
     // Expired — draft dropped, fall through to normal handling of this message.
-    await setSession(env.SESSIONS, chatId, session);
+    await setSession(env.SESSIONS, chatId, session, threadId);
   }
 
   try {
@@ -152,9 +154,9 @@ export async function handleMessage(msg, env, opts = {}) {
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
   const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
   if (pendingPickerExpired) {
-    const current = await getSession(env.SESSIONS, chatId);
+    const current = await getSession(env.SESSIONS, chatId, threadId);
     if (current?.pendingProjectChoice) {
-      await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+      await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null }, threadId);
     }
   }
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
@@ -163,7 +165,7 @@ export async function handleMessage(msg, env, opts = {}) {
   if (!projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
-      await openProjectChoice(env, chatId, session, { decision, input: msg,
+      await openProjectChoice(env, chatId, session, { decision, input: msg, threadId,
         opts: { mode: opts.mode || null, initialMsgId: opts.initialMsgId || null },
         contextFromSession: route.contextFromSession || session.contextFromSession || null });
       return;
@@ -175,13 +177,13 @@ export async function handleMessage(msg, env, opts = {}) {
     // Quick command detected: clear any stuck pending project choice so the next real
     // task doesn't re-trigger the picker.
     if (decision.action === 'quick' && pendingCreation) {
-      const current = await getSession(env.SESSIONS, chatId);
+      const current = await getSession(env.SESSIONS, chatId, threadId);
       if (current?.pendingProjectChoice) {
-        await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null });
+        await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: null }, threadId);
       }
     }
   }
-  opts = { ...opts, initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
+  opts = { ...opts, threadId, initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
 
   const items = msg.intakeItems || [{ text: msg.text || msg.caption || '', msg }];
   const prepared = items.map((item, index) => {
@@ -217,6 +219,7 @@ function stripMediaTags(text) {
 }
 
 async function handleText(chatId, session, text, env, opts = {}) {
+  const threadId = opts.threadId ?? threadIdOf(opts.originalMessage || {});
   let retryOpts = opts;
   let accepted = false;
   try {
@@ -232,13 +235,13 @@ async function handleText(chatId, session, text, env, opts = {}) {
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
     const placeholderRes = opts.initialMsgId
       ? null
-      : await sendTracked(env, chatId, '📨 Передаю задачу агенту…');
+      : await sendTracked(env, chatId, '📨 Передаю задачу агенту…', {}, threadId);
     const initialMsgId = opts.initialMsgId ?? (placeholderRes?.result?.message_id ?? null);
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
     // If agent creates a new pinned message it returns the new ID; we store it for next time
     const result = await runTask(env, {
-      initiatedAt: opts.initiatedAt, threadId: opts.originalMessage?.message_thread_id || null,
+      initiatedAt: opts.initiatedAt, threadId: threadId || null,
       userId: chatId,
       requestId: opts.requestId,
       username: session.username,
@@ -282,7 +285,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pendingNewProject: false,
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
-    });
+    }, threadId);
     if (opts.isRetry) return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
   } catch (err) {
     // Telegram/session bookkeeping failures after ACK must never resubmit work.
@@ -309,14 +312,14 @@ async function handleText(chatId, session, text, env, opts = {}) {
         if (opts.durableInput) throw queueError;
         const notice = `⚠️ Восстановление не запланировано: ${reason}; не удалось сохранить повтор в очередь. Нужен ручной запуск.`;
         if (opts.isRetry) return { outcome: 'queue_failed', notice };
-        await sendTracked(env, chatId, notice);
+        await sendTracked(env, chatId, notice, {}, threadId);
         return 'queue_failed';
       }
       const notice = attempt
         ? `⚠️ Попытка восстановления ${attempt}/2 не удалась: ${reason}. Следующая попытка через 3 минуты.`
         : '⏸ Агент временно недоступен. Попробую снова через 3 минуты (до двух попыток) — не отправляй повторно.';
       if (opts.isRetry) return { outcome: 'scheduled', notice };
-      await sendTracked(env, chatId, notice).catch(e => console.warn('[recovery] queued notification failed:', e.message));
+      await sendTracked(env, chatId, notice, {}, threadId).catch(e => console.warn('[recovery] queued notification failed:', e.message));
       return 'scheduled';
     }
     const userMsg = opts.isRetry
@@ -327,13 +330,13 @@ async function handleText(chatId, session, text, env, opts = {}) {
       ? '⏸ Агент временно недоступен. Файл не удалось поставить на автоповтор; попробуй прислать его ещё раз через пару минут.'
       : `❌ Ошибка: ${reason}`;
     if (opts.isRetry) return { outcome: kind, notice: userMsg };
-    await sendTracked(env, chatId, userMsg);
+    await sendTracked(env, chatId, userMsg, {}, threadId);
     return kind;
   }
 }
 
-async function recoveryNotice(env, chatId, text) {
-  const result = await sendTracked(env, chatId, text);
+async function recoveryNotice(env, chatId, text, threadId = null) {
+  const result = await sendTracked(env, chatId, text, {}, threadId);
   if (!result?.ok) throw new Error(`Recovery notification rejected: ${result?.description || 'unknown'}`);
 }
 
@@ -348,24 +351,25 @@ export async function processDueRetries(env) {
   const due = await takeDueRetries(store);
   for (const entry of due) {
     const { chatId, text, opts = {} } = entry;
+    const threadId = opts.threadId ?? threadIdOf(opts.originalMessage || entry.originalMessage || {});
     try {
       let result = entry.terminal;
       if (!result) {
-        const session = await getSession(env.SESSIONS, chatId);
+        const session = await getSession(env.SESSIONS, chatId, threadId);
         if (!session || (opts.retryUsername && opts.retryUsername !== session.username)) {
           result = { outcome: 'profile_changed', notice: '⚠️ Восстановление отменено: вход в профиль завершён или выбран другой профиль.' };
         } else if (entry.startedAt) {
           result = { outcome: 'outcome_unknown', notice: '⚠️ Попытка восстановления прервалась без подтверждённого результата. Задача могла быть принята; автоматический повтор остановлен, чтобы не создать дубль.' };
         } else {
           const attempt = (opts.retryAttempt || 0) + 1;
-          await recoveryNotice(env, chatId, `🔄 Пробую восстановить сессию: попытка ${attempt}/2.`);
+          await recoveryNotice(env, chatId, `🔄 Пробую восстановить сессию: попытка ${attempt}/2.`, threadId);
           await markRetryStarted(store, entry);
           result = await handleText(chatId, session, text, env, { ...opts, initialMsgId: null, isRetry: true, retryAttempt: attempt });
           result ||= { outcome: 'awaiting_choice', notice: '↪️ Для восстановления нужно выбрать диалог.' };
         }
         await saveRetryOutcome(store, entry, result);
       }
-      await recoveryNotice(env, chatId, result.notice);
+      await recoveryNotice(env, chatId, result.notice, threadId);
       await finishRetry(store, entry, result.outcome);
     } catch (err) {
       console.error(`[recovery] chat=${chatId} worker failed:`, err.message);
@@ -469,7 +473,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
 // (same ordering as GET /project-decision → listProjects, most-used first, i.e.
 // highest session count — recency only breaks ties. Both /project-decision and
 // /projects must sort identically or the index lookup here resolves to the wrong project.)
-export async function sendProjectPicker(botToken, chatId, choices, activeId, env) {
+export async function sendProjectPicker(botToken, chatId, choices, activeId, env, threadId = null) {
   // Descriptive body + numbered tap-buttons — same shape as the session picker
   // (renderSessionList). A project carries a durable 3-sense summary (start/middle/end)
   // from the agent; render it so the user can tell projects apart, instead of a bare
@@ -496,7 +500,7 @@ export async function sendProjectPicker(botToken, chatId, choices, activeId, env
   const rows = [];
   for (let i = 0; i < numBtns.length; i += 5) rows.push(numBtns.slice(i, i + 5));
   rows.push([{ text: '➕ Новый проект', callback_data: 'pp:new' }]);
-  return sendKeyboardTracked(env, chatId, lines.join('\n').trim(), rows, {});
+  return sendKeyboardTracked(env, chatId, lines.join('\n').trim(), rows, {}, threadId);
 }
 
 function transcriptPreview(text, maxSentences = 3) {
@@ -515,19 +519,20 @@ function transcriptPreview(text, maxSentences = 3) {
 // Deepgram (it accepts video containers directly — no local extraction needed),
 // deliver the transcript to the chat, then hand it to the agent as the task text.
 async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, fileId, mimeType, emoji) {
+  const threadId = opts.threadId ?? threadIdOf(opts.originalMessage || {});
   const { transcript, error } = await transcribeVoice(fileId, mimeType, env);
   if (!transcript) {
-    await sendTracked(env, chatId, `❌ Транскрипция не удалась: ${error}`);
+    await sendTracked(env, chatId, `❌ Транскрипция не удалась: ${error}`, {}, threadId);
     return;
   }
   if (transcript.length < 800) {
-    await sendTracked(env, chatId, `${emoji} ${transcript}`);
+    await sendTracked(env, chatId, `${emoji} ${transcript}`, {}, threadId);
   } else {
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
     const filename = `transcript-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}-${pad(now.getMinutes())}.txt`;
     const preview = transcriptPreview(transcript, 3);
-    await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `${emoji} ${preview}…`);
+    await sendDocument(env.BOT_TOKEN, chatId, filename, transcript, `${emoji} ${preview}…`, threadId);
   }
   // Prepend any accumulated human text so buffered "текст + медиа" keeps both.
   const task = humanCaption ? `${humanCaption}\n${transcript}` : transcript;

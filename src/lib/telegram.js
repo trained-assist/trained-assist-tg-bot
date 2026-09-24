@@ -200,11 +200,14 @@ export async function deleteMessage(token, chatId, messageId) {
 }
 
 
-export async function sendDocument(token, chatId, filename, content, caption = '') {
+export async function sendDocument(token, chatId, filename, content, caption = '', threadId = null) {
   const form = new FormData();
   form.append('chat_id', String(chatId));
   form.append('document', new Blob([content], { type: 'text/plain' }), filename);
   if (caption) form.append('caption', caption);
+  // Forum topics: a NEW message must carry message_thread_id (hard guard: omitted
+  // entirely when absent, so private/non-forum requests are unchanged).
+  if (Number.isInteger(threadId) && threadId > 0) form.append('message_thread_id', String(threadId));
   const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
     method: 'POST',
     body: form,

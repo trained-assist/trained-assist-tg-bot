@@ -306,14 +306,16 @@ export async function getAgentHealth(env) {
   }
 }
 
-export async function stopTask(env, { username }) {
+export async function stopTask(env, { username, chatId = null, threadId = null }) {
   const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ username }),
+    // Forum topics (#255): a chat-scoped stop must not kill a sibling topic's task.
+    // threadId is omitted entirely when absent (non-forum behavior unchanged).
+    body: JSON.stringify({ username, ...(chatId != null ? { chatId } : {}), ...(Number.isInteger(threadId) && threadId > 0 ? { threadId } : {}) }),
     signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);

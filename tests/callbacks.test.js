@@ -168,7 +168,7 @@ describe('callbacks — intake_run while a run is already busy (дыра №4)',
     await handleCallbackQuery(cq, env);
 
     expect(sendMessage).toHaveBeenCalledWith(
-      env.BOT_TOKEN, 999, expect.stringMatching(/уже (идёт|в работе|занят)/i)
+      env.BOT_TOKEN, 999, expect.stringMatching(/уже (идёт|в работе|занят)/i), expect.anything()
     );
   });
 });
