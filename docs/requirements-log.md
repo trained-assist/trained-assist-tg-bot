@@ -158,3 +158,7 @@
 - [планируется] #248 системная устойчивость intake (dead-end при insufficient/ошибке, fail-open, TTL/индикатор, видимость failed)
 - [планируется] #246 env/секреты ботов в provisioning (новый бот — без ручных шагов)
 - [планируется] #251 всегда копим вход (тихо при `all_off`), ACK по `all_on`, TTL 6ч, flush-all
+
+## 2026-09-25 — forum topic isolation (#255)
+- Canonical conversation keys preserve legacy `String(chatId)` when no valid `message_thread_id` exists.
+- Forum intake/media return paths use `chatId:threadId`; delivery context carries the topic identity.

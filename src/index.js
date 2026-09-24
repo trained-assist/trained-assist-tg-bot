@@ -8,6 +8,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
+import { conversationKey, threadExtra } from './conversation-context.js';
 import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
@@ -75,7 +76,7 @@ app.get('/debug/whoami', async (c) => {
 // otherwise exposed.
 app.get('/debug/intake/:chatId', async (c) => {
   if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
-  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
   const res = await stub.fetch('https://intake/debug' + new URL(c.req.url).search);
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
