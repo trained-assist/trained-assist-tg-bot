@@ -629,6 +629,23 @@ export async function handleCallbackQuery(cq, env) {
     const sessionId = (sepIdx === -1 ? rest : rest.slice(0, sepIdx)) || session.activeSessionId || session.lastSessionId;
     const idxNum = Number(sepIdx === -1 ? NaN : rest.slice(sepIdx + 1));
     const optionNo = Number.isFinite(idxNum) ? idxNum + 1 : 1;
+    // Compatibility for already-sent menus incorrectly generated from the GTD
+    // footer. Resolve the actual tapped button, never guess from its index.
+    const tapped = message?.reply_markup?.inline_keyboard?.flat().find(b => b.callback_data === data);
+    const label = String(tapped?.text || '').replace(/^\d+\.\s*/, '').trim();
+    const checklistCommand = /^Отключить чеклист$/i.test(label) ? '/checklist_turn_off'
+      : /^Чеклист активен$/i.test(label) ? '/show_active_cheklist' : null;
+    if (checklistCommand) {
+      await answerCallbackQuery(env.BOT_TOKEN, id);
+      await runTask(env, {
+        initiatedAt, threadId: message?.message_thread_id || null,
+        requestId: `callback-${id}`, userId: chatId, username: session.username,
+        sessionId, task: checklistCommand, forceClaude: false,
+        telegramUserId: session.telegramUserId, projectId: session.projectId || null,
+      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      return;
+    }
+
     await answerCallbackQuery(env.BOT_TOKEN, id, `▶️ Вариант ${optionNo}…`);
     const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
