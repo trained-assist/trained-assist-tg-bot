@@ -19,7 +19,9 @@
     "tests/staging-preview.test.js",
     "tests/staging-health.test.js",
     "tests/session-disambiguation.test.js",
-    "tests/project-choice-flow.test.js"
+    "tests/project-choice-flow.test.js",
+    "tests/bot-context.test.js",
+    "tests/supplement-running-task.test.js"
   ],
   "node": []
 }

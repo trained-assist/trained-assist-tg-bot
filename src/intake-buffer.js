@@ -1,3 +1,4 @@
+import { resolveAudience } from './lib/bot-context.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia, ackText } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
@@ -79,7 +80,7 @@ export class IntakeBuffer {
     // wrapper. Without this, session reads inside the DO ignore the namespace and
     // can find sessions from a different bot (cross-bot auto-login bug).
     if (env.SESSION_NAMESPACE) {
-      const ns = env.SESSION_NAMESPACE;
+      const ns = resolveAudience(env);
       const raw = env.SESSIONS;
       env = { ...env, SESSIONS: {
         get: k => raw.get(`${ns}:${k}`),

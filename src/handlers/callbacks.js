@@ -681,7 +681,7 @@ export async function handleCallbackQuery(cq, env) {
     }
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     try {
-      const result = await stopTask(env, { username: session.username });
+      const result = await stopTask(env, { username: session.username, chatId });
       const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
       if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       else await sendMessage(env.BOT_TOKEN, chatId, text);
@@ -752,7 +752,7 @@ export async function handleCallbackQuery(cq, env) {
     await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
     await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
     if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '➕ Останавливаю задачу и перезапускаю с дополнением…', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-    await stopTask(env, { username: session.username }).catch(() => {});
+    await stopTask(env, { username: session.username, chatId }).catch(() => {});
     return runTask(env, {
       initiatedAt, threadId: message?.message_thread_id || null,
       requestId: `sup-${draft.taskId}-${msgId || id}`,

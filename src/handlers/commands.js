@@ -1,3 +1,4 @@
+import { resolveAudience } from '../lib/bot-context.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
@@ -104,7 +105,7 @@ async function cmdStart(chatId, env) {
   // recruiterHidden/recruiterOnly entries are dropped here the same way they're
   // dropped from the Telegram command menu (src/lib/telegram.js#registerBotCommands)
   // — otherwise /start would list commands the menu itself doesn't show.
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   const hhLines = [];
   const otherLines = [];
   const seen = new Set();
@@ -618,7 +619,7 @@ async function cmdStop(msg, env) {
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
   try {
-    const result = await stopTask(env, { username: session.username });
+    const result = await stopTask(env, { username: session.username, chatId });
     if (result.killed > 0) {
       return sendMessage(env.BOT_TOKEN, chatId, '🛑 Задача остановлена.');
     } else {
