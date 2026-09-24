@@ -226,7 +226,10 @@ jobs:
           verify main "https://trained-assist-tg-bot.skillset-apply.workers.dev"
           verify recruiter "https://trained-assist-tg-bot-recruiter.skillset-apply.workers.dev"
           if [ -n "${FREELANCE_BOT_TOKEN:-}" ]; then
-            verify freelance "https://trained-assist-tg-bot-freelance.skillset-apply.workers.dev"
+            # freelance uses a custom domain (its *.workers.dev route is disabled
+            # by the custom_domain binding, and Telegram's resolver rejected the
+            # fresh workers.dev host anyway) — verify the host setWebhook targets.
+            verify freelance "https://tg-freelance.trainedassist.store"
           else
             echo "::warning::FREELANCE_BOT_TOKEN not provisioned — skipping freelance smoke (env stays inert)"
           fi
