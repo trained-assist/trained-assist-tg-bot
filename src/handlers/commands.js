@@ -1,4 +1,4 @@
-import { openProjectChoice } from '../lib/project-choice.js';
+import { startNewDialog } from '../lib/project-choice.js';
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
@@ -6,6 +6,7 @@ import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, re
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 import { handleMessage } from './message.js';
+import { isProjectSwitch } from '../lib/project-command.js';
 import commandsRegistry from '../../commands-registry.json';
 
 // Commands the agent handles itself (via getQuickAnswer / a session task) rather than
@@ -34,6 +35,19 @@ export function isAdminForwardedCommand(text) {
   return ADMIN_FORWARDED_COMMANDS.has(cmd);
 }
 
+// After the agent switched/pinned the chat's project, drop the gateway's cached
+// project + dialog pointers (#1318). Otherwise continuation matching keeps looking
+// among the OLD project's sessions; with them cleared, the next message starts a new
+// dialog resolved via /project-decision, which returns the newly pinned project.
+export async function resetChatProject(env, chatId) {
+  const session = await getSession(env.SESSIONS, chatId);
+  if (!session) return;
+  await setSession(env.SESSIONS, chatId, { ...session,
+    projectId: null, projectPicked: false, lastSessionId: null,
+    activeSessionId: null, activeSessionIsNew: false, projectSelectionSessionId: null,
+    pendingNewProject: false, contextFromSession: null });
+}
+
 export async function handleCommand(msg, env) {
   const { chat, text, from } = msg;
   const chatId = chat.id;
@@ -47,10 +61,10 @@ export async function handleCommand(msg, env) {
     // message's text/caption in as the role body, so users don't retype paragraphs.
     const inline = text.slice(cmd.length).trim();
     const quoted = (msg.reply_to_message?.text || msg.reply_to_message?.caption || '').trim();
-    if (quoted && !inline) {
-      return handleMessage({ ...msg, text: `${cmd} ${quoted}` }, env);
-    }
-    return handleMessage(msg, env);
+    const forwarded = quoted && !inline ? { ...msg, text: `${cmd} ${quoted}` } : msg;
+    const result = await handleMessage(forwarded, env);
+    if (isProjectSwitch(forwarded.text)) await resetChatProject(env, chatId);
+    return result;
   }
 
   switch (cmd) {
@@ -506,6 +520,7 @@ async function cmdClose(chatId, env) {
     activeSessionId: null,
     activeSessionIsNew: false,
     projectSelectionSessionId: null,
+    projectPicked: false,
     pendingNewProject: false,
     pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
     lastSessionId: null,
@@ -522,7 +537,7 @@ async function cmdNewDialog(chatId, env) {
   const session = await getSession(env.SESSIONS, chatId);
   if (!session) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Сначала войди: /login username password');
 
-  try { return await openProjectChoice(env, chatId, session); }
+  try { return await startNewDialog(env, chatId, session); }
   catch (err) { return sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
 }
 

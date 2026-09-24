@@ -2,6 +2,7 @@ import { getProjectDecision, runTask } from './agent-client.js';
 import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
 import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
+import { shouldAskProject } from '../intake-routing.js';
 
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -82,6 +83,28 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
   }
 }
 
+// «✨ Новый диалог» (nd:, /new_dialog, sn:) — same rule as the plain-message path:
+// ask /project-decision and show the picker ONLY for action 'ask'. A chat with a
+// pinned project (or a single project) gets action 'auto' → bind it silently (#1318).
+// The bound id is NOT an explicit choice, so projectPicked stays false (no re-pin).
+export async function startNewDialog(env, chatId, session, { contextFromSession = null } = {}) {
+  const decision = await getProjectDecision(env, { username: session.username, chatId, task: '' });
+  if (session.pendingProjectChoice?.input || shouldAskProject({ isNewDialog: true, decision })) {
+    return openProjectChoice(env, chatId, session, { decision, contextFromSession });
+  }
+  const project = decision.action === 'auto'
+    ? (decision.choices || []).find(c => c.id === decision.pinned) || decision.choices?.[0] || decision.project || null
+    : null;
+  const sessionId = newSessionId(chatId);
+  await setSession(env.SESSIONS, chatId, { ...session,
+    pendingProjectChoice: null, pendingMessage: null, pendingMessageAt: null,
+    activeSessionId: sessionId, activeSessionIsNew: true, lastSessionId: null,
+    projectId: project?.id || null, projectSelectionSessionId: sessionId, projectPicked: false,
+    pendingNewProject: false, contextFromSession: contextFromSession || null });
+  const label = project ? `📁 ${esc(project.name || project.label || project.id)}\n\n` : '';
+  await sendMessage(env.BOT_TOKEN, chatId, `${label}✨ Новый диалог — напиши свою задачу!`);
+}
+
 export async function chooseProject(cq, env, session) {
   const chatId = cq.message.chat.id;
   session = await withKvConsistencyRetry(env.SESSIONS, chatId, session,
@@ -126,12 +149,14 @@ export async function chooseProject(cq, env, session) {
     await answerCallbackQuery(env.BOT_TOKEN, cq.id, 'Проект не найден');
     return;
   }
+  // projectPicked: the user explicitly chose an existing project in the menu → the agent
+  // pins the chat to it (#1318). «➕ Новый проект» pins via newProjectName instead.
   const route = { sessionId: newSessionId(chatId), forceNew: true, projectChosen: true,
-    projectId: project?.id || null, newProject: raw === 'new', contextFromSession: pending.contextFromSession };
+    projectId: project?.id || null, projectPicked: !!project, newProject: raw === 'new', contextFromSession: pending.contextFromSession };
   await setSession(env.SESSIONS, chatId, { ...session,
     pendingProjectChoice: pending.input ? { ...pending, dispatching: true } : null, pendingMessage: null, pendingMessageAt: null, pendingPickerId: null, pendingOriginalMessage: null, pendingOriginalOpts: null,
     activeSessionId: route.sessionId, activeSessionIsNew: true, lastSessionId: null,
-    projectId: route.projectId, projectSelectionSessionId: route.sessionId,
+    projectId: route.projectId, projectSelectionSessionId: route.sessionId, projectPicked: route.projectPicked,
     pendingNewProject: route.newProject, contextFromSession: route.contextFromSession });
   await answerCallbackQuery(env.BOT_TOKEN, cq.id);
   const label = project ? `📁 ${esc(project.name || project.label)}` : '➕ Новый проект — название определим по задаче';

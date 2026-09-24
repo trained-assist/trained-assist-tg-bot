@@ -72,7 +72,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
   const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
@@ -91,6 +91,9 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (pinnedMsgId) body.pinnedMsgId = pinnedMsgId;
   if (telegramUserId) body.telegramUserId = telegramUserId;
   if (projectId) body.projectId = projectId;
+  // Explicit menu choice only (#1318): the agent pins the chat to this project. Auto /
+  // remembered / pinned ids are forwarded without it so they never (re)pin.
+  if (projectId && projectPicked === true) body.projectPicked = true;
   if (newProjectName) body.newProjectName = newProjectName;
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
