@@ -141,3 +141,34 @@ describe('callbacks — clarify| removed (§9.2 owner reversal, 2026-09-14)', ()
     expect(answerCallbackQuery).toHaveBeenCalled();
   });
 });
+
+// GAP PROOF (INTAKE-SCENARIO-MATRIX.md, дыра №4): IntakeBuffer's /flush endpoint
+// already returns {busy:true} when a run is in flight (intake-buffer.js), but the
+// intake_run callback here only branches on `r?.empty` — the busy case falls through
+// with no sendMessage at all. The tap is acked ("📨 Передаю задачу…") so the button
+// visibly disappears, then nothing happens: the user is left thinking their message
+// was queued when it was silently dropped.
+describe('callbacks — intake_run while a run is already busy (дыра №4)', () => {
+  it('tells the user a run is already in flight instead of silently dropping the tap', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ busy: true }))) };
+    const env = {
+      BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret',
+      INTAKE: { idFromName: (n) => n, get: () => stub },
+    };
+
+    const cq = {
+      id: 'cq-1',
+      data: 'intake_run',
+      from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 },
+    };
+    await handleCallbackQuery(cq, env);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      env.BOT_TOKEN, 999, expect.stringMatching(/уже (идёт|в работе|занят)/i)
+    );
+  });
+});

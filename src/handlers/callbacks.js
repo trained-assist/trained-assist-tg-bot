@@ -544,6 +544,11 @@ export async function handleCallbackQuery(cq, env) {
       if (r?.empty) {
         await sendMessage(env.BOT_TOKEN, chatId,
           '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
+      } else if (r?.busy) {
+        // /flush no-ops when a run is already in flight (never double-fire) — tell
+        // the user instead of silently dropping the tap (INTAKE-SCENARIO-MATRIX.md №4).
+        await sendMessage(env.BOT_TOKEN, chatId,
+          '⏳ Уже идёт прогон — новое сообщение добавится в буфер, кнопка появится снова после завершения.');
       }
     }
     return;
