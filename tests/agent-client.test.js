@@ -181,3 +181,22 @@ describe('getProjects sends audience derived from SESSION_NAMESPACE', () => {
     expect(fetchSpy.mock.calls[0][0]).toContain('audience=recruiter');
   });
 });
+
+// #1318: the agent pins the chat ONLY on projectPicked:true + projectId.
+describe('runTask projectPicked wire field', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const send = async args => {
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchSpy);
+    await runTask({ AGENT_URL: BASE, AGENT_SECRET: 'x' }, { userId: 1, username: USER, task: 'work', ...args });
+    return JSON.parse(fetchSpy.mock.calls[0][1].body);
+  };
+  it('sends projectPicked:true with projectId for an explicit menu choice', async () => {
+    expect(await send({ projectId: 'p1', projectPicked: true })).toMatchObject({ projectId: 'p1', projectPicked: true });
+  });
+  it('omits projectPicked for auto/remembered ids and when there is no projectId', async () => {
+    expect(await send({ projectId: 'p1' })).not.toHaveProperty('projectPicked');
+    expect(await send({ projectId: 'p1', projectPicked: false })).not.toHaveProperty('projectPicked');
+    expect(await send({ projectPicked: true })).not.toHaveProperty('projectPicked');
+  });
+});

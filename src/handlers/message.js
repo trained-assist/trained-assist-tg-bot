@@ -2,6 +2,7 @@ import { readMedia } from '../lib/media-retry.js';
 import { PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject } from '../intake-routing.js';
+import { PROJECT_COMMAND_RE } from '../lib/project-command.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
@@ -128,7 +129,9 @@ export async function handleMessage(msg, env, opts = {}) {
     }
   }
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
-  if (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen)) {
+  // /project <…> manages projects itself (agent quick answer) — never gate it behind the picker.
+  const projectCommand = PROJECT_COMMAND_RE.test(msg.text || '');
+  if (!projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg,
@@ -138,7 +141,7 @@ export async function handleMessage(msg, env, opts = {}) {
     }
     if (route.forceNew && decision.action !== 'quick') {
       // Resolve the new session inside the selected project, never inherit a stale pointer.
-      route = { ...route, projectChosen: true, projectId: decision.project?.id || (decision.action === 'auto' ? decision.choices?.[0]?.id : null) || null };
+      route = { ...route, projectChosen: true, projectPicked: false, projectId: decision.project?.id || (decision.action === 'auto' ? decision.choices?.[0]?.id : null) || null };
     }
     // Quick command detected: clear any stuck pending project choice so the next real
     // task doesn't re-trigger the picker.
@@ -220,6 +223,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
       projectId: route.projectChosen ? route.projectId : (opts.intakeRoute ? opts.intakeRoute.projectId : (session.projectId || null)),
+      // Only an explicit picker choice pins the chat in the agent (#1318).
+      projectPicked: !!(route.projectChosen && route.projectPicked && route.projectId),
       newProjectName: route.forceNew && (route.newProject || (session.projectSelectionSessionId === route.sessionId && session.pendingNewProject))
         ? text.replace(/^\[Сообщение \d+\]\s*/u, '').split('\n')[0].trim().slice(0, 60) || 'Новый проект' : null,
       requestId: opts.requestId,
@@ -244,6 +249,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       activeSessionId: null,
       activeSessionIsNew: null,
       projectSelectionSessionId: null,
+      projectPicked: false,
       pendingNewProject: false,
       contextFromSession: null,
       pinnedMsgId: newPinnedMsgId,
@@ -349,7 +355,7 @@ async function resolveSessionRoute(chatId, session, text, env) {
   const lc = text.toLowerCase();
   if (session.activeSessionId && session.projectSelectionSessionId === session.activeSessionId) {
     return { type: 'run', sessionId: session.activeSessionId, forceNew: true, projectChosen: true,
-      projectId: session.projectId || null, newProject: !!session.pendingNewProject,
+      projectId: session.projectId || null, projectPicked: !!session.projectPicked, newProject: !!session.pendingNewProject,
       contextFromSession: session.contextFromSession || null };
   }
 

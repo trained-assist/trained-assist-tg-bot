@@ -5,7 +5,7 @@ import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { handleCommand } from '../src/handlers/commands.js';
 import { getSession, setSession } from '../src/lib/kv.js';
 import { getProjectDecision, runTask, getSessions, classifyMessage } from '../src/lib/agent-client.js';
-import { sendMessageWithKeyboard } from '../src/lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard } from '../src/lib/telegram.js';
 
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(), getProjectDecision: vi.fn(), getSessions: vi.fn(), classifyMessage: vi.fn(), runTask: vi.fn().mockResolvedValue({}),
@@ -53,16 +53,20 @@ describe('project selection through actual creation, message and callback handle
     expect((await getSession(env.SESSIONS, chatId)).pendingProjectChoice.choices).toHaveLength(9);
     expect(runTask).not.toHaveBeenCalled();
   });
-  it('offers new project even with only one existing project', async () => {
-    getProjectDecision.mockResolvedValue({ action: 'auto', choices: [projects[0]] });
-    await tap('nd:'); await tap('pc:new');
+  // #1318: «✨ Новый диалог» follows the plain-message rule — picker only for 'ask'.
+  it('single (unpinned) project: auto-binds without a picker and without pinning', async () => {
+    getProjectDecision.mockResolvedValue({ action: 'auto', choices: [projects[0]], pinned: null });
+    await tap('nd:');
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
     await handleMessage(message('Новая разработка'), env, { mode: 'deep' });
-    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: null, newProjectName: 'Новая разработка', forceNew: true });
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p0', newProjectName: null, forceNew: true, projectPicked: false });
   });
-  it('offers new project for an empty profile', async () => {
+  it('empty profile: no picker, the agent creates the default project', async () => {
     getProjectDecision.mockResolvedValue({ action: 'create', choices: [] });
-    await tap('nd:'); await tap('pc:new');
-    expect((await getSession(env.SESSIONS, chatId)).pendingNewProject).toBe(true);
+    await tap('nd:');
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+    await handleMessage(message('первая задача'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: null, newProjectName: null, forceNew: true, projectPicked: false });
   });
   it('paginates all nine projects and selects the ninth', async () => {
     await tap('nd:'); await tap('pc:page:1'); await tap('pc:8');
@@ -205,4 +209,115 @@ describe('project selection through actual creation, message and callback handle
     expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p0', task: 'saved', mode: 'deep' });
   });
 
+});
+
+describe('chat = project: pinned project in the gateway (#1318)', () => {
+  const pinned = { action: 'auto', choices: [projects[5]], pinned: 'p5' };
+  const pickerShown = () => sendMessageWithKeyboard.mock.calls.some(c => c[3].flat().some(b => b.callback_data?.startsWith('pc:')));
+
+  it.each([['nd:', () => tap('nd:')], ['/new_dialog', () => handleCommand(message('/new_dialog'), env)]])(
+    '%s with a pinned project skips the picker and binds it silently', async (_, open) => {
+      getProjectDecision.mockResolvedValue(pinned);
+      await open();
+      expect(getProjectDecision).toHaveBeenCalledTimes(1);
+      expect(pickerShown()).toBe(false);
+      expect(sendMessage.mock.calls.at(-1)[2]).toContain('Project 5');
+      await handleMessage(message('задача в закреплённом проекте'), env);
+      expect(runTask).toHaveBeenCalledTimes(1);
+      expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p5', forceNew: true, projectPicked: false });
+      expect(pickerShown()).toBe(false);
+    });
+
+  it('«✨ Новый диалог с этим контекстом» (sn:) also honours the pinned project', async () => {
+    getProjectDecision.mockResolvedValue(pinned);
+    await tap('sn:source-1');
+    expect(pickerShown()).toBe(false);
+    await handleMessage(message('продолжим с контекстом'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p5', contextFromSession: 'source-1', forceNew: true, projectPicked: false });
+  });
+
+  it('picker choice (menu opened before the task) sends projectPicked:true', async () => {
+    await tap('nd:'); await tap('pc:2');
+    await handleMessage(message('задача'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p2', projectPicked: true, forceNew: true });
+  });
+
+  it('picker choice for a captured task sends projectPicked:true', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    await handleMessage(message('captured task'), env);
+    expect(runTask).not.toHaveBeenCalled();
+    await tap('pc:4');
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p4', projectPicked: true, task: 'captured task' });
+  });
+
+  it('«➕ Новый проект» pins via newProjectName, never projectPicked', async () => {
+    await tap('nd:'); await tap('pc:new');
+    await handleMessage(message('Новая штука'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: null, newProjectName: 'Новая штука', projectPicked: false });
+  });
+
+  it('auto-resolved and remembered projects never send projectPicked', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    getProjectDecision.mockResolvedValue(pinned);
+    await handleMessage(message('первая'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p5', projectPicked: false });
+    await handleMessage(message('вторая'), env); // continuation → remembered session.projectId
+    expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p5', projectPicked: false, forceNew: false });
+  });
+
+  it('projectPicked does not leak into the next message after a picker choice', async () => {
+    await tap('nd:'); await tap('pc:2');
+    await handleMessage(message('первая'), env);
+    await handleMessage(message('вторая'), env);
+    expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p2', projectPicked: false, forceNew: false });
+  });
+
+  it('/project <name> resets the cached project; next message resolves the newly pinned one', async () => {
+    getSessions.mockResolvedValue([{ id: 'old', projectId: 'old-project' }]);
+    await handleCommand(message('/project Project 3'), env);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ task: '/project Project 3' });
+    const after = await getSession(env.SESSIONS, chatId);
+    expect(after).toMatchObject({ projectId: null, lastSessionId: null, activeSessionId: null });
+    getProjectDecision.mockResolvedValue({ action: 'auto', choices: [projects[3]], pinned: 'p3' });
+    await handleMessage(message('задача после смены проекта'), env);
+    expect(getSessions).not.toHaveBeenCalled();
+    expect(classifyMessage).not.toHaveBeenCalled();
+    expect(pickerShown()).toBe(false);
+    expect(runTask.mock.calls[1][1]).toMatchObject({ projectId: 'p3', forceNew: true, projectPicked: false });
+    expect(runTask.mock.calls[1][1].sessionId).not.toBe('old');
+    expect((await getSession(env.SESSIONS, chatId)).projectId).toBe('p3');
+  });
+
+  it('/project new <name> also resets; bare /project and rename do not', async () => {
+    await handleCommand(message('/project'), env);
+    expect(await getSession(env.SESSIONS, chatId)).toMatchObject({ projectId: 'old-project' });
+    await handleCommand(message('/project rename 1 = Другое'), env);
+    expect(await getSession(env.SESSIONS, chatId)).toMatchObject({ projectId: 'old-project' });
+    await handleCommand(message('/project new Свежий'), env);
+    expect(await getSession(env.SESSIONS, chatId)).toMatchObject({ projectId: null, lastSessionId: null });
+  });
+
+  it('/project in a fresh chat is forwarded without opening the picker', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    await handleCommand(message('/project 2'), env);
+    expect(pickerShown()).toBe(false);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ task: '/project 2' });
+  });
+
+  it('/close: next message starts a new dialog via /project-decision in the pinned project', async () => {
+    await handleCommand(message('/close'), env);
+    expect(await getSession(env.SESSIONS, chatId)).toMatchObject({ lastSessionId: null, activeSessionId: null, projectPicked: false });
+    getProjectDecision.mockResolvedValue(pinned);
+    await handleMessage(message('после закрытия'), env);
+    expect(getProjectDecision).toHaveBeenCalledTimes(1);
+    expect(pickerShown()).toBe(false);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p5', forceNew: true, projectPicked: false });
+  });
+
+  it('/close with several unpinned projects: next message asks via the picker', async () => {
+    await handleCommand(message('/close'), env);
+    await handleMessage(message('после закрытия'), env);
+    expect(pickerShown()).toBe(true);
+    expect(runTask).not.toHaveBeenCalled();
+  });
 });

@@ -306,6 +306,7 @@ export async function routeText(msg, env, chatId) {
         forceNew: !!(session.activeSessionId && session.activeSessionIsNew),
         projectId: session.projectId || null,
         projectChosen: session.projectSelectionSessionId === sessionId,
+        projectPicked: session.projectSelectionSessionId === sessionId && !!session.projectPicked,
         newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
     // FORCE_RUN_RE: explicit launch words ("запускай/го") when buffer may have content.
