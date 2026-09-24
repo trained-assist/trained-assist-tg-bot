@@ -9,4 +9,6 @@ Goal: third Telegram bot (freelance) wired into the gateway safely — PR-A2 of 
 - [x] §4.4 ci.yml deploy/smoke shell loop (main/recruiter/freelance); freelance INERT without `FREELANCE_BOT_TOKEN`
 - [x] §4.5 tests: `agent-client.test.js` three audiences + new `tests/bot-audience.test.js`
 - [x] `npm run check` / `npm test` / `npm run test:media-runtime` / `npm run test:staging` green
+- [x] CI green on PR #235 (ci + scenario-gate + deploy-staging + smoke-test-staging + staging-gate)
+- [x] Merged to main (2399807); prod deploy + smoke passed (main/recruiter verified, freelance skipped — inert)
 - [ ] Enable freelance env + canary on an agreed test chat (separate step AFTER merge — not in this PR)
