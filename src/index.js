@@ -1,3 +1,4 @@
+import { resolveAudience } from './lib/bot-context.js';
 import { serveMedia } from './media-jobs.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
@@ -134,7 +135,7 @@ app.post('/webhook', async (c) => {
 // Main bot omits SESSION_NAMESPACE → raw chatId keys (backward-compatible).
 function applySessionNamespace(env) {
   if (!env.SESSION_NAMESPACE) return env;
-  const ns = env.SESSION_NAMESPACE;
+  const ns = resolveAudience(env);
   const raw = env.SESSIONS;
   return { ...env, SESSIONS: {
     get: k => raw.get(`${ns}:${k}`),

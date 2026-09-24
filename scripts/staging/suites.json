@@ -20,6 +20,8 @@
     "tests/staging-health.test.js",
     "tests/session-disambiguation.test.js",
     "tests/project-choice-flow.test.js",
+    "tests/bot-context.test.js",
+    "tests/supplement-running-task.test.js",
     "tests/intake-gate-client.test.js",
     "tests/intake-routing.test.js",
     "tests/intake-recovery-auth.test.js"

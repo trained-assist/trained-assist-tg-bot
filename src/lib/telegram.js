@@ -1,3 +1,4 @@
+import { resolveAudience } from './bot-context.js';
 import { trackUI, forgetUI } from './transient-ui.js';
 import commandsRegistry from '../../commands-registry.json';
 // Telegram Bot API helpers
@@ -75,7 +76,7 @@ let bootRegistered = false;
 export async function ensureCommandsRegisteredOnce(env) {
   if (bootRegistered) return;
   bootRegistered = true;
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   await registerBotCommands(env.BOT_TOKEN, { audience });
 }
 

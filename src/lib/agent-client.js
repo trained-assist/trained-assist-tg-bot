@@ -1,3 +1,4 @@
+import { resolveAudience, resolveBotId } from './bot-context.js';
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 // HTTP client for trained-assist-agent
 
@@ -58,7 +59,7 @@ export async function getProjects(env, { username, userId }) {
     const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
     if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
   }
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   try {
     const res = await fetch(
       `${agentUrl}/projects?username=${encodeURIComponent(username)}&audience=${audience}`,
@@ -75,12 +76,12 @@ export async function getProjects(env, { username, userId }) {
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
   const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
   await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
   // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
   // here has always meant the Telegram chat to stream into; chatId is the forward-looking
   // wire name for that same value. Drop userId only after agent flips chatId canonical (PR-D).
-  const body = { userId, chatId: userId, username, context, sessionId, contextFromSession, threadId, initiatedAt, audience };
+  const body = { userId, chatId: userId, username, context, sessionId, contextFromSession, threadId, initiatedAt, audience, botId: resolveBotId(env) };
   if (fileRefs?.length) body.fileRefs = fileRefs;
   if (requestId) body.requestId = requestId;
   if (task) body.task = task;
@@ -99,7 +100,8 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (env.RUN_OUTBOX) {
     // Caller supplies Telegram/batch identity; fallback uses a stable status message.
     body.requestId = requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
-    const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(`${username}:${userId}`));
+    const scope = audience === 'default' && body.botId === 'default' ? `${username}:${userId}` : `${audience}:${body.botId}:${username}:${userId}`;
+    const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(scope));
     const res = await stub.fetch('https://outbox/enqueue', {
       method: 'POST', body: JSON.stringify({ agentUrl, body }),
     });
@@ -136,7 +138,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 // Failure is explicit: never turn an unavailable project service into "no projects".
 export async function getProjectDecision(env, { username, chatId, task = '' }) {
   const headers = { Authorization: `Bearer ${env.AGENT_SECRET}` };
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   try {
     const res = await fetch(
       `${env.AGENT_URL}/project-decision?username=${encodeURIComponent(username)}&chatId=${encodeURIComponent(chatId)}&task=${encodeURIComponent(task)}&audience=${audience}`,
@@ -157,7 +159,7 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
 }
 
 export async function getSessions(env, { username, limit = 10 }) {
-  const audience = env.SESSION_NAMESPACE === 'recruiter' ? 'recruiter' : 'default';
+  const audience = resolveAudience(env);
   const res = await fetch(
     `${env.AGENT_URL}/sessions?username=${encodeURIComponent(username)}&limit=${limit}&audience=${audience}`,
     { headers: { 'Authorization': `Bearer ${env.AGENT_SECRET}` } }
@@ -302,14 +304,15 @@ export async function getAgentHealth(env) {
   }
 }
 
-export async function stopTask(env, { username }) {
+export async function stopTask(env, { username, chatId, sessionId }) {
+  if (!/^-?\d{1,20}$/.test(String(chatId))) throw new Error('chatId required for scoped stop');
   const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, chatId, ...(sessionId ? { sessionId } : {}), audience: resolveAudience(env), botId: resolveBotId(env) }),
     signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);

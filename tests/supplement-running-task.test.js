@@ -74,7 +74,7 @@ describe('supplement a running task via ➕ Дополнить', () => {
     await handleCallbackQuery({ id: 'cb-2', data: 'supok|task-abc', from: { id: chatId },
       message: { message_id: 201, chat: { id: chatId } } }, env);
 
-    expect(stopTask).toHaveBeenCalledWith(env, { username: 'owner' });
+    expect(stopTask).toHaveBeenCalledWith(env, { username: 'owner', chatId });
     expect(runTask).toHaveBeenCalledTimes(1);
     const call = runTask.mock.calls[0][1];
     expect(call).toMatchObject({ sessionId: 's-1', forceClaude: true, mode: 'deep' });
