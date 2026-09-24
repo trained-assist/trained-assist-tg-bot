@@ -102,7 +102,14 @@ export async function handleCommand(msg, env) {
     case '/report':
     case '/report_bug_or_feature_request': return cmdReport(msg, env);
     default:
-      return sendMessage(env.BOT_TOKEN, chatId, '❓ Неизвестная команда. Напиши /start для списка команд.');
+      // Unified fallback for unregistered commands — `known command → its handler`,
+      // `unknown command → agent`. Never reply "unknown command" / treat it as an
+      // error: forward the original message (args and all) to the agent as a normal
+      // user request, so it can interpret the meaning with its own tool surface.
+      // This is deliberately generic (no per-command list, no registry of unknown
+      // commands): a missing commands-registry.json entry must never stop a user
+      // from reaching the agent, and future commands work without a gateway change.
+      return handleMessage(msg, env);
   }
 }
 
