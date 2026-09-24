@@ -7,6 +7,7 @@ import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
+import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
@@ -199,7 +200,11 @@ export async function dispatchInner(update, env) {
 
   // Admin group: user-mgmt commands + admin-only agent commands (e.g. /get_webpass)
   // pass through. Everything else is intentionally dropped to keep the group quiet.
-  if (String(chatId) === env.ADMIN_GROUP_ID) {
+  if (isAdminGroupChat(chatId, env.ADMIN_GROUP_ID)) {
+    if (msg.migrate_to_chat_id) {
+      console.error(`[admin] admin group ${chatId} migrated to supergroup ${msg.migrate_to_chat_id} — matched automatically; update ADMIN_GROUP_ID secret`);
+      return;
+    }
     if (isUserMgmtCommand(text)) {
       await handleUserMgmt(msg, env);
     } else if (isAdminForwardedCommand(text) || /^\/restart(?:@\w+)?(?:\s|$)/i.test(text)) {
@@ -207,6 +212,14 @@ export async function dispatchInner(update, env) {
       const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
       await handleCommand({ ...msg, text: cleanText }, env);
     }
+    return;
+  }
+
+  // Admin commands outside the admin chat: say why instead of the generic
+  // "Неизвестная команда" — that message hid the supergroup-id drift above.
+  if (isAdminOnlyCommand(stripBotMention(text, env.BOT_USERNAME))) {
+    console.warn(`[admin] admin-only command from non-admin chat ${chatId} (ADMIN_GROUP_ID=${env.ADMIN_GROUP_ID || 'unset'})`);
+    await sendMessage(env.BOT_TOKEN, chatId, adminOnlyHint(chatId));
     return;
   }
 
