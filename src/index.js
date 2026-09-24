@@ -11,6 +11,7 @@ import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from '
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
 import { openProjectChoice } from './lib/project-choice.js';
+import { applySessionNamespace } from './lib/session-namespace.js';
 
 const app = new Hono();
 
@@ -113,6 +114,15 @@ app.post('/debug/transcribe-test', async (c) => {
 // Telegram webhook
 app.post('/webhook', async (c) => {
   const env = c.env;
+  // Per-bot webhook secret. New bots set it when calling setWebhook (secret_token);
+  // Telegram then echoes it in X-Telegram-Bot-Api-Secret-Token on every delivery.
+  // Validate BEFORE parsing the body or touching any state — an unsigned update
+  // must never reach dispatch. Unset secret = legacy bots (main/recruiter) keep
+  // working unchanged. Durable ACK is deliberately not implemented (issue #1302 §4.3).
+  const expectedSecret = env.TELEGRAM_WEBHOOK_SECRET;
+  if (expectedSecret && c.req.header('X-Telegram-Bot-Api-Secret-Token') !== expectedSecret) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
   let update;
   try {
     update = await c.req.json();
@@ -127,21 +137,6 @@ app.post('/webhook', async (c) => {
   c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
   return c.json({ ok: true });
 });
-
-// Prefix all SESSIONS KV keys so per-profile bots (recruiter, sales) can share
-// the same KV namespace without inheriting each other's login sessions.
-// Main bot omits SESSION_NAMESPACE → raw chatId keys (backward-compatible).
-function applySessionNamespace(env) {
-  if (!env.SESSION_NAMESPACE) return env;
-  const ns = env.SESSION_NAMESPACE;
-  const raw = env.SESSIONS;
-  return { ...env, SESSIONS: {
-    get: k => raw.get(`${ns}:${k}`),
-    put: (k, v, opts) => raw.put(`${ns}:${k}`, v, opts),
-    delete: k => raw.delete(`${ns}:${k}`),
-    list: opts => raw.list(opts),
-  }};
-}
 
 async function dispatch(update, env) {
   const chatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
