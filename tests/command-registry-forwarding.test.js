@@ -34,6 +34,29 @@ describe('newly-forwarded agent commands reach the agent, not the "unknown comma
   });
 });
 
+// Unified fallback (owner rule): `known command → its handler`, `unknown command →
+// agent`. An unregistered command must never dead-end on "❓ Неизвестная команда" —
+// the original message goes to the agent so it can interpret the command's meaning
+// itself. This is what makes agent-side/future commands work without a gateway
+// deploy: absence from commands-registry.json must not block reaching the agent.
+describe('unregistered commands fall through to the agent', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    '/spec_preferences',
+    '/show_candidates',
+    '/some_command',
+    '/typo_login',
+    '/totally_unknown_thing@super_personal_assistant_bot',
+  ])('%s is forwarded via handleMessage untouched', async (cmd) => {
+    const msg = { chat: { id: 1 }, text: cmd, from: { id: 1 } };
+    await handleCommand(msg, {});
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe(cmd);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 // Explicit contract: deriving every case from the registry alone misses removed commands.
 describe('requested checklist command', () => {
   beforeEach(() => vi.clearAllMocks());
