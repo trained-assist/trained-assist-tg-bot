@@ -1,4 +1,4 @@
-import { openProjectChoice, chooseProject } from '../lib/project-choice.js';
+import { openProjectChoice, chooseProject, startNewDialog } from '../lib/project-choice.js';
 import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
@@ -178,6 +178,7 @@ export async function handleCallbackQuery(cq, env) {
         pinnedMsgId: updatedSession.pinnedMsgId || null,
         telegramUserId: updatedSession.telegramUserId,
         projectId,
+        projectPicked: !!projectId, // explicit menu choice → agent pins the chat (#1318)
         newProjectName,
       });
       const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
@@ -220,6 +221,7 @@ export async function handleCallbackQuery(cq, env) {
       activeSessionId: sessionId,
       activeSessionIsNew: false,
       projectSelectionSessionId: null,
+      projectPicked: false,
       pendingNewProject: false,
       contextFromSession: null,
       pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
@@ -286,7 +288,7 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const sourceSessionId = data.slice(3);
     await answerCallbackQuery(env.BOT_TOKEN, id);
-    try { await openProjectChoice(env, chatId, session, { contextFromSession: sourceSessionId }); }
+    try { await startNewDialog(env, chatId, session, { contextFromSession: sourceSessionId }); }
     catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
     return;
   }
@@ -321,7 +323,7 @@ export async function handleCallbackQuery(cq, env) {
 
     if (sub === '' || sub === 'clean') {
       await answerCallbackQuery(env.BOT_TOKEN, id);
-      try { await openProjectChoice(env, chatId, session); }
+      try { await startNewDialog(env, chatId, session); }
       catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
       return;
     }

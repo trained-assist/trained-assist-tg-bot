@@ -63,7 +63,7 @@ describe('routeText — shared private+group intake rule', () => {
     getSession.mockResolvedValueOnce({ lastSessionId: 'original', projectId: 'project-1' });
     await routeText({ chat: { id: 42 }, text: 'да', reply_to_message: { message_id: 1 } }, env, 42);
     expect(_appended).toHaveLength(1);
-    expect(_appended[0].msg.intakeRoute).toEqual({ sessionId: 'original', projectId: 'project-1', forceNew: false, projectChosen: false, newProject: false, contextFromSession: null });
+    expect(_appended[0].msg.intakeRoute).toEqual({ sessionId: 'original', projectId: 'project-1', forceNew: false, projectChosen: false, projectPicked: false, newProject: false, contextFromSession: null });
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
