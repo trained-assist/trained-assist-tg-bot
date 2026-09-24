@@ -1,5 +1,6 @@
 import { openProjectChoice, chooseProject, startNewDialog } from '../lib/project-choice.js';
-import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh } from '../lib/transient-ui.js';
+import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh, projectChoiceExpired } from '../lib/transient-ui.js';
+import { readPicker } from '../lib/picker-mirror.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
@@ -15,6 +16,12 @@ export async function handleCallbackQuery(cq, env) {
 
   let session = await getSession(env.SESSIONS, chatId);
 
+  // KV may still hold an older picker than the one tapped (opened by the IntakeBuffer
+  // DO in another colo) — trust the strongly-consistent DO mirror for this message.
+  if (data?.startsWith('pc:') && session && projectChoiceExpired(session.pendingProjectChoice, cq)) {
+    const mirrored = await readPicker(env, chatId);
+    if (mirrored && !projectChoiceExpired(mirrored, cq)) session = { ...session, pendingProjectChoice: mirrored };
+  }
 
   if (await rejectExpiredUI(cq, env, session)) return;
 

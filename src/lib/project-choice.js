@@ -3,6 +3,7 @@ import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './
 import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
 import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
 import { shouldAskProject } from '../intake-routing.js';
+import { mirrorPicker } from './picker-mirror.js';
 
 const PAGE_SIZE = 6;
 const esc = value => String(value).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -77,6 +78,7 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     await editMessage(env.BOT_TOKEN, chatId, opts.initialMsgId, '📂 Задача сохранена. Выбери проект в меню ниже.',
       { reply_markup: { inline_keyboard: [] } }).catch(() => {});
   }
+  await mirrorPicker(env, chatId, { ...pending, messageId });
   const current = await getSession(env.SESSIONS, chatId);
   if (current?.pendingProjectChoice?.token === pending.token) {
     await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: { ...pending, messageId } });
@@ -132,6 +134,7 @@ export async function chooseProject(cq, env, session) {
       '🔀 <b>Переструктурирование проектов</b>\n\nСмотрю текущую структуру и предложу план — без подтверждения ничего не изменится.',
       { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } });
     await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: null });
+    await mirrorPicker(env, chatId, null);
     await runTask(env, {
       userId: chatId,
       username: session.username,
@@ -158,6 +161,8 @@ export async function chooseProject(cq, env, session) {
     activeSessionId: route.sessionId, activeSessionIsNew: true, lastSessionId: null,
     projectId: route.projectId, projectSelectionSessionId: route.sessionId, projectPicked: route.projectPicked,
     pendingNewProject: route.newProject, contextFromSession: route.contextFromSession });
+  // Consume the mirror before dispatch so a second tap can't launch the task twice.
+  await mirrorPicker(env, chatId, null);
   await answerCallbackQuery(env.BOT_TOKEN, cq.id);
   const label = project ? `📁 ${esc(project.name || project.label)}` : '➕ Новый проект — название определим по задаче';
   await editMessage(env.BOT_TOKEN, chatId, pending.messageId,
@@ -175,6 +180,7 @@ export async function chooseProject(cq, env, session) {
       const current = await getSession(env.SESSIONS, chatId);
       if (current?.pendingProjectChoice?.messageId === pending.messageId) {
         await setSession(env.SESSIONS, chatId, { ...current, pendingProjectChoice: pending });
+        await mirrorPicker(env, chatId, pending);
         await render(env, chatId, pending);
       }
       await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Не удалось подготовить задачу. Сообщения сохранены — выбери проект ещё раз, чтобы повторить.');
