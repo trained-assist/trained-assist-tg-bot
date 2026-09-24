@@ -6,7 +6,7 @@ import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/int
 import { transcribeVoice } from './handlers/message.js';
 
 
-export async function prepareIntake(msg, env, session) {
+export async function prepareIntake(msg, env, session, checkpoint = async () => {}) {
   if (msg.fileRef?.storage === 'r2') return msg;
   if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
   const MAX_BYTES = 20 * 1024 * 1024;
@@ -21,18 +21,26 @@ export async function prepareIntake(msg, env, session) {
       return { ...msg, fileTooLarge: true };
     }
     const fileRef = await storeTelegramFile(msg, media, env, session);
-    msg.fileRef = fileRef;
+    msg = { ...msg, fileRef };
+    await checkpoint(msg);
     const { transcript, error } = msg.transcript ? { transcript: msg.transcript }
       : await transcribeVoice(media.file_id, media.mime_type || null, env);
     if (!transcript) throw new Error(error || 'Пустая расшифровка');
+    const notifyTranscript = msg.transcriptNotified === false || !msg.transcript;
+    msg = { ...msg, transcript, transcriptNotified: !notifyTranscript };
+    await checkpoint(msg);
     const transcriptRef = await storeTranscript(msg, media, transcript, env, session);
-    if (!msg.transcript) {
+    msg = { ...msg, transcriptRef };
+    await checkpoint(msg);
+    if (notifyTranscript) {
       const anchor = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
       if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, anchor);
       else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового');
     }
     // Keep the source media metadata for retry, but do not duplicate transcript in .text.
-    return { ...msg, transcript, fileRef, transcriptRef };
+    msg = { ...msg, transcript, fileRef, transcriptRef, transcriptNotified: true };
+    await checkpoint(msg);
+    return msg;
   }
   const file = msg.photo?.[msg.photo.length - 1] || msg.document;
   if (file) {
@@ -50,10 +58,10 @@ export async function prepareIntake(msg, env, session) {
   return msg;
 }
 
-export async function preflight(msg, env) {
+export async function preflight(msg, env, checkpoint) {
   const session = await getSession(env.SESSIONS, msg.chat.id);
   if (!session) return { msg }; // normal login path remains authoritative
-  const prepared = await prepareIntake(msg, env, session);
+  const prepared = await prepareIntake(msg, env, session, checkpoint);
   const query = [prepared.text || prepared.caption, prepared.transcript].filter(Boolean).join('\n');
   // A photo/document must reach the agent with its caption; a text-only quick reply
   // cannot consume it. Transcribed audio is eligible just like typed text.

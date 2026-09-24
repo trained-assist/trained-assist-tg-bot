@@ -90,13 +90,23 @@ export async function handleMessage(msg, env, opts = {}) {
     if (msg.intakeItems) {
       const items = [];
       // Sequential uploads bound peak memory for old cached batches and large media.
-      for (const item of msg.intakeItems) items.push({ ...item, msg: await prepareIntake({ chat: msg.chat, ...item.msg }, env, session) });
+      for (const [index, item] of msg.intakeItems.entries()) {
+        try {
+          const checkpoint = prepared => opts.onIntakePrepared?.(index, prepared);
+          const prepared = await prepareIntake({ chat: msg.chat, ...item.msg }, env, session, checkpoint);
+          await checkpoint(prepared);
+          items.push({ ...item, msg: prepared });
+        } catch (error) {
+          error.intakeMessageId = item.msg?.message_id;
+          throw error;
+        }
+      }
       msg = { ...msg, intakeItems: items };
     } else {
       msg = await prepareIntake(msg, env, session);
     }
   } catch (error) {
-    throw Object.assign(new Error(error?.message || 'Attachment preparation failed', { cause: error }), { code: 'INTAKE_PREPARATION_FAILED' });
+    throw Object.assign(new Error(error?.message || 'Attachment preparation failed', { cause: error }), { code: 'INTAKE_PREPARATION_FAILED', intakeMessageId: error?.intakeMessageId });
   }
 
   // prepareIntake already notified the user for oversized files; skip agent dispatch.

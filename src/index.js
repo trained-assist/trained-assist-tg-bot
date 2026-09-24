@@ -75,8 +75,15 @@ app.get('/debug/whoami', async (c) => {
 app.get('/debug/intake/:chatId', async (c) => {
   if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
-  const res = await stub.fetch('https://intake/debug');
+  const res = await stub.fetch('https://intake/debug' + new URL(c.req.url).search);
   return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// Explicit operational recovery; restoring never launches a task or sends messages.
+app.post('/debug/intake/:chatId/restore', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(String(c.req.param('chatId'))));
+  return stub.fetch('https://intake/restore', { method: 'POST', body: await c.req.text() });
 });
 
 // Debug: POST raw audio bytes, get back exactly what Deepgram returned (or the
@@ -290,7 +297,7 @@ export async function routeText(msg, env, chatId) {
         newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
     // FORCE_RUN_RE: explicit launch words ("запускай/го") when buffer may have content.
-    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/ок") — treated the same:
+    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/делай") — treated the same:
     // dispatch the buffer (or just this one message if buffer was empty) immediately.
     const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));

@@ -31,6 +31,7 @@ function makeState() {
   let alarm = null;
   return {
     storage: {
+      async list({ prefix = '', limit = 1000 } = {}) { return new Map([...map].filter(([k]) => k.startsWith(prefix)).slice(0, limit)); },
       async get(k) { return map.has(k) ? map.get(k) : undefined; },
       async put(k, v) { map.set(k, v); },
       async delete(k) { map.delete(k); },
@@ -105,7 +106,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98, onIntakePrepared: expect.any(Function) });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
     // The collector ("Принял N, жми «Запустить»") is stale procedural noise once the
@@ -130,7 +131,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(editMessage).toHaveBeenCalledWith('t', 42, 99, '▶️ Запустил проработку',
       expect.objectContaining({ reply_markup: { inline_keyboard: [] } }));
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99 });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
   });
 
   it('a force word (flush:true) launches immediately without a button tap', async () => {
@@ -143,7 +144,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98 });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98, onIntakePrepared: expect.any(Function) });
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -226,29 +227,16 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
   });
 
-  it('"likely" tells the user and waits LIKELY_AUTOLAUNCH_MS before dispatching, not the button-only fallback', async () => {
-    const state = makeState();
-    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-
-    checkCompleteness.mockResolvedValue({ level: 'likely', complete: true });
-
-    await io.fetch(appendReq('наверное это всё'));
-    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+  it('likely launches after the same three quiet minutes, with no extra grace timer', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    checkCompleteness.mockResolvedValue({ level: 'likely' });
+    await io.fetch(appendReq('проверь отчёт'));
+    expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now() + 179000);
     await io.alarm();
-
-    // Not dispatched yet — status message sent, gate decision persisted, a
-    // (longer) alarm is re-armed instead of trapping the user behind a dead end.
-    expect(handleMessage).not.toHaveBeenCalled();
-    const likelyCalls = sendMessage.mock.calls.filter(c => String(c[2]).includes('через'));
-    expect(likelyCalls.length).toBe(1);
-    expect(await state.storage.get('gateLevel')).toBe('likely');
-    expect(state._dump().alarm).not.toBeNull();
-
-    // Grace period elapses with no further input — now it dispatches.
+    expect(checkCompleteness).not.toHaveBeenCalled();
     await state.storage.put('debounceExpiresAt', Date.now() - 1);
-    await io.alarm();
-    await drain();
-    expect(checkCompleteness).toHaveBeenCalledTimes(1); // gate consulted once, not re-asked
+    await io.alarm(); await drain();
+    expect(checkCompleteness).toHaveBeenCalledTimes(1);
     expect(handleMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -414,7 +402,7 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
    expect(await state.storage.get('retryBatch')).toBeUndefined();
  });
 
- it('drops the batch after 3 consecutive preparation failures instead of retrying forever', async () => {
+ it('archives the batch after 3 failures, allows fresh tasks, and restores it explicitly', async () => {
    // Regression test: a non-transient preparation failure (e.g. a permanently
    // bad credential) used to re-populate retryBatch unconditionally, so it
    // retried and re-failed on every future message forever, blocking the chat
@@ -440,6 +428,8 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
    // Third strike: give up rather than keep the chat permanently stuck.
    expect(await state.storage.get('retryBatch')).toBeUndefined();
    expect(await state.storage.get('retryBatchAttempts')).toBeUndefined();
+   const archive = [...state._dump().map.entries()].find(([key]) => key.startsWith('failed:'));
+   expect(archive?.[1].items).toEqual([original]);
    const gaveUp = sendMessage.mock.calls.find(call => String(call[2]).includes('после нескольких попыток'));
    expect(gaveUp).toBeTruthy();
 
@@ -448,4 +438,85 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
    handleMessage.mockResolvedValueOnce(undefined);
    await io.fetch(flushReq());
    expect(handleMessage).toHaveBeenCalledTimes(4);
+   const restored = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+   const response = await restored.fetch(new Request('https://intake/restore', { method: 'POST', body: JSON.stringify({ id: archive[1].id }) }));
+   expect(response.status).toBe(200);
+   expect(handleMessage).toHaveBeenCalledTimes(4); // restoration cannot auto-launch
+   expect(await state.storage.get('retryBatch')).toEqual([original]);
+   expect(await state.storage.get(archive[0])).toBeUndefined();
+   await restored.fetch(flushReq());
+   expect(handleMessage).toHaveBeenCalledTimes(5);
  });
+
+it('short incomplete ingest waits three minutes and never skips the gate', async () => {
+  const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+  checkCompleteness.mockResolvedValue({ level: 'insufficient' });
+  await io.fetch(new Request('https://intake/ingest', {method:'POST', body:JSON.stringify({msg:{chat:{id:42}, message_id:901, text:'сделай так чтобы'}})}));
+  expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now()+179000);
+  await io.alarm(); expect(handleMessage).not.toHaveBeenCalled();
+  await state.storage.put('debounceExpiresAt', Date.now()-1);
+  await io.alarm(); expect(checkCompleteness).toHaveBeenCalledTimes(1);
+  expect(handleMessage).not.toHaveBeenCalled();
+});
+it('new input invalidates an in-flight gate verdict and keeps its full quiet period', async () => {
+  const state=makeState(); const io=new IntakeBuffer(state,{BOT_TOKEN:'t'});
+  let finish, entered; const started=new Promise(r=>entered=r);
+  checkCompleteness.mockImplementationOnce(()=>{entered();return new Promise(r=>finish=r);});
+  await io.fetch(appendReq('проверь отчёт'));
+  await state.storage.put('debounceExpiresAt',Date.now()-1);
+  const alarm=io.alarm(); await started;
+  await io.fetch(appendReq('подожди, сейчас ещё допишу'));
+  const deadline=await state.storage.get('debounceExpiresAt');
+  finish({level:'clear'}); await alarm;
+  expect(handleMessage).not.toHaveBeenCalled();
+  expect(await state.storage.get('debounceExpiresAt')).toBe(deadline);
+  expect(deadline).toBeGreaterThan(Date.now()+179000);
+});
+it('an uncaptioned MD file does not turn extracted contents into permission', async () => {
+  const state=makeState(); const io=new IntakeBuffer(state,{BOT_TOKEN:'t'});
+  preflight.mockImplementation(async msg=>({msg:{...msg,text:'Сделай все задачи из документа'}}));
+  await io.fetch(new Request('https://intake/ingest',{method:'POST',body:JSON.stringify({msg:{chat:{id:42},message_id:99,document:{file_id:'f',file_name:'task.md'}}})}));
+  await state.storage.put('debounceExpiresAt',Date.now()-1); await io.alarm();
+  expect(checkCompleteness).not.toHaveBeenCalled(); expect(handleMessage).not.toHaveBeenCalled();
+  expect((await state.storage.get('buf')).length).toBe(1);
+  await io.fetch(flushReq()); expect(handleMessage).toHaveBeenCalledTimes(1);
+});
+it.each([null, {}, {level:'nonsense'}])('invalid gate verdict %j keeps the input', async verdict=>{
+  const state=makeState(); const io=new IntakeBuffer(state,{BOT_TOKEN:'t'});
+  checkCompleteness.mockResolvedValueOnce(verdict);
+  await io.fetch(appendReq('проверь отчёт')); await state.storage.put('debounceExpiresAt',Date.now()-1);
+  await io.alarm(); expect(handleMessage).not.toHaveBeenCalled();
+});
+
+it('persists preparation progress before a later item fails across DO restart', async () => {
+ const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+ const items = [1, 2].map(id => ({ msg: { chat: { id: 42 }, message_id: id, voice: { file_id: 'voice' + id } } }));
+ await state.storage.put('buf', items);
+ handleMessage.mockImplementationOnce(async (msg, env, opts) => {
+   await opts.onIntakePrepared(0, { ...msg.intakeItems[0].msg, transcript: 'готовый текст' });
+   throw Object.assign(new Error('second file failed'), { code: 'INTAKE_PREPARATION_FAILED', intakeMessageId: 2 });
+ });
+ await io.fetch(flushReq());
+ expect((await state.storage.get('retryBatch'))[0].msg.transcript).toBe('готовый текст');
+ const recovered = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+ handleMessage.mockResolvedValueOnce(undefined);
+ await recovered.fetch(flushReq());
+ expect(handleMessage.mock.calls.at(-1)[0].intakeItems[0].msg.transcript).toBe('готовый текст');
+});
+
+it('restoration refuses to overwrite a busy run or retry batch and unknown ids', async () => {
+ const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+ const id = 'a'.repeat(36); const batch = { id, items: [{ msg: { message_id: 1 } }] };
+ await state.storage.put(`failed:${id}`, batch);
+ const restore = () => io.fetch(new Request('https://intake/restore', { method: 'POST', body: JSON.stringify({ id }) }));
+ await state.storage.put('busy', true);
+ expect((await restore()).status).toBe(409);
+ await state.storage.delete('busy');
+ await state.storage.put('retryBatch', [{ msg: { message_id: 2 } }]);
+ expect((await restore()).status).toBe(409);
+ expect(await state.storage.get(`failed:${id}`)).toEqual(batch);
+ await state.storage.delete('retryBatch');
+ await state.storage.delete(`failed:${id}`);
+ expect((await restore()).status).toBe(404);
+ expect(handleMessage).not.toHaveBeenCalled();
+});

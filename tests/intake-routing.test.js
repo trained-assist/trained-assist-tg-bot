@@ -3,14 +3,15 @@ import { FORCE_RUN_RE, AUTO_LAUNCH_RE } from '../src/intake-routing.js';
 
 describe('AUTO_LAUNCH_RE — standalone continuation/confirm signals', () => {
   it('matches known confirm words', () => {
-    for (const w of ['продолжай', 'давай', 'ок', 'ok', 'yes', 'действуй']) {
+    for (const w of ['продолжай', 'делай', 'всё готово', 'прямо сейчас делай', 'действуй']) {
       expect(AUTO_LAUNCH_RE.test(w)).toBe(true);
     }
   });
 
-  it('matches a bare "?" (owner ask, 2026-09-22: a one-char confirm)', () => {
-    expect(AUTO_LAUNCH_RE.test('?')).toBe(true);
-    expect(AUTO_LAUNCH_RE.test(' ? ')).toBe(true);
+  it('acknowledgments and question marks are not explicit authorization', () => {
+    for (const text of ['?', ' ? ', 'ок', 'ok', 'yes', 'давай', 'понял', 'ага', 'угу']) {
+      expect(AUTO_LAUNCH_RE.test(text)).toBe(false);
+    }
   });
 
   it('does NOT match prose that merely contains a confirm word', () => {
