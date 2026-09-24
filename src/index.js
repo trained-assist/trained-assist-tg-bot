@@ -289,7 +289,7 @@ export async function routeText(msg, env, chatId) {
         newProject: !!session.pendingNewProject, contextFromSession: session.contextFromSession || null } };
     }
     // FORCE_RUN_RE: explicit launch words ("запускай/го") when buffer may have content.
-    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/ок") — treated the same:
+    // AUTO_LAUNCH_RE: clear continuation signals ("продолжай/делай") — treated the same:
     // dispatch the buffer (or just this one message if buffer was empty) immediately.
     const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
     const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));

@@ -201,8 +201,7 @@ export async function classifyMessage(env, { message, sessions }) {
 /**
  * ШАГ 1.2 completeness gate: ask the agent's cheap LLM how confidently a
  * coalesced intake buffer reads as a finished, actionable request. Returns
- * { level: 'clear'|'likely'|'insufficient' }. Fails open to 'clear' on any
- * error — the gate must never silently trap the user.
+ * { level: 'clear'|'likely'|'insufficient' }. Errors hold the buffer for manual launch.
  */
 export async function checkCompleteness(env, { text }) {
   try {
@@ -215,10 +214,12 @@ export async function checkCompleteness(env, { text }) {
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { level: 'clear', complete: true };
-    return res.json();
+    if (!res.ok) return { level: 'insufficient', complete: false };
+    const result = await res.json();
+    return ['clear', 'likely', 'insufficient'].includes(result?.level)
+      ? result : { level: 'insufficient', complete: false };
   } catch {
-    return { level: 'clear', complete: true };
+    return { level: 'insufficient', complete: false };
   }
 }
 
