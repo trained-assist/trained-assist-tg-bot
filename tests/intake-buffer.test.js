@@ -520,3 +520,37 @@ it('restoration refuses to overwrite a busy run or retry batch and unknown ids',
  expect((await restore()).status).toBe(404);
  expect(handleMessage).not.toHaveBeenCalled();
 });
+
+describe('IntakeBuffer — /clear escape hatch', () => {
+  const clearReq = () => new Request('https://intake/clear', { method: 'POST', body: '{}' });
+
+  it('drops buf, retryBatch and failed batches, cancels the alarm, and launches nothing', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('buf', [{ text: 'a', msg: { chat: { id: 42 }, message_id: 1 } }]);
+    await state.storage.put('retryBatch', [{ text: 'b', msg: { chat: { id: 42 }, message_id: 2 } }]);
+    await state.storage.put('failed:x', { id: 'x', items: [{ msg: { message_id: 3 } }] });
+    await state.storage.put('debounceExpiresAt', Date.now() + 1000);
+    await state.storage.setAlarm(Date.now() + 1000);
+
+    const data = await (await io.fetch(clearReq())).json();
+    expect(data).toEqual({ cleared: 2, failed: 1 });
+
+    const dump = state._dump();
+    expect(dump.map.has('buf')).toBe(false);
+    expect(dump.map.has('retryBatch')).toBe(false);
+    expect(dump.map.has('failed:x')).toBe(false);
+    expect(dump.map.has('debounceExpiresAt')).toBe(false);
+    expect(dump.alarm).toBe(null);
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses to clear while a run is busy', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('busy', true);
+    const data = await (await io.fetch(clearReq())).json();
+    expect(data).toEqual({ busy: true, cleared: false });
+    expect(await state.storage.get('busy')).toBe(true);
+  });
+});

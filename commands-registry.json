@@ -19,6 +19,7 @@
     { "command": "/files", "aliases": ["/папки"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Файлы и папки профиля" },
     { "command": "/ru", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Задача через РФ IP (nalog.ru и т.п.)" },
     { "command": "/stop", "aliases": ["/стоп"], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Остановить текущую задачу" },
+    { "command": "/clean_buffer", "aliases": [], "handler": "local", "audiences": ["default", "recruiter", "freelance"], "description": "Очистить застрявший буфер intake (не трогает идущую задачу)" },
     { "command": "/skills", "aliases": ["/скиллы"], "handler": "local", "audiences": ["default", "freelance"], "description": "Список доступных скиллов" },
     { "command": "/all_on", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Включить «все сообщения → агенту» в группе" },
     { "command": "/all_off", "aliases": [], "handler": "local", "audiences": ["default", "freelance"], "description": "Выключить «все сообщения → агенту»" },
