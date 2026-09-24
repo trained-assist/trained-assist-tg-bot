@@ -147,3 +147,14 @@
 ## Команды — единый fallback для незарегистрированных
 
 - [реализовано] Единый fallback для незарегистрированных команд (#249): `known command → свой handler`, `unknown command → агенту как обычный запрос`. `default:` в `src/handlers/commands.js` вызывает `handleMessage(msg, env)` вместо «❓ Неизвестная команда». Generic — без списка/registry неизвестных команд, без нового логирования. `commands-registry.json` остаётся для меню и маршрутизации известных команд, но отсутствие команды в нём не мешает обратиться к агенту. Покрывает все окружения этого воркера (main/recruiter/freelance/будущие).
+
+## 2026-09-24 — freelance-бот запущен, intake, env
+
+- [реализовано] freelance-бот @freelance_spec_bot включён: Worker + секреты, вебхук на https://tg-freelance.trainedassist.store/webhook (кастомный домен — Telegram не резолвил свежий `*.workers.dev`)
+- [реализовано] регистрация команд freelance: `/spec_generation_defaults`, `/spec_generation_explained` (#243), `/remember` (#245); `audience=freelance`, в основном/рекрутерском боте их нет
+- [реализовано] `/clean_buffer` (#247): сброс залипшего intake-буфера этого чата (busy → отказ); не трогает идущую задачу
+- [реализовано] `DEEPGRAM_API_KEY` выставлен на freelance-Worker (голосовые падали 401 → «Вложение не удалось подготовить»)
+- [реализовано] (agent #1334) gate авто-запуска: non-reasoning модель + robust parse — «текст не запускался» починен
+- [планируется] #248 системная устойчивость intake (dead-end при insufficient/ошибке, fail-open, TTL/индикатор, видимость failed)
+- [планируется] #246 env/секреты ботов в provisioning (новый бот — без ручных шагов)
+- [планируется] #251 всегда копим вход (тихо при `all_off`), ACK по `all_on`, TTL 6ч, flush-all
