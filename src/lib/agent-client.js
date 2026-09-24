@@ -311,7 +311,7 @@ export async function stopTask(env, { username, chatId, sessionId }) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ username, chatId, ...(sessionId ? { sessionId } : {}), audience: resolveAudience(env) }),
+    body: JSON.stringify({ username, chatId, ...(sessionId ? { sessionId } : {}), audience: resolveAudience(env), botId: resolveBotId(env) }),
     signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);

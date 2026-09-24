@@ -49,6 +49,6 @@ describe('generic bot context', () => {
     await expect(stopTask(env, { username:'alice' })).rejects.toThrow('chatId');
     expect(fetch).not.toHaveBeenCalled();
     await stopTask(env, { username:'alice', chatId:42, sessionId:'session-one' });
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ username:'alice', chatId:42, sessionId:'session-one', audience:'freelance' });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ username:'alice', chatId:42, sessionId:'session-one', audience:'freelance', botId:'sales-bot' });
   });
 });
