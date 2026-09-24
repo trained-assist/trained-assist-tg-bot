@@ -172,3 +172,25 @@ describe('callbacks — intake_run while a run is already busy (дыра №4)',
     );
   });
 });
+
+
+describe('legacy checklist footer menu', () => {
+  it.each([
+    ['2. Отключить чеклист', '/checklist_turn_off'],
+    ['1. Чеклист активен', '/show_active_cheklist'],
+  ])('routes %s as an exact command without a new deep session', async (text, task) => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const data = 'menu|original-session|1';
+    await handleCallbackQuery({ id: 'legacy-checklist', data, from: { id: 999 }, message: {
+      chat: { id: 999 }, message_id: 42,
+      reply_markup: { inline_keyboard: [[{ text, callback_data: data }]] },
+    } }, { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(runTask.mock.calls[0][1]).toMatchObject({ sessionId: 'original-session', task, forceClaude: false });
+    expect(runTask.mock.calls[0][1].mode).toBeUndefined();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
