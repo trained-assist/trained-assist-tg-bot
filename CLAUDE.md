@@ -36,8 +36,8 @@ When a user sends a message, the bot resolves which Claude session to use:
 1. **New-session signal** in text ("другая задача", "new task", …) → create new session
 2. **User chose session explicitly** via `/sessions` keyboard → use that session
 3. **No history** → new session
-4. **Recent session < 2h** → auto-continue, no friction
-5. **Old session** → fetch last 5 sessions from agent, ask Claude Haiku to classify the message → route automatically if confident, show session-picker keyboard if ambiguous
+4. **Recent session < 1h** → auto-continue, no friction
+5. **Old session** → fetch recent sessions within the current project and classify → continue only a validated high-confidence match; otherwise use the durable project-choice flow (never an automatic dialog picker)
 
 ### Bot → Agent auth
 
