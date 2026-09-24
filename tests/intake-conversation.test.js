@@ -138,7 +138,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
-    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number) });
+    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
   });
 
   it('C2: a question sent WHILE a run is in flight must not be swallowed (anti-«молчит»)', async () => {
@@ -173,7 +173,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toContain('собери участников выставки Rosupack');
     expect(msg.text).toContain('только российские производители упаковки');
-    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number) });
+    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
   });
 
   it('C4: voice reply plus photo and pasted text wait for one explicit launch', async () => {
@@ -228,7 +228,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(2);
     expect(handleMessage.mock.calls[1][0].text)
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
-    expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep', initialMsgId: expect.any(Number) });
+    expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
   });
 
   // Regression: a follow-up reply must offer time to add supporting material.

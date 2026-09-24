@@ -96,11 +96,32 @@ export class IntakeBuffer {
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
         preparingAt: i.preparingAt, enqueueFailures: i.enqueueFailures || 0,
       }));
+      const cursor = url.searchParams.get('cursor');
+      const failed = await this.state.storage.list({ prefix: 'failed:', limit: 100,
+        ...(cursor && /^failed:[a-f0-9-]{36}$/.test(cursor) ? { startAfter: cursor } : {}) });
       return json({
+        failedBatchesNextCursor: failed.size === 100 ? [...failed.keys()].at(-1) : null,
+        failedBatches: [...failed.values()].map(({ id, items, failedAt, messageId, status }) =>
+          ({ id, failedAt, messageId, status, items: summarize(items) })),
         buf: summarize(buf), retryBatch: summarize(retryBatch), retryBatchAttempts: retryBatchAttempts || 0,
         busy: !!busy, busySince: busySince || null, launching: summarize(launching),
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
       });
+    }
+
+    if (url.pathname === '/restore' && request.method === 'POST') {
+      const { id } = await request.json();
+      if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) return new Response('invalid id', { status: 400 });
+      return this._exclusive(async () => this.state.storage.transaction(async tx => {
+        if (await tx.get('busy') || (await tx.get('retryBatch'))?.length) return new Response('busy', { status: 409 });
+        const batch = await tx.get(`failed:${id}`);
+        if (!batch) return new Response('not found', { status: 404 });
+        await tx.put('retryBatch', batch.items);
+        await tx.delete('retryBatchAttempts');
+        await tx.delete(`failed:${id}`);
+        // No task, alarm or Telegram notification is triggered by restoration.
+        return json({ restored: true, count: batch.items.length });
+      }));
     }
 
     if (url.pathname === '/media-result' && request.method === 'POST') {
@@ -108,7 +129,7 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/ingest' && request.method === 'POST') {
-      const { msg } = await request.json();
+      let { msg } = await request.json();
       if (mediaEnabled(this.env) && mediaOf(msg)) {
         const session = await getSession(this.env.SESSIONS, msg.chat.id);
         if (session) return this._ingestMedia(msg, session);
@@ -126,7 +147,16 @@ export class IntakeBuffer {
       let result = { msg };
       try {
         const { preflight } = await import('./intake-preflight.js');
-        result = await preflight(msg, this.env);
+        result = await preflight(msg, this.env, async prepared => {
+          msg = prepared;
+          result = { msg: prepared };
+          await this._exclusive(async () => {
+            const items = (await this.state.storage.get('buf')) || [];
+            const index = items.findIndex(i => i.msg.message_id === prepared.message_id);
+            if (index >= 0) items[index] = { ...items[index], msg: prepared };
+            await this.state.storage.put('buf', items);
+          });
+        });
       } catch (error) {
         await sendMessage(this.env.BOT_TOKEN, msg.chat.id,
           '⚠️ Сообщение сохранено для повтора, но подготовка файла или расшифровки ещё не завершена. Повторю при запуске проработки.');
@@ -460,33 +490,35 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId });
+      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId,
+        onIntakePrepared: async (index, prepared) => {
+          buf[index] = { ...buf[index], msg: prepared };
+          await this.state.storage.put('launching', buf);
+        },
+      });
       await this.state.storage.delete('launching');
       await this.state.storage.delete('retryBatchAttempts');
     } catch (err) {
-      // Preparation failed: keep the original Telegram references, never launch
-      // a partial task or require the user to dictate everything again — UNLESS
-      // this is a non-transient failure (e.g. a permanently bad credential/file
-      // ref) that has now failed 3x in a row: without a cap, that single item
-      // re-fails on every future message forever and the chat can never launch
-      // anything again ("state accumulated and never resets" — owner report
-      // 2026-09-23, chat 8815112204). Cap mirrors the existing 3-strike
-      // convention in _recoverMedia's enqueueFailures.
+      // Stop automatic retries after three failures, but preserve the complete
+      // batch and preparation progress for explicit recovery. New input stays usable.
       const isPrepFailure = err?.code === 'INTAKE_PREPARATION_FAILED';
       const attempts = isPrepFailure ? ((await this.state.storage.get('retryBatchAttempts')) || 0) + 1 : 0;
       const giveUp = isPrepFailure && attempts >= 3;
-      await this._exclusive(async () => {
+      const failureId = giveUp ? crypto.randomUUID() : null;
+      await this._exclusive(async () => this.state.storage.transaction(async tx => {
         if (giveUp) {
-          await this.state.storage.delete('retryBatchAttempts');
+          await tx.put(`failed:${failureId}`, { id: failureId, items: buf, failedAt: Date.now(),
+            messageId: err.intakeMessageId || null, status: err.cause?.status || null });
+          await tx.delete('retryBatchAttempts');
         } else {
-          await this.state.storage.put('retryBatch', buf);
-          if (isPrepFailure) await this.state.storage.put('retryBatchAttempts', attempts);
+          await tx.put('retryBatch', buf);
+          if (isPrepFailure) await tx.put('retryBatchAttempts', attempts);
         }
-        await this.state.storage.delete('launching');
-      });
+        await tx.delete('launching');
+      }));
       await sendMessage(this.env.BOT_TOKEN, chatId,
         giveUp
-          ? '⚠️ Вложение так и не удалось подготовить после нескольких попыток — похоже, проблема не временная. Пачку сбросил, чтобы не блокировать дальнейшую работу: пришли вложение ещё раз (или опиши текстом) и запусти заново.'
+          ? '⚠️ Вложение не удалось подготовить после нескольких попыток. Сообщения и готовые расшифровки сохранены для восстановления. Новые задачи можно отправлять; для возврата этой пачки обратись в поддержку.'
           : isPrepFailure
           ? '⚠️ Не удалось подготовить вложение. Пачка и ссылки на исходные сообщения сохранены. Повтори запуск позже — отправлять всё заново не нужно.'
           : '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.');

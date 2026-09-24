@@ -21,7 +21,8 @@
     "tests/session-disambiguation.test.js",
     "tests/project-choice-flow.test.js",
     "tests/intake-gate-client.test.js",
-    "tests/intake-routing.test.js"
+    "tests/intake-routing.test.js",
+    "tests/intake-recovery-auth.test.js"
   ],
   "node": []
 }

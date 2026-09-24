@@ -73,3 +73,27 @@ describe('preflight before collector', () => {
     expect(map.get('buf')[0].msg.voice.file_id).toBe('v'); expect(map.get('buf')[0].preparingAt).toBeUndefined();
   });
 });
+
+// A later failure must not discard already paid-for transcription or file storage.
+it('checkpoints transcript before transcript storage failure and retries without STT', async () => {
+  const { env } = world();
+  let saved;
+  mocks.transcriptStore.mockRejectedValueOnce(new Error('storage unavailable'));
+  const original = { ...msg, text: undefined, voice: { file_id: 'v' } };
+  const checkpoint = async value => { saved = structuredClone(value); };
+  await expect(prepareIntake(original, env, { username: 'alice' }, checkpoint)).rejects.toThrow('storage unavailable');
+  expect(saved.transcript).toBe('ревью кандидатов');
+  expect(saved.fileRef.id).toBe('a'.repeat(64));
+  await prepareIntake(saved, env, { username: 'alice' }, checkpoint);
+  expect(mocks.stt).toHaveBeenCalledTimes(1);
+  expect(mocks.send.mock.calls.filter(c => c[2] === '🎤 ревью кандидатов')).toHaveLength(1);
+});
+
+it('ingest retains checkpointed STT after a transcript upload failure', async () => {
+ const { io, map } = world();
+ mocks.transcriptStore.mockRejectedValueOnce(new Error('upload unavailable'));
+ await ingest(io, { ...msg, text: undefined, voice: { file_id: 'v' } });
+ expect(map.get('buf')[0].msg.transcript).toBe('ревью кандидатов');
+ expect(map.get('buf')[0].msg.transcriptNotified).toBe(false);
+ expect(map.get('buf')[0].preparingAt).toBeUndefined();
+});
