@@ -128,6 +128,32 @@ export class IntakeBuffer {
       }));
     }
 
+    // Explicit escape hatch (Telegram /clean_buffer): drop everything buffered for
+    // this chat — buf, retryBatch, failed batches and any pending debounce/alarm —
+    // WITHOUT touching an in-flight run. Fixes the "messages sit in the buffer
+    // forever, no button, no ack" dead-end (e.g. the gate saying 'insufficient'
+    // and never re-offering a launch). Never launches anything.
+    if (url.pathname === '/clear' && request.method === 'POST') {
+      if (await this.state.storage.get('busy')) return json({ busy: true, cleared: false });
+      const result = await this._exclusive(async () => {
+        const buf = (await this.state.storage.get('buf')) || [];
+        const retry = (await this.state.storage.get('retryBatch')) || [];
+        const failedKeys = [...(await this.state.storage.list({ prefix: 'failed:' })).keys()];
+        await this.state.storage.delete('buf');
+        await this.state.storage.delete('retryBatch');
+        await this.state.storage.delete('retryBatchAttempts');
+        for (const k of failedKeys) await this.state.storage.delete(k);
+        await this.state.storage.delete('debounceExpiresAt');
+        await this.state.storage.delete('gateLevel');
+        await this.state.storage.delete('shortDebounce');
+        await this.state.storage.delete('collectorMsgId');
+        await this.state.storage.delete('launching');
+        await this.state.storage.deleteAlarm();
+        return { cleared: buf.length + retry.length, failed: failedKeys.length };
+      });
+      return json(result);
+    }
+
     if (url.pathname === '/media-result' && request.method === 'POST') {
       return this._mediaResult(await request.json());
     }

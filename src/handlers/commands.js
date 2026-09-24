@@ -93,6 +93,8 @@ export async function handleCommand(msg, env) {
     case '/ru':                return cmdRu(msg, env);
     case '/стоп':
     case '/stop':              return cmdStop(msg, env);
+    case '/clean_buffer':
+    case '/очистить_буфер':    return cmdCleanBuffer(chatId, env);
     case '/skills':
     case '/скиллы':            return cmdSkills(chatId, env);
     case '/all_on':            return cmdAllOn(msg, env);
@@ -624,6 +626,27 @@ async function cmdPrivacy(chatId, env) {
     `Пароли → Cloudflare KV (scrypt hash).\n\n` +
     `Напиши "удали мои данные" — всё будет очищено.`
   );
+}
+
+// Escape hatch for a stuck intake buffer: drop buffered/retry/failed batches and
+// any pending debounce for THIS chat, without touching an in-flight run. A batch
+// that can't be prepared/prepared-checked leaves messages sitting with no button
+// and no ack — this lets the user unblock themselves instead of contacting support.
+async function cmdCleanBuffer(chatId, env) {
+  if (!env.INTAKE) return sendMessage(env.BOT_TOKEN, chatId, '⚠️ Буфер недоступен в этом окружении.');
+  try {
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+    const res = await stub.fetch('https://intake/clear', { method: 'POST', body: JSON.stringify({}) });
+    const data = await res.json().catch(() => ({}));
+    if (data.busy) {
+      return sendMessage(env.BOT_TOKEN, chatId, '⏳ Сейчас идёт задача — буфер очищу после её завершения. Повтори /clean_buffer позже.');
+    }
+    const parts = [`🧹 Буфер очищен: снято сообщений — ${data.cleared ?? 0}`];
+    if (data.failed) parts.push(`сбоев — ${data.failed}`);
+    return sendMessage(env.BOT_TOKEN, chatId, parts.join(', ') + '. Можно отправлять задачу заново.');
+  } catch (e) {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось очистить буфер: ${e.message}`);
+  }
 }
 
 async function cmdStop(msg, env) {
