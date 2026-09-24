@@ -74,6 +74,19 @@ export class IntakeBuffer {
   async fetch(request) {
     const url = new URL(request.url);
 
+    // Strongly-consistent mirror of the chat's project picker (src/lib/picker-mirror.js).
+    // Deliberately outside _exclusive(): the flush that opens the picker calls here
+    // while holding it, and a picker read must never wait behind a long dispatch.
+    if (url.pathname === '/picker') {
+      if (request.method === 'GET') return Response.json({ pending: (await this.state.storage.get('picker')) || null });
+      if (request.method === 'PUT') {
+        const { pending } = await request.json();
+        if (pending) await this.state.storage.put('picker', pending);
+        else await this.state.storage.delete('picker');
+        return Response.json({ ok: true });
+      }
+    }
+
     if (url.pathname === '/debug' && request.method === 'GET') {
       const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel] =
         await Promise.all([
