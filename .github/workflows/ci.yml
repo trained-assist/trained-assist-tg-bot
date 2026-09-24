@@ -105,11 +105,6 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - name: Deploy to Cloudflare Workers (main)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
       # ADMIN_GROUP_ID is a Workers secret set once via `wrangler secret put` —
       # it isn't declared in wrangler.toml and deploy doesn't touch it, so it
       # silently went missing and every admin-group command (/adduser etc.)
@@ -121,12 +116,37 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: echo "${{ secrets.ADMIN_GROUP_ID }}" | npx wrangler secret put ADMIN_GROUP_ID
-      - name: Deploy to Cloudflare Workers (recruiter)
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy --env recruiter
+      # One loop instead of a hand-copied step per bot (issue #1302 §4.4):
+      # adding a 4th bot is one more entry here, not another copy-pasted block.
+      # BUILD_SHA is passed so the smoke step can prove the deployed revision.
+      # FREELANCE_BOT_TOKEN is the enable flag: while it is not provisioned the
+      # freelance env stays INERT (skipped with a warning, never a failure).
+      - name: Deploy enabled Workers (main / recruiter / freelance)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          FREELANCE_BOT_TOKEN: ${{ secrets.FREELANCE_BOT_TOKEN }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deploy() {
+            name="$1"
+            if [ "$name" = "main" ]; then
+              npx wrangler deploy --var BUILD_SHA:"$BUILD_SHA"
+            else
+              npx wrangler deploy --env "$name" --var BUILD_SHA:"$BUILD_SHA"
+            fi
+          }
+          for name in main recruiter; do
+            echo "Deploying $name…"
+            deploy "$name"
+          done
+          if [ -n "${FREELANCE_BOT_TOKEN:-}" ]; then
+            echo "Deploying freelance…"
+            deploy freelance
+          else
+            echo "::warning::FREELANCE_BOT_TOKEN not provisioned — skipping freelance deploy (env stays inert)"
+          fi
 
   deploy-staging:
     runs-on: ubuntu-latest
@@ -173,17 +193,43 @@ jobs:
     needs: deploy
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
-      - name: Worker health check
+      # Same enabled-set as the deploy loop above: main/recruiter always,
+      # freelance only once its token is provisioned. Each enabled Worker must
+      # serve the exact revision (buildSha) AND answer getMe with a bot identity
+      # (via its own /debug/whoami) — a Worker wired to the wrong token would
+      # otherwise pass a health-only check (issue #1302 §4.4).
+      - name: Verify enabled Workers (buildSha + bot identity)
+        env:
+          FREELANCE_BOT_TOKEN: ${{ secrets.FREELANCE_BOT_TOKEN }}
+          BUILD_SHA: ${{ github.sha }}
         run: |
-          echo "Waiting for Worker to be live (up to 30s)..."
-          for i in $(seq 1 6); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              "https://trained-assist-tg-bot.skillset-apply.workers.dev/health" 2>/dev/null || echo 000)
-            echo "  attempt $i: HTTP $STATUS"
-            [ "$STATUS" = "200" ] && break
-            sleep 5
-          done
-          [ "$STATUS" = "200" ] && echo "✅ Worker alive" || { echo "❌ Worker not responding (HTTP $STATUS)"; exit 1; }
+          set -euo pipefail
+          verify() {
+            name="$1"; url="$2"
+            echo "— $name: $url"
+            for i in $(seq 1 6); do
+              body=$(curl -sf "$url/health" 2>/dev/null || true)
+              if printf '%s' "$body" | grep -q "\"buildSha\":\"$BUILD_SHA\""; then
+                echo "  ✅ buildSha=$BUILD_SHA"
+                break
+              fi
+              echo "  attempt $i: health=$body"
+              if [ "$i" = "6" ]; then echo "  ❌ $name did not serve buildSha=$BUILD_SHA"; exit 1; fi
+              sleep 5
+            done
+            who=$(curl -sf "$url/debug/whoami" 2>/dev/null || true)
+            if ! printf '%s' "$who" | grep -q '"is_bot":true'; then
+              echo "  ❌ $name getMe identity check failed: $who"; exit 1
+            fi
+            echo "  ✅ bot identity ok"
+          }
+          verify main "https://trained-assist-tg-bot.skillset-apply.workers.dev"
+          verify recruiter "https://trained-assist-tg-bot-recruiter.skillset-apply.workers.dev"
+          if [ -n "${FREELANCE_BOT_TOKEN:-}" ]; then
+            verify freelance "https://trained-assist-tg-bot-freelance.skillset-apply.workers.dev"
+          else
+            echo "::warning::FREELANCE_BOT_TOKEN not provisioned — skipping freelance smoke (env stays inert)"
+          fi
 
   autofix:
     needs: [ci, scenario-gate]
