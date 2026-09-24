@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "check": "node --check src/index.js src/handlers/message.js src/handlers/commands.js src/handlers/callbacks.js src/handlers/user-mgmt.js src/lib/telegram.js src/lib/kv.js src/lib/agent-client.js && node scripts/check-commands-registry.mjs",
+    "check": "node --check src/index.js src/handlers/message.js src/handlers/commands.js src/handlers/callbacks.js src/handlers/user-mgmt.js src/lib/telegram.js src/lib/kv.js src/lib/agent-client.js src/lib/audience.js src/lib/command-visibility.js src/lib/session-namespace.js && node scripts/check-commands-registry.mjs",
     "set-commands": "node scripts/set-commands.js",
     "test": "vitest run",
     "test:staging": "node scripts/staging/run.mjs",

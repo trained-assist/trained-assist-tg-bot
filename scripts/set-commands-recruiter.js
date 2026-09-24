@@ -9,6 +9,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { isCommandVisible } from '../src/lib/command-visibility.js';
 
 const token = process.env.BOT_TOKEN || process.argv[2];
 if (!token) {
@@ -21,9 +22,9 @@ const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.j
 const commands = [];
 const seen = new Set();
 for (const entry of registry.commands) {
-  // Mirrors the audience:'recruiter' filter in src/lib/telegram.js#registerBotCommands —
-  // keep both in sync (this script is the manual fallback for when the worker is offline).
-  if (entry.hidden || entry.adminOnly || entry.recruiterHidden) continue;
+  // Same visibility helper the worker uses (src/lib/command-visibility.js) —
+  // this script is the manual fallback for when the worker is offline.
+  if (!isCommandVisible(entry, 'recruiter')) continue;
   if (seen.has(entry.command)) continue;
   seen.add(entry.command);
   const name = entry.command.replace(/^\//, '');

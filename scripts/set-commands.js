@@ -9,6 +9,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { isCommandVisible } from '../src/lib/command-visibility.js';
 
 const token = process.env.BOT_TOKEN || process.argv[2];
 if (!token) {
@@ -21,9 +22,9 @@ const registry = JSON.parse(readFileSync(join(__dirname, '../commands-registry.j
 const commands = [];
 const seen = new Set();
 for (const entry of registry.commands) {
-  // Mirrors the audience:'default' filter in src/lib/telegram.js#registerBotCommands —
-  // this bot has no HH skill enabled, so recruiter-only commands don't belong here.
-  if (entry.hidden || entry.adminOnly || entry.recruiterOnly) continue;
+  // Same visibility helper the worker uses (src/lib/command-visibility.js) —
+  // this bot's audience is 'default'.
+  if (!isCommandVisible(entry, 'default')) continue;
   if (seen.has(entry.command)) continue;
   seen.add(entry.command);
   commands.push({ command: entry.command.replace(/^\//, ''), description: entry.description });

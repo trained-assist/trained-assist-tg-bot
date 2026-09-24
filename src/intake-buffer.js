@@ -1,6 +1,7 @@
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia, ackText } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
+import { applySessionNamespace } from './lib/session-namespace.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch requires three quiet minutes AND an actionable request.
@@ -58,17 +59,7 @@ export class IntakeBuffer {
     // directly from the Workers runtime so it can't piggyback on the fetch-handler
     // wrapper. Without this, session reads inside the DO ignore the namespace and
     // can find sessions from a different bot (cross-bot auto-login bug).
-    if (env.SESSION_NAMESPACE) {
-      const ns = env.SESSION_NAMESPACE;
-      const raw = env.SESSIONS;
-      env = { ...env, SESSIONS: {
-        get: k => raw.get(`${ns}:${k}`),
-        put: (k, v, opts) => raw.put(`${ns}:${k}`, v, opts),
-        delete: k => raw.delete(`${ns}:${k}`),
-        list: opts => raw.list(opts),
-      }};
-    }
-    this.env = env;
+    this.env = applySessionNamespace(env);
     this.mutation = Promise.resolve();
   }
 

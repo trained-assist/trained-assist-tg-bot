@@ -130,6 +130,78 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # only needed if the recruiter bot grows an admin group, Chrome-ext pairing,
 # or voice-note transcription.)
 
+# ── Freelance environment (third bot on the shared contour; issue #1302 §4) ──
+# INERT until FREELANCE_BOT_TOKEN is provisioned: ci.yml's deploy/smoke loop
+# skips this env while that secret is empty (warning, not failure). No real
+# token/webhook is wired here — enabling + canary is a separate step after merge.
+[env.freelance]
+name = "trained-assist-tg-bot-freelance"
+
+[env.freelance.vars]
+MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter).
+RECOVERY_IMPORT_LEGACY = "off"
+INTAKE_DEBOUNCE = "on"
+SESSION_NAMESPACE = "freelance"
+# BOT_USERNAME is intentionally not set yet: the real third bot's @username must
+# be confirmed before enabling (group mention/reply routing and the /start
+# greeting depend on it). Set it in the same change that turns the env on:
+#   BOT_USERNAME = "<freelance bot username>"
+
+# USERS — shared with production, exactly like recruiter: the new bot works with
+# the existing profile/login system, not a separate registration.
+# SESSIONS — its OWN KV: the freelance bot must never read another bot's login
+# sessions (this also sidesteps the shared-namespace `list` leak — see
+# src/lib/session-namespace.js).
+[[env.freelance.kv_namespaces]]
+binding = "USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+[[env.freelance.kv_namespaces]]
+binding = "SESSIONS"
+id = "52240aec81e449eb81bac93ac7917d1f"
+
+# Durable Objects: own bindings + own initial migrations. This worker has never
+# been deployed, so every class is new HERE — these migrations apply to the
+# freelance worker only. Top-level and the other envs must NOT re-declare
+# new_sqlite_classes for classes they already created (CF API code 10074).
+[[env.freelance.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+[[env.freelance.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+[[env.freelance.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+[[env.freelance.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[env.freelance.migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
+
+[[env.freelance.migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.freelance.migrations]]
+tag = "v3-recovery"
+new_sqlite_classes = ["RetryQueue"]
+
+[[env.freelance.migrations]]
+tag = "v4-media"
+new_sqlite_classes = ["MediaJob"]
+
+# Secrets for freelance — set once, only when enabling:
+#   wrangler secret put BOT_TOKEN --env freelance
+#   wrangler secret put AGENT_URL --env freelance
+#   wrangler secret put AGENT_SECRET --env freelance
+#   wrangler secret put TELEGRAM_WEBHOOK_SECRET --env freelance  # setWebhook secret_token
+
 [[env.staging.durable_objects.bindings]]
 name = "RETRY_QUEUE"
 class_name = "RetryQueue"

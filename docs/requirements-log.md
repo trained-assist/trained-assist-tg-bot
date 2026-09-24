@@ -132,3 +132,14 @@
 - [реализовано] RELAY_BOT_SECRET — auth для команд через relay
 - [реализовано] Пароли пользователей — scrypt hash в Cloudflare KV
 - [реализовано] Исправлен path traversal в /files и /files/read (startsWith → !== + startsWith+sep)
+- [реализовано] Webhook secret_token (issue #1302 §4.3): валидация X-Telegram-Bot-Api-Secret-Token до изменения state; скрипт scripts/set-webhook.mjs
+
+## Мульти-бот (delivery) — issue #1302 PR-A2
+
+- [реализовано] resolveAudience(env) — единый резолвер audience (default/recruiter/freelance) вместо 5× тернарника SESSION_NAMESPACE
+- [реализовано] [env.freelance] в wrangler.toml: Worker trained-assist-tg-bot-freelance, SESSION_NAMESPACE=freelance, USERS общий с prod, SESSIONS — отдельный KV (52240aec…), свои DO-миграции, MEDIA_PIPELINE=off. Инертен пока не provisioned FREELANCE_BOT_TOKEN
+- [реализовано] applySessionNamespace идемпотентен и префиксует list() (src/lib/session-namespace.js, общий для index.js и intake-buffer.js)
+- [реализовано] commands-registry.json: поле audiences + один helper видимости (src/lib/command-visibility.js) для /start и setMyCommands
+- [реализовано] ensureCommandsRegisteredOnce: ключ botId+digest, флаг ставится только после успешного await
+- [реализовано] ci.yml: deploy/smoke loop по main/recruiter/freelance; smoke проверяет buildSha + getMe; freelance пропускается с warning без токена
+- [планируется] Включить freelance env + canary на тестовом чате с реальным третьим ботом (отдельный шаг после merge)

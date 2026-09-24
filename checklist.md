@@ -1,9 +1,12 @@
-Goal: Supplement flow requires explicit ✅ confirm before stop+restart (no more killing a running task by typing)
+Goal: third Telegram bot (freelance) wired into the gateway safely — PR-A2 of issue #1302
 
-- [x] CI green (ci+staging-gate success on 065dc83) on https://github.com/trained-assist/trained-assist-tg-bot/pull/219
-- [x] Merged to main (3b7a7ae)
-- [x] Deployed to prod (Version e2171f7e)
-
-Closed companions:
-- [x] PR #216 — ➕ Дополнить button (merged d774c23, deployed)
-- [x] PR #218 — checklist closeout: root cause of stray text restart was agent-side prompt text; this PR adds the confirmation gate
+- [x] §4.1 `resolveAudience(env)` replaces the 5× `SESSION_NAMESPACE` ternary (agent-client.js / commands.js / telegram.js)
+- [x] §4.2 `[env.freelance]` in wrangler.toml — own Worker, separate SESSIONS KV, USERS shared with prod, own DO migrations, `MEDIA_PIPELINE=off`
+- [x] §4.2 `applySessionNamespace` idempotent + `list()` namespaced (shared `src/lib/session-namespace.js`)
+- [x] §4.2 commands-registry `audiences` field + one visibility helper (`src/lib/command-visibility.js`) used by /start AND setMyCommands
+- [x] §4.2 `ensureCommandsRegisteredOnce` keyed by botId+digest; flag set only after a successful `await`
+- [x] §4.3 webhook `secret_token` validated before any state change; `scripts/set-webhook.mjs`
+- [x] §4.4 ci.yml deploy/smoke shell loop (main/recruiter/freelance); freelance INERT without `FREELANCE_BOT_TOKEN`
+- [x] §4.5 tests: `agent-client.test.js` three audiences + new `tests/bot-audience.test.js`
+- [x] `npm run check` / `npm test` / `npm run test:media-runtime` / `npm run test:staging` green
+- [ ] Enable freelance env + canary on an agreed test chat (separate step AFTER merge — not in this PR)

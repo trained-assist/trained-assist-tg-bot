@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { pickAgentUrl, runTask, getSessions } from '../src/lib/agent-client.js';
+import { resolveAudience } from '../src/lib/audience.js';
+
+describe('resolveAudience', () => {
+  it('maps SESSION_NAMESPACE to the wire audience, default when unset', () => {
+    expect(resolveAudience({})).toBe('default');
+    expect(resolveAudience({ SESSION_NAMESPACE: 'recruiter' })).toBe('recruiter');
+    expect(resolveAudience({ SESSION_NAMESPACE: 'freelance' })).toBe('freelance');
+  });
+});
 
 const BASE = 'https://gcp.example.com';
 const RU   = 'https://ru.example.com';
@@ -105,6 +114,16 @@ describe('runTask sends audience derived from SESSION_NAMESPACE', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.audience).toBe('recruiter');
   });
+
+  it('sends audience: "freelance" when SESSION_NAMESPACE is "freelance"', async () => {
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'freelance' };
+    await runTask(env, { userId: 1, username: USER, task: 'work' });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.audience).toBe('freelance');
+  });
 });
 
 // P1-B of naming-conventions refactor (plan generic-naming-conventions-refactoring §4):
@@ -158,6 +177,15 @@ describe('getSessions sends audience derived from SESSION_NAMESPACE', () => {
     await getSessions(env, { username: USER });
     expect(fetchSpy.mock.calls[0][0]).toContain('audience=recruiter');
   });
+
+  it('appends audience=freelance when SESSION_NAMESPACE is "freelance"', async () => {
+    const { getSessions } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ sessions: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'freelance' };
+    await getSessions(env, { username: USER });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=freelance');
+  });
 });
 
 describe('getProjects sends audience derived from SESSION_NAMESPACE', () => {
@@ -179,6 +207,15 @@ describe('getProjects sends audience derived from SESSION_NAMESPACE', () => {
     const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'recruiter' };
     await getProjects(env, { username: USER, userId: 1 });
     expect(fetchSpy.mock.calls[0][0]).toContain('audience=recruiter');
+  });
+
+  it('appends audience=freelance when SESSION_NAMESPACE is "freelance"', async () => {
+    const { getProjects } = await import('../src/lib/agent-client.js');
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ projects: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const env = { AGENT_URL: BASE, AGENT_SECRET: 'x', SESSION_NAMESPACE: 'freelance' };
+    await getProjects(env, { username: USER, userId: 1 });
+    expect(fetchSpy.mock.calls[0][0]).toContain('audience=freelance');
   });
 });
 
