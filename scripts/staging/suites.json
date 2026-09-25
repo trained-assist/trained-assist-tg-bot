@@ -25,6 +25,7 @@
     "tests/intake-recovery-auth.test.js",
     "tests/bot-audience.test.js",
     "tests/input-snapshot.test.js",
+    "tests/journal-link.test.js",
     "tests/conversation-context.test.js",
     "tests/forum-topics-isolation.test.js",
     "tests/forum-topics-routing.test.js"

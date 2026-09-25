@@ -4,6 +4,7 @@ import { readPicker } from '../lib/picker-mirror.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendDocument, sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
+import { journalLoginUrl } from '../lib/journal-link.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
@@ -561,9 +562,13 @@ export async function handleCallbackQuery(cq, env) {
     const input = await response.json();
     if (data.split('|')[0] === 'input_journal') {
       const sid = input.body?.sessionId;
-      await sendT(env, chatId, threadId, sid
-        ? `Журнал диалога: https://app.trainedassist.store/#/session/${encodeURIComponent(sid)}`
-        : 'Журнал появится после создания диалога.');
+      if (!sid) { await sendT(env, chatId, threadId, 'Журнал появится после создания диалога.'); return; }
+      // One-time login link minted per tap for the profile that pressed it, so
+      // the web app opens this dialog already logged in (not as another profile).
+      // URL button, not text: no link preview fetches it; a stale one → re-tap.
+      const url = await journalLoginUrl(env, { username: session.username, sessionId: sid });
+      await sendT(env, chatId, threadId, '📜 Журнал диалога — ссылка одноразовая, входит под твоим профилем, действует 10 минут.',
+        { reply_markup: { inline_keyboard: [[{ text: '📜 Открыть журнал', url }]] } });
       return;
     }
     const heading = input.state === 'snapshot' ? `Вход запуска ${input.id} (зафиксирован)`
