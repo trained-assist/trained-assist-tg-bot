@@ -131,12 +131,18 @@ async function handleWebhook(c, pathBotId) {
     return c.json({ error: 'bot registry misconfigured' }, 500);
   }
   if (!bot) return c.json({ error: 'unknown bot' }, 404);
-  // Per-bot webhook secret. New bots set it when calling setWebhook (secret_token);
+  // Per-bot webhook secret. Every bot sets it when calling setWebhook (secret_token);
   // Telegram then echoes it in X-Telegram-Bot-Api-Secret-Token on every delivery.
   // Validate BEFORE parsing the body or touching any state — an unsigned update
-  // must never reach dispatch. Unset secret = legacy bots (main/recruiter) keep
-  // working unchanged. Durable ACK is deliberately not implemented (issue #1302 §4.3).
-  if (bot.webhookSecret && secretHeader !== bot.webhookSecret) {
+  // must never reach dispatch. FAIL CLOSED: a bot with no secret configured is
+  // rejected too. The old "unset = accept" default let anyone POST a forged
+  // update (any chat.id, incl. ADMIN_GROUP_ID) to main/recruiter (audit 2026-09-25).
+  // Durable ACK is deliberately not implemented (issue #1302 §4.3).
+  if (!bot.webhookSecret) {
+    console.error('[webhook] TELEGRAM_WEBHOOK_SECRET not configured — rejecting update (fail closed)');
+    return c.json({ error: 'webhook secret not configured' }, 401);
+  }
+  if (secretHeader !== bot.webhookSecret) {
     return c.json({ error: 'unauthorized' }, 401);
   }
   const env = envForBot(c.env, bot);

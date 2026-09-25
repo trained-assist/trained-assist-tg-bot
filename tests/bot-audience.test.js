@@ -138,11 +138,13 @@ describe('webhook secret is validated before any state change', () => {
     expect(waitUntil).toHaveBeenCalled();
   });
 
-  it('keeps legacy bots (no secret configured) working', async () => {
+  it('fails closed when no secret is configured (no unsigned updates, ever)', async () => {
     const env = {};
-    const waitUntil = vi.fn();
-    const res = await worker.fetch(webhookRequest(undefined), env, { waitUntil });
-    expect(res.status).toBe(200);
-    expect(waitUntil).toHaveBeenCalled();
+    for (const header of [undefined, 'anything']) {
+      const waitUntil = vi.fn();
+      const res = await worker.fetch(webhookRequest(header), env, { waitUntil });
+      expect(res.status).toBe(401);
+      expect(waitUntil).not.toHaveBeenCalled();
+    }
   });
 });
