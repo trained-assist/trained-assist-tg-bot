@@ -561,7 +561,11 @@ export async function handleCallbackQuery(cq, env) {
     if (!response.ok) { await sendT(env, chatId, threadId, 'Для этого сообщения сохранённый input недоступен.'); return; }
     const input = await response.json();
     if (data.split('|')[0] === 'input_journal') {
-      const sid = input.body?.sessionId;
+      // Prefer the id the agent actually ran on (3rd part, input_journal|msg|sid);
+      // the snapshot only has the id the gateway requested, which the agent may
+      // have healed onto another session. Old two-part buttons fall back to it.
+      const buttonSid = data.split('|')[2];
+      const sid = (buttonSid && /^[a-zA-Z0-9_.-]{1,128}$/.test(buttonSid) ? buttonSid : null) || input.body?.sessionId;
       if (!sid) { await sendT(env, chatId, threadId, 'Журнал появится после создания диалога.'); return; }
       // One-time login link minted per tap for the profile that pressed it, so
       // the web app opens this dialog already logged in (not as another profile).

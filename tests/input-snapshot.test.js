@@ -117,6 +117,12 @@ it('inspection callback sends the full private snapshot to the original topic, j
   expect(payload).toMatchObject({ u: 'alice', s: 'saved-session' });
   expect(send.mock.calls[0][3].message_thread_id).toBeUndefined();
   expect((await read(io)).status).toBe(200);
+  // The agent's button carries the session it actually ran on — it wins over
+  // the snapshot's requested id (which the agent may have healed elsewhere).
+  send.mockClear();
+  await handleCallbackQuery({ id: 'cb3', data: 'input_journal|99|s-42-1790000000000', message: { message_id: 200, chat:{id:42} } }, env);
+  const resolved = send.mock.calls[0][3].reply_markup.inline_keyboard[0][0];
+  expect(JSON.parse(Buffer.from(new URL(resolved.url).searchParams.get('t').split('.')[0], 'base64url'))).toMatchObject({ u: 'alice', s: 's-42-1790000000000' });
 });
 
 it('snapshot matches the durable outbox payload when the caller omitted requestId', async () => {
