@@ -109,7 +109,13 @@ it('inspection callback sends the full private snapshot to the original topic, j
   expect(send).toHaveBeenCalledWith('t', 42, 'input-snapshot.txt', expect.stringContaining('секретный запрос'), expect.any(String), 7);
   send.mockClear();
   await handleCallbackQuery({ id: 'cb2', data: 'input_journal|99', message: { message_id: 200, chat:{id:42} } }, env);
-  expect(send.mock.calls[0][2]).toContain('#/session/saved-session');
+  // Journal is a one-time login URL button for the pressing profile, not a bare
+  // app link that opens under whichever profile the browser was logged in as.
+  const button = send.mock.calls[0][3].reply_markup.inline_keyboard[0][0];
+  expect(button.url).toMatch(/^https:\/\/app\.trainedassist\.store\/web\/magic\?t=[\w-]+\.[\w-]+$/);
+  const payload = JSON.parse(Buffer.from(new URL(button.url).searchParams.get('t').split('.')[0], 'base64url'));
+  expect(payload).toMatchObject({ u: 'alice', s: 'saved-session' });
+  expect(send.mock.calls[0][3].message_thread_id).toBeUndefined();
   expect((await read(io)).status).toBe(200);
 });
 
