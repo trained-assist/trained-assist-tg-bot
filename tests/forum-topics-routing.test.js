@@ -42,6 +42,7 @@ vi.mock('../src/lib/project-choice.js', () => ({
   openProjectChoice: vi.fn(async () => {}), chooseProject: vi.fn(async () => {}), startNewDialog: vi.fn(async () => {}),
 }));
 
+import { answerCallbackQuery, editMessageReplyMarkup } from '../src/lib/telegram.js';
 import { IntakeBuffer } from '../src/intake-buffer.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 
@@ -123,5 +124,23 @@ describe('callbacks — topic-keyed flush', () => {
     await handleCallbackQuery({ id: 'c2', data: 'intake_run', from: { id: 999 },
       message: { chat: { id: 999 }, message_id: 42 } }, env);
     expect(captured).toEqual(['999']);
+  });
+});
+
+// A consumed accumulator is normal after launch, including delayed legacy taps.
+describe('launch callback after the buffer was consumed', () => {
+  it.each(['intake_run', 'workrun|old-session'])('%s acknowledges an empty flush without a chat message', async data => {
+    const { env } = makeIntakeEnv();
+    const { state } = makeDoState();
+    const intake = new IntakeBuffer(state, env);
+    env.INTAKE.get = () => ({ fetch: (url, init) => intake.fetch(new Request(url, init)) });
+    for (const id of ['first', 'duplicate']) {
+      await handleCallbackQuery({ id, data, from: { id: 999 },
+        message: { chat: { id: CHAT }, message_id: 42, message_thread_id: 77 } }, env);
+    }
+    expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
+    expect(editMessageReplyMarkup).toHaveBeenCalledWith('t', CHAT, 42, []);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
   });
 });

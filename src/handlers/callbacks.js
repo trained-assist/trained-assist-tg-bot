@@ -560,10 +560,10 @@ export async function handleCallbackQuery(cq, env) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
         .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
-      if (r?.empty) {
-        await sendT(env, chatId, threadId,
-          '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
-      } else if (r?.busy) {
+      // An empty buffer is a normal no-op after dispatch (including a stale
+      // or duplicate tap). The callback is already acknowledged; don't add a
+      // misleading instruction to resend a task that may already be running.
+      if (r?.busy) {
         // /flush no-ops when a run is already in flight (never double-fire) — tell
         // the user instead of silently dropping the tap (INTAKE-SCENARIO-MATRIX.md №4).
         await sendT(env, chatId, threadId,
