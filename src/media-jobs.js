@@ -1,3 +1,4 @@
+import { conversationKey, threadIdOf } from './conversation-context.js';
 // Per-attachment durable state machine. No byte transfer in intake/webhook requests.
 import { checkMediaResponse } from './lib/media-retry.js';
 export const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
@@ -149,8 +150,7 @@ export class MediaJob {
         }
         job.stage = 'deliver';
       } else if (job.stage === 'deliver' || job.stage === 'notify-failure') {
-        const threadId = job.msg.message_thread_id;
-        const key = Number.isInteger(threadId) && threadId > 0 ? `${job.msg.chat.id}:${threadId}` : String(job.msg.chat.id);
+        const key = conversationKey(job.msg.chat.id, threadIdOf(job.msg));
         const stub = this.env.INTAKE.get(this.env.INTAKE.idFromName(key));
         const response = await stub.fetch('https://intake/media-result', { method: 'POST', body: JSON.stringify({
           id: job.id, messageId: job.msg.message_id, username: job.username,

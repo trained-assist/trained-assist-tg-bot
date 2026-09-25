@@ -24,7 +24,10 @@
     "tests/intake-routing.test.js",
     "tests/intake-recovery-auth.test.js",
     "tests/bot-audience.test.js",
-    "tests/input-snapshot.test.js"
+    "tests/input-snapshot.test.js",
+    "tests/conversation-context.test.js",
+    "tests/forum-topics-isolation.test.js",
+    "tests/forum-topics-routing.test.js"
   ],
   "node": []
 }

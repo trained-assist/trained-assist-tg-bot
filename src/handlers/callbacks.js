@@ -811,7 +811,7 @@ export async function handleCallbackQuery(cq, env) {
     return runTask(env, {
       initiatedAt, threadId: threadId,
       requestId: `sup-${draft.taskId}-${msgId || id}`,
-      inputItems: [{ text: draft.text, msg: { chat: { id: chatId }, message_thread_id: threadId, text: draft.text } }],
+      inputItems: [{ text: draft.text, msg: { chat: { id: chatId }, threadId, text: draft.text } }],
       userId: chatId,
       username: session.username,
       sessionId: draft.sessionId,

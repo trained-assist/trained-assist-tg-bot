@@ -6,12 +6,16 @@ export function conversationKey(chatId, threadId) {
   return validThreadId(threadId) ? `${chatId}:${threadId}` : String(chatId);
 }
 
-/** Extract a valid Telegram forum-topic id from a message-like object.
- *  Returns null (NOT 0/NaN) when absent — the hard guard: callers must treat
- *  null exactly like today's chat-only behavior. */
+/** Telegram also sets message_thread_id on ordinary group replies. Only a
+ * forum topic is a separate conversation; treating reply roots as topics sends
+ * collector callbacks to empty Durable Objects. threadId is our trusted internal
+ * context field, used by callers that have already resolved the Telegram message. */
 export function threadIdOf(message = {}) {
-  const t = message?.message_thread_id ?? message?.threadId;
-  return validThreadId(t) ? t : null;
+  if (message?.message_thread_id != null) {
+    if (message.is_topic_message !== true && message.chat?.is_forum !== true) return null;
+    return validThreadId(message.message_thread_id) ? message.message_thread_id : null;
+  }
+  return validThreadId(message?.threadId) ? message.threadId : null;
 }
 
 export function deliveryContext(message = {}, audience = undefined) {

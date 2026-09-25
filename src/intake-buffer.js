@@ -122,6 +122,7 @@ export class IntakeBuffer {
       if (url.searchParams.get('draft') !== 'true' && !preparing) return new Response('Snapshot not found', { status: 404 });
       const items = preparing ? ((await this.state.storage.get('launching')) || (await this.state.storage.get('retryBatch')) || [])
         : [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+      if (!items.length) return new Response('Input not found', { status: 404 });
       items
         .sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       return json({ state: 'draft', items, ...assembleInput(items),

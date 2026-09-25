@@ -18,7 +18,7 @@ function world() {
     getAlarm: async () => alarm, setAlarm: async t => { alarm = t; }, deleteAlarm: async () => { alarm = null; },
     transaction: async f => f(storage),
   };
-  const env = { BOT_TOKEN: 't', AGENT_URL: 'https://agent.test', AGENT_SECRET: 'test' };
+  const env = { SESSIONS: { put: async () => {} }, BOT_TOKEN: 't', AGENT_URL: 'https://agent.test', AGENT_SECRET: 'test' };
   const io = new IntakeBuffer({ storage }, env);
   const keys = [];
   env.INTAKE = { idFromName: key => { keys.push(key); return key; }, get: () => ({ fetch: (url, opts) => io.fetch(new Request(url, opts)) }) };
@@ -105,7 +105,7 @@ it('inspection callback sends the full private snapshot to the original topic, j
   await runTask(env, { userId: 42, username: 'alice', requestId: 'inspect', initialMsgId: 99,
     task: 'секретный запрос', sessionId: 'saved-session', inputItems: [item(1,'секретный запрос')] });
   send.mockClear();
-  await handleCallbackQuery({ id: 'cb', data: 'input_run|99', message: { message_id: 200, chat:{id:42}, message_thread_id:7 } }, env);
+  await handleCallbackQuery({ id: 'cb', data: 'input_run|99', message: { message_id: 200, chat:{id:42}, is_topic_message: true, message_thread_id:7 } }, env);
   expect(send).toHaveBeenCalledWith('t', 42, 'input-snapshot.txt', expect.stringContaining('секретный запрос'), expect.any(String), 7);
   send.mockClear();
   await handleCallbackQuery({ id: 'cb2', data: 'input_journal|99', message: { message_id: 200, chat:{id:42} } }, env);
@@ -124,4 +124,61 @@ it('snapshot matches the durable outbox payload when the caller omitted requestI
   expect(snapshot.id).toBe(enqueued.requestId);
   expect(snapshot.body).toEqual(enqueued);
   expect(fetch).not.toHaveBeenCalled();
+});
+
+it('ordinary supergroup reply buttons inspect and launch the original chat buffer', async () => {
+  const { threadIdOf, conversationKey } = await import('../src/conversation-context.js');
+  const w = world();
+  const chat = { id: -10034567, type: 'supergroup' }; // not a forum
+  const source = { chat, message_id: 717, text: 'проверь документы',
+    intakeRoute: { sessionId: 's-existing', forceNew: false, projectChosen: true } };
+  const key = conversationKey(chat.id, threadIdOf(source));
+  const other = world();
+  w.env.INTAKE.get = name => ({ fetch: (url, opts) => (name === key ? w.io : other.io).fetch(new Request(url, opts)) });
+  await append(w.io, { text: source.text, msg: source });
+  // Telegram adds message_thread_id to a bot's reply even outside forums.
+  const control = { chat, message_id: 99, message_thread_id: 717, reply_to_message: source };
+  await handleCallbackQuery({ id: 'inspect-group', data: 'input_draft', message: control }, w.env);
+  expect(send).toHaveBeenCalledWith('t', chat.id, 'input-snapshot.txt', expect.stringContaining(source.text), expect.any(String), null);
+  await handleCallbackQuery({ id: 'launch-group', data: 'intake_run', message: control }, w.env);
+  const wire = fetch.mock.calls.filter(([url]) => String(url).endsWith('/run')).map(([,opts]) => JSON.parse(opts.body));
+  expect(wire).toHaveLength(1);
+  expect(wire[0].task).toContain(source.text);
+  expect(wire[0].threadId).toBeNull();
+  expect(await w.storage.get('buf')).toBeUndefined();
+  expect((await (await read(w.io)).json()).body.task).toContain(source.text);
+  await handleCallbackQuery({ id: 'launch-group-twice', data: 'intake_run', message: control }, w.env);
+  expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/run'))).toHaveLength(1);
+});
+
+
+it('an unavailable draft is reported instead of exporting an empty snapshot', async () => {
+  const { env } = world();
+  await handleCallbackQuery({ id: 'old', data: 'input_draft', message: { chat: { id: 42 }, message_id: 99 } }, env);
+  expect(send.mock.calls.some(call => call[2] === 'input-snapshot.txt')).toBe(false);
+  expect(send.mock.calls[0][2]).toContain('сохранённый input недоступен');
+});
+
+it('forum inspection and launch stay in the selected topic, without falling back to the chat buffer', async () => {
+  const a = world(), b = world(), chatLevel = world();
+  const chat = { id: -100123, type: 'supergroup', is_forum: true };
+  const buckets = new Map([[`${chat.id}:7`, a.io], [`${chat.id}:8`, b.io], [String(chat.id), chatLevel.io]]);
+  const env = a.env;
+  env.INTAKE.get = key => ({ fetch: (url, opts) => buckets.get(key).fetch(new Request(url, opts)) });
+  for (const [topic, w, text] of [[7,a,'topic A'],[8,b,'topic B'],[null,chatLevel,'chat-only']]) {
+    await append(w.io, { text, msg: { chat, message_id: 1, text, is_topic_message: !!topic, message_thread_id: topic,
+      intakeRoute: { sessionId: 'saved', forceNew: false, projectChosen: true } } });
+  }
+  const control = { chat, message_id: 99, message_thread_id: 7, is_topic_message: true };
+  await handleCallbackQuery({ id: 'forum-input', data: 'input_draft', message: control }, env);
+  expect(send.mock.calls.at(-1)[3]).toContain('topic A');
+  expect(send.mock.calls.at(-1)[3]).not.toContain('topic B');
+  expect(send.mock.calls.at(-1)[5]).toBe(7);
+  await handleCallbackQuery({ id: 'forum-launch', data: 'intake_run', message: control }, env);
+  const wire = JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/run'))[1].body);
+  expect(wire.threadId).toBe(7);
+  expect(wire.task).toContain('topic A');
+  expect(await a.storage.get('buf')).toBeUndefined();
+  expect((await b.storage.get('buf'))[0].text).toBe('topic B');
+  expect((await chatLevel.storage.get('buf'))[0].text).toBe('chat-only');
 });

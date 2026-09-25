@@ -145,16 +145,16 @@ describe('routeText — forum topic routing (#255)', () => {
   it('keys the Intake DO by chatId:threadId for a forum message', async () => {
     const { env, keys } = makeTopicEnv();
     getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
-    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'задача A', message_thread_id: 7 }, env, -100);
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'задача A', is_topic_message: true, message_thread_id: 7 }, env, -100);
     expect(keys).toEqual(['-100:7']);
   });
 
   it('keys each topic separately so text A and text B never share a buffer', async () => {
     const a = makeTopicEnv();
     getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
-    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'A', message_thread_id: 1 }, a.env, -100);
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'A', is_topic_message: true, message_thread_id: 1 }, a.env, -100);
     getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-2' });
-    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'B', message_thread_id: 2 }, a.env, -100);
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'B', is_topic_message: true, message_thread_id: 2 }, a.env, -100);
     expect(a.keys).toEqual(['-100:1', '-100:2']);
   });
 
