@@ -14,6 +14,7 @@ import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from '
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
 import { openProjectChoice } from './lib/project-choice.js';
+import { chatConfigCommandFromPhrase } from './lib/project-command.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 
 const app = new Hono();
@@ -296,6 +297,12 @@ export async function dispatchInner(update, env) {
 // silently drift from the private path again (#530).
 export async function routeText(msg, env, chatId) {
   const threadId = threadIdOf(msg);
+  // «текущий проект» / «закрепи X» / «сними закрепление» / «покажи настройки» → the command.
+  const configCmd = chatConfigCommandFromPhrase(msg.text);
+  if (configCmd) {
+    await handleCommand({ ...msg, text: configCmd }, env);
+    return;
+  }
   if (shouldDebounce(msg, env)) {
     // Pin replies AND an explicitly chosen new project at receipt, so switching
     // menus before launch cannot move an already collected batch to another project.
