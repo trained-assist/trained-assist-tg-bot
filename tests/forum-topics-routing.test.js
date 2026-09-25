@@ -83,22 +83,24 @@ beforeEach(() => vi.clearAllMocks());
 describe('IntakeBuffer — outbound sends stay in the topic', () => {
   it('held notice carries message_thread_id for a forum topic', async () => {
     const { env } = makeIntakeEnv();
-    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: CHAT }, message_id: 3 } }] });
+    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: CHAT }, message_id: 2, message_thread_id: 9 } }] });
     const intake = new IntakeBuffer(state, env);
     await intake.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({
       text: 'x', msg: { chat: { id: CHAT }, message_id: 3, text: 'x', message_thread_id: 9 },
     }) }));
-    expect(sendMessage).toHaveBeenCalledWith('t', CHAT, expect.any(String), expect.objectContaining({ message_thread_id: 9 }));
+    await state.storage.put('receiptDue', Date.now() - 1); await intake.alarm();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledWith('t', CHAT, expect.any(String), expect.any(Array), expect.objectContaining({ message_thread_id: 9 }));
   });
 
   it('ordinary private-chat append never sends message_thread_id', async () => {
     const { env } = makeIntakeEnv();
-    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: 42 }, message_id: 3 } }] });
+    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: 42 }, message_id: 2, message_thread_id: 9 } }] });
     const intake = new IntakeBuffer(state, env);
     await intake.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({
       text: 'x', msg: { chat: { id: 42 }, message_id: 3, text: 'x' },
     }) }));
-    const extra = sendMessage.mock.calls[0][3];
+    await state.storage.put('receiptDue', Date.now() - 1); await intake.alarm();
+    const extra = sendMessageWithKeyboard.mock.calls[0][4];
     expect(extra).not.toHaveProperty('message_thread_id');
   });
 });
@@ -139,7 +141,7 @@ describe('launch callback after the buffer was consumed', () => {
         message: { chat: { id: CHAT }, message_id: 42, message_thread_id: 77 } }, env);
     }
     expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
-    expect(editMessageReplyMarkup).toHaveBeenCalledWith('t', CHAT, 42, []);
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
   });

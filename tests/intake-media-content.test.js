@@ -213,7 +213,7 @@ async function launchBatch(messages) {
     transaction: async function(fn) { return fn(this); },
     get: async k => structuredClone(data.get(k)),
     put: async (k, v) => data.set(k, structuredClone(v)),
-    delete: async k => data.delete(k), setAlarm: async () => {}, deleteAlarm: async () => {},
+    delete: async k => data.delete(k), getAlarm: async () => null, setAlarm: async () => {}, deleteAlarm: async () => {},
   }};
   const intake = new IntakeBuffer(state, env);
   for (const msg of messages) await intake.fetch(new Request('https://intake/append', {

@@ -23,7 +23,8 @@
     "tests/intake-gate-client.test.js",
     "tests/intake-routing.test.js",
     "tests/intake-recovery-auth.test.js",
-    "tests/bot-audience.test.js"
+    "tests/bot-audience.test.js",
+    "tests/input-snapshot.test.js"
   ],
   "node": []
 }

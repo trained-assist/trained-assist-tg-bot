@@ -2,7 +2,7 @@ import { openProjectChoice, chooseProject, startNewDialog } from '../lib/project
 import { rejectExpiredUI, PICKER_TTL_MS, pendingMessageFresh, projectChoiceExpired } from '../lib/transient-ui.js';
 import { readPicker } from '../lib/picker-mirror.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
-import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
+import { sendDocument, sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
@@ -549,13 +549,36 @@ export async function handleCallbackQuery(cq, env) {
   // буфер и запускает по нему проработку. `workrun|…` — устаревшая кнопка «⏻ Запустить
   // проработку» из старых чатов; раньше она перезапускала sess.lastUserMessage в обход
   // буфера (десинк «ушло не на то», #530 §B). Теперь ведёт в тот же flush — один источник.
+  if (['input_draft', 'input_run', 'input_journal'].includes(data?.split('|')[0])) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id);
+    if (!env.INTAKE) return;
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+    const params = new URLSearchParams({ messageId: data.split('|')[1] || String(message.message_id), username: session.username,
+      draft: String(data === 'input_draft') });
+    const response = await stub.fetch(`https://intake/input?${params}`);
+    if (!response.ok) { await sendT(env, chatId, threadId, 'Для этого сообщения сохранённый input недоступен.'); return; }
+    const input = await response.json();
+    if (data.split('|')[0] === 'input_journal') {
+      const sid = input.body?.sessionId;
+      await sendT(env, chatId, threadId, sid
+        ? `Журнал диалога: https://app.trainedassist.store/#/session/${encodeURIComponent(sid)}`
+        : 'Журнал появится после создания диалога.');
+      return;
+    }
+    const heading = input.state === 'snapshot' ? `Вход запуска ${input.id} (зафиксирован)`
+      : `Текущий input: ${(input.items || []).length} сообщений${input.pending ? ' — вложения ещё обрабатываются' : ''}`;
+    const task = input.body?.task ?? input.task ?? '';
+    // Full metadata includes original forwards, links/entities, Telegram media ids,
+    // prepared file refs and transcripts, in the same order used for dispatch.
+    const document = `${heading}\n\n${task}\n\nПолный snapshot и метаданные:\n${JSON.stringify(input, null, 2)}`;
+    await sendDocument(env.BOT_TOKEN, chatId, 'input-snapshot.txt', document, heading.slice(0, 900), threadId);
+    return;
+  }
+
   if (data === 'intake_run' || data?.startsWith('workrun|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
-    // Clear the button immediately so it can't be pressed twice (important in group chats).
-    if (message?.message_id) {
-      editMessageReplyMarkup(env.BOT_TOKEN, chatId, message.message_id, []).catch(() => {});
-    }
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
@@ -792,6 +815,7 @@ export async function handleCallbackQuery(cq, env) {
     return runTask(env, {
       initiatedAt, threadId: threadId,
       requestId: `sup-${draft.taskId}-${msgId || id}`,
+      inputItems: [{ text: draft.text, msg: { chat: { id: chatId }, message_thread_id: threadId, text: draft.text } }],
       userId: chatId,
       username: session.username,
       sessionId: draft.sessionId,
