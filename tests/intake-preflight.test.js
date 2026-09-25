@@ -13,7 +13,7 @@ function world() {
   const env = { AGENT_URL: 'https://agent.test', BOT_TOKEN: 't', AGENT_SECRET: 's', SESSIONS: {
     get: vi.fn(async () => JSON.stringify({ username: 'alice' })), put: vi.fn() } };
   const state = { storage: { get: async k => map.get(k), put: async (k,v) => map.set(k,v),
-    delete: async k => map.delete(k), setAlarm: vi.fn(), deleteAlarm: vi.fn() } };
+    delete: async k => map.delete(k), getAlarm: async () => null, setAlarm: vi.fn(), deleteAlarm: vi.fn() } };
   return { env, map, io: new IntakeBuffer(state, env) };
 }
 beforeEach(() => { vi.clearAllMocks(); mocks.send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
@@ -24,13 +24,12 @@ beforeEach(() => { vi.clearAllMocks(); mocks.send.mockResolvedValue({ ok: true, 
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ answer: 'https://review.test', sessionId: 'qa-1' }))); });
 const ingest = (io, message) => io.fetch(new Request('https://intake/ingest', { method: 'POST', body: JSON.stringify({ msg: message }) }));
 describe('preflight before collector', () => {
-  it('quick hit sends expandable answer, no agent launch and no collector; duplicate is ignored', async () => {
+  it('buffered input never triggers an intermediate quick answer; duplicates stay deduplicated', async () => {
     const { io, map } = world();
     await ingest(io, msg); await ingest(io, msg);
-    expect(map.get('buf')).toEqual([]); expect(mocks.handle).not.toHaveBeenCalled();
-    expect(fetch.mock.calls.filter(([url])=>url.endsWith('/intake-quick'))).toHaveLength(1);
-    expect(fetch.mock.calls.some(([url])=>url.endsWith('/restart/activity'))).toBe(false);
-    expect(mocks.send.mock.calls[0][3].reply_markup.inline_keyboard[0][0].callback_data).toBe('qa_more|qa-1');
+    expect(map.get('buf')).toHaveLength(1); expect(mocks.handle).not.toHaveBeenCalled();
+    expect(fetch.mock.calls.filter(([url])=>url.endsWith('/intake-quick'))).toHaveLength(0);
+    expect(mocks.send).not.toHaveBeenCalled();
   });
   it('voice transcript is shown before quick request, never retranscribed at launch', async () => {
     const { env } = world();
@@ -45,7 +44,8 @@ describe('preflight before collector', () => {
     await ingest(io, msg);
     expect(map.get('buf')[0].text).toBe(msg.text);
     expect(mocks.handle).not.toHaveBeenCalled();
-    expect(mocks.send.mock.calls.at(-1)[2]).toContain('Накапливаю');
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(map.get('receiptDue')).toBeTruthy();
   });
   it('launch during five concurrent transcriptions cannot omit pending messages', async () => {
     const { io, map } = world(); let release;

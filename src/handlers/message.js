@@ -1,3 +1,4 @@
+import { assembleInput } from '../input-assembly.js';
 import { readMedia } from '../lib/media-retry.js';
 import { PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { enqueueRecovery } from '../retry-queue.js';
@@ -186,18 +187,11 @@ export async function handleMessage(msg, env, opts = {}) {
   opts = { ...opts, threadId, initiatedAt: opts.initiatedAt ?? (Number.isFinite(msg.date) ? msg.date * 1000 : Date.now()), intakeRoute: opts.intakeRoute || msg.intakeRoute, resolvedRoute: route, originalMessage: msg };
 
   const items = msg.intakeItems || [{ text: msg.text || msg.caption || '', msg }];
-  const prepared = items.map((item, index) => {
-    const m = item.msg;
-    const caption = stripMediaTags(item.text || m.text || m.caption || '');
-    return { text: [caption, m.transcript,
-      m.fileRef ? `Вложение ${index + 1}: ${m.fileRef.name}` : ''].filter(Boolean).join('\n'),
-      refs: [m.fileRef, m.transcriptRef].filter(Boolean), isVoice: !!m.transcript };
-  });
-  const task = msg.intakeItems ? prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') : prepared[0].text;
-  return handleText(chatId, session, task, env, { ...opts,
+  const assembled = assembleInput(items, !!msg.intakeItems);
+  return handleText(chatId, session, assembled.task, env, { ...opts,
     requestId: opts.requestId || (items.every(i => i.msg.message_id)
       ? `intake-${await batchIdentity(chatId, items)}` : crypto.randomUUID()),
-    fileRefs: prepared.flatMap(p => p.refs), isVoice: prepared.some(p => p.isVoice),
+    fileRefs: assembled.fileRefs, isVoice: assembled.isVoice, inputItems: items,
     durableInput: !!(msg.intakeItems || opts.intakeRoute || msg.intakeRoute),
   });
 }
@@ -259,8 +253,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       projectPicked: !!(route.projectChosen && route.projectPicked && route.projectId),
       newProjectName: route.forceNew && (route.newProject || (session.projectSelectionSessionId === route.sessionId && session.pendingNewProject))
         ? text.replace(/^\[Сообщение \d+\]\s*/u, '').split('\n')[0].trim().slice(0, 60) || 'Новый проект' : null,
-      requestId: opts.requestId,
       fileRefs: opts.fileRefs || [],
+      inputItems: opts.inputItems,
       fileBase64: opts.fileBase64 || null,
       fileName: opts.fileName || null,
       fileMimeType: opts.fileMimeType || null,

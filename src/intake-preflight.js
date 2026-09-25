@@ -33,7 +33,7 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
     const transcriptRef = await storeTranscript(msg, media, transcript, env, session);
     msg = { ...msg, transcriptRef };
     await checkpoint(msg);
-    if (notifyTranscript) {
+    if (notifyTranscript && !msg.batchInput) {
       const anchor = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
       if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, { ...anchor, ...threadExtra(threadIdOf(msg)) });
       else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового', threadIdOf(msg));
@@ -63,6 +63,7 @@ export async function preflight(msg, env, checkpoint) {
   const session = await getSession(env.SESSIONS, msg.chat.id, threadIdOf(msg));
   if (!session) return { msg }; // normal login path remains authoritative
   const prepared = await prepareIntake(msg, env, session, checkpoint);
+  if (msg.batchInput) return { msg: prepared };
   const query = [prepared.text || prepared.caption, prepared.transcript].filter(Boolean).join('\n');
   // A photo/document must reach the agent with its caption; a text-only quick reply
   // cannot consume it. Transcribed audio is eligible just like typed text.

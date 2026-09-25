@@ -60,6 +60,11 @@ const flushReq = () => new Request('https://intake/flush', { method: 'POST' });
 // Let dynamic import() inside _dispatch settle across a few macrotasks.
 async function drain() { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); }
 
+async function receipt(io) {
+  await io.state.storage.put('receiptDue', Date.now() - 1);
+  await io.alarm();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   sendMessage.mockResolvedValue({ ok: true, result: { message_id: 98 } });
@@ -72,23 +77,18 @@ beforeEach(() => {
 });
 
 describe('IntakeBuffer — smart debounce with completeness gate', () => {
-  it('idle messages each get a FRESH anchored ack, never a silent edit (owner reversal 2026-09-15)', async () => {
-    const state = makeState();
-    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-
-    await io.fetch(appendReq('start the task'));
+  it('a burst has one delayed receipt; a later burst edits that same collector', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    for (let n = 0; n < 10; n++) await io.fetch(appendReq(`part ${n}`));
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(state._dump().alarm).not.toBeNull();              // debounce timer armed
-    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1); // collector shown
-    expect(editMessageReplyMarkup).not.toHaveBeenCalled();    // nothing prior to strip
-
-    // Second message must produce its OWN fresh bubble (anchored to it), not an
-    // edit of the first — an edit is invisible once the chat has scrolled past it.
-    await io.fetch(appendReq('also do X'));
-    expect(handleMessage).not.toHaveBeenCalled();
-    expect(editMessage).not.toHaveBeenCalled();
-    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2); // a new collector each time
-    expect(editMessageReplyMarkup).toHaveBeenCalledTimes(1);  // prior button stripped
+    await receipt(io);
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+    expect(sendMessageWithKeyboard.mock.calls[0][2]).toContain('10 сообщений');
+    await io.fetch(appendReq('one more'));
+    await receipt(io);
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+    expect(editMessage).toHaveBeenLastCalledWith('t', 42, 99, expect.stringContaining('11 сообщений'), expect.anything());
   });
 
   it('▶️ flush coalesces the buffer into ONE dispatch and clears busy after', async () => {
@@ -106,32 +106,25 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98, onIntakePrepared: expect.any(Function) });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(await state.storage.get('buf')).toBeUndefined();
     // The collector ("Принял N, жми «Запустить»") is stale procedural noise once the
     // task has launched — it's deleted outright, not left behind as an edited husk
     // (owner request 2026-09-22).
-    expect(deleteMessage).toHaveBeenCalledWith('t', 42, 99);
+    expect(deleteMessage).not.toHaveBeenCalled();
     expect(editMessage).not.toHaveBeenCalled();
   });
 
-  it('falls back to a neutral edit of the collector if the placeholder send fails', async () => {
-    const state = makeState();
-    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-
-    await io.fetch(appendReq('start the task'));
-    sendMessage.mockResolvedValueOnce(null); // placeholder delivery fails
-
+  it('launch reuses the collector rather than deleting it or sending another bubble', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task')); await receipt(io);
     await io.fetch(flushReq());
-    await drain();
-
-    // No usable placeholder id — the collector must stay around (edited, button
-    // stripped) as the fallback streaming target, not be deleted out from under it.
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
-    expect(editMessage).toHaveBeenCalledWith('t', 42, 99, '▶️ Запустил проработку',
-      expect.objectContaining({ reply_markup: { inline_keyboard: [] } }));
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
+    expect(editMessage).toHaveBeenCalledWith('t', 42, 99, '📨 Передаю собранный input агенту…', expect.anything());
+    expect(handleMessage.mock.calls[0][2].initialMsgId).toBe(99);
   });
 
   it('a force word (flush:true) launches immediately without a button tap', async () => {
@@ -144,7 +137,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 98, onIntakePrepared: expect.any(Function) });
+    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
   });
 
   it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
@@ -174,20 +167,15 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
-  it('falls back to a plain-text ack when the keyboard send is rejected (#595)', async () => {
-    const state = makeState();
-    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-
-    // Telegram rejects the keyboard message (e.g. bad markup) — must not leave
-    // the user with zero ack even though the message itself was buffered fine.
-    sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Bad Request: reply markup' });
-    sendMessage.mockResolvedValueOnce({ ok: true, result: { message_id: 55 } });
-
-    await io.fetch(appendReq('start the task'));
-
-    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledTimes(1); // plain-text retry fired
-    expect(await state.storage.get('collectorMsgId')).toBe(55);
+  it('retries a failed receipt without discarding input or creating a plain duplicate', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Too Many Requests' });
+    await io.fetch(appendReq('start the task')); await receipt(io);
+    expect(await state.storage.get('collectorMsgId')).toBeUndefined();
+    expect(await state.storage.get('receiptDue')).toBeTruthy();
+    await receipt(io);
+    expect(await state.storage.get('collectorMsgId')).toBe(99);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('recovers a buffer trapped by a dead run once BUSY_MAX elapses', async () => {
@@ -252,7 +240,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
 
     expect(handleMessage).not.toHaveBeenCalled();
     expect(checkCompleteness).toHaveBeenCalledTimes(1);
-    const notice = sendMessage.mock.calls.filter(c => String(c[2]).includes('не хватает контекста'));
+    const notice = editMessage.mock.calls.filter(c => String(c[3]).includes('Не хватает контекста'));
     expect(notice.length).toBe(1);
     // No re-armed alarm and no gate-decision to resume from — only a new
     // message or the ▶️ button can move this forward.
@@ -359,12 +347,13 @@ describe('intake concurrent delivery', () => {
     for (let i = 0; i < 20 && (!resolveA || !resolveB); i++) await new Promise(r => setTimeout(r, 0));
     resolveA(); resolveB();
     await Promise.all([reqA, reqB]);
+    await receipt(io);
 
     // Correct behaviour: one item accepted → one collector shown, reporting
     // the true final count (2). The race instead fires _armAutoDispatch twice,
     // each off a stale snapshot (1, then 1) instead of once off the real one (2).
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
-    expect(collectorTextArg(sendMessageWithKeyboard)).toContain('(2)');
+    expect(collectorTextArg(sendMessageWithKeyboard)).toContain('2 сообщений');
   });
 });
 

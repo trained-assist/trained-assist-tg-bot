@@ -1,4 +1,5 @@
-import { mediaEnabled, mediaOf, mediaId, enqueueMedia, ackText } from './media-jobs.js';
+import { assembleInput } from './input-assembly.js';
+import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
@@ -22,7 +23,7 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 // The alarm also recovers reserved media jobs; for runs it is a safety net: if a run's isolate dies before clearing `busy`,
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
-import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, deleteMessage } from './lib/telegram.js';
+import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem } from './intake-routing.js';
 import { threadExtra, threadIdOf } from './conversation-context.js';
 
@@ -65,21 +66,13 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
                                  // legitimate session (~40 min agent cap).
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
 
-const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
+const RECEIPT_MS = 1500;
+const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
+  { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 
-const collectorText = n =>
-  `📥 Принял ✅ Накапливаю (${n}). Если задача понятна, запущу после 3 минут без новых сообщений. Можешь дополнить или жми «▶️ Запустить проработку», когда закончишь.`;
-
-// Shown while a run is in flight: the buffer holds new messages (never auto-runs),
-// but the user MUST still see they were received. Silence here was the «спросил
-// "работает" — молчит» bug — a busy hold produced no Telegram output at all.
-const heldText = n =>
-  `⏳ Иду по текущей задаче. Принял ещё (${n}) — покажу кнопку «▶️ Запустить», как закончу.`;
-
-// Gate said "insufficient": must NEVER auto-dispatch, and the user must be told
-// plainly that nothing was launched — a silent non-launch reads as a broken bot.
-const insufficientText =
-  '❔ Не запускаю автоматически — похоже, не хватает контекста, чтобы понять задачу. Дополни или жми «▶️ Запустить проработку», если и так достаточно.';
+const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
+const heldText = n => `✓ Получил ещё ${n} сообщений. Дополнения сохранены отдельно от входа запущенной задачи.`;
+const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -90,6 +83,7 @@ export class IntakeBuffer {
     // can find sessions from a different bot (cross-bot auto-login bug).
     this.env = applySessionNamespace(env);
     this.mutation = Promise.resolve();
+    this.uiMutation = Promise.resolve();
   }
 
   async _exclusive(fn) {
@@ -114,6 +108,43 @@ export class IntakeBuffer {
         else await this.state.storage.delete('picker');
         return Response.json({ ok: true });
       }
+    }
+
+    if (url.pathname === '/input' && request.method === 'GET') {
+      const statusId = url.searchParams.get('messageId');
+      const snapshotId = statusId && await this.state.storage.get(`input-message:${statusId}`);
+      if (snapshotId) {
+        const snapshot = await this._readSnapshot(snapshotId);
+        if (snapshot?.body.username !== url.searchParams.get('username')) return new Response('Forbidden', { status: 403 });
+        return json(snapshot);
+      }
+      const preparing = statusId && String(await this.state.storage.get('preparingMsgId')) === statusId;
+      if (url.searchParams.get('draft') !== 'true' && !preparing) return new Response('Snapshot not found', { status: 404 });
+      const items = preparing ? ((await this.state.storage.get('launching')) || (await this.state.storage.get('retryBatch')) || [])
+        : [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+      items
+        .sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+      return json({ state: 'draft', items, ...assembleInput(items),
+        pending: !!preparing || items.some(i => i.mediaPending || i.preparingAt) });
+    }
+    if (url.pathname === '/snapshot' && request.method === 'POST') {
+      const { body, items } = await request.json();
+      return this._exclusive(async () => {
+        const id = body.requestId;
+        if (!id) return new Response('requestId required', { status: 400 });
+        const existing = await this._readSnapshot(id);
+        if (existing && existing.body.username !== body.username) return new Response('Snapshot owner mismatch', { status: 403 });
+        if (!existing) {
+          const data = JSON.stringify({ state: 'snapshot', id, createdAt: Date.now(), items, body });
+          const chunks = Math.ceil(data.length / 16000);
+          await this.state.storage.transaction(async tx => {
+            for (let i = 0; i < chunks; i++) await tx.put(`input:${id}:${i}`, data.slice(i * 16000, (i + 1) * 16000));
+            await tx.put(`input:${id}`, { chunks });
+          });
+        }
+        if (body.initialMsgId) await this.state.storage.put(`input-message:${body.initialMsgId}`, id);
+        return json({ id, body: existing?.body || body });
+      });
     }
 
     if (url.pathname === '/debug' && request.method === 'GET') {
@@ -175,6 +206,7 @@ export class IntakeBuffer {
         await this.state.storage.delete('debounceExpiresAt');
         await this.state.storage.delete('gateLevel');
         await this.state.storage.delete('shortDebounce');
+        await this.state.storage.delete('receiptDue');
         await this.state.storage.delete('collectorMsgId');
         await this.state.storage.delete('launching');
         await this.state.storage.deleteAlarm();
@@ -203,10 +235,11 @@ export class IntakeBuffer {
         return true;
       });
       if (!accepted) return json({ duplicate: true });
+      await this._scheduleReceipt();
       let result = { msg };
       try {
         const { preflight } = await import('./intake-preflight.js');
-        result = await preflight(msg, this.env, async prepared => {
+        result = await preflight({ ...msg, batchInput: true }, this.env, async prepared => {
           msg = prepared;
           result = { msg: prepared };
           await this._exclusive(async () => {
@@ -291,7 +324,8 @@ export class IntakeBuffer {
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
       if (pending) {
-        await sendTracked(this.env, buf[0].msg.chat.id, '⏳ Ещё расшифровываю полученные сообщения. Нажми запуск после расшифровки — пачка сохранена.', {}, threadIdOf(buf[0].msg));
+        await this._showCollector(buf[0].msg.chat.id, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf[0].msg),
+          '⏳ Вложения ещё обрабатываются. Весь input сохранён; запуск будет доступен после подготовки.');
         return json({ preparing: true });
       }
       await this._dispatch();
@@ -322,16 +356,7 @@ export class IntakeBuffer {
     });
     if (!accepted) return json({ duplicate: true });
     await enqueueMedia(msg, this.env, session).catch(() => {}); // watchdog retries
-    const remaining = (await this.state.storage.get('buf')) || [];
-    if (await this.state.storage.get('busy')) await this._showHeldNotice(msg.chat.id, remaining.length, msg.message_id, threadIdOf(msg));
-    else {
-      // Show a receipt without the launch button — the button will appear once
-      // transcription is done (in _mediaResult). Showing the button first and
-      // transcript second was confusing users: they'd tap launch, get "still
-      // transcribing", and not know to tap again after the transcript arrived.
-      await sendTracked(this.env, msg.chat.id,
-        ackText(msg), anchor(msg.message_id), threadIdOf(msg)).catch(() => {});
-    }
+    await this._scheduleReceipt();
     return json({ queued: true, id });
   }
 
@@ -395,7 +420,9 @@ export class IntakeBuffer {
       const text = result.error
         ? `⚠️ ${result.error}. Ссылка на вложение сохранена для восстановления; в следующую задачу оно не войдёт. Можно продолжать текстом; для повторной обработки отправь вложение ещё раз.`
         : result.transcript ? `🎤 ${result.transcript}` : '✅ Вложение сохранено. Можно запускать проработку.';
-      if (!result.error && result.transcript?.length >= 800) {
+      if (!result.error) {
+        await this._scheduleReceipt();
+      } else if (result.transcript?.length >= 800) {
         await sendDocument(this.env.BOT_TOKEN, notify.chatId, `transcript-${notify.messageId}.txt`, result.transcript, '🎤 Расшифровка голосового', notify.threadId).catch(() => {});
       } else {
         await sendTracked(this.env, notify.chatId, text, { ...anchor(notify.messageId), parse_mode: undefined }, notify.threadId).catch(() => {});
@@ -430,53 +457,56 @@ export class IntakeBuffer {
     const expiresAt = Date.now() + debounceMs;
     await this.state.storage.put('debounceExpiresAt', expiresAt);
     await this.state.storage.setAlarm(expiresAt);
-    await this._showCollector(chatId, remaining.length, replyToMessageId, threadId);
+    await this._scheduleReceipt();
   }
 
-  // ACK every accumulated message with a FRESH bubble anchored to it — never an
-  // edit of an older one. An edit is invisible once the chat has scrolled past
-  // it, which is exactly what read as "did my message even arrive?" (the owner
-  // rejected the old edit-in-place design for this reason, 2026-09-15). The
-  // previous collector's button is stripped so only the newest is tappable —
-  // all buttons flush the same chat-keyed buffer, so a stale one is cosmetic
-  // clutter at worst, but one live button reads cleaner.
-  async _showCollector(chatId, count, replyToMessageId, threadId = null) {
-    if (!chatId) return;
-    const prevId = await this.state.storage.get('collectorMsgId');
-    if (prevId) {
-      await editMessageReplyMarkup(this.env.BOT_TOKEN, chatId, prevId, [])
-        .catch(err => console.error(`[intake ${chatId}] strip prior collector button failed:`, err?.message));
-    }
-    const sent = await sendKeyboardTracked(
-      this.env, chatId, collectorText(count), LAUNCH_BTN, anchor(replyToMessageId), threadId,
-    ).catch(err => { console.error(`[intake ${chatId}] send collector failed:`, err?.message); return null; });
-    const newId = sent?.result?.message_id;
-    if (newId) {
-      await this.state.storage.put('collectorMsgId', newId);
-      return;
-    }
-    console.error(`[intake ${chatId}] collector-with-keyboard not delivered, retrying without keyboard:`, sent?.description || sent);
-    // The buffer already has the message (buf.push happened before this call) — losing
-    // the ack here reads as "the bot ate my message" even though nothing was lost. Try
-    // once more without the inline keyboard in case the markup itself is what Telegram
-    // rejected; the force word (see FORCE_RUN_RE) still launches without a button.
-    const plain = await sendTracked(this.env, chatId, collectorText(count), anchor(replyToMessageId), threadId)
-      .catch(err => { console.error(`[intake ${chatId}] plain-text collector retry failed:`, err?.message); return null; });
-    const plainId = plain?.result?.message_id;
-    if (plainId) await this.state.storage.put('collectorMsgId', plainId);
-    else console.error(`[intake ${chatId}] collector message not delivered at all — buf accepted silently, user sees no ack:`, plain?.description || plain);
+  async _readSnapshot(id) {
+    const meta = await this.state.storage.get(`input:${id}`);
+    if (!meta) return null;
+    let data = '';
+    for (let i = 0; i < meta.chunks; i++) data += await this.state.storage.get(`input:${id}:${i}`);
+    return JSON.parse(data);
   }
 
-  // Confirm receipt of a message held during an in-flight run. Same rule as the
-  // collector: a fresh bubble per message, anchored to it, not an edit of a
-  // rolling notice — the rolling edit was invisible once scrolled past.
-  async _showHeldNotice(chatId, count, replyToMessageId, threadId = null) {
-    if (!chatId) return;
-    const sent = await sendTracked(this.env, chatId, heldText(count), anchor(replyToMessageId), threadId)
-      .catch(err => { console.error(`[intake ${chatId}] send held-notice failed:`, err?.message); return null; });
-    if (!sent?.result?.message_id) {
-      console.error(`[intake ${chatId}] held-notice not delivered — buf accepted silently, user sees no ack:`, sent?.description || sent);
-    }
+  async _scheduleReceipt() {
+    const due = Date.now() + RECEIPT_MS;
+    await this.state.storage.put('receiptDue', due);
+    const alarm = await this.state.storage.getAlarm();
+    if (!alarm || alarm > due) await this.state.storage.setAlarm(due);
+  }
+
+  async _showHeldNotice() { await this._scheduleReceipt(); }
+
+  // Serialize Telegram edits independently of buffer mutations. A slow send cannot
+  // create two collectors, and each edit reads the latest durable count.
+  async _showCollector(chatId, count, replyToMessageId, threadId = null, override = null) {
+    const previous = this.uiMutation;
+    let release;
+    this.uiMutation = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      if (!chatId) return null;
+      const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+      if (!override && !items.length) return null;
+      const text = override || collectorText(items.length || count);
+      const keyboard = override?.startsWith('📨') ? [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] : LAUNCH_BTN;
+      const prevId = await this.state.storage.get('collectorMsgId');
+      if (prevId) {
+        const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
+          { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
+        if (edited?.ok || /message is not modified/i.test(edited?.description || '')) return prevId;
+        // A transient edit error must not create a duplicate control message.
+        if (!/message to edit not found/i.test(edited?.description || '')) {
+          await this._scheduleReceipt();
+          return prevId;
+        }
+      }
+      const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
+      const id = sent?.result?.message_id;
+      if (id) await this.state.storage.put('collectorMsgId', id);
+      else await this._scheduleReceipt();
+      return id || null;
+    } finally { release(); }
   }
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
@@ -512,36 +542,10 @@ export class IntakeBuffer {
     const msg = { ...base, text: coalescedText, intakeItems: buf,
       intakeRoute: continuation?.intakeRoute };
 
-    // Do NOT stream the agent response into the old collector — it may have been
-    // sent before the voice transcript was posted (the collector's message_id is
-    // lower, so it appears above the transcript in the chat). Send a fresh
-    // placeholder whose message_id is guaranteed to be higher than any
-    // already-posted transcript.
-    const collectorMsgId = await this.state.storage.get('collectorMsgId');
+    await this.state.storage.delete('receiptDue');
+    const initialMsgId = await this._showCollector(chatId, buf.length, base.message_id, threadId, '📨 Передаю собранный input агенту…');
+    if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
     await this.state.storage.delete('collectorMsgId');
-    const lastMsgId = base.message_id || null;
-    const placeholderRes = await sendTracked(
-      this.env, chatId, '📨 Передаю задачу агенту…',
-      lastMsgId ? { reply_to_message_id: lastMsgId, allow_sending_without_reply: true } : {},
-      threadId,
-    ).catch(() => null);
-
-    // The collector ("Принял N, жми «Запустить»") is stale procedural noise once
-    // the task has actually launched — delete it outright rather than leaving an
-    // edited "▶️ Запустил проработку" husk in the chat (owner request 2026-09-22).
-    // Only fall back to a neutral, button-less edit if the placeholder above
-    // failed to send, since then this message id is still needed below as the
-    // streaming target.
-    if (collectorMsgId && chatId) {
-      if (placeholderRes?.result?.message_id) {
-        await deleteMessage(this.env.BOT_TOKEN, chatId, collectorMsgId).catch(() => {});
-      } else {
-        await editMessage(this.env.BOT_TOKEN, chatId, collectorMsgId, '▶️ Запустил проработку', {
-          reply_markup: { inline_keyboard: [] },
-        }).catch(() => {});
-      }
-    }
-    const initialMsgId = placeholderRes?.result?.message_id ?? collectorMsgId ?? null;
 
     // Safety net: only fires if the run's isolate dies before finally clears busy.
     await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
@@ -604,6 +608,17 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    const receiptDue = await this.state.storage.get('receiptDue');
+    if (receiptDue) {
+      if (Date.now() < receiptDue && !((await this.state.storage.get('debounceExpiresAt')) <= Date.now())) { await this.state.storage.setAlarm(receiptDue); return; }
+      await this.state.storage.delete('receiptDue');
+      const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+      if (items.length) {
+        const last = items.at(-1).msg;
+        await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+          await this.state.storage.get('busy') ? heldText(items.length) : null);
+      }
+    }
     await this._recoverMedia();
 
     // If not busy and media still pending — _recoverMedia re-armed the alarm; wait.
@@ -647,10 +662,15 @@ export class IntakeBuffer {
         if (verdict?.level === 'clear' || verdict?.level === 'likely') {
           await this._dispatch(snapshot);
         } else if (chatId) {
-          await sendTracked(this.env, chatId, insufficientText, {}, threadIdOf(buf[buf.length - 1].msg));
+          await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
         }
         return;
       }
+    }
+    if (debounceExpiresAt && Date.now() < debounceExpiresAt) {
+      const alarm = await this.state.storage.getAlarm();
+      if (!alarm || alarm <= Date.now() || alarm > debounceExpiresAt) await this.state.storage.setAlarm(debounceExpiresAt);
+      return;
     }
     // ── End debounce ────────────────────────────────────────────────────────────
 

@@ -67,12 +67,13 @@ describe('durable R2 pipeline',()=>{
   const buf=f.intake.data.get('buf');buf[0].preparingAt=Date.now()-300000;f.intake.data.set('buf',buf);
   const result=await f.io.fetch(new Request('https://intake/flush',{method:'POST'}));expect(await result.json()).toEqual({preparing:true});
  });
- it('immediate ack names the actual attachment type, not always voice', async()=>{
+ it('media receipt is batched, not one acknowledgement per attachment', async()=>{
   expect(ackText({voice:{}})).toBe('🎙 Принял голосовое, расшифровываю…');
   expect(ackText({photo:[{}]})).toBe('📷 Принял фото');
   expect(ackText({document:{mime_type:'application/pdf'}})).toBe('📎 Принял вложение');
+  sendMessage.mockClear();
   await fixture({chat:{id:42},message_id:9,photo:[{file_id:'p',file_unique_id:'p'}]});
-  expect(sendMessage).toHaveBeenCalledWith('test',42,'📷 Принял фото',expect.anything());
+  expect(sendMessage).not.toHaveBeenCalled();
  });
  it('photo and PDF skip transcription, retain caption and metadata',async()=>{
   for(const extra of [{photo:[{file_id:'p',file_unique_id:'p'}]}, {document:{file_id:'d',file_name:'doc.pdf',mime_type:'application/pdf'}}]) {

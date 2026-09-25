@@ -1,3 +1,4 @@
+import { conversationKey } from '../conversation-context.js';
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 import { resolveAudience } from './audience.js';
 // HTTP client for trained-assist-agent
@@ -73,9 +74,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, requestId, threadId = null, initiatedAt = Date.now() }) {
-  const agentUrl = await pickAgentUrl(env, username, task || '', forceRu);
-  await copyRefsToAgent(env, username, fileRefs || [], agentUrl);
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
   const audience = resolveAudience(env);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
   // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
@@ -99,6 +98,22 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
+
+  if (env.INTAKE && inputItems) {
+    body.requestId ||= crypto.randomUUID();
+    const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(userId, threadId)));
+    const saved = await intake.fetch('https://intake/snapshot', {
+      method: 'POST', body: JSON.stringify({ body, items: inputItems }),
+    });
+    if (!saved.ok) throw new Error(`Input snapshot HTTP ${saved.status}`);
+    // A retry sends exactly the immutable payload of its first attempt.
+    const snapshot = await saved.json();
+    for (const key of Object.keys(body)) delete body[key];
+    Object.assign(body, snapshot.body);
+  }
+
+  const agentUrl = await pickAgentUrl(env, body.username, body.task || '', forceRu);
+  await copyRefsToAgent(env, body.username, body.fileRefs || [], agentUrl);
 
   if (env.RUN_OUTBOX) {
     // Caller supplies Telegram/batch identity; fallback uses a stable status message.

@@ -84,6 +84,11 @@ function makeWorld() {
       },
     },
   };
+  env.quiet = async chatId => {
+    const io = buffers.get(String(chatId));
+    await io.state.storage.put('receiptDue', Date.now() - 1);
+    await io.alarm();
+  };
   return { env };
 }
 
@@ -94,10 +99,12 @@ const drain = async () => { for (let i = 0; i < 6; i++) await new Promise(r => s
 async function say(env, chatId, text) {          // a plain user message
   await routeText({ chat: { id: chatId }, text }, env, chatId);
   await drain();
+  await env.quiet(chatId);
 }
 async function replyToBot(env, chatId, text) {   // answering the bot's message
   await routeText({ chat: { id: chatId }, text, reply_to_message: { message_id: 1 } }, env, chatId);
   await drain();
+  await env.quiet(chatId);
 }
 function tapRun(env, chatId) {                    // ▶️ Запустить — the intake_run callback
   return env.INTAKE.get(String(chatId)).fetch('https://intake/flush', { method: 'POST' });
@@ -125,10 +132,13 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     ];
     for (const p of parts) {
       const mark = tg.length;
-      await say(env, 42, p);
-      expect(since(mark).length).toBeGreaterThan(0);          // never silent
+      await routeText({ chat: { id: 42 }, text: p }, env, 42);
+      expect(since(mark)).toHaveLength(0);
     }
+    await env.quiet(42);
+    expect(tg.filter(e => e.kind === 'send')).toHaveLength(1);
     // The collector always carries the launch button.
+    await env.quiet(42);
     expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
     expect(handleMessage).not.toHaveBeenCalled();             // nothing auto-fires
 
@@ -184,6 +194,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
       { message_id: 12, text: 'скопированный текст' },
     ]) await routeText({ chat: { id: 42 }, ...msg }, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
+    await env.quiet(42);
     expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
     await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
@@ -220,6 +231,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     release1();
     await run1;
     await drain();
+    await env.quiet(42);
     expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
 
     // 6: launch the held follow-ups as a second deep run.
@@ -255,7 +267,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     const emitted = since(mark);
     expect(emitted.length).toBeGreaterThan(0);               // never silent
     expect(emitted.some(e => e.buttons.includes(RUN_CB))).toBe(true); // «▶️» offered
-    expect(emitted.some(e => /это всё|дополн/i.test(e.text || ''))).toBe(true); // asks
+    expect(emitted.some(e => /input/i.test(e.text || ''))).toBe(true); // asks
     expect(handleMessage).toHaveBeenCalledTimes(1);          // <-- current bug: fires 2nd run
   });
 });
