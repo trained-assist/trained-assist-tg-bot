@@ -116,3 +116,41 @@ describe('routeText — shared private+group intake rule', () => {
     expect(getProjectDecision).not.toHaveBeenCalled(); // no API call for returning users
   });
 });
+
+describe('routeText — forum topic routing (#255)', () => {
+  function makeTopicEnv() {
+    const keys = [];
+    const stub = { fetch: vi.fn(async () => new Response('{}')) };
+    return {
+      keys,
+      env: {
+        INTAKE_DEBOUNCE: 'on',
+        BOT_TOKEN: 't',
+        INTAKE: { idFromName: (n) => { keys.push(n); return n; }, get: () => stub },
+      },
+    };
+  }
+
+  it('keys the Intake DO by chatId:threadId for a forum message', async () => {
+    const { env, keys } = makeTopicEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'задача A', message_thread_id: 7 }, env, -100);
+    expect(keys).toEqual(['-100:7']);
+  });
+
+  it('keys each topic separately so text A and text B never share a buffer', async () => {
+    const a = makeTopicEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'A', message_thread_id: 1 }, a.env, -100);
+    getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-2' });
+    await routeText({ chat: { id: -100, type: 'supergroup' }, text: 'B', message_thread_id: 2 }, a.env, -100);
+    expect(a.keys).toEqual(['-100:1', '-100:2']);
+  });
+
+  it('keeps the legacy chatId key for private chats and non-forum groups', async () => {
+    const { env, keys } = makeTopicEnv();
+    getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
+    await routeText({ chat: { id: 42, type: 'private' }, text: 'привет' }, env, 42);
+    expect(keys).toEqual(['42']);
+  });
+});

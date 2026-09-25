@@ -1,4 +1,5 @@
 // Cloudflare KV helpers for sessions and user registry
+import { conversationKey, validThreadId } from '../conversation-context.js';
 
 // Single home for session-id generation. Was copy-pasted as
 // `s-${Math.abs(chatId)}-${Date.now()}` in 6 places — every duplicate is a chance
@@ -13,16 +14,63 @@ export function newSessionId(chatId) {
 }
 
 // Sessions: chatId → { username, profileName }
-export async function getSession(kv, chatId) {
-  const val = await kv.get(String(chatId));
-  return val ? JSON.parse(val) : null;
+//
+// Forum topics split the session into two records (issue #255, review "State split"):
+//   • ChatState   — auth/username/telegramUserId/allMsgMode/group settings, keyed by
+//                   String(chatId). ONE per chat, shared by every topic.
+//   • ThreadState — dialog/picker/project/supplement pointers (topic-local UI state),
+//                   keyed by conversationKey(chatId, threadId).
+// getSession merges them for a caller that passes a valid threadId; with no thread it
+// returns/ writes EXACTLY the single chat record as before (hard guard: private chats
+// and non-forum groups are byte-for-byte unchanged).
+export const THREAD_SESSION_FIELDS = new Set([
+  'lastSessionId', 'activeSessionId', 'activeSessionIsNew', 'lastMessageAt',
+  'projectId', 'projectPicked', 'projectSelectionSessionId', 'pendingNewProject',
+  'contextFromSession', 'pinnedMsgId',
+  'pendingMessage', 'pendingMessageAt', 'pendingOriginalMessage', 'pendingOriginalOpts',
+  'pendingProjectChoice', 'pendingPickerId', 'pendingSupplementDraft',
+]);
+
+function splitThreadSession(session = {}) {
+  const chat = {};
+  const thread = {};
+  for (const [key, value] of Object.entries(session)) {
+    if (THREAD_SESSION_FIELDS.has(key)) thread[key] = value;
+    else chat[key] = value;
+  }
+  return { chat, thread };
 }
 
-export async function setSession(kv, chatId, session) {
-  await kv.put(String(chatId), JSON.stringify(session));
+export async function getSession(kv, chatId, threadId = null) {
+  const baseVal = await kv.get(String(chatId));
+  const base = baseVal ? JSON.parse(baseVal) : null;
+  if (!validThreadId(threadId)) return base;
+  // Auth is chat-scoped: no chat record means logged out, even if a topic record lingers.
+  if (!base) return null;
+  const threadVal = await kv.get(conversationKey(chatId, threadId));
+  const thread = threadVal ? JSON.parse(threadVal) : null;
+  return thread ? { ...base, ...thread } : base;
 }
 
-export async function deleteSession(kv, chatId) {
+export async function setSession(kv, chatId, session, threadId = null) {
+  if (!validThreadId(threadId)) {
+    await kv.put(String(chatId), JSON.stringify(session));
+    return;
+  }
+  const { chat, thread } = splitThreadSession(session);
+  await kv.put(conversationKey(chatId, threadId), JSON.stringify(thread));
+  // Merge chat fields into the existing record so a topic write can never erase
+  // auth/allMsgMode that the other topics rely on.
+  const baseVal = await kv.get(String(chatId));
+  const base = baseVal ? JSON.parse(baseVal) : {};
+  await kv.put(String(chatId), JSON.stringify({ ...base, ...chat }));
+}
+
+export async function deleteSession(kv, chatId, threadId = null) {
+  if (validThreadId(threadId)) {
+    await kv.delete(conversationKey(chatId, threadId));
+    return;
+  }
   await kv.delete(String(chatId));
 }
 
@@ -33,10 +81,10 @@ export async function deleteSession(kv, chatId) {
 // that looks like the pending state was never written. One retry after a short delay
 // recovers the overwhelming majority of these without adding latency to the common
 // (already-consistent) case, and costs nothing extra when the state really is stale.
-export async function withKvConsistencyRetry(kv, chatId, session, isReady, delayMs = 400) {
+export async function withKvConsistencyRetry(kv, chatId, session, isReady, delayMs = 400, threadId = null) {
   if (isReady(session)) return session;
   await new Promise(resolve => setTimeout(resolve, delayMs));
-  const retried = await getSession(kv, chatId);
+  const retried = await getSession(kv, chatId, threadId);
   return isReady(retried) ? retried : session;
 }
 

@@ -306,14 +306,24 @@ export async function getAgentHealth(env) {
   }
 }
 
-export async function stopTask(env, { username }) {
+export async function stopTask(env, { username, chatId = null, threadId = null }) {
+  const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
+  // Forum topics (#255): in a topic, `/stop` must only kill that topic's task — scope
+  // by chat + topic + this bot's audience (the agent scopes an omitted audience to
+  // 'default', so a recruiter/freelance topic would otherwise never match). Without a
+  // valid threadId we send EXACTLY the legacy `{ username }` payload, so private-chat /
+  // non-forum stop semantics (including the agent's audience-wide fallback) are
+  // byte-for-byte unchanged (hard guard).
+  const body = tid != null && chatId != null
+    ? { username, chatId, threadId: tid, audience: resolveAudience(env) }
+    : { username };
   const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${env.AGENT_SECRET}`,
     },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);

@@ -1,5 +1,6 @@
 // Normalize once at receipt; durable intake keeps text and lightweight file references.
 import { getSession } from './lib/kv.js';
+import { threadExtra, threadIdOf } from './conversation-context.js';
 import { sendMessage, sendDocument } from './lib/telegram.js';
 import { pickAgentUrl } from './lib/agent-client.js';
 import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/intake-files.js';
@@ -16,7 +17,7 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
     if (!msg.voice && media.file_size && media.file_size > MAX_BYTES) {
       await sendMessage(env.BOT_TOKEN, msg.chat.id,
         'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
-        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true, ...threadExtra(threadIdOf(msg)) }
       );
       return { ...msg, fileTooLarge: true };
     }
@@ -34,8 +35,8 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
     await checkpoint(msg);
     if (notifyTranscript) {
       const anchor = { reply_to_message_id: msg.message_id, allow_sending_without_reply: true };
-      if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, anchor);
-      else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового');
+      if (transcript.length < 800) await sendMessage(env.BOT_TOKEN, msg.chat.id, `🎤 ${transcript}`, { ...anchor, ...threadExtra(threadIdOf(msg)) });
+      else await sendDocument(env.BOT_TOKEN, msg.chat.id, `transcript-${msg.message_id}.txt`, transcript, '🎤 Расшифровка голосового', threadIdOf(msg));
     }
     // Keep the source media metadata for retry, but do not duplicate transcript in .text.
     msg = { ...msg, transcript, fileRef, transcriptRef, transcriptNotified: true };
@@ -47,7 +48,7 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
     if (file.file_size && file.file_size > MAX_BYTES) {
       await sendMessage(env.BOT_TOKEN, msg.chat.id,
         'Файл слишком большой для Telegram (>20 МБ) — я не смогу его получить напрямую. Загрузи, пожалуйста, в Google Drive, Яндекс Диск или любое облако и пришли мне ссылку — скачаю оттуда.',
-        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true }
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true, ...threadExtra(threadIdOf(msg)) }
       );
       return { ...msg, fileTooLarge: true };
     }
@@ -59,7 +60,7 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
 }
 
 export async function preflight(msg, env, checkpoint) {
-  const session = await getSession(env.SESSIONS, msg.chat.id);
+  const session = await getSession(env.SESSIONS, msg.chat.id, threadIdOf(msg));
   if (!session) return { msg }; // normal login path remains authoritative
   const prepared = await prepareIntake(msg, env, session, checkpoint);
   const query = [prepared.text || prepared.caption, prepared.transcript].filter(Boolean).join('\n');
@@ -78,7 +79,7 @@ export async function preflight(msg, env, checkpoint) {
     const result = await response.json();
     if (!result.answer || !result.sessionId) return { msg: prepared };
     const sent = await sendMessage(env.BOT_TOKEN, msg.chat.id, `⚡ ${result.answer}`, {
-      reply_to_message_id: msg.message_id, allow_sending_without_reply: true,
+      reply_to_message_id: msg.message_id, allow_sending_without_reply: true, ...threadExtra(threadIdOf(msg)),
       reply_markup: { inline_keyboard: [[{ text: '🔎 Разобраться подробнее', callback_data: `qa_more|${result.sessionId}` }]] },
     });
     if (!sent?.ok) throw new Error('Не удалось отправить быстрый ответ');

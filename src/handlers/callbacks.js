@@ -4,22 +4,35 @@ import { readPicker } from '../lib/picker-mirror.js';
 import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyRetry } from '../lib/kv.js';
 import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
+import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
+
+// Topic-aware outbound helpers (issue #255): every NEW message must carry
+// message_thread_id so it lands in the same forum topic as its trigger. editMessage
+// needs no thread — it targets an existing message_id that already belongs to a
+// topic. threadExtra() is empty when there is no valid thread (hard guard).
+function sendT(env, chatId, threadId, text, extra = {}) {
+  return sendMessage(env.BOT_TOKEN, chatId, text, { ...extra, ...threadExtra(threadId) });
+}
+function sendKbT(env, chatId, threadId, text, keyboard, extra = {}, lifecycleEnv = env) {
+  return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) }, lifecycleEnv);
+}
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
   const initiatedAt = Date.now();
   const chatId = message?.chat?.id || from?.id;
+  const threadId = threadIdOf(message);
 
   if (!chatId) return;
 
-  let session = await getSession(env.SESSIONS, chatId);
+  let session = await getSession(env.SESSIONS, chatId, threadId);
 
   // KV may still hold an older picker than the one tapped (opened by the IntakeBuffer
   // DO in another colo) — trust the strongly-consistent DO mirror for this message.
   if (data?.startsWith('pc:') && session && projectChoiceExpired(session.pendingProjectChoice, cq)) {
-    const mirrored = await readPicker(env, chatId);
+    const mirrored = await readPicker(env, chatId, threadId);
     if (mirrored && !projectChoiceExpired(mirrored, cq)) session = { ...session, pendingProjectChoice: mirrored };
   }
 
@@ -32,7 +45,7 @@ export async function handleCallbackQuery(cq, env) {
   if (data?.startsWith('sp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
 
-    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh, 400, threadId);
     const sessionId = data.slice(3);
     const pending = session.pendingMessage;
     const pendingFresh = pendingMessageFresh(session);
@@ -48,7 +61,7 @@ export async function handleCallbackQuery(cq, env) {
           input: pendingFresh ? (session.pendingOriginalMessage || { chat: { id: chatId }, text: pending }) : null,
           opts: session.pendingOriginalOpts || {},
         });
-      } catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+      } catch (err) { await sendT(env, chatId, threadId, `⚠️ ${err.message}`); }
       return;
     }
 
@@ -56,7 +69,7 @@ export async function handleCallbackQuery(cq, env) {
       // Happy path: pending message exists and is fresh — run it
       await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
 
-      const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
+      const placeholderRes = await sendT(env, chatId, threadId, '📨 Передаю задачу агенту…');
       const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
       // Capture post-write state so .then() below spreads from the same base,
@@ -69,7 +82,7 @@ export async function handleCallbackQuery(cq, env) {
         pendingMessageAt: null,
         activeSessionId: null,
       };
-      await setSession(env.SESSIONS, chatId, updatedSession);
+      await setSession(env.SESSIONS, chatId, updatedSession, threadId);
       const label = sessionId === 'new' ? '✨ Новый диалог' : '↩️ Продолжаю диалог';
       if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       // Pass existing pinnedMsgId to agent — agent manages context content and may return new ID
@@ -77,7 +90,7 @@ export async function handleCallbackQuery(cq, env) {
       // Without await, Cloudflare terminates the execution context before /run is ever fetched.
       try {
         const result = await runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `callback-${id}`,
           userId: chatId,
           username: updatedSession.username,
@@ -92,10 +105,10 @@ export async function handleCallbackQuery(cq, env) {
         });
         const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
         if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
-          await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+          await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId }, threadId);
         }
       } catch (err) {
-        sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
+        sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`).catch(() => {});
       }
     } else {
       // KV stale or message expired — replace keyboard with prompt to write
@@ -106,14 +119,14 @@ export async function handleCallbackQuery(cq, env) {
         lastSessionId: sessionId === 'new' ? null : resolvedId,
         pendingMessage: null,
         pendingMessageAt: null,
-      });
+      }, threadId);
       const promptText = sessionId === 'new'
         ? '✨ Новый диалог — напиши свою задачу!'
         : '↩️ Диалог выбран — напиши следующее сообщение.';
       if (msgId) {
         await editMessage(env.BOT_TOKEN, chatId, msgId, promptText, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
-        await sendMessage(env.BOT_TOKEN, chatId, promptText);
+        await sendT(env, chatId, threadId, promptText);
       }
     }
     return;
@@ -124,7 +137,7 @@ export async function handleCallbackQuery(cq, env) {
   // message (provisional name). Runs the stashed pending message, mirroring sp:.
   if (data?.startsWith('pp:')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh);
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, pendingMessageFresh, 400, threadId);
     const raw = data.slice(3);
     const pending = session.pendingMessage;
     const pendingFresh = pendingMessageFresh(session);
@@ -132,10 +145,10 @@ export async function handleCallbackQuery(cq, env) {
 
     if (!pendingFresh) {
       await answerCallbackQuery(env.BOT_TOKEN, id);
-      await setSession(env.SESSIONS, chatId, { ...session, pendingMessage: null, pendingMessageAt: null });
+      await setSession(env.SESSIONS, chatId, { ...session, pendingMessage: null, pendingMessageAt: null }, threadId);
       const t = '⌛ Сообщение устарело — напиши задачу заново, спрошу проект снова.';
       if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, t, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-      else await sendMessage(env.BOT_TOKEN, chatId, t);
+      else await sendT(env, chatId, threadId, t);
       return;
     }
 
@@ -154,7 +167,7 @@ export async function handleCallbackQuery(cq, env) {
 
     await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
     const resolvedId = newSessionId(chatId);
-    const placeholderRes = await sendMessage(env.BOT_TOKEN, chatId, '📨 Передаю задачу агенту…');
+    const placeholderRes = await sendT(env, chatId, threadId, '📨 Передаю задачу агенту…');
     const initialMsgId = placeholderRes?.result?.message_id ?? null;
 
     const updatedSession = {
@@ -168,12 +181,12 @@ export async function handleCallbackQuery(cq, env) {
       // the agent stores it on the session record and re-binds on continuation).
       projectId: projectId || session.projectId || null,
     };
-    await setSession(env.SESSIONS, chatId, updatedSession);
+    await setSession(env.SESSIONS, chatId, updatedSession, threadId);
     if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, `${label} — задача передана на запуск`, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
 
     try {
       const result = await runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `callback-${id}`,
         userId: chatId,
         username: updatedSession.username,
@@ -190,10 +203,10 @@ export async function handleCallbackQuery(cq, env) {
       });
       const newPinnedMsgId = result?.pinnedMsgId || updatedSession.pinnedMsgId || null;
       if (newPinnedMsgId !== updatedSession.pinnedMsgId) {
-        await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId });
+        await setSession(env.SESSIONS, chatId, { ...updatedSession, pinnedMsgId: newPinnedMsgId }, threadId);
       }
     } catch (err) {
-      sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`).catch(() => {});
+      sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`).catch(() => {});
     }
     return;
   }
@@ -205,8 +218,7 @@ export async function handleCallbackQuery(cq, env) {
     await answerCallbackQuery(env.BOT_TOKEN, id);
 
     const sessionId = data.slice(3);
-    await sendMessageWithKeyboard(
-      env.BOT_TOKEN, chatId,
+    await sendKbT(env, chatId, threadId,
       '↩ Что сделать с этим диалогом?',
       [
         [{ text: '▶️ Продолжить',                       callback_data: `sc:${sessionId}` }],
@@ -234,9 +246,9 @@ export async function handleCallbackQuery(cq, env) {
       pendingProjectChoice: session.pendingProjectChoice ? { ...session.pendingProjectChoice, suspended: true } : null,
       lastSessionId: sessionId,
       lastMessageAt: Date.now(),
-    });
+    }, threadId);
     await answerCallbackQuery(env.BOT_TOKEN, id, '📌 Продолжаю диалог');
-    await sendMessage(env.BOT_TOKEN, chatId,
+    await sendT(env, chatId, threadId,
       '📌 <b>Продолжаю этот диалог</b>\n\nПиши следующее сообщение — отвечу с учётом контекста.'
     );
     return;
@@ -255,13 +267,13 @@ export async function handleCallbackQuery(cq, env) {
         path: `sessions/${sessionId}.json`,
       });
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось загрузить данные сессии: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Не удалось загрузить данные сессии: ${e.message}`);
       return;
     }
 
     let parsed;
     try { parsed = JSON.parse(fileData.content); } catch {
-      await sendMessage(env.BOT_TOKEN, chatId, '❌ Не удалось прочитать файл сессии');
+      await sendT(env, chatId, threadId, '❌ Не удалось прочитать файл сессии');
       return;
     }
 
@@ -284,7 +296,7 @@ export async function handleCallbackQuery(cq, env) {
     }
 
     const text = lines.join('\n');
-    await sendMessage(env.BOT_TOKEN, chatId,
+    await sendT(env, chatId, threadId,
       text.length > 4000 ? text.slice(0, 3900) + '\n…' : text
     );
     return;
@@ -296,7 +308,7 @@ export async function handleCallbackQuery(cq, env) {
     const sourceSessionId = data.slice(3);
     await answerCallbackQuery(env.BOT_TOKEN, id);
     try { await startNewDialog(env, chatId, session, { contextFromSession: sourceSessionId }); }
-    catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+    catch (err) { await sendT(env, chatId, threadId, `⚠️ ${err.message}`); }
     return;
   }
 
@@ -307,7 +319,7 @@ export async function handleCallbackQuery(cq, env) {
     let list;
     try { list = await getSessions(env, { username: session.username, limit: 8 }); } catch { list = []; }
     if (!list.length) {
-      await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов.');
+      await sendT(env, chatId, threadId, '📭 Нет диалогов.');
       return;
     }
     const { text, buttons } = renderSessionList(list, { callbackPrefix: 'sd' });
@@ -315,7 +327,7 @@ export async function handleCallbackQuery(cq, env) {
       { text: '✨ Новый диалог', callback_data: 'nd:' },
       { text: '🗂 Архивировать', callback_data: 'ar:menu' },
     ]);
-    await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
+    await sendKbT(env, chatId, threadId, text, buttons, {}, env);
     return;
   }
 
@@ -331,7 +343,7 @@ export async function handleCallbackQuery(cq, env) {
     if (sub === '' || sub === 'clean') {
       await answerCallbackQuery(env.BOT_TOKEN, id);
       try { await startNewDialog(env, chatId, session); }
-      catch (err) { await sendMessage(env.BOT_TOKEN, chatId, `⚠️ ${err.message}`); }
+      catch (err) { await sendT(env, chatId, threadId, `⚠️ ${err.message}`); }
       return;
     }
 
@@ -341,7 +353,7 @@ export async function handleCallbackQuery(cq, env) {
       let list;
       try { list = await getSessions(env, { username: session.username, limit: 6 }); } catch { list = []; }
       if (!list.length) {
-        await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов для загрузки контекста.');
+        await sendT(env, chatId, threadId, '📭 Нет диалогов для загрузки контекста.');
         return;
       }
       const { text, buttons } = renderSessionList(list, {
@@ -349,7 +361,7 @@ export async function handleCallbackQuery(cq, env) {
         header: '📚 <b>Загрузить контекст в новый диалог</b>',
         hint: 'Выбери номер диалога ниже — его контекст загрузится в новый:',
       });
-      await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, buttons, {}, env);
+      await sendKbT(env, chatId, threadId, text, buttons, {}, env);
       return;
     }
 
@@ -360,10 +372,10 @@ export async function handleCallbackQuery(cq, env) {
   // ── Profile actions ───────────────────────────────────────────────────────
   if (data === 'prof:logout') {
     await answerCallbackQuery(env.BOT_TOKEN, id);
-    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты уже не авторизован.'); return; }
+    if (!session) { await sendT(env, chatId, threadId, '⚠️ Ты уже не авторизован.'); return; }
     const name = session.name;
     await deleteSession(env.SESSIONS, chatId);
-    await sendMessage(env.BOT_TOKEN, chatId,
+    await sendT(env, chatId, threadId,
       `👋 До встречи, ${name}!\n\nДля входа: <code>/login username password</code>`
     );
     return;
@@ -371,9 +383,9 @@ export async function handleCallbackQuery(cq, env) {
 
   if (data === 'prof:switch') {
     await answerCallbackQuery(env.BOT_TOKEN, id);
-    if (!session) { await sendMessage(env.BOT_TOKEN, chatId, '⚠️ Ты не авторизован.'); return; }
+    if (!session) { await sendT(env, chatId, threadId, '⚠️ Ты не авторизован.'); return; }
     await deleteSession(env.SESSIONS, chatId);
-    await sendMessage(env.BOT_TOKEN, chatId,
+    await sendT(env, chatId, threadId,
       `🔄 Выход из профиля <b>${session.name}</b> выполнен.\n\n` +
       `Войди под другим логином:\n<code>/login username password</code>`
     );
@@ -383,7 +395,7 @@ export async function handleCallbackQuery(cq, env) {
   // ── File browser: navigate into folder ───────────────────────────────────
   if (data?.startsWith('fl:')) {
     await answerCallbackQuery(env.BOT_TOKEN, id);
-    await cmdFiles(chatId, env, data.slice(3));
+    await cmdFiles(chatId, env, data.slice(3), threadId);
     return;
   }
 
@@ -396,7 +408,7 @@ export async function handleCallbackQuery(cq, env) {
     try {
       fileData = await readFile(env, { username: session.username, path: data.slice(3) });
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось прочитать файл: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Не удалось прочитать файл: ${e.message}`);
       return;
     }
 
@@ -411,10 +423,10 @@ export async function handleCallbackQuery(cq, env) {
     const body = `<pre>${esc(display)}</pre>`;
     const full = `${header}\n\n${body}`;
     if (full.length <= 4096) {
-      await sendMessage(env.BOT_TOKEN, chatId, full);
+      await sendT(env, chatId, threadId, full);
     } else {
-      await sendMessage(env.BOT_TOKEN, chatId, header);
-      await sendMessage(env.BOT_TOKEN, chatId, `<pre>${esc(display.slice(0, 3800))}</pre>`);
+      await sendT(env, chatId, threadId, header);
+      await sendT(env, chatId, threadId, `<pre>${esc(display.slice(0, 3800))}</pre>`);
     }
     return;
   }
@@ -430,8 +442,7 @@ export async function handleCallbackQuery(cq, env) {
 
     if (sub === 'menu') {
       await answerCallbackQuery(env.BOT_TOKEN, id);
-      await sendMessageWithKeyboard(
-        env.BOT_TOKEN, chatId,
+      await sendKbT(env, chatId, threadId,
         '🗂 <b>Архивировать диалоги</b>\n\nВыбери что архивировать:',
         [
           [{ text: '🗂 Архивировать все',                      callback_data: 'ar:all' }],
@@ -450,7 +461,7 @@ export async function handleCallbackQuery(cq, env) {
       let list;
       try { list = await getSessions(env, { username: session.username, limit: 20 }); } catch { list = []; }
       if (!list.length) {
-        await sendMessage(env.BOT_TOKEN, chatId, '📭 Нет диалогов для архивирования.');
+        await sendT(env, chatId, threadId, '📭 Нет диалогов для архивирования.');
         return;
       }
       const buttons = list.map(s => ([{
@@ -458,8 +469,7 @@ export async function handleCallbackQuery(cq, env) {
         callback_data: `sa:${s.id}`,
       }]));
       buttons.push([{ text: '← Отмена', callback_data: 'ar:menu' }]);
-      await sendMessageWithKeyboard(
-        env.BOT_TOKEN, chatId,
+      await sendKbT(env, chatId, threadId,
         '📋 <b>Выбери диалог для архивирования:</b>',
         buttons, {}, env
       );
@@ -483,13 +493,13 @@ export async function handleCallbackQuery(cq, env) {
     try {
       list = await getSessions(env, { username: session.username, limit: 100 });
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Не удалось получить диалоги: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Не удалось получить диалоги: ${e.message}`);
       return;
     }
 
     const toArchive = keepLast > 0 ? list.slice(keepLast) : list;
     if (toArchive.length === 0) {
-      await sendMessage(env.BOT_TOKEN, chatId, '✅ Нечего архивировать — диалогов столько, сколько хочешь оставить.');
+      await sendT(env, chatId, threadId, '✅ Нечего архивировать — диалогов столько, сколько хочешь оставить.');
       return;
     }
 
@@ -499,9 +509,9 @@ export async function handleCallbackQuery(cq, env) {
         sessionIds: toArchive.map(s => s.id),
       });
       const n = result.archived ?? toArchive.length;
-      await sendMessage(env.BOT_TOKEN, chatId, `✅ Архивировано диалогов: <b>${n}</b>`);
+      await sendT(env, chatId, threadId, `✅ Архивировано диалогов: <b>${n}</b>`);
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка архивирования: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Ошибка архивирования: ${e.message}`);
     }
     return;
   }
@@ -523,10 +533,10 @@ export async function handleCallbackQuery(cq, env) {
       if (msgId) {
         await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       } else {
-        await sendMessage(env.BOT_TOKEN, chatId, text);
+        await sendT(env, chatId, threadId, text);
       }
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
     }
     return;
   }
@@ -547,16 +557,16 @@ export async function handleCallbackQuery(cq, env) {
       editMessageReplyMarkup(env.BOT_TOKEN, chatId, message.message_id, []).catch(() => {});
     }
     if (env.INTAKE) {
-      const stub = env.INTAKE.get(env.INTAKE.idFromName(String(chatId)));
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const r = await stub.fetch('https://intake/flush', { method: 'POST' })
-        .then(x => x.json()).catch(err => { sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`); return null; });
+        .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
       if (r?.empty) {
-        await sendMessage(env.BOT_TOKEN, chatId,
+        await sendT(env, chatId, threadId,
           '📭 Буфер пуст — напиши запрос, потом жми «▶️ Запустить проработку».');
       } else if (r?.busy) {
         // /flush no-ops when a run is already in flight (never double-fire) — tell
         // the user instead of silently dropping the tap (INTAKE-SCENARIO-MATRIX.md №4).
-        await sendMessage(env.BOT_TOKEN, chatId,
+        await sendT(env, chatId, threadId,
           '⏳ Уже идёт прогон — новое сообщение добавится в буфер, кнопка появится снова после завершения.');
       }
     }
@@ -575,10 +585,10 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '▶️ Продолжаю по плану…');
     const sessionId = data.slice('plan|'.length) || session.activeSessionId || session.lastSessionId;
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '▶️ Продолжаю по плану…');
+    const thinkMsg = await sendT(env, chatId, threadId, '▶️ Продолжаю по плану…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
@@ -589,7 +599,7 @@ export async function handleCallbackQuery(cq, env) {
       initialMsgId,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
     return;
   }
 
@@ -606,10 +616,10 @@ export async function handleCallbackQuery(cq, env) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '🔎 Разбираюсь подробнее…');
     const sessionId = data.slice('qa_more|'.length) || session.activeSessionId || session.lastSessionId;
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, '🔎 Разбираюсь подробнее…');
+    const thinkMsg = await sendT(env, chatId, threadId, '🔎 Разбираюсь подробнее…');
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
@@ -619,7 +629,7 @@ export async function handleCallbackQuery(cq, env) {
       initialMsgId,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
     return;
   }
 
@@ -645,19 +655,19 @@ export async function handleCallbackQuery(cq, env) {
     if (checklistCommand) {
       await answerCallbackQuery(env.BOT_TOKEN, id);
       await runTask(env, {
-        initiatedAt, threadId: message?.message_thread_id || null,
+        initiatedAt, threadId: threadId,
         requestId: `callback-${id}`, userId: chatId, username: session.username,
         sessionId, task: checklistCommand, forceClaude: false,
         telegramUserId: session.telegramUserId, projectId: session.projectId || null,
-      }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+      }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
       return;
     }
 
     await answerCallbackQuery(env.BOT_TOKEN, id, `▶️ Вариант ${optionNo}…`);
-    const thinkMsg = await sendMessage(env.BOT_TOKEN, chatId, `▶️ Продолжаю с вариантом ${optionNo}…`);
+    const thinkMsg = await sendT(env, chatId, threadId, `▶️ Продолжаю с вариантом ${optionNo}…`);
     const initialMsgId = thinkMsg?.result?.message_id ?? null;
     await runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `callback-${id}`,
       userId: chatId,
       username: session.username,
@@ -668,7 +678,7 @@ export async function handleCallbackQuery(cq, env) {
       initialMsgId,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
     return;
   }
 
@@ -689,7 +699,7 @@ export async function handleCallbackQuery(cq, env) {
       { text: '⛔ Точно остановить', callback_data: `stopok|${taskId}` },
     ]];
     if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, confirmText, { lifecycleEnv: env, reply_markup: { inline_keyboard: confirmKeyboard } }).catch(() => {});
-    else await sendMessageWithKeyboard(env.BOT_TOKEN, chatId, confirmText, confirmKeyboard, {}, env);
+    else await sendKbT(env, chatId, threadId, confirmText, confirmKeyboard, {}, env);
     return;
   }
 
@@ -707,12 +717,12 @@ export async function handleCallbackQuery(cq, env) {
     }
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     try {
-      const result = await stopTask(env, { username: session.username });
+      const result = await stopTask(env, { username: session.username, chatId, threadId });
       const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
       if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-      else await sendMessage(env.BOT_TOKEN, chatId, text);
+      else await sendT(env, chatId, threadId, text);
     } catch (e) {
-      await sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${e.message}`);
+      await sendT(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
     }
     return;
   }
@@ -734,9 +744,9 @@ export async function handleCallbackQuery(cq, env) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       pendingSupplementDraft: { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS },
-    });
+    }, threadId);
     await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Напиши, что добавить');
-    await sendMessage(env.BOT_TOKEN, chatId,
+    await sendT(env, chatId, threadId,
       '✏️ Напиши текст следующим сообщением — остановлю текущую задачу и перезапущу с ним как с дополнением.');
     return;
   }
@@ -755,7 +765,7 @@ export async function handleCallbackQuery(cq, env) {
     // the draft was written moments ago. Same race the sp:/pc: pickers already guard
     // against with withKvConsistencyRetry; this flow was missing that re-read, which is
     // exactly why a quick confirm tap could report "draft not found" on a real draft.
-    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, s => !!s?.pendingSupplementDraft);
+    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, s => !!s?.pendingSupplementDraft, 400, threadId);
     const draft = session.pendingSupplementDraft;
     const msgId = message?.message_id;
     if (!draft) {
@@ -764,23 +774,23 @@ export async function handleCallbackQuery(cq, env) {
       return;
     }
     if (Date.now() >= draft.expiresAt) {
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
       await answerCallbackQuery(env.BOT_TOKEN, id, '⌛ Черновик устарел.');
       if (msgId) await editMessageReplyMarkup(env.BOT_TOKEN, chatId, msgId, []).catch(() => {});
       return;
     }
     if (!confirm) {
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
       await answerCallbackQuery(env.BOT_TOKEN, id, '✖️ Отменено — задача продолжает работать.');
       if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '✖️ Дополнение отменено — задача продолжает работать.', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
       return;
     }
-    await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null });
+    await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
     await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
     if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '➕ Останавливаю задачу и перезапускаю с дополнением…', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-    await stopTask(env, { username: session.username }).catch(() => {});
+    await stopTask(env, { username: session.username, chatId, threadId }).catch(() => {});
     return runTask(env, {
-      initiatedAt, threadId: message?.message_thread_id || null,
+      initiatedAt, threadId: threadId,
       requestId: `sup-${draft.taskId}-${msgId || id}`,
       userId: chatId,
       username: session.username,
@@ -791,7 +801,7 @@ export async function handleCallbackQuery(cq, env) {
       initialMsgId: msgId || null,
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
-    }).catch(err => sendMessage(env.BOT_TOKEN, chatId, `❌ Ошибка: ${err.message}`));
+    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, id);
