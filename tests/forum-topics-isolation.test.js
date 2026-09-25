@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { conversationKey, deliveryContext, threadExtra, threadIdOf } from '../src/conversation-context.js';
 import { getSession, setSession, THREAD_SESSION_FIELDS } from '../src/lib/kv.js';
 import { MediaJob } from '../src/media-jobs.js';
+import { stopTask } from '../src/lib/agent-client.js';
 
 // Cross-topic (forum) isolation matrix for issue #255.
 //
@@ -125,5 +126,33 @@ describe('MediaJob media-result returns to the originating topic', () => {
     const job = new MediaJob(mediaJobState(deliverJob({ chat: { id: CHAT }, message_id: 5 })), mediaJobEnv(captured));
     await job.alarm();
     expect(captured).toEqual([String(CHAT)]);
+  });
+});
+
+// ── /stop scoping ─────────────────────────────────────────────────────────────
+// A forum topic's stop must be scoped to chat + topic + this bot's audience, while a
+// non-forum stop must keep the exact legacy `{ username }` payload (hard guard).
+describe('stopTask payload scoping', () => {
+  const env = { AGENT_URL: 'https://agent', AGENT_SECRET: 's', SESSION_NAMESPACE: 'recruiter' };
+  let originalFetch;
+  beforeEach(() => { originalFetch = global.fetch; });
+  afterEach(() => { global.fetch = originalFetch; });
+
+  function captureBody() {
+    let sent = null;
+    global.fetch = vi.fn(async (_url, opts) => { sent = JSON.parse(opts.body); return { ok: true, json: async () => ({ ok: true, killed: 1 }) }; });
+    return () => sent;
+  }
+
+  it('legacy { username } for a private/non-forum stop', async () => {
+    const get = captureBody();
+    await stopTask(env, { username: 'u', chatId: CHAT, threadId: null });
+    expect(get()).toEqual({ username: 'u' });
+  });
+
+  it('scopes by chat + topic + audience inside a forum topic', async () => {
+    const get = captureBody();
+    await stopTask(env, { username: 'u', chatId: CHAT, threadId: 7 });
+    expect(get()).toEqual({ username: 'u', chatId: CHAT, threadId: 7, audience: 'recruiter' });
   });
 });
