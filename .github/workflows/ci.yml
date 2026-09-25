@@ -222,6 +222,14 @@ jobs:
               echo "  ❌ $name getMe identity check failed: $who"; exit 1
             fi
             echo "  ✅ bot identity ok"
+            # Fail-closed webhook: an unsigned update must be refused. 200 here
+            # means the Worker would dispatch forged updates (audit 2026-09-25).
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$url/webhook" \
+              -H 'content-type: application/json' -d '{"update_id":0}')
+            if [ "$code" != "401" ]; then
+              echo "  ❌ $name accepted an unsigned webhook (HTTP $code) — set TELEGRAM_WEBHOOK_SECRET + setWebhook secret_token"; exit 1
+            fi
+            echo "  ✅ unsigned webhook rejected"
           }
           verify main "https://trained-assist-tg-bot.skillset-apply.workers.dev"
           verify recruiter "https://trained-assist-tg-bot-recruiter.skillset-apply.workers.dev"

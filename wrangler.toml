@@ -207,6 +207,11 @@ new_sqlite_classes = ["MediaJob"]
 #   wrangler secret put AGENT_URL --env freelance
 #   wrangler secret put AGENT_SECRET --env freelance
 #   wrangler secret put TELEGRAM_WEBHOOK_SECRET --env freelance  # setWebhook secret_token
+#
+# TELEGRAM_WEBHOOK_SECRET is REQUIRED for every bot env (main/recruiter/freelance):
+# /webhook fails closed without it (prod smoke asserts unsigned → 401).
+# Set/rotate (Telegram retries the few 401s in between): (1) setWebhook url=<same> secret_token=<new>
+# (2) wrangler secret put TELEGRAM_WEBHOOK_SECRET [--env X] with the same value.
 
 [[env.staging.durable_objects.bindings]]
 name = "RETRY_QUEUE"
