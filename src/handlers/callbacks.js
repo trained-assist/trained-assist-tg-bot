@@ -586,12 +586,8 @@ export async function handleCallbackQuery(cq, env) {
       // An empty buffer is a normal no-op after dispatch (including a stale
       // or duplicate tap). The callback is already acknowledged; don't add a
       // misleading instruction to resend a task that may already be running.
-      if (r?.busy) {
-        // /flush no-ops when a run is already in flight (never double-fire) — tell
-        // the user instead of silently dropping the tap (INTAKE-SCENARIO-MATRIX.md №4).
-        await sendT(env, chatId, threadId,
-          '⏳ Уже идёт прогон — новое сообщение добавится в буфер, кнопка появится снова после завершения.');
-      }
+      // Busy/duplicate taps keep the existing status; the callback is already acknowledged.
+
     }
     return;
   }
