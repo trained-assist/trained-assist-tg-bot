@@ -47,8 +47,9 @@
         "default",
         "freelance"
       ],
-      "description": "Проекты профиля: список/смена/создание"
+      "description": "Проект чата: показать/закрепить/открепить (/project unpin)"
     },
+    { "command": "/settings", "aliases": ["/config", "/настройки"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Настройки чата: проект, движок, роль, что сохранено" },
     {
       "command": "/build_spec",
       "aliases": [

@@ -10,7 +10,8 @@ const handleMessage = vi.fn();
 const openProjectChoice = vi.fn();
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 // commands/callbacks/etc. are pulled in transitively by index.js; stub the heavy ones.
-vi.mock('../src/handlers/commands.js', () => ({ handleCommand: vi.fn(), isAdminForwardedCommand: () => false }));
+const handleCommand = vi.fn();
+vi.mock('../src/handlers/commands.js', () => ({ handleCommand: (...a) => handleCommand(...a), isAdminForwardedCommand: () => false }));
 vi.mock('../src/handlers/user-mgmt.js', () => ({ handleUserMgmt: vi.fn(), isUserMgmtCommand: () => false }));
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
 vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(), getOrCreateMappedSession: vi.fn() }));
@@ -44,6 +45,16 @@ describe('routeText — shared private+group intake rule', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(_appended).toHaveLength(1);
     expect(_appended[0]).toMatchObject({ text: 'быстрая мысль', flush: false });
+  });
+
+  it('turns «закрепи X» into /project pin X at once — no intake, no project picker', async () => {
+    const { env, _appended } = makeEnv();
+    getSession.mockResolvedValue({ username: 'u' });
+    getProjectDecision.mockResolvedValue({ action: 'ask', choices: [{ id: 'a' }, { id: 'b' }] });
+    await routeText({ chat: { id: 42 }, text: 'закрепи Фриланс-заказы' }, env, 42);
+    expect(handleCommand).toHaveBeenCalledWith(expect.objectContaining({ text: '/project pin Фриланс-заказы' }), env);
+    expect(openProjectChoice).not.toHaveBeenCalled();
+    expect(_appended).toHaveLength(0);
   });
 
   it('flushes immediately on a bare force word', async () => {
