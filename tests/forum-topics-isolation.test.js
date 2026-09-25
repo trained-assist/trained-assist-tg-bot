@@ -36,7 +36,7 @@ describe('conversation-context', () => {
   it('topic keys when a valid thread is present', () => {
     expect(conversationKey(CHAT, 7)).toBe(`${CHAT}:7`);
     expect(threadExtra(7)).toEqual({ message_thread_id: 7 });
-    expect(deliveryContext({ chat: { id: CHAT }, message_thread_id: 7 })).toEqual({ chatId: CHAT, threadId: 7 });
+    expect(deliveryContext({ chat: { id: CHAT }, is_topic_message: true, message_thread_id: 7 })).toEqual({ chatId: CHAT, threadId: 7 });
   });
 });
 
@@ -117,9 +117,16 @@ const deliverJob = msg => ({ id: 'a'.repeat(64), username: 'u', stage: 'deliver'
 describe('MediaJob media-result returns to the originating topic', () => {
   it('uses chatId:threadId for a topic message', async () => {
     const captured = [];
-    const job = new MediaJob(mediaJobState(deliverJob({ chat: { id: CHAT }, message_id: 5, message_thread_id: 9 })), mediaJobEnv(captured));
+    const job = new MediaJob(mediaJobState(deliverJob({ chat: { id: CHAT }, message_id: 5, is_topic_message: true, message_thread_id: 9 })), mediaJobEnv(captured));
     await job.alarm();
     expect(captured).toEqual([`${CHAT}:9`]);
+  });
+  it('returns prepared media to the chat buffer for an ordinary reply', async () => {
+    const captured = [];
+    const job = new MediaJob(mediaJobState(deliverJob({ chat: { id: CHAT, type: 'supergroup' },
+      message_id: 6, message_thread_id: 5, reply_to_message: { message_id: 5 } })), mediaJobEnv(captured));
+    await job.alarm();
+    expect(captured).toEqual([String(CHAT)]);
   });
   it('uses the legacy chat key when there is no thread', async () => {
     const captured = [];

@@ -323,7 +323,7 @@ async function cmdRu(msg, env) {
   try {
     const sessionId = newSessionId(chatId);
     await runTask(env, {
-      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: msg.message_thread_id || null,
+      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: threadIdOf(msg),
       requestId: `command-${chatId}-${msg.message_id}`,
       userId: chatId,
       username: session.username,
@@ -856,7 +856,7 @@ async function cmdRestart(msg, env) {
     const res = await fetch(`${env.AGENT_URL}/maintenance`, {
       method: arg === 'status' ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
-      ...(arg === 'status' ? {} : { body: JSON.stringify({ action: arg === 'cancel' ? 'cancel' : 'request', initiator: { username: session.username, chatId: msg.chat.id, threadId: msg.message_thread_id || null } }) }),
+      ...(arg === 'status' ? {} : { body: JSON.stringify({ action: arg === 'cancel' ? 'cancel' : 'request', initiator: { username: session.username, chatId: msg.chat.id, threadId: threadIdOf(msg) } }) }),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw Error(`HTTP ${res.status}`);

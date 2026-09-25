@@ -83,10 +83,10 @@ beforeEach(() => vi.clearAllMocks());
 describe('IntakeBuffer — outbound sends stay in the topic', () => {
   it('held notice carries message_thread_id for a forum topic', async () => {
     const { env } = makeIntakeEnv();
-    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: CHAT }, message_id: 2, message_thread_id: 9 } }] });
+    const { state } = makeDoState({ busy: true, buf: [{ text: 'queued', msg: { chat: { id: CHAT }, message_id: 2, is_topic_message: true, message_thread_id: 9 } }] });
     const intake = new IntakeBuffer(state, env);
     await intake.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({
-      text: 'x', msg: { chat: { id: CHAT }, message_id: 3, text: 'x', message_thread_id: 9 },
+      text: 'x', msg: { chat: { id: CHAT }, message_id: 3, text: 'x', is_topic_message: true, message_thread_id: 9 },
     }) }));
     await state.storage.put('receiptDue', Date.now() - 1); await intake.alarm();
     expect(sendMessageWithKeyboard).toHaveBeenCalledWith('t', CHAT, expect.any(String), expect.any(Array), expect.objectContaining({ message_thread_id: 9 }));
@@ -113,7 +113,7 @@ describe('callbacks — topic-keyed flush', () => {
       INTAKE: { idFromName: n => { captured.push(n); return n; }, get: () => ({ fetch: async () => Response.json({ flushed: true }) }) },
     };
     await handleCallbackQuery({ id: 'c1', data: 'intake_run', from: { id: 999 },
-      message: { chat: { id: CHAT }, message_id: 42, message_thread_id: 77 } }, env);
+      message: { chat: { id: CHAT }, message_id: 42, is_topic_message: true, message_thread_id: 77 } }, env);
     expect(captured).toEqual([`${CHAT}:77`]);
   });
 
@@ -138,7 +138,7 @@ describe('launch callback after the buffer was consumed', () => {
     env.INTAKE.get = () => ({ fetch: (url, init) => intake.fetch(new Request(url, init)) });
     for (const id of ['first', 'duplicate']) {
       await handleCallbackQuery({ id, data, from: { id: 999 },
-        message: { chat: { id: CHAT }, message_id: 42, message_thread_id: 77 } }, env);
+        message: { chat: { id: CHAT }, message_id: 42, is_topic_message: true, message_thread_id: 77 } }, env);
     }
     expect(answerCallbackQuery).toHaveBeenCalledTimes(2);
     expect(editMessageReplyMarkup).not.toHaveBeenCalled();
