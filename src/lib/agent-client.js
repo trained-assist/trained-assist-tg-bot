@@ -100,7 +100,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileMimeType) body.fileMimeType = fileMimeType;
 
   if (env.INTAKE && inputItems) {
-    body.requestId ||= crypto.randomUUID();
+    body.requestId ||= initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID();
     const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(userId, threadId)));
     const saved = await intake.fetch('https://intake/snapshot', {
       method: 'POST', body: JSON.stringify({ body, items: inputItems }),
@@ -117,7 +117,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
 
   if (env.RUN_OUTBOX) {
     // Caller supplies Telegram/batch identity; fallback uses a stable status message.
-    body.requestId = requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
+    body.requestId ||= requestId || (initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID());
     const stub = env.RUN_OUTBOX.get(env.RUN_OUTBOX.idFromName(`${username}:${userId}`));
     const res = await stub.fetch('https://outbox/enqueue', {
       method: 'POST', body: JSON.stringify({ agentUrl, body }),

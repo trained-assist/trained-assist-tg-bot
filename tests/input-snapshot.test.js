@@ -112,3 +112,16 @@ it('inspection callback sends the full private snapshot to the original topic, j
   expect(send.mock.calls[0][2]).toContain('#/session/saved-session');
   expect((await read(io)).status).toBe(200);
 });
+
+it('snapshot matches the durable outbox payload when the caller omitted requestId', async () => {
+  const { env, io } = world();
+  let enqueued;
+  env.RUN_OUTBOX = { idFromName: key => key, get: () => ({ fetch: async (_url, options) => {
+    enqueued = JSON.parse(options.body).body; return Response.json({ queued:true });
+  } }) };
+  await runTask(env, { userId:42, username:'alice', initialMsgId:99, task:'outbox task', inputItems:[item(1,'outbox task')] });
+  const snapshot = await (await read(io)).json();
+  expect(snapshot.id).toBe(enqueued.requestId);
+  expect(snapshot.body).toEqual(enqueued);
+  expect(fetch).not.toHaveBeenCalled();
+});
