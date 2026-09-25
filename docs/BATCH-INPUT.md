@@ -18,5 +18,6 @@ Superseded tests (replaced in the same change):
 - `tests/intake-conversation.test.js`: immediate envelope per arrival → one envelope per quiet window; preserves one dispatch for the full conversation.
 - `tests/intake-preflight.test.js`: quick hit consumes an individual buffered item → no intermediate quick dispatch; duplicate update stays deduplicated.
 - `tests/media-jobs.test.js` and `tests/forum-topics-routing.test.js`: immediate media/held ACK → delayed receipt, preserving topic address.
+- `tests/callbacks.test.js`: busy launch now acknowledges the callback without producing a second status bubble.
 - Empty-launch tests retain no-message invariant; the callback no longer strips the keyboard asynchronously, because it races the new persistent controls.
 Replacement scenario `tests/input-snapshot.test.js` is mandatory in staging. It verifies exact wire payload, immutable retries, source metadata/order, Unicode chunks, ownership, callback delivery and delayed-send concurrency.
