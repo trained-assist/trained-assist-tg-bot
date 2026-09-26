@@ -373,6 +373,13 @@ export async function processDueRetries(env) {
   }
 }
 
+// Telegram dialog ids are `s-<|chatId|>-<ts>` (newSessionId); legacy groups used the raw
+// negative id (`s--<|chatId|>-<ts>`). Anything else belongs to another chat or channel.
+export function isChatSessionId(id, chatId) {
+  const abs = String(Math.abs(Number(chatId)));
+  return typeof id === 'string' && (id.startsWith(`s-${abs}-`) || id.startsWith(`s--${abs}-`));
+}
+
 /**
  * Decide what to do with the incoming message:
  *   { type: 'run', sessionId }           — run task with this session
@@ -440,8 +447,12 @@ async function resolveSessionRoute(chatId, session, text, env) {
     return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
   }
 
-  // Restrict automatic matching to the current project when one is known.
-  recentSessions = (recentSessions || []).filter(s => !session.projectId || s.projectId === session.projectId);
+  // Restrict automatic matching to THIS chat's dialogs (2026-09-26 incident: /sessions lists
+  // the whole profile, so a message that merely mentioned another chat was routed into that
+  // chat's live session and queued behind it) and to the current project when one is known.
+  recentSessions = (recentSessions || [])
+    .filter(s => isChatSessionId(s.id, chatId))
+    .filter(s => !session.projectId || s.projectId === session.projectId);
   if (!recentSessions.length) {
     return { type: 'run', sessionId: newSessionId(chatId), forceNew: true };
   }
