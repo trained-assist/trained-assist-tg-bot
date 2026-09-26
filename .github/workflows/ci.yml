@@ -256,11 +256,11 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1
+    uses: trained-assist/pr-autofix/.github/workflows/autofix-callable.yml@v1.5.0
     with:
       pr_number: ${{ github.event.pull_request.number }}
       original_branch: ${{ github.head_ref }}
       run_id: ${{ github.run_id }}
     secrets:
       openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
-      gh_token: ${{ secrets.GH_PAT || github.token }}
+      gh_token: ${{ secrets.AUTOFIX_PAT || secrets.GH_PAT || github.token }}
