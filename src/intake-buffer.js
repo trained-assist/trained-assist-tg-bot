@@ -76,7 +76,7 @@ const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
-const heldText = n => `✓ Получил ещё ${n} сообщений. Дополнения сохранены отдельно от входа запущенной задачи.`;
+const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. «▶️ Запустить агента» — запущу их сразу после неё.`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
 export class IntakeBuffer {
@@ -215,6 +215,7 @@ export class IntakeBuffer {
         await this.state.storage.delete('receiptDue');
         await this.state.storage.delete('collectorMsgId');
         await this.state.storage.delete('launching');
+        await this.state.storage.delete('launchAfterRelease');
         await this.state.storage.deleteAlarm();
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
@@ -343,8 +344,19 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
-      // Button tap. If a run is somehow already going, ignore (don't double-fire).
-      if ((await this.state.storage.get('busy')) === true) return json({ busy: true });
+      // Button tap / force word while a run is in flight. Never a second
+      // concurrent run (#1527 F1), but never a silent no-op either: the held
+      // «▶️ Запустить агента» button used to do nothing mid-run. First self-heal
+      // a stale hold (lost push / restart — same poll the alarm uses); if the run
+      // is really going, remember the tap and launch right after it ends.
+      if ((await this.state.storage.get('busy')) === true) {
+        const since = (await this.state.storage.get('busySince')) || 0;
+        if (!(await this._pollRunFinishedIfIdle(since, { launch: true }))) {
+          await this.state.storage.put('launchAfterRelease', true);
+          return json({ busy: true, queued: true });
+        }
+        return json({ flushed: true, healed: true });
+      }
       const buf = (await this.state.storage.get('retryBatch')) || (await this.state.storage.get('buf')) || [];
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
@@ -672,8 +684,15 @@ export class IntakeBuffer {
   async _afterBusyRelease() {
     await this._recoverMedia();
     const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
-    if (!remaining.length) return;
+    if (!remaining.length) { await this.state.storage.delete('launchAfterRelease'); return; }
     if (remaining.some(i => i.mediaPending)) return; // _mediaResult shows the collector later
+    // The user already tapped «▶️ Запустить» during the run — honour it now
+    // instead of re-offering the button and waiting for another tap.
+    if (await this.state.storage.get('launchAfterRelease')) {
+      await this.state.storage.delete('launchAfterRelease');
+      await this._dispatch();
+      return;
+    }
     const last = remaining[remaining.length - 1];
     await this._showCollector(last.msg.chat?.id, remaining.length, last.msg.message_id, threadIdOf(last.msg));
   }
@@ -685,7 +704,7 @@ export class IntakeBuffer {
   // agent process restarted (in-memory counter reset). Outbox dispatches are
   // excluded: their counter only appears when the outbox actually delivers,
   // and releasing early while a job is still queued reopens the double-run hole.
-  async _pollRunFinishedIfIdle(since) {
+  async _pollRunFinishedIfIdle(since, { launch = false } = {}) {
     const chatId = await this.state.storage.get('busyChatId');
     if (!chatId || !this.env.AGENT_URL) return false;
     if (await this.state.storage.get('busyViaOutbox')) return false;
@@ -701,6 +720,7 @@ export class IntakeBuffer {
       const released = await this._exclusive(async () => {
         if (!(await this.state.storage.get('busy'))) return false;
         await this._releaseBusyLocked();
+        if (launch) await this.state.storage.put('launchAfterRelease', true);
         return true;
       });
       if (released) await this._afterBusyRelease();
