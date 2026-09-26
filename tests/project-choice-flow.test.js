@@ -138,11 +138,11 @@ describe('project selection through actual creation, message and callback handle
     expect(task).toContain('one'); expect(task).toContain('two');
   });
   it.each(['low', 'medium', 'error'])('stale ambiguous %s input retains batches and files through project selection', async outcome => {
-    await setSession(env.SESSIONS, chatId, { username: 'owner', lastSessionId: 'old',
+    await setSession(env.SESSIONS, chatId, { username: 'owner', lastSessionId: `s-${Math.abs(chatId)}-1`,
       lastMessageAt: Date.now() - 3 * 3600000, projectId: 'old-project' });
-    getSessions.mockResolvedValue([{ id: 'old', projectId: 'old-project', lastAt: Date.now() - 60000 }]);
+    getSessions.mockResolvedValue([{ id: `s-${Math.abs(chatId)}-1`, projectId: 'old-project', lastAt: Date.now() - 60000 }]);
     if (outcome === 'error') classifyMessage.mockRejectedValue(new Error('offline'));
-    else classifyMessage.mockResolvedValue({ confidence: outcome, sessionId: 'old' });
+    else classifyMessage.mockResolvedValue({ confidence: outcome, sessionId: `s-${Math.abs(chatId)}-1` });
     await handleMessage({ ...message('проверь документ'), document: {
       file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain',
     } }, env, { mode: 'deep' });

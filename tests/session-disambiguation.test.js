@@ -179,4 +179,15 @@ describe('ambiguous routing uses projects', () => {
     expect(classifyMessage).not.toHaveBeenCalled();
     expect(runTask.mock.calls[0][1].forceNew).toBe(true);
   });
+  it('never auto-routes into another chat session of the profile (cross-chat leak)', async () => {
+    getSession.mockResolvedValue({ username: 'u', lastSessionId: 's-42-1', lastMessageAt: THREE_HOURS_AGO });
+    getSessions.mockResolvedValue([
+      { id: 's-1004371070440-1', topic: 'гтд в чате -4371070440' },
+      { id: 's-42-1', topic: 'лестница моделей' },
+    ]);
+    classifyMessage.mockResolvedValue({ confidence: 'high', sessionId: 's-1004371070440-1' });
+    await handleMessage({ chat: { id: CHAT_ID }, text: 'по гтд: в чате -4371070440 висит' }, env);
+    expect(classifyMessage.mock.calls[0][1].sessions.map(s => s.id)).toEqual(['s-42-1']);
+    expect(runTask.mock.calls[0][1].sessionId).not.toBe('s-1004371070440-1');
+  });
 });
