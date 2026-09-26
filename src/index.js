@@ -37,7 +37,9 @@ app.post('/internal/run-finished', async c => {
   }
   const body = await c.req.json().catch(() => null);
   const chatId = Number(body?.chatId);
-  if (!Number.isSafeInteger(chatId) || chatId <= 0) return c.json({ error: 'invalid chatId' }, 400);
+  // 0 is the web/internal sentinel; real Telegram chats include NEGATIVE
+  // group/supergroup ids, which must reach their IntakeBuffer.
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return c.json({ error: 'invalid chatId' }, 400);
   const rawThread = body?.threadId;
   const threadId = rawThread == null ? null : Number(rawThread);
   if (threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) return c.json({ error: 'invalid threadId' }, 400);
