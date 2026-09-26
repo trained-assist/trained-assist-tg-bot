@@ -143,6 +143,23 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(await state.storage.get('busyRequestId')).toBeUndefined();
   });
 
+  it('busy arms the per-minute poll instead of sleeping until BUSY_MAX', async () => {
+    // A lost run-finished push used to hold the chat until BUSY_MAX_MS (45 min)
+    // because the alarm was only ever armed at the hard cap — the /tasks/running
+    // poll the comment describes never actually ran. The hold must now tick every
+    // BUSY_POLL_MS so the first idle tick releases it.
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const before = Date.now();
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+    const alarm = state._dump().alarm;
+    expect(alarm).toBeGreaterThan(before);
+    expect(alarm - before).toBeLessThanOrEqual(61_000);
+  });
+
   it('run-finished from a FOREIGN dispatch (requestId mismatch) keeps the hold', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });

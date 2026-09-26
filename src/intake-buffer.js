@@ -64,6 +64,11 @@ const anchor = messageId => (messageId ? { reply_to_message_id: messageId, allow
 const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isolate
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
+const BUSY_POLL_MS = 60_000;     // while busy, the alarm ticks this often and asks the
+                                 // agent GET /tasks/running?chatId= whether the run
+                                 // settled — the safety net for a lost run-finished
+                                 // push. The hold is released on the first idle tick,
+                                 // so a dropped push costs ~1 min, not BUSY_MAX_MS.
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
 
 const RECEIPT_MS = 1500;
@@ -547,7 +552,7 @@ export class IntakeBuffer {
       await this.state.storage.put('busy', true);
       await this.state.storage.put('busySince', Date.now());
       await this.state.storage.put('launching', items);
-      await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+      await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       if (!retryBatch) await this.state.storage.delete('buf');
       await this.state.storage.delete('retryBatch');
       return items;
@@ -574,7 +579,7 @@ export class IntakeBuffer {
 
     // Safety net: only fires if the run never reports back (lost run-finished
     // push, agent crash). The per-minute alarm ticks poll /tasks/running first.
-    await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+    await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
 
     let runAck = null;
     try {
@@ -599,7 +604,7 @@ export class IntakeBuffer {
         await this.state.storage.delete('launching');
         await this.state.storage.delete('retryBatchAttempts');
         // busy intentionally KEPT: the run's lifetime owns it now (#1527 F1).
-        await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       } else {
         // handleMessage resolved without reaching the agent (project picker,
         // oversized file, supplement draft, …) — no run to wait for.
