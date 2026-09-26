@@ -171,8 +171,9 @@ export async function getProjectDecision(env, { username, chatId, task = '' }) {
   if (!res.ok) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
   const data = await res.json();
   if (data.note || !Array.isArray(data.projects)) throw new Error('Не удалось загрузить проекты. Попробуй ещё раз.');
-  return { action: data.projects.length > 1 ? 'ask' : data.projects.length ? 'auto' : 'create',
-    choices: data.projects, active: null };
+  // Never 'ask' (owner decision 2026-09-26): without a decision the agent binds the chat's
+  // current project itself (pinned → last used → «Все подряд»).
+  return { action: data.projects.length ? 'auto' : 'create', choices: [], active: null };
 }
 
 export async function getSessions(env, { username, limit = 10 }) {

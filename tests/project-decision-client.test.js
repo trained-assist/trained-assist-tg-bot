@@ -4,11 +4,13 @@ const env = { AGENT_URL: 'https://agent', AGENT_RU_URL: 'https://other', AGENT_S
 const args = { username: 'owner', chatId: 42 };
 const response = data => ({ ok: true, json: async () => data });
 afterEach(() => vi.unstubAllGlobals());
-it('uses basic list when live endpoint falsely returns create with unavailable note', async () => {
+// Replaced 2026-09-26: the fallback used to return 'ask' for ≥2 projects; the bot no longer
+// asks which project — the agent binds the chat's current one itself.
+it('uses basic list when live endpoint falsely returns create with unavailable note, never asks', async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(response({ action: 'create', choices: [], note: 'projects model unavailable' }))
     .mockResolvedValueOnce(response({ projects: [{ id: 'a' }, { id: 'b' }] }));
   vi.stubGlobal('fetch', fetcher);
-  expect(await getProjectDecision(env, args)).toMatchObject({ action: 'ask', choices: [{ id: 'a' }, { id: 'b' }] });
+  expect(await getProjectDecision(env, args)).toMatchObject({ action: 'auto', choices: [] });
   expect(fetcher.mock.calls[1][0]).toBe('https://agent/projects?username=owner&audience=default');
 });
 it('fails visibly when both endpoints fail, rather than inventing an empty profile', async () => {
