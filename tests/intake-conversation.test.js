@@ -117,8 +117,22 @@ const RUN_CB = 'intake_run';
 beforeEach(() => {
   tg.length = 0;
   handleMessage.mockReset();
-  handleMessage.mockResolvedValue({ ok: true });
+  // Real handleMessage acks via onRunAccepted once the agent accepts the run
+  // (epic #1527 PR1) — the dispatch then holds busy until run-finished.
+  handleMessage.mockImplementation(async (msg, env, opts) => {
+    opts?.onRunAccepted?.({ requestId: 'req-default', durable: true });
+    return { ok: true };
+  });
 });
+
+// The agent's run-finished push (epic #1527 PR1) → releases the busy hold.
+async function runFinished(env, chatId, requestId = 'req-default') {
+  await env.INTAKE.get(String(chatId)).fetch('https://intake/run-finished', {
+    method: 'POST',
+    body: JSON.stringify({ requestId }),
+  });
+  await drain();
+}
 
 describe('intake conversation — real routeText + real IntakeBuffer', () => {
   it('C1: a 5-message task build accumulates visibly, then ▶️ launches ONE deep run', async () => {
@@ -148,7 +162,10 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
-    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
+    expect(opts).toEqual({
+      mode: 'deep', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
   it('C2: a question sent WHILE a run is in flight must not be swallowed (anti-«молчит»)', async () => {
@@ -183,7 +200,10 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toContain('собери участников выставки Rosupack');
     expect(msg.text).toContain('только российские производители упаковки');
-    expect(opts).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
+    expect(opts).toEqual({
+      mode: 'deep', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
   it('C4: voice reply plus photo and pasted text wait for one explicit launch', async () => {
@@ -209,9 +229,11 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
   it('C5: an 8-message conversation — accumulate, launch, follow-ups held+acked, re-launch', async () => {
     const { env } = makeWorld();
 
-    // 1–3: build and launch the first task; hold the run open.
+    // 1–3: build and launch the first task; hold the run open (ack fires on resolve).
     let release1;
-    handleMessage.mockReturnValueOnce(new Promise(r => { release1 = r; }));
+    handleMessage.mockImplementationOnce((msg, env, opts) => new Promise(r => {
+      release1 = () => { opts?.onRunAccepted?.({ requestId: 'req-c5', durable: true }); r({ ok: true }); };
+    }));
     await say(env, 42, 'проанализируй отклики на вакансию');
     await say(env, 42, 'вакансия — продакт-менеджер');
     await say(env, 42, 'сделай короткий отчёт');
@@ -227,10 +249,12 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     }
     expect(handleMessage).toHaveBeenCalledTimes(1);           // held, not dispatched
 
-    // Run 1 finishes → a fresh launch button is re-offered for the held messages.
+    // Run 1 settles: enqueue alone is NOT completion (epic #1527 PR1) — the
+    // agent's run-finished push releases the hold and re-offers the button.
     release1();
     await run1;
     await drain();
+    await runFinished(env, 42, 'req-c5');
     await env.quiet(42);
     expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
 
@@ -240,7 +264,10 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage).toHaveBeenCalledTimes(2);
     expect(handleMessage.mock.calls[1][0].text)
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
-    expect(handleMessage.mock.calls[1][2]).toEqual({ mode: 'deep', initialMsgId: expect.any(Number), onIntakePrepared: expect.any(Function) });
+    expect(handleMessage.mock.calls[1][2]).toEqual({
+      mode: 'deep', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
   // Regression: a follow-up reply must offer time to add supporting material.
@@ -252,11 +279,13 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     // fire on its own. This is the class behind «ответил Б → сразу побежал».
     const { env } = makeWorld();
 
-    // Turn 1: build + launch. The run completing == «the agent responded».
+    // Turn 1: build + launch. «The agent responded» == the run-finished push
+    // (epic #1527 PR1) — the enqueue alone keeps the busy hold.
     await say(env, 42, 'разбери отклик кандидата Иванова');
     await tapRun(env, 42);
     await drain();
     expect(handleMessage).toHaveBeenCalledTimes(1);          // one run so far
+    await runFinished(env, 42);
 
     // The user now adds the second half of the same thought (a reply to the
     // bot's answer — exactly «юзер ему отвечает»). It must NOT dispatch; it must

@@ -220,6 +220,25 @@ export class IntakeBuffer {
       return this._mediaResult(await request.json());
     }
 
+    // Agent → gateway run-finished (epic #1527 PR1): the primary release signal
+    // for the busy hold. The agent pushes this when an admitted run settles
+    // (success/error/stop/quick); the sender matches busyRequestId so a foreign
+    // run for the same chat can't release this chat's hold. Safety nets if this
+    // never arrives: outbox permanent reject, the alarm's /tasks/running poll,
+    // and BUSY_MAX_MS.
+    if (url.pathname === '/run-finished' && request.method === 'POST') {
+      const { requestId = null } = await request.json().catch(() => ({}));
+      const released = await this._exclusive(async () => {
+        if (!(await this.state.storage.get('busy'))) return { busy: false };
+        const busyReq = await this.state.storage.get('busyRequestId');
+        if (busyReq && requestId && busyReq !== requestId) return { busy: true, mismatch: true };
+        await this._releaseBusyLocked();
+        return { busy: false, released: true };
+      });
+      if (released.released) await this._afterBusyRelease();
+      return json(released);
+    }
+
     if (url.pathname === '/ingest' && request.method === 'POST') {
       let { msg } = await request.json();
       if (mediaEnabled(this.env) && mediaOf(msg)) {
@@ -538,6 +557,11 @@ export class IntakeBuffer {
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
     const threadId = threadIdOf(base);
+    // Identity of this busy window — read by /run-finished matching and the
+    // alarm's /tasks/running poll. Stored before the async dispatch work so a
+    // crash mid-flight still leaves a coherent record for the safety nets.
+    await this.state.storage.put('busyChatId', chatId);
+    await this.state.storage.put('busyThread', threadId);
     const coalescedText = coalesceBuffer(buf);
     const continuation = buf.find(item => item.msg.intakeRoute)?.msg;
     const msg = { ...base, text: coalescedText, intakeItems: buf,
@@ -548,9 +572,11 @@ export class IntakeBuffer {
     if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
     await this.state.storage.delete('collectorMsgId');
 
-    // Safety net: only fires if the run's isolate dies before finally clears busy.
+    // Safety net: only fires if the run never reports back (lost run-finished
+    // push, agent crash). The per-minute alarm ticks poll /tasks/running first.
     await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
 
+    let runAck = null;
     try {
       // Dynamic import avoids a circular import at module load.
       // mode:'deep' — «▶️ Запустить проработку» запускает НАДЁЖНУЮ (deep) сессию на всём
@@ -558,13 +584,27 @@ export class IntakeBuffer {
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(msg, this.env, { mode: 'deep', initialMsgId,
+        onRunAccepted: (ack) => { runAck = ack || null; },
         onIntakePrepared: async (index, prepared) => {
           buf[index] = { ...buf[index], msg: prepared };
           await this.state.storage.put('launching', buf);
         },
       });
-      await this.state.storage.delete('launching');
-      await this.state.storage.delete('retryBatchAttempts');
+      if (runAck) {
+        // requestId is what the agent echoes back in run-finished. The outbox
+        // ack has no requestId field — its taskId IS the dispatch requestId.
+        const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
+        if (dispatchRequestId) await this.state.storage.put('busyRequestId', dispatchRequestId);
+        if (runAck.outbox) await this.state.storage.put('busyViaOutbox', true);
+        await this.state.storage.delete('launching');
+        await this.state.storage.delete('retryBatchAttempts');
+        // busy intentionally KEPT: the run's lifetime owns it now (#1527 F1).
+        await this.state.storage.setAlarm(Date.now() + BUSY_MAX_MS);
+      } else {
+        // handleMessage resolved without reaching the agent (project picker,
+        // oversized file, supplement draft, …) — no run to wait for.
+        await this._exclusive(async () => this._releaseBusyLocked());
+      }
     } catch (err) {
       // Stop automatic retries after three failures, but preserve the complete
       // batch and preparation progress for explicit recovery. New input stays usable.
@@ -591,20 +631,77 @@ export class IntakeBuffer {
           : '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.',
         threadId);
       console.error(`[intake ${chatId}] batch preparation failed (attempt ${attempts || 1}${giveUp ? ', gave up' : ''}):`, err?.cause?.message || err?.message);
-    } finally {
-      await this.state.storage.delete('busy');
-      await this.state.storage.delete('busySince');
-      await this.state.storage.deleteAlarm();
-      await this._recoverMedia();
-      const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
-      if (remaining.length && chatId) {
-        // Messages piled up mid-run — surface a fresh launch button, never auto-run.
-        // Skip if media is still pending: _mediaResult will show the collector once the
-        // transcript arrives, so the button never appears above the transcript in chat.
-        if (!remaining.some(i => i.mediaPending)) {
-          await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id, threadId);
-        }
-      }
+      // Dispatch failed before/while reaching the agent — nothing is running.
+      await this._exclusive(async () => this._releaseBusyLocked());
+    }
+    if (!(await this.state.storage.get('busy'))) {
+      // Released above (no ack / dispatch failure): finish what the old
+      // finally-path did — media recovery + collector for held messages. When
+      // busy is still set the run owns it; release happens via run-finished,
+      // the outbox permanent-reject path, the alarm poll, or BUSY_MAX_MS.
+      await this._afterBusyRelease();
+    }
+  }
+
+  // ── Busy = lifetime of the run (epic #1527 PR1) ─────────────────────────────
+  // _dispatch sets `busy` and keeps it after a successful enqueue; it is
+  // cleared by _releaseBusyLocked on: agent run-finished (matched requestId),
+  // outbox permanent reject, the alarm's /tasks/running?chatId= poll (lost
+  // push / agent restart), or BUSY_MAX_MS. Until then every new message lands
+  // in the buffer as held — never as a second queued task (US-SUP-01 / CH-10).
+
+  // Must be called inside _exclusive: clear the whole busy record.
+  async _releaseBusyLocked() {
+    await this.state.storage.delete('busy');
+    await this.state.storage.delete('busySince');
+    await this.state.storage.delete('busyRequestId');
+    await this.state.storage.delete('busyViaOutbox');
+    await this.state.storage.delete('busyChatId');
+    await this.state.storage.delete('busyThread');
+    await this.state.storage.delete('launching');
+    await this.state.storage.deleteAlarm();
+  }
+
+  // Post-release side effects (media recovery + collector for held messages).
+  // Never inside the lock — Telegram I/O.
+  async _afterBusyRelease() {
+    await this._recoverMedia();
+    const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+    if (!remaining.length) return;
+    if (remaining.some(i => i.mediaPending)) return; // _mediaResult shows the collector later
+    const last = remaining[remaining.length - 1];
+    await this._showCollector(last.msg.chat?.id, remaining.length, last.msg.message_id, threadIdOf(last.msg));
+  }
+
+  // Safety-net poll: ask the agent whether ANY run for this chat is still
+  // accepted-not-finished. The chat-scoped counter is bumped synchronously at
+  // runTask entry (before /run's 202) and released together with the
+  // run-finished push, so `running:false` here means the push was lost or the
+  // agent process restarted (in-memory counter reset). Outbox dispatches are
+  // excluded: their counter only appears when the outbox actually delivers,
+  // and releasing early while a job is still queued reopens the double-run hole.
+  async _pollRunFinishedIfIdle(since) {
+    const chatId = await this.state.storage.get('busyChatId');
+    if (!chatId || !this.env.AGENT_URL) return false;
+    if (await this.state.storage.get('busyViaOutbox')) return false;
+    if (Date.now() - since < 30_000) return false; // warmup: ack → counter visible
+    try {
+      const res = await fetch(`${this.env.AGENT_URL}/tasks/running?chatId=${encodeURIComponent(chatId)}`, {
+        headers: { Authorization: `Bearer ${this.env.AGENT_SECRET || ''}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (data.running) return false;
+      const released = await this._exclusive(async () => {
+        if (!(await this.state.storage.get('busy'))) return false;
+        await this._releaseBusyLocked();
+        return true;
+      });
+      if (released) await this._afterBusyRelease();
+      return released;
+    } catch {
+      return false; // transient — next alarm tick retries; BUSY_MAX is the hard cap
     }
   }
 
@@ -675,22 +772,29 @@ export class IntakeBuffer {
     }
     // ── End debounce ────────────────────────────────────────────────────────────
 
-    // Busy release: if a run's isolate died before its finally cleared `busy`, release it.
-    // Also re-offer the launch button after releasing the hold.
+    // Busy release (epic #1527 PR1): primary signal is the agent's
+    // run-finished push; this branch is the per-minute safety net — poll the
+    // agent's chat-scoped activity, and hard-cap at BUSY_MAX_MS. After any
+    // release the collector below re-offers the launch button for held input.
     if ((await this.state.storage.get('busy')) === true) {
       const since = (await this.state.storage.get('busySince')) || 0;
-      if (Date.now() - since < BUSY_MAX_MS) {
-        await this.state.storage.setAlarm(Math.min(since + BUSY_MAX_MS, Date.now() + 60000));
-        return;
+      const age = Date.now() - since;
+      if (age < BUSY_MAX_MS) {
+        const released = age >= 30_000 && await this._pollRunFinishedIfIdle(since);
+        if (!released) {
+          await this.state.storage.setAlarm(Math.min(since + BUSY_MAX_MS, Date.now() + 60000));
+          return;
+        }
+      } else {
+        // Hard cap: a dispatched-but-never-reported batch becomes retryable
+        // input again (original items were never acknowledged as run).
+        await this._exclusive(async () => {
+          const launching = (await this.state.storage.get('launching')) || [];
+          if (launching.length) await this.state.storage.put('retryBatch', launching);
+          await this._releaseBusyLocked();
+        });
+        await this._afterBusyRelease();
       }
-      await this._exclusive(async () => {
-        const launching = (await this.state.storage.get('launching')) || [];
-        const remaining = (await this.state.storage.get('buf')) || [];
-        if (launching.length) await this.state.storage.put('retryBatch', launching);
-        await this.state.storage.delete('launching');
-        await this.state.storage.delete('busy');
-        await this.state.storage.delete('busySince');
-      });
     }
     const buf = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
     if (buf.length) {

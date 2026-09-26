@@ -261,6 +261,12 @@ async function handleText(chatId, session, text, env, opts = {}) {
     });
 
     accepted = true;
+    // Epic #1527 PR1: tell the dispatcher (IntakeBuffer._dispatch) that a run
+    // was really accepted — its ack carries the dispatch requestId. The busy
+    // hold now lives until the agent's run-finished callback matches it; paths
+    // that return without reaching runTask (project picker, fileTooLarge, …)
+    // never fire this, so _dispatch releases busy immediately as before.
+    opts.onRunAccepted?.(result);
     const newPinnedMsgId = result?.pinnedMsgId || session.pinnedMsgId || null;
 
     await setSession(env.SESSIONS, chatId, {
