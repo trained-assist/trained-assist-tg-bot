@@ -27,6 +27,30 @@ app.use('*', async (c, next) => {
 });
 app.get('/internal/media', c => serveMedia(c.req.raw, c.env));
 
+// Agent → gateway: run settled (epic #1527 PR1). The IntakeBuffer holds `busy`
+// for the REAL lifetime of a run; this is the primary release signal (the
+// agent also exposes GET /tasks/running?chatId= as the alarm-poll safety net).
+// Bearer AGENT_SECRET — same auth as every other agent→gateway/internal route.
+app.post('/internal/run-finished', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  const body = await c.req.json().catch(() => null);
+  const chatId = Number(body?.chatId);
+  if (!Number.isSafeInteger(chatId) || chatId <= 0) return c.json({ error: 'invalid chatId' }, 400);
+  const rawThread = body?.threadId;
+  const threadId = rawThread == null ? null : Number(rawThread);
+  if (threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) return c.json({ error: 'invalid threadId' }, 400);
+  const requestId = typeof body?.requestId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId) ? body.requestId : null;
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+  const res = await stub.fetch('https://intake/run-finished', {
+    method: 'POST',
+    body: JSON.stringify({ requestId }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  return c.json(payload, res.status);
+});
+
 // Health check
 app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
 

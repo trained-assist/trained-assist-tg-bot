@@ -74,6 +74,18 @@ beforeEach(() => {
   deleteMessage.mockResolvedValue({ ok: true });
   checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
   preflight.mockImplementation(async msg => ({ msg }));
+  // Real handleMessage fires onRunAccepted after the agent acks (message.js
+  // handleText) — that ack is what makes _dispatch KEEP busy for the run's
+  // lifetime (epic #1527 PR1 / F1). Tests that need a custom flow override it.
+  handleMessage.mockImplementation(async (msg, env, opts) => {
+    opts?.onRunAccepted?.({ requestId: 'req-default', durable: true, taskId: 'task-default' });
+  });
+});
+
+// Epic #1527: the agent's run-finished push → IntakeBuffer /run-finished.
+const runFinishedReq = requestId => new Request('https://intake/run-finished', {
+  method: 'POST',
+  body: JSON.stringify(requestId === undefined ? {} : { requestId }),
 });
 
 describe('IntakeBuffer — smart debounce with completeness gate', () => {
@@ -91,7 +103,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(editMessage).toHaveBeenLastCalledWith('t', 42, 99, expect.stringContaining('11 сообщений'), expect.anything());
   });
 
-  it('▶️ flush coalesces the buffer into ONE dispatch and clears busy after', async () => {
+  it('▶️ flush coalesces the buffer into ONE dispatch and holds busy until run-finished', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
@@ -106,14 +118,78 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // §A #530: launching the buffer starts a DEEP (проработка) session, not a one-shot.
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
-    expect(await state.storage.get('busy')).toBeUndefined();
+    expect(handleMessage.mock.calls[0][2]).toEqual({
+      mode: 'deep', initialMsgId: 99,
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
+    // Epic #1527 PR1 (red-first F1): the run is in flight — busy must OUTLIVE
+    // the enqueue. Before this fix it was cleared in _dispatch's finally right
+    // after the 202, which let a mid-run message auto-dispatch as a SECOND task.
+    expect(await state.storage.get('busy')).toBe(true);
+    expect(await state.storage.get('busyRequestId')).toBe('req-default');
     expect(await state.storage.get('buf')).toBeUndefined();
+
     // The collector ("Принял N, жми «Запустить»") is stale procedural noise once the
     // task has launched — it's deleted outright, not left behind as an edited husk
     // (owner request 2026-09-22).
     expect(deleteMessage).not.toHaveBeenCalled();
     expect(editMessage).not.toHaveBeenCalled();
+
+    // Agent reports the run finished → primary release signal.
+    const res = await io.fetch(runFinishedReq('req-default'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ released: true });
+    expect(await state.storage.get('busy')).toBeUndefined();
+    expect(await state.storage.get('busyRequestId')).toBeUndefined();
+  });
+
+  it('run-finished from a FOREIGN dispatch (requestId mismatch) keeps the hold', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+
+    const res = await io.fetch(runFinishedReq('someone-elses-request'));
+    expect(await res.json()).toMatchObject({ busy: true, mismatch: true });
+    expect(await state.storage.get('busy')).toBe(true);
+
+    // The matching one releases.
+    await io.fetch(runFinishedReq('req-default'));
+    expect(await state.storage.get('busy')).toBeUndefined();
+  });
+
+  it('run-finished with no active run is a harmless no-op', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const res = await io.fetch(runFinishedReq('req-x'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ busy: false });
+  });
+
+  it('dispatch that never reaches the agent (no ack) releases busy immediately', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    // Project picker path: handleMessage resolves without calling onRunAccepted.
+    handleMessage.mockImplementation(async () => {});
+    await io.fetch(appendReq('pick a project first'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await state.storage.get('busy')).toBeUndefined();
+  });
+
+  it('a dispatch that throws releases busy and restores the batch as retryable', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    handleMessage.mockRejectedValueOnce(new Error('agent down'));
+    await io.fetch(appendReq('do it'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBeUndefined();
+    // The batch survived — a later flush can retry it.
+    expect((await state.storage.get('retryBatch') || await state.storage.get('buf') || []).length).toBe(1);
   });
 
   it('launch reuses the collector rather than deleting it or sending another bubble', async () => {
@@ -137,32 +213,43 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
-    expect(handleMessage.mock.calls[0][2]).toEqual({ mode: 'deep', initialMsgId: 99, onIntakePrepared: expect.any(Function) });
+    expect(handleMessage.mock.calls[0][2]).toEqual({
+      mode: 'deep', initialMsgId: 99,
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
-  it('holds messages sent during a run and re-offers a button afterwards (no auto-run)', async () => {
+  it('holds messages sent during a run; run-finished (not enqueue) re-offers the button', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
     await io.fetch(appendReq('start the task'));
 
     let release;
-    handleMessage.mockReturnValueOnce(new Promise(r => { release = r; }));
+    handleMessage.mockImplementationOnce((msg, env, opts) => new Promise(r => {
+      release = () => { opts?.onRunAccepted?.({ requestId: 'req-slow', durable: true }); r(); };
+    }));
     const runPromise = io.fetch(flushReq());
     await drain();
     expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await state.storage.get('busy')).toBe(true);
 
     // Messages sent WHILE the run is in flight are buffered, not dispatched.
     await io.fetch(appendReq('actually also do X'));
     await io.fetch(appendReq('and Y'));
     expect(handleMessage).toHaveBeenCalledTimes(1);
 
+    // Enqueue returned — but the RUN is still going: hold stays, no button yet.
     release();
     await runPromise;
-
-    // Run done: held messages are NOT auto-dispatched — a fresh button is shown.
     expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await state.storage.get('busy')).toBe(true);
+    expect((await state.storage.get('buf')).length).toBe(2);
+
+    // Agent pushes run-finished → hold released, held input re-offered, never auto-run.
+    await io.fetch(runFinishedReq('req-slow'));
     expect(await state.storage.get('busy')).toBeUndefined();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2); // collector re-offered
     expect((await state.storage.get('buf')).length).toBe(2);
   });
@@ -193,6 +280,80 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(await state.storage.get('busy')).toBeUndefined();
     expect(handleMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('alarm poll releases a lost-push busy when the agent reports the chat idle', async () => {
+    const state = makeState();
+    const realFetch = global.fetch;
+    const io = new IntakeBuffer(state, {
+      BOT_TOKEN: 't', AGENT_URL: 'https://agent.example', AGENT_SECRET: 'sek',
+    });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+
+    // Warmup: a young busy must NOT poll yet (ack → agent counter visibility).
+    await state.storage.put('busySince', Date.now() - 5_000);
+    await io.alarm();
+    expect(await state.storage.get('busy')).toBe(true);
+
+    // Past warmup, agent says the chat has no accepted run → push was lost.
+    await state.storage.put('busySince', Date.now() - 60_000);
+    await state.storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 7, text: 'held' } }]);
+    let polledUrl = null;
+    global.fetch = async (url, init) => {
+      polledUrl = String(url);
+      expect(init.headers.Authorization).toBe('Bearer sek');
+      return { ok: true, json: async () => ({ running: false, scope: 'chat' }) };
+    };
+    try {
+      await io.alarm();
+    } finally {
+      global.fetch = realFetch;
+    }
+    expect(polledUrl).toContain('https://agent.example/tasks/running?chatId=42');
+    expect(await state.storage.get('busy')).toBeUndefined();
+    // Held message re-offered with the launch button.
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('alarm poll keeps busy while the agent still reports the chat running', async () => {
+    const state = makeState();
+    const realFetch = global.fetch;
+    const io = new IntakeBuffer(state, {
+      BOT_TOKEN: 't', AGENT_URL: 'https://agent.example', AGENT_SECRET: 'sek',
+    });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    await state.storage.put('busySince', Date.now() - 60_000);
+    global.fetch = async () => ({ ok: true, json: async () => ({ running: true, scope: 'chat' }) });
+    try {
+      await io.alarm();
+    } finally {
+      global.fetch = realFetch;
+    }
+    expect(await state.storage.get('busy')).toBe(true);
+  });
+
+  it('alarm poll is skipped for outbox dispatches (delivery not yet counted)', async () => {
+    const state = makeState();
+    const realFetch = global.fetch;
+    let called = false;
+    global.fetch = async () => { called = true; return { ok: true, json: async () => ({ running: false }) }; };
+    try {
+      const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent.example' });
+      await state.storage.put('busy', true);
+      await state.storage.put('busySince', Date.now() - 60_000);
+      await state.storage.put('busyChatId', 42);
+      await state.storage.put('busyViaOutbox', true);
+      await io.alarm();
+      expect(called).toBe(false);
+      expect(await state.storage.get('busy')).toBe(true);
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 
   it('auto-dispatches after DEBOUNCE_MS when the gate says "clear"', async () => {

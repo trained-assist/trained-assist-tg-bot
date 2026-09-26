@@ -60,6 +60,10 @@ export class RunOutbox {
               await this.state.storage.put(`failed:${job.id}`, { ...job, status: res.status });
               await this.notify(job, `⚠️ Задача сохранена, но сервер отклонил её (HTTP ${res.status}). Нужна проверка; автоматически повторять её не буду.`);
               await this.state.storage.delete(`job:${job.id}`);
+              // Epic #1527 PR1: the agent will never send run-finished for a
+              // rejected job — release the chat's busy hold now or it sticks
+              // until BUSY_MAX_MS (match by this job's requestId).
+              await this.releaseIntakeBusy(job);
               continue;
             }
             throw Error(`HTTP ${res.status}`);
@@ -100,5 +104,21 @@ export class RunOutbox {
         signal: AbortSignal.timeout(5000),
       });
     } catch { /* Delivery status must not remove the queued payload. */ }
+  }
+  // Epic #1527 PR1: permanent delivery failure means no run-finished push will
+  // ever arrive for this dispatch — tell the chat's IntakeBuffer to release its
+  // busy hold (matched by requestId) instead of waiting for BUSY_MAX_MS.
+  async releaseIntakeBusy(job) {
+    try {
+      const { conversationKey } = await import('./conversation-context.js');
+      const stub = this.env.INTAKE.get(this.env.INTAKE.idFromName(conversationKey(job.chatId, job.threadId || null)));
+      await stub.fetch('https://intake/run-finished', {
+        method: 'POST',
+        body: JSON.stringify({ requestId: job.id }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (e) {
+      console.warn('[outbox] release busy failed:', e.message);
+    }
   }
 }
