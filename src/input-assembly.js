@@ -22,3 +22,22 @@ export function assembleInput(items, batch = true) {
   return { task: batch ? prepared.map((p, i) => `[Сообщение ${i + 1}]\n${p.text}`).join('\n\n') : prepared[0]?.text || '',
     fileRefs: prepared.flatMap(p => p.refs), isVoice: prepared.some(p => p.isVoice) };
 }
+
+// Compact inspection document for the «Посмотреть input» file. Shows exactly
+// what the model receives (the assembled task) plus a one-line per-message
+// format summary — NOT the raw Telegram snapshot. The old full-JSON dump
+// repeated user text (task + body.task + transcript + reply_to) and carried
+// entities/offsets, chat/from objects and media ids the model never sees,
+// which read as token waste to the user (2026-09-26).
+export function renderSnapshotDocument(input, heading) {
+  const task = input.body?.task ?? input.task ?? '';
+  const lines = [heading, '', task];
+  const files = [];
+  const seen = new Set();
+  for (const ref of input.body?.fileRefs || []) {
+    const key = ref.id || ref.name;
+    if (!seen.has(key)) { seen.add(key); files.push(ref.name || ref.id); }
+  }
+  if (files.length) lines.push('', `Файлы: ${files.join(', ')}`);
+  return lines.join('\n');
+}
