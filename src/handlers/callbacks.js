@@ -6,6 +6,7 @@ import { sendDocument, sendMessage, sendMessageWithKeyboard, editMessage, editMe
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { journalLoginUrl } from '../lib/journal-link.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
+import { renderSnapshotDocument } from '../input-assembly.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
@@ -577,10 +578,10 @@ export async function handleCallbackQuery(cq, env) {
     }
     const heading = input.state === 'snapshot' ? `Вход запуска ${input.id} (зафиксирован)`
       : `Текущий input: ${(input.items || []).length} сообщений${input.pending ? ' — вложения ещё обрабатываются' : ''}`;
-    const task = input.body?.task ?? input.task ?? '';
-    // Full metadata includes original forwards, links/entities, Telegram media ids,
-    // prepared file refs and transcripts, in the same order used for dispatch.
-    const document = `${heading}\n\n${task}\n\nПолный snapshot и метаданные:\n${JSON.stringify(input, null, 2)}`;
+    // Compact inspection document: what the model actually receives (the task)
+    // plus per-message format markers — not the raw Telegram snapshot with
+    // entities/offsets, chat/from objects and media ids (token waste read-back).
+    const document = renderSnapshotDocument(input, heading);
     await sendDocument(env.BOT_TOKEN, chatId, 'input-snapshot.txt', document, heading.slice(0, 900), threadId);
     return;
   }

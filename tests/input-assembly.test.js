@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assembleInput } from '../src/input-assembly.js';
+import { assembleInput, renderSnapshotDocument } from '../src/input-assembly.js';
 
 const voiceItem = (overrides = {}) => ({
   text: '',
@@ -39,5 +39,32 @@ describe('input-assembly token compressor', () => {
     const { task, fileRefs } = assembleInput([{ text: 'просто текст', msg: { text: 'просто текст' } }]);
     expect(task).toBe('[Сообщение 1]\nпросто текст');
     expect(fileRefs).toHaveLength(0);
+  });
+});
+
+describe('renderSnapshotDocument — компактный снапшот «что уходит модели»', () => {
+  it('shows the assembled task (what the model receives) plus file names — not the raw metadata dump', () => {
+    const input = {
+      state: 'snapshot',
+      id: 'tg-abc',
+      items: [{ text: '', msg: { voice: { file_id: 'v1' }, transcript: 'мой голос',
+        fileRef: { id: 'a1', name: 'audio.ogg' } }, mediaPending: false }],
+      body: { task: '[Сообщение 1]\nмой голос\n[голосовое]',
+        fileRefs: [{ id: 'a1', name: 'audio.ogg' }, { id: 't1', name: 'transcript.txt' }] },
+    };
+    const doc = renderSnapshotDocument(input, 'Вход запуска tg-abc (зафиксирован)');
+    expect(doc).toContain('[Сообщение 1]\nмой голос\n[голосовое]');
+    expect(doc).toContain('Файлы: audio.ogg, transcript.txt');
+    expect(doc).not.toContain('"state"');
+    expect(doc).not.toContain('"file_id"');
+    expect(doc).not.toContain('Полный snapshot и метаданные');
+  });
+
+  it('deduplicates repeated file refs and handles a draft with no body', () => {
+    const doc = renderSnapshotDocument(
+      { items: [{ text: 'a', msg: { text: 'a' } }], task: 'a', pending: false },
+      'Текущий input: 1 сообщений');
+    expect(doc).toContain('Текущий input: 1 сообщений');
+    expect(doc).toContain('\na');
   });
 });
