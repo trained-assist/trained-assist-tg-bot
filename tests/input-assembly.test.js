@@ -58,6 +58,14 @@ describe('renderSnapshotDocument — компактный снапшот «чт�
     expect(doc).not.toContain('"state"');
     expect(doc).not.toContain('"file_id"');
     expect(doc).not.toContain('Полный snapshot и метаданные');
+    // Truthfulness: the snapshot must NOT pretend the 1-sentence task is the
+    // whole model input — the model also gets the system prompt (role/persona),
+    // MCP tool definitions and context sections, so the run footer's
+    // «вход N токенов» is the total input (2026-09-26 owner caught this).
+    expect(doc).toContain('Это только текст задачи');
+    expect(doc).toContain('системный промпт');
+    expect(doc).toContain('MCP-инструментов');
+    expect(doc).toContain('ВЕСЬ вход модели');
   });
 
   it('deduplicates repeated file refs and handles a draft with no body', () => {
