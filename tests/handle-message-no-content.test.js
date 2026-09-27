@@ -3,12 +3,16 @@ import { handleMessage } from '../src/handlers/message.js';
 import { getSession, setSession } from '../src/lib/kv.js';
 import { runTask } from '../src/lib/agent-client.js';
 import { sendMessage } from '../src/lib/telegram.js';
+import { noContentNudgeText } from '../src/group-routing.js';
 
 // Defense-in-depth for the 2026-09-27 incident (group addressed empty task →
 // agent 400 "missing fields"): even if a content-less message slips past the
 // router gates (e.g. some future caller), handleMessage itself must NEVER
-// dispatch an empty task. Lock: a message with no text/caption/media/fileRefs
-// is dropped before runTask, and no placeholder is sent.
+// dispatch an empty task. Owner 2026-09-27: the user must never get silent
+// nothing either — reply with the friendly nudge («привет! я на связи. Есть
+// задача?») instead of an empty task OR a silent drop. Lock: a message with no
+// text/caption/media/fileRefs gets the nudge (no runTask); buffered launches
+// still pass through untouched.
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(), runTask: vi.fn().mockResolvedValue({}),
 }));
@@ -33,10 +37,10 @@ beforeEach(async () => {
 });
 
 describe('handleMessage — content-less message', () => {
-  it('a sticker (no text/caption/file) is dropped, runTask never called, no placeholder sent', async () => {
+  it('a sticker (no text/caption/file) gets the nudge, runTask never called', async () => {
     await handleMessage({ message_id: ++mid, chat: { id: chatId, type: 'private' }, sticker: { file_id: 's1' } }, env, {});
     expect(runTask).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('test', chatId, noContentNudgeText(), {});
   });
 
   it('a real text message still dispatches as before', async () => {
