@@ -18,6 +18,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
   'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
+  'act|',       // extracted action buttons — run the tapped label in the same session (#1542 P3)
   'stop|',      // ⛔ Стоп button sent by agent on task start — show stop confirm
   'stopok|',    // ⛔ Точно остановить — confirmed, actually stops the running task
   'stopno|',    // ↩️ Вернуться (stop) — cancels, task keeps running
@@ -186,5 +187,37 @@ describe('legacy checklist footer menu', () => {
     expect(runTask.mock.calls[0][1]).toMatchObject({ sessionId: 'original-session', task, forceClaude: false });
     expect(runTask.mock.calls[0][1].mode).toBeUndefined();
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('act| extracted action buttons (#1542 P3)', () => {
+  it('runs the tapped label as a deep task in the same session', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { runTask } = await import('../src/lib/agent-client.js');
+    const data = 'act|orig-session|1';
+    await handleCallbackQuery({ id: 'act-1', data, from: { id: 999 }, message: {
+      chat: { id: 999 }, message_id: 42,
+      reply_markup: { inline_keyboard: [
+        [{ text: '▶️ Создать PR', callback_data: 'act|orig-session|0' }],
+        [{ text: '▶️ Задеплоить на прод', callback_data: data }],
+      ] },
+    } }, { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(runTask).toHaveBeenCalledOnce();
+    const args = runTask.mock.calls[0][1];
+    expect(args).toMatchObject({ sessionId: 'orig-session', forceClaude: true, mode: 'deep' });
+    expect(args.task).toContain('«Задеплоить на прод»');
+    expect(args.task).not.toContain('Создать PR');
+  });
+
+  it('does not run anything when the tapped button is missing from markup', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { runTask } = await import('../src/lib/agent-client.js');
+    await handleCallbackQuery({ id: 'act-2', data: 'act|s|0', from: { id: 999 }, message: {
+      chat: { id: 999 }, message_id: 42, reply_markup: { inline_keyboard: [] },
+    } }, { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(runTask).not.toHaveBeenCalled();
   });
 });
