@@ -65,7 +65,7 @@ describe('durable R2 pipeline',()=>{
  it('recovers a reserved job after enqueue interruption without a two-minute timeout bypass',async()=>{
   const f=await fixture();f.s.data.clear();await f.io._recoverMedia();expect(f.s.data.get('job').stage).toBe('download');
   const buf=f.intake.data.get('buf');buf[0].preparingAt=Date.now()-300000;f.intake.data.set('buf',buf);
-  const result=await f.io.fetch(new Request('https://intake/flush',{method:'POST'}));expect(await result.json()).toEqual({preparing:true});
+  const result=await f.io.fetch(new Request('https://intake/flush',{method:'POST'}));expect(await result.json()).toEqual({preparing:true,queued:true});
  });
  it('media receipt is batched, not one acknowledgement per attachment', async()=>{
   expect(ackText({voice:{}})).toBe('🎙 Принял голосовое, расшифровываю…');

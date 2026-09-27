@@ -70,6 +70,10 @@ const BUSY_POLL_MS = 60_000;     // while busy, the alarm ticks this often and a
                                  // push. The hold is released on the first idle tick,
                                  // so a dropped push costs ~1 min, not BUSY_MAX_MS.
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
+const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: past this the
+                                       // item is dropped from the batch as failed, so a lost
+                                       // MediaJob alarm can't leave the chat permanently
+                                       // un-launchable («ещё грузится» on every tap).
 
 const RECEIPT_MS = 1500;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
@@ -361,9 +365,13 @@ export class IntakeBuffer {
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
       if (pending) {
+        // The tap DID register — leaving it unanswered read as «кнопка не
+        // нажимается». Confirm the request was taken, and remember it so the
+        // batch launches by itself the moment the last attachment is ready.
+        await this.state.storage.put('launchWhenReady', true);
         await this._showCollector(buf[0].msg.chat.id, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf[0].msg),
-          '⏳ Вложения ещё обрабатываются. Весь input сохранён; запуск будет доступен после подготовки.');
-        return json({ preparing: true });
+          '📥 Задачу забрал — часть сообщений ещё грузится. Сохраню всё и начну, как только получу вложения.');
+        return json({ preparing: true, queued: true });
       }
       await this._dispatch();
       return json({ flushed: true });
@@ -380,7 +388,7 @@ export class IntakeBuffer {
       if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
       // Reservation and watchdog survive a crash before enqueue's network call.
       await this.state.storage.transaction(async tx => {
-        items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username });
+        items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username, mediaFirstSeenAt: Date.now() });
         await tx.put('buf', items);
         await tx.put('received', [...seen, msg.message_id].slice(-1000));
         await tx.setAlarm(Date.now() + 60000);
@@ -416,6 +424,17 @@ export class IntakeBuffer {
         });
         if (failed) await this._mediaResult({ id: item.msg.mediaJob, messageId: item.msg.message_id,
           username: item.mediaOwner, error: 'Очередь обработки временно недоступна' });
+      }
+      // Watchdog: a media job whose DO lost its alarm (eviction between the
+      // enqueue and the alarm write) never calls back, so the item would sit
+      // `mediaPending` forever — the chat shows no transcription, no launch
+      // button, and a tap answers «ещё грузится» indefinitely. After
+      // MEDIA_DEADLINE_MS give up: keep the original Telegram reference for
+      // recovery, drop the item from the launchable batch, and tell the user.
+      const age = Date.now() - (item.mediaFirstSeenAt || Date.now());
+      if (age >= MEDIA_DEADLINE_MS) {
+        await this._mediaResult({ id: item.msg.mediaJob, messageId: item.msg.message_id,
+          username: item.mediaOwner, error: 'Не удалось получить вложение' });
       }
     }
   }
@@ -475,7 +494,15 @@ export class IntakeBuffer {
         const remaining = (await this.state.storage.get('buf')) || [];
         const busy = await this.state.storage.get('busy');
         if (!busy && remaining.length && !remaining.some(i => i.mediaPending)) {
-          await this._armAutoDispatch(notify.chatId, remaining, notify.messageId, notify.threadId);
+          // The user tapped «▶️ Запустить» while the attachment was still
+          // downloading — the tap was honoured then («задачу забрал»), so start
+          // now instead of making them find the button again.
+          if (await this.state.storage.get('launchWhenReady')) {
+            await this.state.storage.delete('launchWhenReady');
+            await this._dispatch();
+          } else {
+            await this._armAutoDispatch(notify.chatId, remaining, notify.messageId, notify.threadId);
+          }
         }
       }
     }
@@ -745,6 +772,8 @@ export class IntakeBuffer {
     await this._recoverMedia();
 
     // If not busy and media still pending — _recoverMedia re-armed the alarm; wait.
+    // _recoverMedia already fired the deadline for anything past MEDIA_DEADLINE_MS,
+    // so a genuinely stuck item does not pile up behind this early return.
     const bufCheck = (await this.state.storage.get('buf')) || [];
     if (!(await this.state.storage.get('busy')) && bufCheck.some(i => i.mediaPending)) return;
 
