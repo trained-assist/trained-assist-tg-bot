@@ -9,6 +9,7 @@ import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { threadExtra, threadIdOf } from '../conversation-context.js';
+import { noContentNudgeText } from '../group-routing.js';
 
 // Local tracked-send wrappers (see intake-buffer.js for rationale): call the
 // imported sendMessage/sendMessageWithKeyboard so existing mocks still intercept,
@@ -92,10 +93,13 @@ export async function handleMessage(msg, env, opts = {}) {
   // branch (index.js) routes here without the private-chat hasContent gate, so a
   // bare mention / reply-with-sticker/GIF used to arrive with an EMPTY task and
   // the agent answered 400 "missing fields" — which the outbox surfaced as
-  // «⚠️ Задача сохранена, но сервер отклонил её (HTTP 400)». Drop it here the
-  // same way private chats do. Buffered launches (intakeItems) always carry
-  // content and pass through untouched.
-  if (!msg.intakeItems?.length && !hasIntakeContent(msg)) return;
+  // «⚠️ Задача сохранена, но сервер отклонил её (HTTP 400)». Nudge the user
+  // instead of dispatching an empty task (or dropping it in silence — owner
+  // 2026-09-27: «нужно не игнорировать, а слать»). Buffered launches
+  // (intakeItems) always carry content and pass through untouched.
+  if (!msg.intakeItems?.length && !hasIntakeContent(msg)) {
+    return sendTracked(env, chatId, noContentNudgeText(), {}, threadId);
+  }
 
   let session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
