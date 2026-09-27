@@ -1,6 +1,7 @@
 import { conversationKey } from '../conversation-context.js';
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 import { resolveAudience } from './audience.js';
+import { runInputTaskId } from '../input-assembly.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -50,6 +51,38 @@ export async function pickAgentUrl(env, username, task, forceRu = false) {
   }
 
   return env.AGENT_URL;
+}
+
+// The REAL model input of a dispatched run (agent-side: system prompt +
+// context/task exactly as the engine received it) for the «Посмотреть input»
+// button — GET /internal/run-input. Tries the agent pickAgentUrl chooses for
+// the same task text (how the run was routed), then the other configured agent.
+// Never throws: a miss (run predates the feature, other agent, network) returns
+// null and the caller falls back to its gateway-side snapshot view.
+export async function fetchRunInput(env, body) {
+  try {
+    const taskId = runInputTaskId(body);
+    const username = body?.username;
+    if (!taskId || !username) return null;
+    const primary = await pickAgentUrl(env, username, body.task || '');
+    const candidates = [...new Set([primary, env.AGENT_RU_URL, env.AGENT_URL].filter(Boolean))];
+    const query = `username=${encodeURIComponent(username)}&taskId=${encodeURIComponent(taskId)}`;
+    for (const base of candidates) {
+      try {
+        const res = await fetch(`${base}/internal/run-input?${query}`, {
+          headers: { Authorization: `Bearer ${env.AGENT_SECRET || ''}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const text = await res.text();
+          if (text) return text;
+        }
+      } catch { /* try the next candidate */ }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getProjects(env, { username, userId }) {

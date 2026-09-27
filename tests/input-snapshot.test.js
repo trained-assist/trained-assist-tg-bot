@@ -28,7 +28,13 @@ const item = (id, text, extra = {}) => ({ text, msg: { chat: { id: 42 }, message
 const read = (io, mid = 99, username = 'alice') => io.fetch(new Request(`https://intake/input?messageId=${mid}&username=${username}`));
 const append = (io, i) => io.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify(i) }));
 beforeEach(() => { vi.clearAllMocks(); send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ durable: true, taskId: 't' }))); });
+  // Route-aware stub: /internal/run-input answers 404 by default (an old run —
+  // the button falls back to the gateway snapshot view, which is what most
+  // assertions here cover); /run and everything else keep the durable-ack shape.
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (String(url).includes('/internal/run-input')) return new Response('not found', { status: 404 });
+    return Response.json({ durable: true, taskId: 't' });
+  })); });
 afterEach(() => vi.unstubAllGlobals());
 
 describe('immutable actual input', () => {
@@ -98,6 +104,23 @@ describe('immutable actual input', () => {
     expect(send.mock.calls.filter(c => Array.isArray(c[3]))).toHaveLength(1);
     expect(send.mock.calls.at(-1)[3]).toContain('4 сообщений');
   });
+});
+
+it('inspection callback prefers the REAL model input from the agent when the run has one', async () => {
+  const { env } = world();
+  await runTask(env, { userId: 42, username: 'alice', requestId: 'real', initialMsgId: 99,
+    task: 'x', sessionId: 's1', inputItems: [item(1, 'x')] });
+  send.mockClear();
+  fetch.mockImplementation(async url => String(url).includes('/internal/run-input')
+    ? new Response('СИСТЕМНЫЙ ПРОМПТ\nРЕАЛЬНЫЙ ИНПУТ', { status: 200 })
+    : Response.json({ durable: true, taskId: 't' }));
+  await handleCallbackQuery({ id: 'cb-real', data: 'input_run|99',
+    message: { message_id: 200, chat: { id: 42 }, is_topic_message: true, message_thread_id: 7 } }, env);
+  expect(send).toHaveBeenCalledWith('t', 42, 'agent-input.txt', 'СИСТЕМНЫЙ ПРОМПТ\nРЕАЛЬНЫЙ ИНПУТ',
+    expect.stringContaining('Реальный input агента'), 7);
+  const asked = fetch.mock.calls.find(([u]) => String(u).includes('/internal/run-input'));
+  expect(String(asked[0])).toContain('username=alice&taskId=alice-real');
+  expect(asked[1].headers.Authorization).toBe('Bearer test');
 });
 
 it('inspection callback sends the full private snapshot to the original topic, journal links the saved session', async () => {

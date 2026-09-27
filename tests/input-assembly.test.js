@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assembleInput, renderSnapshotDocument } from '../src/input-assembly.js';
+import { assembleInput, renderSnapshotDocument, runInputTaskId } from '../src/input-assembly.js';
 
 const voiceItem = (overrides = {}) => ({
   text: '',
@@ -74,5 +74,20 @@ describe('renderSnapshotDocument — компактный снапшот «чт�
       'Текущий input: 1 сообщений');
     expect(doc).toContain('Текущий input: 1 сообщений');
     expect(doc).toContain('\na');
+  });
+});
+
+describe('runInputTaskId — mirrors the agent /run taskId derivation', () => {
+  it('default audience → username-requestId', () => {
+    expect(runInputTaskId({ username: 'vova', audience: 'default', requestId: 'msg-1-2' })).toBe('vova-msg-1-2');
+  });
+  it('scoped audience → username-audience-requestId', () => {
+    expect(runInputTaskId({ username: 'vova', audience: 'recruiter', requestId: 'msg-1-2' })).toBe('vova-recruiter-msg-1-2');
+  });
+  it('missing/invalid requestId or username → null (no agent lookup, keep gateway view)', () => {
+    expect(runInputTaskId({ username: 'vova', audience: 'default' })).toBeNull();
+    expect(runInputTaskId({ username: 'vova', audience: 'default', requestId: 'a/b' })).toBeNull();
+    expect(runInputTaskId({ username: '../x', audience: 'default', requestId: 'm1' })).toBeNull();
+    expect(runInputTaskId(null)).toBeNull();
   });
 });
