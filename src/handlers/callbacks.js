@@ -7,7 +7,7 @@ import { answerCallbackQuery } from '../lib/telegram.js';
 import { journalLoginUrl } from '../lib/journal-link.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { renderSnapshotDocument } from '../input-assembly.js';
-import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
@@ -578,6 +578,18 @@ export async function handleCallbackQuery(cq, env) {
     }
     const heading = input.state === 'snapshot' ? `Вход запуска ${input.id} (зафиксирован)`
       : `Текущий input: ${(input.items || []).length} сообщений${input.pending ? ' — вложения ещё обрабатываются' : ''}`;
+    // Dispatched run: prefer the REAL model input from the agent (system prompt +
+    // context/task exactly as the engine received it, written at spawn time).
+    // A miss — old run, agent without the feature, network — falls back to the
+    // gateway-side snapshot below, so the button never dead-ends.
+    if (input.state === 'snapshot') {
+      const real = await fetchRunInput(env, input.body);
+      if (real) {
+        await sendDocument(env.BOT_TOKEN, chatId, 'agent-input.txt', real,
+          `Реальный input агента — запуск ${input.id}`.slice(0, 900), threadId);
+        return;
+      }
+    }
     // Compact inspection document: what the model actually receives (the task)
     // plus per-message format markers — not the raw Telegram snapshot with
     // entities/offsets, chat/from objects and media ids (token waste read-back).

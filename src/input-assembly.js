@@ -6,6 +6,20 @@
 // "[Файл сохранён: .../audio.ogg]" note too (the file is still copied/pinned).
 const MEDIA_MARKER = m => m.voice ? '[голосовое]' : m.audio ? '[аудио]' : m.video ? '[видео]' : null;
 
+// taskId the agent assigns to this dispatched run — mirrors the agent's /run
+// derivation (`${requestOwner}-${requestId}`, owner = audience-scoped username;
+// server.js requestOwner). Null when the snapshot can't yield a valid id → the
+// caller keeps its own gateway-side view instead of asking the agent.
+export function runInputTaskId(body) {
+  const requestId = body?.requestId;
+  const username = body?.username;
+  if (!requestId || !/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) return null;
+  if (!username || !/^[a-zA-Z0-9_-]{1,32}$/.test(username)) return null;
+  const audience = body?.audience;
+  const owner = audience && audience !== 'default' ? `${username}-${audience}` : username;
+  return `${owner}-${requestId}`;
+}
+
 export function assembleInput(items, batch = true) {
   const prepared = items.map((item, index) => {
     const m = item.msg || {};
