@@ -10,7 +10,7 @@ import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
-import { shouldDebounce, shouldAskProject, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
+import { shouldDebounce, shouldAskProject, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
 import { openProjectChoice } from './lib/project-choice.js';
@@ -285,8 +285,15 @@ export async function dispatchInner(update, env) {
     }
     // Addressing selects the recipient; it does not request an immediate launch.
     // Use the same intake path as private chats so follow-up media can be added.
+    // A content-less addressed message (bare mention, reply-with-sticker/GIF) is
+    // dropped like in private chats — otherwise it reaches the agent as an EMPTY
+    // task and the server answers 400 "missing fields", which the outbox surfaces
+    // as «⚠️ Задача сохранена, но сервер отклонил её (HTTP 400)».
+    // hasIntakeContent (not hasContent) so addressed video/photo still route: it
+    // matches the media the intake pipeline actually processes. Clean text (bot
+    // mention stripped) — a bare «@bot» mention has no actable content either.
     if (isAddressedToBot(msg, env.BOT_USERNAME)) {
-      await routeText(cleanMsg, env, chatId);
+      if (hasIntakeContent(cleanMsg)) await routeText(cleanMsg, env, chatId);
       return;
     }
     if (!hasContent(msg)) return;

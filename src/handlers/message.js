@@ -2,7 +2,7 @@ import { assembleInput } from '../input-assembly.js';
 import { readMedia } from '../lib/media-retry.js';
 import { PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { enqueueRecovery } from '../retry-queue.js';
-import { shouldAskProject } from '../intake-routing.js';
+import { shouldAskProject, hasIntakeContent } from '../intake-routing.js';
 import { PROJECT_COMMAND_RE } from '../lib/project-command.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
@@ -87,6 +87,15 @@ export async function handleMessage(msg, env, opts = {}) {
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     opts = { ...opts, requestId: `tg-${Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')}` };
   }
+
+  // Never dispatch a message the pipeline can't act on. The group addressed
+  // branch (index.js) routes here without the private-chat hasContent gate, so a
+  // bare mention / reply-with-sticker/GIF used to arrive with an EMPTY task and
+  // the agent answered 400 "missing fields" — which the outbox surfaced as
+  // «⚠️ Задача сохранена, но сервер отклонил её (HTTP 400)». Drop it here the
+  // same way private chats do. Buffered launches (intakeItems) always carry
+  // content and pass through untouched.
+  if (!msg.intakeItems?.length && !hasIntakeContent(msg)) return;
 
   let session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
