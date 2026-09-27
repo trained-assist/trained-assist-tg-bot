@@ -98,6 +98,18 @@ export function botWasAddedToGroup(msg, botUsername) {
  * how to make it work here — the piece the owner said was missing: don't guess
  * the member count silently, just SAY it and offer the explicit switch.
  */
+/**
+ * The nudge sent when someone talks TO the bot but the message has no actable
+ * content (bare mention, reply-with-sticker/GIF). Instead of dropping it
+ * silently — and instead of dispatching an EMPTY task that the agent rejects
+ * with 400 "missing fields" — acknowledge that we're here and invite a real
+ * task (owner 2026-09-27: «нужно не игнорировать, а слать „привет! я на
+ * связи. Есть задача?"»).
+ */
+export function noContentNudgeText() {
+  return '👋 Я на связи! Есть задача? Напиши её текстом или голосовым.';
+}
+
 export function groupWelcomeText(botUsername) {
   const mention = '@' + String(botUsername || '').replace(/^@/, '');
   return (

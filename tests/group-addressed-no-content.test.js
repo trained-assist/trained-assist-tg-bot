@@ -5,9 +5,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // the agent as an EMPTY task. The agent answered 400 "missing fields" and the
 // outbox surfaced «⚠️ Задача сохранена, но сервер отклонил её (HTTP 400)» to
 // the user. Private chats had a content gate in index.js; the group addressed
-// branch had none. Lock: content-less addressed group messages are dropped at
-// the router exactly like private ones; addressed text/media/video still route
-// to the intake accumulator.
+// branch had none. Owner 2026-09-27: instead of dropping such messages in
+// silence, reply with a friendly nudge («привет! я на связи. Есть задача?») so
+// the person knows the bot is here. Lock: content-less addressed group messages
+// get the nudge (never an EMPTY task, never silence); addressed text/media/video
+// still route to the intake accumulator.
 
 const handleMessage = vi.fn();
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
@@ -29,6 +31,7 @@ vi.mock('../src/lib/telegram.js', () => ({
 
 import { dispatchInner } from '../src/index.js';
 import { sendMessage } from '../src/lib/telegram.js';
+import { noContentNudgeText } from '../src/group-routing.js';
 
 const BOT = 'super_personal_assistant_bot';
 const CHAT = -5470514035;
@@ -51,7 +54,7 @@ function makeEnv() {
 beforeEach(() => vi.clearAllMocks());
 
 describe('group — addressed content-less message', () => {
-  it('reply-to-bot with a sticker is dropped at the router, never dispatched', async () => {
+  it('reply-to-bot with a sticker gets the nudge, never dispatched', async () => {
     const { env } = makeEnv();
     await dispatchInner({
       message: {
@@ -61,16 +64,16 @@ describe('group — addressed content-less message', () => {
       },
     }, env);
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', CHAT, noContentNudgeText(), {});
   });
 
-  it('bare mention (@bot with nothing after it) is dropped, not dispatched empty', async () => {
+  it('bare mention (@bot with nothing after it) gets the nudge, not dispatched empty', async () => {
     const { env } = makeEnv();
     await dispatchInner({
       message: { chat: { id: CHAT, type: 'supergroup' }, date: now(), message_id: 2, from: { id: 1, username: 'leggent' }, text: `@${BOT}` },
     }, env);
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith('t', CHAT, noContentNudgeText(), {});
   });
 
   it('addressed video still routes to the intake accumulator (no regression)', async () => {
