@@ -9,6 +9,13 @@
 //
 // Only logged-in groups record (the caller checks the session); /history_off disables
 // recording for a chat and wipes what was kept, /history_on turns it back on.
+//
+// Delivery cursor: every entry gets a monotonic `seq` in the DO; a run carries only the
+// entries after the chat's `delivered` cursor, and the cursor moves only once the agent
+// accepted the run (ackGroupHistory). So a message reaches the agent's prompt once — the
+// next run doesn't repeat it. The run also carries the entries structured
+// (body.groupHistory); the agent keeps them on disk and serves them via the
+// get_group_history MCP tool, so already-delivered messages stay readable.
 // Pure helpers here + thin DO client; the storage side lives in IntakeBuffer.
 
 import { conversationKey } from './conversation-context.js';
@@ -71,6 +78,13 @@ function mskTime(ts) {
   return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }
 
+/** Highest delivery seq among entries (0 if none carry one). */
+export function maxSeq(entries) {
+  let m = 0;
+  for (const e of (Array.isArray(entries) ? entries : [])) if (Number.isSafeInteger(e?.seq) && e.seq > m) m = e.seq;
+  return m;
+}
+
 /** Reference block for the agent; newest lines win if the block would be too long. */
 export function formatHistoryBlock(entries) {
   if (!entries?.length) return '';
@@ -81,8 +95,9 @@ export function formatHistoryBlock(entries) {
   const shown = lines.slice(start);
   const omitted = start > 0 ? `(ранние ${start} сообщ. опущены)\n` : '';
   return (
-    'История группы — сообщения участников, НЕ адресованные боту (последние 24ч, справочно; ' +
-    'текущая задача — ниже):\n' + omitted + shown.join('\n')
+    'История группы — НОВЫЕ с прошлой задачи сообщения участников, НЕ адресованные боту ' +
+    '(справочно; текущая задача — ниже; ранее переданные — через get_group_history):\n' +
+    omitted + shown.join('\n')
   );
 }
 
@@ -106,17 +121,36 @@ export async function recordGroupMessage(env, msg, threadId = null) {
   }
 }
 
-/** The formatted block for a group chat ('' if none / disabled / error). */
-export async function groupHistoryBlock(env, chatId, threadId = null) {
+/** Not-yet-delivered entries of a group chat ([] if none / disabled / error). */
+export async function pendingGroupHistory(env, chatId, threadId = null) {
   try {
-    if (!env?.INTAKE || !isGroupChatId(chatId)) return '';
-    const res = await stub(env, chatId, threadId).fetch('https://intake/group-history');
-    if (!res.ok) return '';
+    if (!env?.INTAKE || !isGroupChatId(chatId)) return [];
+    const res = await stub(env, chatId, threadId).fetch('https://intake/group-history?pending=1');
+    if (!res.ok) return [];
     const { entries } = await res.json();
-    return formatHistoryBlock(pruneHistory(entries));
+    return pruneHistory(entries);
   } catch (e) {
     console.warn(`[group-history] read failed chat=${chatId}: ${e?.message || e}`);
-    return '';
+    return [];
+  }
+}
+
+/** The formatted block of not-yet-delivered entries ('' if none / disabled / error). */
+export async function groupHistoryBlock(env, chatId, threadId = null) {
+  return formatHistoryBlock(await pendingGroupHistory(env, chatId, threadId));
+}
+
+/** Mark entries up to `seq` as delivered. Never throws: worst case they repeat once. */
+export async function ackGroupHistory(env, chatId, threadId, seq) {
+  try {
+    if (!env?.INTAKE || !isGroupChatId(chatId) || !(seq > 0)) return false;
+    const res = await stub(env, chatId, threadId).fetch('https://intake/group-history/ack', {
+      method: 'POST', body: JSON.stringify({ seq }),
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn(`[group-history] ack failed chat=${chatId}: ${e?.message || e}`);
+    return false;
   }
 }
 

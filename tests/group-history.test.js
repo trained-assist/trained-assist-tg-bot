@@ -150,6 +150,57 @@ describe('ambient group message → DO → /run context', () => {
     expect(block).not.toContain('во время выключения');
   });
 
+  it('the next run carries only what was said since the previous run (no repeats)', async () => {
+    const env = makeEnv();
+    await recordGroupMessage(env, gmsg(20, 'старое-1'));
+    await recordGroupMessage(env, gmsg(21, 'старое-2'));
+    await runTask(env, { userId: -100500, username: 'owner', task: 'первая задача' });
+    expect(runBodies[0].context).toContain('старое-1');
+    expect(runBodies[0].groupHistory.map(e => e.text)).toEqual(['старое-1', 'старое-2']);
+
+    // Nothing new → the second run gets no history block at all.
+    await runTask(env, { userId: -100500, username: 'owner', task: 'вторая задача' });
+    expect(runBodies[1].context).toBeUndefined();
+    expect(runBodies[1].groupHistory).toBeUndefined();
+
+    // Something new → only the new message, not the delivered ones.
+    await recordGroupMessage(env, gmsg(22, 'новое'));
+    await runTask(env, { userId: -100500, username: 'owner', task: 'третья задача' });
+    expect(runBodies[2].context).toContain('новое');
+    expect(runBodies[2].context).not.toContain('старое');
+    expect(runBodies[2].groupHistory.map(e => e.text)).toEqual(['новое']);
+
+    // Delivered entries are still kept in the DO (full window), only the cursor moved.
+    const res = await env.INTAKE.get('-100500').fetch('https://intake/group-history');
+    expect((await res.json()).entries.map(e => e.text)).toEqual(['старое-1', 'старое-2', 'новое']);
+  });
+
+  it('a run the agent rejected does not consume the history', async () => {
+    const env = makeEnv();
+    await recordGroupMessage(env, gmsg(30, 'важное'));
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (String(url).endsWith('/run')) runBodies.push(JSON.parse(init.body));
+      return new Response('bad', { status: 400 });
+    }));
+    await expect(runTask(env, { userId: -100500, username: 'owner', task: 'x' })).rejects.toThrow(/HTTP 400/);
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (String(url).endsWith('/run')) runBodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }));
+    await runTask(env, { userId: -100500, username: 'owner', task: 'y' });
+    expect(runBodies.at(-1).context).toContain('важное');
+  });
+
+  it('forum topics have independent delivery cursors', async () => {
+    const env = makeEnv();
+    await recordGroupMessage(env, gmsg(40, 'A1'), 5);
+    await recordGroupMessage(env, gmsg(41, 'B1'), 6);
+    await runTask(env, { userId: -100500, username: 'owner', task: 't', threadId: 5 });
+    expect(runBodies[0].context).toContain('A1');
+    await runTask(env, { userId: -100500, username: 'owner', task: 't', threadId: 6 });
+    expect(runBodies[1].context).toContain('B1');
+  });
+
   it('a broken DO never breaks the run', async () => {
     const env = { AGENT_URL: 'https://agent.example', AGENT_SECRET: 's',
       INTAKE: { idFromName: n => n, get: () => ({ fetch: async () => { throw new Error('boom'); } }) } };
