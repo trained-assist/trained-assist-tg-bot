@@ -357,15 +357,19 @@ export async function getAgentHealth(env) {
 
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
   const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
-  // Forum topics (#255): in a topic, `/stop` must only kill that topic's task — scope
-  // by chat + topic + this bot's audience (the agent scopes an omitted audience to
-  // 'default', so a recruiter/freelance topic would otherwise never match). Without a
-  // valid threadId we send EXACTLY the legacy `{ username }` payload, so private-chat /
-  // non-forum stop semantics (including the agent's audience-wide fallback) are
-  // byte-for-byte unchanged (hard guard).
-  const body = tid != null && chatId != null
-    ? { username, chatId, threadId: tid, audience: resolveAudience(env) }
-    : { username };
+  // ALWAYS scope the stop by this bot's audience + the chat (+ forum topic when
+  // present). A `{ username }`-only payload makes the agent's /tasks/stop a
+  // profile-wide kill inside audience 'default', so a private-chat /stop or the
+  // ⛔ Стоп button could SIGTERM a sibling task sharing the same profile — most
+  // notably a web-interface session (chatId=0) that had nothing to do with the
+  // Telegram chat (regression test: web session dies from a Telegram stop).
+  // Sending the bot's own audience keeps recruiter/freelance stops scoped to
+  // their own tasks instead of falling through to a wrong 'default' match, which
+  // is exactly what the previous hard guard was protecting (#260) — it fixed the
+  // audience regression by adding `audience`, but kept the unscoped { username }
+  // payload for non-forum chats, reintroducing the cross-interface kill.
+  const body = { username, chatId, audience: resolveAudience(env) };
+  if (tid != null) body.threadId = tid;
   const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
     method: 'POST',
     headers: {

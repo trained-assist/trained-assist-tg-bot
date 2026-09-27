@@ -137,8 +137,11 @@ describe('MediaJob media-result returns to the originating topic', () => {
 });
 
 // ── /stop scoping ─────────────────────────────────────────────────────────────
-// A forum topic's stop must be scoped to chat + topic + this bot's audience, while a
-// non-forum stop must keep the exact legacy `{ username }` payload (hard guard).
+// A stop must ALWAYS be scoped by this bot's audience + the chat (+ forum topic
+// when present). The former legacy `{ username }` payload made the agent's stop a
+// profile-wide kill in audience 'default', so a private-chat /stop or the ⛔ Стоп
+// button could SIGTERM a sibling task sharing the profile — including a web-interface
+// session (chatId=0) unrelated to the Telegram chat (cross-interface kill).
 describe('stopTask payload scoping', () => {
   const env = { AGENT_URL: 'https://agent', AGENT_SECRET: 's', SESSION_NAMESPACE: 'recruiter' };
   let originalFetch;
@@ -151,10 +154,10 @@ describe('stopTask payload scoping', () => {
     return () => sent;
   }
 
-  it('legacy { username } for a private/non-forum stop', async () => {
+  it('scopes a private/non-forum stop by chat + audience (never a profile-wide kill)', async () => {
     const get = captureBody();
     await stopTask(env, { username: 'u', chatId: CHAT, threadId: null });
-    expect(get()).toEqual({ username: 'u' });
+    expect(get()).toEqual({ username: 'u', chatId: CHAT, audience: 'recruiter' });
   });
 
   it('scopes by chat + topic + audience inside a forum topic', async () => {
