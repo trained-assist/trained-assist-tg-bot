@@ -11,6 +11,7 @@ import { handleMessage } from './message.js';
 import { isProjectSwitch } from '../lib/project-command.js';
 import commandsRegistry from '../../commands-registry.json';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
+import { setGroupHistoryEnabled } from '../group-history.js';
 
 // Topic-aware outbound helpers (issue #255): new messages must carry the forum
 // topic id; threadExtra() is empty without one (private/non-forum unchanged).
@@ -113,6 +114,8 @@ export async function handleCommand(msg, env) {
     case '/скиллы':            return cmdSkills(chatId, env, threadId);
     case '/all_on':            return cmdAllOn(msg, env);
     case '/all_off':           return cmdAllOff(msg, env);
+    case '/history_off':       return cmdGroupHistory(msg, env, false);
+    case '/history_on':        return cmdGroupHistory(msg, env, true);
     case '/report':
     case '/report_bug_or_feature_request': return cmdReport(msg, env);
     default:
@@ -810,6 +813,28 @@ async function cmdAllOn(msg, env) {
     allMsgMode: true,
     allMsgPinnedId: modeMsg,
   }, threadId);
+}
+
+// Quiet-mode group history (src/group-history.js): /history_off stops recording
+// ambient group messages for this chat and wipes what was kept; /history_on resumes.
+async function cmdGroupHistory(msg, env, enabled) {
+  const threadId = threadIdOf(msg);
+  const chatId = msg.chat.id;
+  if (!['group', 'supergroup'].includes(msg.chat.type)) {
+    return sendIn(env, chatId, threadId, '⚠️ Эта команда работает только в группах.');
+  }
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
+  if (!env.INTAKE) return sendIn(env, chatId, threadId, '⚠️ История группы недоступна в этом окружении.');
+  const { wasEnabled } = await setGroupHistoryEnabled(env, chatId, threadId, enabled);
+  if (enabled) {
+    return sendIn(env, chatId, threadId, wasEnabled
+      ? '✅ История группы уже включена. Выключить: /history_off'
+      : '✅ История группы включена: сообщения, не адресованные мне, запоминаю на 24ч как контекст для задач. Выключить: /history_off');
+  }
+  return sendIn(env, chatId, threadId, wasEnabled
+    ? '🔕 История группы выключена, сохранённое удалено. Включить снова: /history_on'
+    : '🔕 История группы уже выключена. Включить: /history_on');
 }
 
 async function cmdAllOff(msg, env) {

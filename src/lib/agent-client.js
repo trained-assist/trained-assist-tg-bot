@@ -2,6 +2,7 @@ import { conversationKey } from '../conversation-context.js';
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 import { resolveAudience } from './audience.js';
 import { runInputTaskId } from '../input-assembly.js';
+import { groupHistoryBlock, isGroupChatId } from '../group-history.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -131,6 +132,13 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileBase64) body.fileBase64 = fileBase64;
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
+
+  // Group chat: what participants said while the bot stayed quiet (src/group-history.js).
+  // Before the snapshot, so a retry replays the same context and «Посмотреть input» shows it.
+  if (isGroupChatId(userId)) {
+    const history = await groupHistoryBlock(env, userId, threadId);
+    if (history) body.context = body.context ? `${history}\n\n${body.context}` : history;
+  }
 
   if (env.INTAKE && inputItems) {
     body.requestId ||= initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID();

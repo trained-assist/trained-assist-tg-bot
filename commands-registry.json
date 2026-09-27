@@ -365,6 +365,28 @@
       "description": "Выключить «все сообщения → агенту»"
     },
     {
+      "command": "/history_off",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Не запоминать сообщения группы, не адресованные боту"
+    },
+    {
+      "command": "/history_on",
+      "aliases": [],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Запоминать сообщения группы (24ч) как контекст"
+    },
+    {
       "command": "/report_bug_or_feature_request",
       "aliases": [],
       "handler": "local",

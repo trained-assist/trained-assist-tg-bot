@@ -35,9 +35,16 @@ import { cmdLogin } from '../src/handlers/commands.js';
 
 function makeEnv() {
   const appended = [];
-  const stub = { fetch: vi.fn(async (_url, init) => { appended.push(JSON.parse(init.body)); return new Response('{}'); }) };
+  const history = [];
+  // Quiet-mode group history (src/group-history.js) shares the chat's DO: keep it
+  // apart from intake appends so "ignored" still means "not sent to the agent".
+  const stub = { fetch: vi.fn(async (url, init) => {
+    (String(url).includes('/group-history') ? history : appended).push(JSON.parse(init?.body || '{}'));
+    return new Response('{}');
+  }) };
   return {
     _appended: appended,
+    _history: history,
     env: {
       INTAKE_DEBOUNCE: 'on',
       BOT_TOKEN: 't',
@@ -116,14 +123,25 @@ describe('private/group admission parity for every supported attachment', () => 
       expect(handleMessage).not.toHaveBeenCalled();
     });
 
-    it(`ignores human-to-human ${Object.keys(payload).join('/')} in all_off large groups`, async () => {
-      const { env, _appended } = makeEnv();
+    it(`does not act on human-to-human ${Object.keys(payload).join('/')} in all_off large groups, but remembers it`, async () => {
+      const { env, _appended, _history } = makeEnv();
       currentSession = { allMsgMode: false };
       env.SESSIONS.get.mockResolvedValue({ count: 3, ts: Date.now() });
       await dispatchInner(groupMsg(payload), env);
       await dispatchInner(groupMsg({ ...payload, reply_to_message: { from: { username: 'another_human' } } }), env);
       expect(_appended).toHaveLength(0);
       expect(handleMessage).not.toHaveBeenCalled();
+      expect(_history).toHaveLength(2);
+      expect(_history[0].entry.text).toBeTruthy();
+    });
+
+    it(`keeps no history of ${Object.keys(payload).join('/')} in a group nobody logged into`, async () => {
+      const { env, _appended, _history } = makeEnv();
+      currentSession = null;
+      env.SESSIONS.get.mockResolvedValue({ count: 3, ts: Date.now() });
+      await dispatchInner(groupMsg(payload), env);
+      expect(_appended).toHaveLength(0);
+      expect(_history).toHaveLength(0);
     });
   }
 });

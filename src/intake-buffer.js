@@ -26,6 +26,7 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem } from './intake-routing.js';
 import { threadExtra, threadIdOf } from './conversation-context.js';
+import { pruneHistory } from './group-history.js';
 
 // Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
 // force every test that mocks that module to declare them). They call the imported
@@ -93,6 +94,17 @@ export class IntakeBuffer {
     this.env = applySessionNamespace(env);
     this.mutation = Promise.resolve();
     this.uiMutation = Promise.resolve();
+    this.historyMutation = Promise.resolve();
+  }
+
+  // Group history (src/group-history.js) has its own lock: an ambient message must
+  // never wait behind a long dispatch holding the intake mutex, and vice versa.
+  async _historyExclusive(fn) {
+    const previous = this.historyMutation;
+    let release;
+    this.historyMutation = new Promise(resolve => { release = resolve; });
+    await previous;
+    try { return await fn(); } finally { release(); }
   }
 
   async _exclusive(fn) {
@@ -154,6 +166,35 @@ export class IntakeBuffer {
         }
         if (body.initialMsgId) await this.state.storage.put(`input-message:${body.initialMsgId}`, id);
         return json({ id, body: existing?.body || body });
+      });
+    }
+
+    if (url.pathname === '/group-history') {
+      if (request.method === 'GET') {
+        if (await this.state.storage.get('groupHistoryOff')) return json({ enabled: false, entries: [] });
+        return json({ enabled: true, entries: pruneHistory((await this.state.storage.get('groupHistory')) || []) });
+      }
+      if (request.method === 'POST') {
+        const { entry } = await request.json();
+        return this._historyExclusive(async () => {
+          if (await this.state.storage.get('groupHistoryOff')) return json({ recorded: false, enabled: false });
+          if (!entry?.text || !Number.isFinite(entry.ts)) return new Response('entry required', { status: 400 });
+          const entries = pruneHistory([...((await this.state.storage.get('groupHistory')) || []), entry]);
+          await this.state.storage.put('groupHistory', entries);
+          return json({ recorded: true, count: entries.length });
+        });
+      }
+    }
+    if (url.pathname === '/group-history/mode' && request.method === 'POST') {
+      const { enabled } = await request.json();
+      return this._historyExclusive(async () => {
+        const wasEnabled = !(await this.state.storage.get('groupHistoryOff'));
+        if (enabled) await this.state.storage.delete('groupHistoryOff');
+        else {
+          await this.state.storage.put('groupHistoryOff', true);
+          await this.state.storage.delete('groupHistory');
+        }
+        return json({ wasEnabled, enabled: !!enabled });
       });
     }
 

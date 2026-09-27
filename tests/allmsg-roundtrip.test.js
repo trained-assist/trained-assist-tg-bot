@@ -55,13 +55,20 @@ const now = () => Math.floor(Date.now() / 1000);
 
 function makeEnv() {
   const appended = [];
-  const intakeStub = { fetch: vi.fn(async (_url, init) => { appended.push(JSON.parse(init.body)); return new Response('{}'); }) };
+  const history = [];
+  // Quiet-mode group history (src/group-history.js) shares the chat DO; keep it apart
+  // from intake appends — "drops ambient" means "not sent to the agent".
+  const intakeStub = { fetch: vi.fn(async (url, init) => {
+    (String(url).includes('/group-history') ? history : appended).push(JSON.parse(init.body));
+    return new Response('{}');
+  }) };
   const SESSIONS = makeKV();
   const USERS = makeKV();
   // Seed the profile so real getUser + verifyPassword(mocked→true) let /login succeed.
   USERS.map.set('user:owner', JSON.stringify({ name: 'Owner', passwordHash: 'h', salt: 's' }));
   return {
     _appended: appended,
+    _history: history,
     SESSIONS,
     env: {
       INTAKE_DEBOUNCE: 'on',
@@ -124,11 +131,13 @@ describe('allMsgMode survives the real KV round-trip (uniform login, no CHAT_MAP
     expect(_appended).toHaveLength(0);
   });
 
-  it('CONTROL: a logged-in group after /all_off drops ambient again', async () => {
-    const { env, _appended } = makeEnv();
+  it('CONTROL: a logged-in group after /all_off does not act on ambient, only remembers it', async () => {
+    const { env, _appended, _history } = makeEnv();
     // Simulate a session that logged in then turned all-msg off.
     env.SESSIONS.map.set(String(GROUP), JSON.stringify({ username: 'owner', name: 'Owner', allMsgMode: false }));
     await dispatchInner(ambient('после all_off'), env);
     expect(_appended).toHaveLength(0);
+    expect(_history).toHaveLength(1);
+    expect(_history[0].entry.text).toBe('после all_off');
   });
 });
