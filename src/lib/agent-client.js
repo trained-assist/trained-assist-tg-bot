@@ -2,7 +2,7 @@ import { conversationKey } from '../conversation-context.js';
 import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 import { resolveAudience } from './audience.js';
 import { runInputTaskId } from '../input-assembly.js';
-import { groupHistoryBlock, isGroupChatId } from '../group-history.js';
+import { pendingGroupHistory, formatHistoryBlock, ackGroupHistory, maxSeq, isGroupChatId } from '../group-history.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -133,12 +133,21 @@ export async function runTask(env, { userId, username, task, context, sessionId,
   if (fileName) body.fileName = fileName;
   if (fileMimeType) body.fileMimeType = fileMimeType;
 
-  // Group chat: what participants said while the bot stayed quiet (src/group-history.js).
-  // Before the snapshot, so a retry replays the same context and «Посмотреть input» shows it.
+  // Group chat: what participants said while the bot stayed quiet (src/group-history.js),
+  // only entries no accepted run carried yet. Before the snapshot, so a retry replays the
+  // same context and «Посмотреть input» shows it. `groupHistory` (structured) lets the
+  // agent keep them for the get_group_history MCP tool.
   if (isGroupChatId(userId)) {
-    const history = await groupHistoryBlock(env, userId, threadId);
-    if (history) body.context = body.context ? `${history}\n\n${body.context}` : history;
+    const pending = await pendingGroupHistory(env, userId, threadId);
+    const history = formatHistoryBlock(pending);
+    if (history) {
+      body.context = body.context ? `${history}\n\n${body.context}` : history;
+      body.groupHistory = pending.map(({ id, seq, ts, from, text }) => ({ id, seq, ts, from, text }));
+    }
   }
+  // Acked only once the agent accepted the run: a failed run repeats the entries next time.
+  // Computed from the final (possibly snapshot-replayed) body — that's what was delivered.
+  const ackHistory = () => ackGroupHistory(env, userId, threadId, maxSeq(body.groupHistory));
 
   if (env.INTAKE && inputItems) {
     body.requestId ||= initialMsgId ? `msg-${userId}-${initialMsgId}` : crypto.randomUUID();
@@ -164,7 +173,9 @@ export async function runTask(env, { userId, username, task, context, sessionId,
       method: 'POST', body: JSON.stringify({ agentUrl, body }),
     });
     if (!res.ok) throw Error(`outbox HTTP ${res.status}`);
-    return res.json();
+    const queued = await res.json();
+    await ackHistory();
+    return queued;
   }
 
   const MAX_ATTEMPTS = 3;
@@ -183,6 +194,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     if (res.ok) {
       const ack=await res.json();
       if(ack.durable){await releaseBufferPins(env,username,fileRefs);if(agentUrl!==env.AGENT_URL)await releaseBufferPins(env,username,fileRefs,agentUrl);}
+      await ackHistory();
       return ack;
     }
     const isRetryable = res.status === 502 || res.status === 503;

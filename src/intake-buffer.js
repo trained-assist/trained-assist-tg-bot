@@ -171,19 +171,35 @@ export class IntakeBuffer {
 
     if (url.pathname === '/group-history') {
       if (request.method === 'GET') {
-        if (await this.state.storage.get('groupHistoryOff')) return json({ enabled: false, entries: [] });
-        return json({ enabled: true, entries: pruneHistory((await this.state.storage.get('groupHistory')) || []) });
+        if (await this.state.storage.get('groupHistoryOff')) return json({ enabled: false, entries: [], delivered: 0 });
+        const delivered = (await this.state.storage.get('groupHistoryDelivered')) || 0;
+        let entries = pruneHistory((await this.state.storage.get('groupHistory')) || []);
+        // ?pending=1 → only what no accepted run has carried yet (seq-less legacy entries
+        // count as seq 0: pending until the first ack).
+        if (url.searchParams.get('pending')) entries = entries.filter(e => (e.seq || 0) > delivered || (!e.seq && !delivered));
+        return json({ enabled: true, entries, delivered });
       }
       if (request.method === 'POST') {
         const { entry } = await request.json();
         return this._historyExclusive(async () => {
           if (await this.state.storage.get('groupHistoryOff')) return json({ recorded: false, enabled: false });
           if (!entry?.text || !Number.isFinite(entry.ts)) return new Response('entry required', { status: 400 });
-          const entries = pruneHistory([...((await this.state.storage.get('groupHistory')) || []), entry]);
+          const seq = ((await this.state.storage.get('groupHistorySeq')) || 0) + 1;
+          const entries = pruneHistory([...((await this.state.storage.get('groupHistory')) || []), { ...entry, seq }]);
+          await this.state.storage.put('groupHistorySeq', seq);
           await this.state.storage.put('groupHistory', entries);
-          return json({ recorded: true, count: entries.length });
+          return json({ recorded: true, count: entries.length, seq });
         });
       }
+    }
+    if (url.pathname === '/group-history/ack' && request.method === 'POST') {
+      const { seq } = await request.json();
+      if (!Number.isSafeInteger(seq) || seq < 1) return new Response('seq required', { status: 400 });
+      return this._historyExclusive(async () => {
+        const delivered = Math.max((await this.state.storage.get('groupHistoryDelivered')) || 0, seq);
+        await this.state.storage.put('groupHistoryDelivered', delivered);
+        return json({ delivered });
+      });
     }
     if (url.pathname === '/group-history/mode' && request.method === 'POST') {
       const { enabled } = await request.json();
