@@ -10,6 +10,7 @@ import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
+import { recordGroupMessage } from './group-history.js';
 import { shouldDebounce, shouldAskProject, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText } from './group-routing.js';
 import { getProjectDecision } from './lib/agent-client.js';
@@ -309,7 +310,12 @@ export async function dispatchInner(update, env) {
     const allMsgMode = session?.allMsgMode;
     const memberCount = allMsgMode ? undefined : await getGroupMemberCount(env, chatId);
     console.log(`[group ${chatId}] ambient memberCount=${memberCount} allMsgMode=${allMsgMode}`);
-    if (!shouldHandleAmbient({ allMsgMode, memberCount })) return;
+    if (!shouldHandleAmbient({ allMsgMode, memberCount })) {
+      // Quiet mode: don't act, but remember it so a later «@bot …» task sees what the
+      // group discussed (src/group-history.js). Logged-in groups only.
+      if (session) await recordGroupMessage(env, msg, threadIdOf(msg));
+      return;
+    }
 
     // Same intake accumulator as private chats — a 2-member group is a 1-on-1
     // workflow and buffers + launches by ▶️, not a session per quick message (#530).
