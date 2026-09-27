@@ -713,6 +713,39 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Extracted action buttons (#1542 P3) ─────────────────────────────────────
+  // act|{sessionId}|{idx} — the agent's post-processor pulled concrete actions out
+  // of its own answer («Создать PR», «Задеплоить») and rendered one button each.
+  // The label on the tapped button IS the instruction: we read it back from the
+  // message markup (no sidecar, no callback_data bytes spent on text) and run it
+  // in the same session, deep. The tap itself is the user's consent to that action.
+  if (data?.startsWith('act|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const rest = data.slice('act|'.length);
+    const sepIdx = rest.lastIndexOf('|');
+    const sessionId = (sepIdx === -1 ? rest : rest.slice(0, sepIdx)) || session.activeSessionId || session.lastSessionId;
+    const tapped = message?.reply_markup?.inline_keyboard?.flat().find(b => b.callback_data === data);
+    const label = String(tapped?.text || '').replace(/^▶️\s*/, '').trim();
+    if (!label) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Кнопка устарела — напиши текстом'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, `▶️ ${label}`.slice(0, 190));
+    const thinkMsg = await sendT(env, chatId, threadId, `▶️ ${label}…`);
+    const initialMsgId = thinkMsg?.result?.message_id ?? null;
+    await runTask(env, {
+      initiatedAt, threadId: threadId,
+      requestId: `callback-${id}`,
+      userId: chatId,
+      username: session.username,
+      sessionId,
+      task: `[Пользователь нажал кнопку «${label}» под твоим последним ответом. Выполни именно это действие так, как ты его описал выше, и доведи до конца. Не переспрашивай — согласие уже дано нажатием кнопки.]`,
+      forceClaude: true,
+      mode: 'deep',
+      initialMsgId,
+      telegramUserId: session.telegramUserId,
+      projectId: session.projectId || null,
+    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
   // ── Stop task button (⛔ Стоп, sent by agent on task start) ─────────────────
   // stop|{taskId} — first tap only shows a confirm keyboard (↩️ Вернуться /
   // ⛔ Точно остановить); the actual stop only happens on the explicit stopok|
