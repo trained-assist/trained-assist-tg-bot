@@ -55,7 +55,7 @@ describe('preflight before collector', () => {
     const pending = Array.from({ length: 5 }, (_, n) => ingest(io, { ...msg, text: undefined, message_id: n + 1, voice: { file_id: `v${n}` } }));
     await vi.waitFor(() => expect(mocks.stt).toHaveBeenCalledTimes(5));
     const response = await io.fetch(new Request('https://intake/flush', { method: 'POST' }));
-    expect(await response.json()).toEqual({ preparing: true }); expect(mocks.handle).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ preparing: true, queued: true }); expect(mocks.handle).not.toHaveBeenCalled();
     release(); await Promise.all(pending);
     expect(map.get('buf')).toHaveLength(5);
     await io.fetch(new Request('https://intake/flush', { method: 'POST' }));
