@@ -271,6 +271,43 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
+  it('▶️ tap DURING a run is not a silent no-op: queued, launched right after run-finished', async () => {
+    // Owner 2026-09-27: «кнопка Запустить пропала / не запускается». The held
+    // receipt showed «▶️ Запустить агента», but /flush while busy returned
+    // {busy:true} and did nothing. Now the tap is remembered and honoured.
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq()); await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+
+    await io.fetch(appendReq('supplement during run'));
+    const tap = await (await io.fetch(flushReq())).json();
+    expect(tap).toMatchObject({ busy: true, queued: true });
+    expect(handleMessage).toHaveBeenCalledTimes(1); // still no concurrent run (F1)
+
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(2); // launched without a 2nd tap
+    expect(handleMessage.mock.calls[1][0].text).toBe('supplement during run');
+    expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
+  });
+
+  it('▶️ tap on a STALE hold (agent says nothing runs) self-heals and launches now', async () => {
+    const state = makeState();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ running: false })));
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - 5 * 60_000);
+    await state.storage.put('busyChatId', 42);
+    await state.storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, text: 'held', message_id: 7 } }]);
+    const tap = await (await io.fetch(flushReq())).json();
+    await drain();
+    expect(tap).toMatchObject({ flushed: true, healed: true });
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('held');
+    fetchSpy.mockRestore();
+  });
+
   it('retries a failed receipt without discarding input or creating a plain duplicate', async () => {
     const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Too Many Requests' });

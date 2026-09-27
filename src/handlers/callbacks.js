@@ -597,6 +597,8 @@ export async function handleCallbackQuery(cq, env) {
       // or duplicate tap). The callback is already acknowledged; don't add a
       // misleading instruction to resend a task that may already be running.
       // Busy/duplicate taps keep the existing status; the callback is already acknowledged.
+      // A tap during a live run is queued in the DO — say so, never a silent no-op.
+      if (r?.queued) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно.');
 
     }
     return;
