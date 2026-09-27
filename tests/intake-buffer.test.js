@@ -507,6 +507,55 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(state._dump().alarm).not.toBeNull();
     expect(await state.storage.get('debounceExpiresAt')).toBeTruthy();
   });
+
+  it('a ▶️ tap while media is still downloading is acknowledged and then launches by itself', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await state.storage.put('buf', [
+      { text: 'вот файл', msg: { chat: { id: 42 }, message_id: 6 }, },
+      { text: undefined, msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-1' },
+        mediaPending: true, mediaOwner: 'alice', mediaFirstSeenAt: Date.now() },
+    ]);
+
+    // The tap must NOT read as a dead button: acknowledge that the batch was
+    // taken and remember the intent for when the last attachment lands.
+    const res = await io.fetch(flushReq());
+    expect(await res.json()).toMatchObject({ preparing: true, queued: true });
+    expect(await state.storage.get('launchWhenReady')).toBe(true);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).toHaveBeenCalledWith(
+      't', 42, expect.stringContaining('Задачу забрал'), expect.anything(), expect.anything());
+
+    // Attachment resolves → the queued tap fires the run, no second tap needed.
+    await io.fetch(new Request('https://intake/media-result', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'job-1', messageId: 7, username: 'alice',
+        fileRef: { id: 'job-1', storage: 'r2' }, transcript: 'сделай отчёт',
+      }),
+    }));
+    await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('a media job stuck past MEDIA_DEADLINE_MS is dropped so the chat can launch again', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    await state.storage.put('buf', [{
+      text: undefined, msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-stuck' },
+      mediaPending: true, mediaOwner: 'alice', mediaFirstSeenAt: Date.now() - 20 * 60_000,
+    }]);
+
+    // Without the deadline this item sat mediaPending forever (its MediaJob DO
+    // lost the alarm), so every tap answered «ещё грузится» and nothing ran.
+    await io.alarm();
+
+    const buf = (await state.storage.get('buf')) || [];
+    expect(buf.some(i => i.mediaPending)).toBe(false);
+    expect(await state.storage.get('media-failed:job-stuck')).toBeTruthy();
+  });
 });
 
 
