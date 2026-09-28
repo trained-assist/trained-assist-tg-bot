@@ -79,9 +79,16 @@ const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: pas
 const RECEIPT_MS = 1500;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
+// Shown INSTEAD of LAUNCH_BTN whenever a run is already accepted for this chat:
+// status text + inspect only. A ▶️ that stays visible after the tap is read as
+// «нажата она или нет?» — the exact ambiguity the owner asked to remove (29.09).
+const STATUS_BTN = [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]];
+// Status overrides that themselves mean "the batch is taken" (📨 dispatching, 📥
+// queued) — even before `busy` is set the launch button must go.
+const TOOK_IT = /^(?:📨|📥)/;
 
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
-const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. «▶️ Запустить агента» — запущу их сразу после неё.`;
+const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Покажу кнопку запуска сразу после неё.`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
 export class IntakeBuffer {
@@ -685,7 +692,13 @@ export class IntakeBuffer {
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
       const text = override || collectorText(items.length || count);
-      const keyboard = override?.startsWith('📨') ? [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] : LAUNCH_BTN;
+      // Launch button only while NOTHING is accepted here: not busy, and this is not
+      // an "already took it" status. busy covers held input during a run; TOOK_IT
+      // covers the dispatching/queued statuses themselves (the 📥 queued bubble can
+      // appear before any release). Held input earns its button back only in
+      // _afterBusyRelease, i.e. once the run is truly over.
+      const launchable = !TOOK_IT.test(override || '') && !(await this.state.storage.get('busy'));
+      const keyboard = launchable ? LAUNCH_BTN : STATUS_BTN;
       const prevId = await this.state.storage.get('collectorMsgId');
       if (prevId) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
