@@ -16,6 +16,7 @@ import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, bot
 import { getProjectDecision } from './lib/agent-client.js';
 import { openProjectChoice } from './lib/project-choice.js';
 import { chatConfigCommandFromPhrase } from './lib/project-command.js';
+import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 
 const app = new Hono();
@@ -281,6 +282,7 @@ export async function dispatchInner(update, env) {
     console.log(`[group ${chatId}] ${msg.from?.username || msg.from?.id}: ${text.slice(0, 100)}`);
 
     if (text.startsWith('/')) {
+      await cancelSupplementForCommand(env, chatId, threadIdOf(msg));
       await handleCommand(cleanMsg, env);
       return;
     }
@@ -333,12 +335,24 @@ export async function dispatchInner(update, env) {
   // uses (hasContent) — so they're silently dropped instead of hitting the
   // "не могу обработать этот тип сообщения" fallback in handleMessage.
   if (text.startsWith('/')) {
+    await cancelSupplementForCommand(env, chatId, threadIdOf(msg));
     await handleCommand(msg, env);
   } else if (!hasContent(msg)) {
     return;
   } else {
     await routeText(msg, env, chatId);
   }
+}
+
+// A command while «➕ Дополнить» waits for text drops the draft (SS-09): the user
+// moved on, so the running task stays untouched and anything already typed goes
+// back to the normal intake flow instead of vanishing.
+async function cancelSupplementForCommand(env, chatId, threadId) {
+  const dropped = await cancelSupplement(env, chatId, threadId);
+  if (!dropped) return;
+  await sendMessage(env.BOT_TOKEN, chatId, dropped.items?.length
+    ? '✖️ Дополнение отменено — задача продолжает работать. Написанное вернул во входящие.'
+    : '✖️ Дополнение отменено — задача продолжает работать.', threadExtra(threadId)).catch(() => {});
 }
 
 // One text-routing rule for both private and group chats: buffer through the
@@ -385,11 +399,17 @@ export async function routeText(msg, env, chatId) {
     // dispatch the buffer (or just this one message if buffer was empty) immediately.
     const flush = FORCE_RUN_RE.test(msg.text || '') || AUTO_LAUNCH_RE.test(msg.text || '');
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-    await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
+    const res = await stub.fetch(env.AGENT_URL && env.SESSIONS && !flush ? 'https://intake/ingest' : 'https://intake/append', {
       method: 'POST',
       body: JSON.stringify({ text: msg.text, msg, flush }),
     });
+    // «➕ Дополнить» armed → the buffer put this message into the supplement draft
+    // instead (SS-06); the old handleMessage-side check was never reached from here.
+    const diverted = await res?.json?.().catch(() => null);
+    if (diverted?.supplement) await showSupplementConfirm(env, msg, chatId, threadId, diverted.supplement);
   } else {
+    // Debounce kill-switch: the buffer is bypassed, so ask the supplement collector directly.
+    if (env.INTAKE && hasIntakeContent(msg) && await captureSupplement(env, msg, chatId, threadId)) return;
     await handleMessage(msg, env);
   }
 }

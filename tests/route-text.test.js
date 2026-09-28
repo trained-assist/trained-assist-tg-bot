@@ -92,7 +92,9 @@ describe('routeText — shared private+group intake rule', () => {
     const { env, _appended } = makeEnv();
     env.INTAKE_DEBOUNCE = 'off';
     await routeText({ chat: { id: 42 }, text: 'что угодно' }, env, 42);
-    expect(_appended).toHaveLength(0);
+    // Nothing is buffered. The only DO call is the «➕ Дополнить» lookup ({op:'add'}),
+    // which must still work with the buffer switched off (it answered «not armed» here).
+    expect(_appended.filter(b => !b.op)).toHaveLength(0);
     expect(handleMessage).toHaveBeenCalledTimes(1);
   });
 

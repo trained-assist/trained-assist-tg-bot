@@ -1,6 +1,5 @@
 import { assembleInput } from '../input-assembly.js';
 import { readMedia } from '../lib/media-retry.js';
-import { PICKER_TTL_MS } from '../lib/transient-ui.js';
 import { enqueueRecovery } from '../retry-queue.js';
 import { shouldAskProject, hasIntakeContent } from '../intake-routing.js';
 import { PROJECT_COMMAND_RE } from '../lib/project-command.js';
@@ -106,30 +105,6 @@ export async function handleMessage(msg, env, opts = {}) {
     return sendTracked(env, chatId,
       '👋 Сначала войди: /login username password', {}, threadId
     );
-  }
-
-  // Consume a one-shot «➕ Дополнить» flow (sup| in callbacks.js): the next plain-text
-  // message is stashed as a DRAFT on the session and a confirmation keyboard
-  // (✅ Перезапустить / ❌ Отменить) is shown. The actual stop+restart happens only on
-  // an explicit supok| tap in callbacks.js — a stray or rushed text message can no
-  // longer kill a running task. Only plain text counts — media/batched intake items
-  // fall through to normal handling untouched.
-  if (session.pendingSupplementDraft && (msg.text || '').trim() && !msg.intakeItems) {
-    const { taskId, sessionId, expiresAt } = session.pendingSupplementDraft;
-    session = { ...session, pendingSupplementDraft: null };
-    if (Date.now() < expiresAt) {
-      const draft = { taskId, sessionId, text: msg.text, expiresAt: Date.now() + PICKER_TTL_MS };
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: draft }, threadId);
-      await sendKeyboardTracked(env, chatId,
-        '➕ Остановить текущую задачу и перезапустить её с твоим дополнением?',
-        [[
-          { text: '↩️ Вернуться', callback_data: `supno|${taskId}` },
-          { text: '➕ Перезапуск с дополнением', callback_data: `supok|${taskId}` },
-        ]], {}, threadId, env);
-      return;
-    }
-    // Expired — draft dropped, fall through to normal handling of this message.
-    await setSession(env.SESSIONS, chatId, session, threadId);
   }
 
   try {
@@ -258,6 +233,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       forceNew: !!route.forceNew,
       contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
+      forceClaude: opts.forceClaude || undefined,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
       telegramUserId: session.telegramUserId,
