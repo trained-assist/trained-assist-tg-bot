@@ -46,3 +46,30 @@ it('forwards a NEGATIVE group chatId to its IntakeBuffer', async () => {
     body: JSON.stringify({ requestId: 'intake-abc' }),
   });
 });
+
+it('forwards consumed message ids (live inbox) to the IntakeBuffer', async () => {
+  const { env, stub } = makeEnv();
+  await worker.fetch(req({ chatId: 42, requestId: 'r1', consumed: [501, '502', 'x'] }), env);
+  expect(stub.fetch).toHaveBeenCalledWith('https://intake/run-finished', {
+    method: 'POST',
+    body: JSON.stringify({ requestId: 'r1', consumed: [501, 502] }),
+  });
+});
+
+const heldReq = (qs, token = 'test-secret') => new Request(`https://worker/internal/held-messages?${qs}`, {
+  headers: token ? { Authorization: `Bearer ${token}` } : {},
+});
+
+it('held-messages: auth + chat validation, then reads the right IntakeBuffer', async () => {
+  const { env, stub } = makeEnv();
+  stub.fetch.mockResolvedValue(Response.json({ busy: true, items: [{ message_id: 7, text: 'hi' }] }));
+  expect((await worker.fetch(heldReq('chatId=42', null), env)).status).toBe(401);
+  expect((await worker.fetch(heldReq('chatId=0'), env)).status).toBe(400);
+  expect((await worker.fetch(heldReq('chatId=42&threadId=-3'), env)).status).toBe(400);
+  expect(stub.fetch).not.toHaveBeenCalled();
+  const res = await worker.fetch(heldReq('chatId=-100123&threadId=9&requestId=intake-abc'), env);
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ busy: true, items: [{ message_id: 7, text: 'hi' }] });
+  expect(env.INTAKE.idFromName).toHaveBeenCalledWith(expect.stringContaining('-100123'));
+  expect(stub.fetch).toHaveBeenCalledWith('https://intake/held?requestId=intake-abc');
+});

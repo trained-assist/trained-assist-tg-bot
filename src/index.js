@@ -46,11 +46,34 @@ app.post('/internal/run-finished', async c => {
   const threadId = rawThread == null ? null : Number(rawThread);
   if (threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) return c.json({ error: 'invalid threadId' }, 400);
   const requestId = typeof body?.requestId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId) ? body.requestId : null;
+  // Message ids the model already took in mid-run via get_new_messages (live inbox).
+  const consumed = Array.isArray(body?.consumed) ? body.consumed.map(Number).filter(Number.isSafeInteger).slice(0, 200) : [];
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(chatId, threadId)));
   const res = await stub.fetch('https://intake/run-finished', {
     method: 'POST',
-    body: JSON.stringify({ requestId }),
+    body: JSON.stringify(consumed.length ? { requestId, consumed } : { requestId }),
   });
+  const payload = await res.json().catch(() => ({}));
+  return c.json(payload, res.status);
+});
+
+// Agent → gateway: messages the user sent AFTER the current run started (live inbox,
+// owner 2026-09-29). Backs the agent's MCP tool get_new_messages. Same auth and
+// chat/thread validation as /internal/run-finished; `requestId` scopes the read to
+// the run that holds this chat, so a sibling run can't read another run's input.
+app.get('/internal/held-messages', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  const chatId = Number(c.req.query('chatId'));
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return c.json({ error: 'invalid chatId' }, 400);
+  const rawThread = c.req.query('threadId');
+  const threadId = rawThread == null || rawThread === '' ? null : Number(rawThread);
+  if (threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) return c.json({ error: 'invalid threadId' }, 400);
+  const rawReq = c.req.query('requestId');
+  const requestId = rawReq && /^[a-zA-Z0-9_-]{1,128}$/.test(rawReq) ? rawReq : null;
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+  const res = await stub.fetch(`https://intake/held${requestId ? `?requestId=${encodeURIComponent(requestId)}` : ''}`);
   const payload = await res.json().catch(() => ({}));
   return c.json(payload, res.status);
 });
