@@ -738,6 +738,36 @@
       "description": "Включить уведомления о шаринге Google Drive"
     },
     {
+      "command": "/bg_notify_on",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Уведомлять о каждом шаге фоновых задач"
+    },
+    {
+      "command": "/bg_notify_off",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Выключить уведомления о шагах фоновых задач"
+    },
+    {
+      "command": "/bg_notify_status",
+      "aliases": [],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Включены ли уведомления о шагах фоновых задач"
+    },
+    {
       "command": "/show_active_cheklist",
       "aliases": [
         "/active_checklist"
