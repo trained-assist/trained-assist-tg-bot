@@ -413,6 +413,14 @@ export class IntakeBuffer {
       if ((await this.state.storage.get('busy')) === true) {
         const since = (await this.state.storage.get('busySince')) || 0;
         if (!(await this._pollRunFinishedIfIdle(since, { launch: true }))) {
+          // Only promise a queued launch when there IS held input to launch after
+          // the run. A stale/duplicate tap on a run that already swallowed its own
+          // batch has nothing to queue — arm nothing and stay silent (дыра №4):
+          // replying «запущу эти сообщения» about messages that do not exist reads
+          // as a failed launch (#293, owner 2026-09-28, chat -5501536471).
+          const held = [...((await this.state.storage.get('retryBatch')) || []),
+            ...((await this.state.storage.get('buf')) || [])];
+          if (!held.length) return json({ busy: true });
           await this.state.storage.put('launchAfterRelease', true);
           return json({ busy: true, queued: true });
         }
@@ -425,6 +433,9 @@ export class IntakeBuffer {
         // The tap DID register — leaving it unanswered read as «кнопка не
         // нажимается». Confirm the request was taken, and remember it so the
         // batch launches by itself the moment the last attachment is ready.
+        // `queued: true` means only "the tap is remembered, not dropped": NOTHING
+        // is running yet (busy is false here), so the caller must NOT narrate it
+        // as a running task — our own collector line below is the honest wording.
         await this.state.storage.put('launchWhenReady', true);
         await this._showCollector(buf[0].msg.chat.id, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf[0].msg),
           '📥 Задачу забрал — часть сообщений ещё грузится. Сохраню всё и начну, как только получу вложения.');
