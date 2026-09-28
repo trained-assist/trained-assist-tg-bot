@@ -5,9 +5,11 @@ import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 // Durable Object: per-chat intake buffer.
 //
-// Automatic launch requires three quiet minutes AND an actionable request.
-// Explicit launch commands/buttons bypass the timer. New input invalidates any
-// in-flight gate verdict; reservation compares the exact checked buffer under lock.
+// Automatic launch needs a quiet period AND an actionable request. The judge sets
+// the period (30 s for a short continuation whose target the previous agent answer
+// makes obvious, 3 min otherwise) and says it out loud; explicit launch commands
+// and buttons bypass the timer. New input invalidates any in-flight gate verdict;
+// reservation compares the exact checked buffer under lock.
 // Files alone are context, never an instruction. Gate failures keep the collector.
 //
 // Two states, both owned here so the rule is one place for every user:
@@ -90,6 +92,16 @@ const TOOK_IT = /^(?:📨|📥)/;
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
 const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Покажу кнопку запуска сразу после неё.`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
+
+// The user's typed instruction for a batch: prepared file contents must never
+// masquerade as it (same rule as the expiry gate below — one definition).
+function coalescedIntent(buf) {
+  return buf.map(i => {
+    const m = i.msg || {};
+    if (m.document || m.photo || m.video) return i.intentText ?? m.caption ?? '';
+    return coalesceItem(i);
+  }).filter(Boolean).join('\n');
+}
 
 export class IntakeBuffer {
   constructor(state, env) {
@@ -290,6 +302,7 @@ export class IntakeBuffer {
         await this.state.storage.delete('debounceExpiresAt');
         await this.state.storage.delete('gateLevel');
         await this.state.storage.delete('shortDebounce');
+        await this.state.storage.delete('gateConsulted');
         await this.state.storage.delete('receiptDue');
         await this.state.storage.delete('collectorMsgId');
         await this.state.storage.delete('launching');
@@ -655,12 +668,57 @@ export class IntakeBuffer {
   async _armAutoDispatch(chatId, remaining, replyToMessageId, threadId = null) {
     await this.state.storage.delete('gateLevel');
     await this.state.storage.delete('shortDebounce');
+    await this.state.storage.delete('gateConsulted');
     await this.state.storage.put('autoPolicy', 'quiet-3m-v1');
     const debounceMs = DEBOUNCE_MS;
     const expiresAt = Date.now() + debounceMs;
     await this.state.storage.put('debounceExpiresAt', expiresAt);
     await this.state.storage.setAlarm(expiresAt);
     await this._scheduleReceipt();
+  }
+
+  // Chat session for the judge — a missing/odd KV in tests must never break the gate.
+  async _gateSession(chatId, threadId) {
+    try { return await getSession(this.env.SESSIONS, chatId, threadId); } catch { return null; }
+  }
+
+  // Owner 2026-09-29: the delay and the reason must be spoken, and a short
+  // «продолжай» may only fast-launch when the judge can see the previous agent
+  // answer. The agent gate is the single source of that verdict; this asks it
+  // ONCE per input (after the receipt settles) and applies the returned delay +
+  // announcement. Any miss keeps the default three-minute timer, so the expiry
+  // gate below still decides — never a silent dead-end.
+  async _consultGate(chatId, threadId = null) {
+    if (!chatId || !this.env.AGENT_URL) return;
+    const store = this.state.storage;
+    const debounceExpiresAt = await store.get('debounceExpiresAt');
+    if (!debounceExpiresAt) return;
+    const buf = (await store.get('buf')) || [];
+    if (!buf.length || buf.some(i => i.mediaPending || i.preparingAt)) return;
+    const snapshot = JSON.stringify(buf);
+    if ((await store.get('gateConsulted')) === snapshot) return; // once per input
+    const intent = coalescedIntent(buf);
+    if (!intent.trim()) return;
+    const session = await this._gateSession(chatId, threadId);
+    let verdict;
+    try {
+      verdict = await checkCompleteness(this.env, { text: intent, username: session?.username || null, chatId, threadId });
+    } catch { return; } // keep the default timer; the expiry gate re-checks
+    const applied = await this._exclusive(async () => {
+      if (JSON.stringify((await store.get('buf')) || []) !== snapshot) return false;
+      if (await store.get('busy')) return false;
+      if (await store.get('debounceExpiresAt') !== debounceExpiresAt) return false;
+      const delay = Number.isFinite(verdict?.delayMs) && verdict.delayMs > 0 ? verdict.delayMs : DEBOUNCE_MS;
+      const expiresAt = Date.now() + delay;
+      await store.put('gateConsulted', snapshot);
+      await store.put('gateLevel', verdict?.level || null);
+      await store.put('debounceExpiresAt', expiresAt);
+      await store.setAlarm(expiresAt);
+      return true;
+    });
+    if (applied && verdict?.announce) {
+      await this._showCollector(chatId, buf.length, buf.at(-1)?.msg?.message_id, threadId, verdict.announce);
+    }
   }
 
   async _readSnapshot(id) {
@@ -910,8 +968,11 @@ export class IntakeBuffer {
       const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       if (items.length) {
         const last = items.at(-1).msg;
+        const busy = await this.state.storage.get('busy');
         await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          await this.state.storage.get('busy') ? heldText(items.length) : null);
+          busy ? heldText(items.length) : null);
+        // Settled burst, run idle: let the judge set the real delay + say why (29.09).
+        if (!busy) await this._consultGate(last.chat?.id, threadIdOf(last));
       }
     }
     await this._recoverMedia();
@@ -937,15 +998,16 @@ export class IntakeBuffer {
       const snapshot = JSON.stringify(buf);
       if (buf.length && !buf.some(i => i.mediaPending || i.preparingAt)) {
         const chatId = buf[buf.length - 1].msg.chat?.id;
-        // Prepared file contents must not masquerade as the user's instruction.
-        const intent = buf.map(i => {
-          const m = i.msg || {};
-          if (m.document || m.photo || m.video) return i.intentText ?? m.caption ?? '';
-          return coalesceItem(i);
-        }).filter(Boolean).join('\n');
+        const threadId = threadIdOf(buf[buf.length - 1].msg);
+        const intent = coalescedIntent(buf);
         let verdict = { level: 'insufficient' };
         try {
-          if (intent.trim()) verdict = await checkCompleteness(this.env, { text: intent });
+          if (intent.trim()) {
+            // Pass the chat identity so a short «продолжай» can be judged against
+            // the assistant's last answer (agent #1823).
+            const session = await this._gateSession(chatId, threadId);
+            verdict = await checkCompleteness(this.env, { text: intent, username: session?.username || null, chatId, threadId });
+          }
         } catch { /* Leave input intact and offer manual launch. */ }
         const current = await this._exclusive(async () => {
           if (JSON.stringify((await this.state.storage.get('buf')) || []) !== snapshot ||
@@ -956,7 +1018,7 @@ export class IntakeBuffer {
           return true;
         });
         if (!current) return;
-        if (verdict?.level === 'clear' || verdict?.level === 'likely') {
+        if (verdict?.level === 'clear' || verdict?.level === 'likely' || verdict?.level === 'continue') {
           await this._dispatch(snapshot);
         } else if (chatId) {
           await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);

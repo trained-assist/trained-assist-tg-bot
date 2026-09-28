@@ -309,6 +309,27 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(afterRelease.some(kb => JSON.stringify(kb).includes('intake_run'))).toBe(true);
   });
 
+  it('the judge sets the delay and the collector says it (30 s continuation)', async () => {
+    // Owner 2026-09-29: a short «продолжай» waits 30 seconds, not three minutes —
+    // and the bot says so out loud. The delay comes from the agent verdict.
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    checkCompleteness.mockResolvedValue({ level: 'continue', complete: true, delayMs: 30000, announce: '⏳ Понял — продолжаю. Запущу через 30 секунд, если не пришлёшь ничего нового.' });
+    const before = Date.now();
+    await io.fetch(appendReq('давай дальше'));
+    await receipt(io);
+    expect(checkCompleteness).toHaveBeenCalledTimes(1);
+    expect(checkCompleteness.mock.calls[0][1]).toMatchObject({ text: 'давай дальше', chatId: 42 });
+    const expires = await state.storage.get('debounceExpiresAt');
+    expect(expires - before).toBeGreaterThan(25_000);
+    expect(expires - before).toBeLessThanOrEqual(31_000);
+    const texts = [
+      ...sendMessageWithKeyboard.mock.calls.map(c => c[2]),
+      ...editMessage.mock.calls.map(c => c[3]),
+    ];
+    expect(texts.some(t => String(t).includes('30 секунд'))).toBe(true);
+  });
+
   it('▶️ tap DURING a run is not a silent no-op: queued, launched right after run-finished', async () => {
     // Owner 2026-09-27: «кнопка Запустить пропала / не запускается». The held
     // receipt showed «▶️ Запустить агента», but /flush while busy returned
