@@ -276,7 +276,14 @@ export async function classifyMessage(env, { message, sessions }) {
  * coalesced intake buffer reads as a finished, actionable request. Returns
  * { level: 'clear'|'likely'|'insufficient' }. Errors hold the buffer for manual launch.
  */
-export async function checkCompleteness(env, { text }) {
+export async function checkCompleteness(env, { text, username = null, chatId = null, threadId = null } = {}) {
+  // The verdict now carries delayMs/announce too (agent #1823): the judge decides
+  // how long to wait and what to say. Older agents simply omit those fields, so the
+  // gateway falls back to its own 3-minute timer.
+  const body = { text };
+  if (username) body.username = username;
+  if (chatId !== null && chatId !== undefined) body.chatId = chatId;
+  if (threadId !== null && threadId !== undefined) body.threadId = threadId;
   try {
     const res = await fetch(`${env.AGENT_URL}/intake-gate`, {
       method: 'POST',
@@ -284,15 +291,15 @@ export async function checkCompleteness(env, { text }) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${env.AGENT_SECRET}`,
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { level: 'insufficient', complete: false };
+    if (!res.ok) return { level: 'insufficient', complete: false, delayMs: null, announce: null };
     const result = await res.json();
-    return ['clear', 'likely', 'insufficient'].includes(result?.level)
-      ? result : { level: 'insufficient', complete: false };
+    return ['clear', 'likely', 'insufficient', 'continue'].includes(result?.level)
+      ? result : { level: 'insufficient', complete: false, delayMs: null, announce: null };
   } catch {
-    return { level: 'insufficient', complete: false };
+    return { level: 'insufficient', complete: false, delayMs: null, announce: null };
   }
 }
 
