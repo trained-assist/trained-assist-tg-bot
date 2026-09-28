@@ -375,6 +375,23 @@ export async function getAgentHealth(env) {
   }
 }
 
+// «▶️ Делать» / «✖️ Отменить» under a forgotten-checklist reminder (#1729 BV-08/08a).
+// Deterministic agent route (no LLM): { ok, status, text } — text is what the gateway
+// edits the reminder message into.
+export async function orphanChecklistAction(env, { username, action, id, chatId = null, threadId = null }) {
+  const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
+  const body = { username, action, id, chatId, audience: resolveAudience(env) };
+  if (tid != null) body.threadId = tid;
+  const res = await fetch(`${env.AGENT_URL}/internal/orphan-checklists/action`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.AGENT_SECRET}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`agent /internal/orphan-checklists/action HTTP ${res.status}`);
+  return res.json();
+}
+
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
   const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   // ALWAYS scope the stop by this bot's audience + the chat (+ forum topic when

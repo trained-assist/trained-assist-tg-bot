@@ -750,6 +750,18 @@
       "description": "Список активных GTD-чеклистов"
     },
     {
+      "command": "/all_forgotten_checklists",
+      "aliases": [
+        "/all_forgotten_checlists"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Забытые чек-листы: Делать / Отменить"
+    },
+    {
       "command": "/checklist_turn_off",
       "aliases": [
         "/gtd_stop",
