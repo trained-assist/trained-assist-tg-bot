@@ -131,6 +131,16 @@ export class IntakeBuffer {
       }
     }
 
+    // «➕ Дополнить» collector (src/lib/supplement.js). Lives here, not in SESSIONS KV:
+    // the webhook routes the typed text to this DO anyway, and only strongly-consistent
+    // per-conversation storage makes a burst (text + voice + file within a second)
+    // land in ONE draft. Outside _exclusive() like /picker — every op is a
+    // storage-only read-modify-write with no external I/O, so it is atomic in a DO and
+    // must never wait behind a long dispatch holding the intake mutex.
+    if (url.pathname === '/supplement' && request.method === 'POST') {
+      return json(await this._supplement(await request.json()));
+    }
+
     if (url.pathname === '/input' && request.method === 'GET') {
       const statusId = url.searchParams.get('messageId');
       const snapshotId = statusId && await this.state.storage.get(`input-message:${statusId}`);
@@ -308,6 +318,8 @@ export class IntakeBuffer {
 
     if (url.pathname === '/ingest' && request.method === 'POST') {
       let { msg } = await request.json();
+      const diverted = await this._divertToSupplement(msg, '/ingest');
+      if (diverted) return diverted;
       if (mediaEnabled(this.env) && mediaOf(msg)) {
         const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg));
         if (session) return this._ingestMedia(msg, session);
@@ -378,6 +390,8 @@ export class IntakeBuffer {
 
     if (url.pathname === '/append' && request.method === 'POST') {
       const { text, msg, flush } = await request.json();
+      const diverted = await this._divertToSupplement(msg, '/append');
+      if (diverted) return diverted;
       const buf = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
         // Telegram can retry delivery of the same update.
@@ -446,6 +460,56 @@ export class IntakeBuffer {
     }
 
     return new Response('not found', { status: 404 });
+  }
+
+  // Every routed message passes here first: while «➕ Дополнить» is armed it joins
+  // the supplement draft instead of `buf` (caller shows the confirmation from the
+  // `supplement` reply). An expired draft is replayed into the ordinary flow first,
+  // in order, so the user's words are never lost; then this message routes normally.
+  async _divertToSupplement(msg, path) {
+    if (!msg) return null;
+    const res = await this._supplement({ op: 'add', msg });
+    if (res.armed) return json({ supplement: { taskId: res.taskId, count: res.count, confirmMsgId: res.confirmMsgId } });
+    for (const item of res.released) {
+      await this.fetch(new Request(`https://intake${path}`, { method: 'POST',
+        body: JSON.stringify({ text: item.msg.text, msg: item.msg, flush: false }) }));
+    }
+    return null;
+  }
+
+  // ops: arm {taskId, sessionId, expiresAt} → {released} (items of a replaced draft);
+  //      add {msg, now} → {armed, count, confirmMsgId} | {armed:false, released} on expiry;
+  //      confirm {msgId} → {count}; take → {draft}; peek → {draft}.
+  async _supplement({ op, ...a }) {
+    const draft = (await this.state.storage.get('supplement')) || null;
+    if (op === 'arm') {
+      await this.state.storage.put('supplement', { taskId: a.taskId, sessionId: a.sessionId,
+        expiresAt: a.expiresAt, items: [], confirmMsgId: null });
+      return { released: draft?.items || [] };
+    }
+    if (op === 'add') {
+      if (!draft) return { armed: false, released: [] };
+      if ((a.now ?? Date.now()) >= draft.expiresAt) {
+        await this.state.storage.delete('supplement');
+        return { armed: false, released: draft.items };
+      }
+      // Telegram redelivers updates on a slow webhook — one message, one item.
+      if (!draft.items.some(i => i.msg.message_id === a.msg.message_id)) {
+        draft.items.push({ text: a.msg.text, msg: a.msg });
+        await this.state.storage.put('supplement', draft);
+      }
+      return { armed: true, taskId: draft.taskId, count: draft.items.length, confirmMsgId: draft.confirmMsgId };
+    }
+    if (op === 'confirm') {
+      if (!draft) return { count: 0 };
+      await this.state.storage.put('supplement', { ...draft, confirmMsgId: a.msgId });
+      return { count: draft.items.length };
+    }
+    if (op === 'take') {
+      if (draft) await this.state.storage.delete('supplement');
+      return { draft };
+    }
+    return { draft };
   }
 
   async _ingestMedia(msg, session) {

@@ -5,6 +5,7 @@ import { getSession, setSession, deleteSession, newSessionId, withKvConsistencyR
 import { sendDocument, sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, pinChatMessage, unpinChatMessage } from '../lib/telegram.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
 import { journalLoginUrl } from '../lib/journal-link.js';
+import { armSupplement, takeSupplement, releaseToIntake } from '../lib/supplement.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { renderSnapshotDocument } from '../input-assembly.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput, orphanChecklistAction } from '../lib/agent-client.js';
@@ -832,81 +833,65 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   // ── Supplement running task (➕ Дополнить, sent by agent alongside ⛔ Стоп) ──
-  // sup|{taskId} — arms a one-shot "next text message becomes the supplement draft"
-  // flag on the session (session.pendingSupplementDraft), same pending-state-on-
-  // session shape as pendingProjectChoice so the existing KV read-after-write race
-  // fix (withKvConsistencyRetry) already covers it. message.js stashes the typed
-  // text and shows a ✅/❌ confirmation keyboard; the actual stop+restart happens
-  // ONLY on the explicit supok| tap below (supno| cancels) — Telegram has no
-  // composer to read from like the web UI's Дополнить (trained-assist-web#33), and
-  // a bare typed message must never kill a running task on its own.
+  // sup|{taskId} arms a collector in the conversation's IntakeBuffer DO
+  // (src/lib/supplement.js): routeText diverts the next messages — text, voice,
+  // files — into ONE draft and shows a single confirmation bubble. Nothing is
+  // stopped by the typed text alone; only the explicit supok| tap below does it
+  // (supno| cancels). Scenario: agent docs/user-scenarios/core/02-stop-and-supplement.md.
   if (data?.startsWith('sup|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const taskId = data.slice('sup|'.length);
     const sessionId = session.activeSessionId || session.lastSessionId;
     if (!sessionId) { await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Нет активной сессии'); return; }
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      pendingSupplementDraft: { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS },
-    }, threadId);
+    const armed = await armSupplement(env, chatId, threadId, { taskId, sessionId, expiresAt: Date.now() + PICKER_TTL_MS })
+      .catch(e => { console.error('[supplement] arm failed:', e.message); return false; });
+    if (!armed) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Не получилось — нажми «Дополнить» ещё раз'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, '✏️ Напиши, что добавить');
     await sendT(env, chatId, threadId,
-      '✏️ Напиши текст следующим сообщением — остановлю текущую задачу и перезапущу с ним как с дополнением.');
+      '✏️ Напиши дополнение следующим сообщением (можно несколько, голосом или файлом) — потом спрошу, перезапустить ли задачу с ним.');
     return;
   }
 
   // ── Supplement confirmation (➕ Перезапуск с дополнением / ↩️ Вернуться) ────
-  // supok|{taskId} — the user typed the supplement text (stashed on the session as
-  // pendingSupplementDraft in message.js) and now explicitly confirms the stop +
-  // restart. No accidental text message can kill the running task anymore: only this
-  // button does. supno| cancels and drops the draft.
+  // The draft is TAKEN atomically from the DO, so a double tap can't launch twice.
+  // supno| and an expired draft hand the collected messages back to the ordinary
+  // intake flow — the user's words are never dropped (K5).
   if (data?.startsWith('supok|') || data?.startsWith('supno|')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     const confirm = data.startsWith('supok|');
-    // message.js writes pendingSupplementDraft in the request right before this tap —
-    // Workers KV gives no read-after-write guarantee across requests/colos, so the
-    // session loaded at the top of this handler can still look empty here even though
-    // the draft was written moments ago. Same race the sp:/pc: pickers already guard
-    // against with withKvConsistencyRetry; this flow was missing that re-read, which is
-    // exactly why a quick confirm tap could report "draft not found" on a real draft.
-    session = await withKvConsistencyRetry(env.SESSIONS, chatId, session, s => !!s?.pendingSupplementDraft, 400, threadId);
-    const draft = session.pendingSupplementDraft;
     const msgId = message?.message_id;
-    if (!draft) {
-      await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Черновик дополнения не найден — напиши задачу заново.');
+    const draft = await takeSupplement(env, chatId, threadId).catch(() => null);
+    const closeBubble = text => msgId
+      ? editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      : null;
+    if (!draft?.items?.length) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Черновик дополнения не найден — нажми «Дополнить» заново.');
       if (msgId) await editMessageReplyMarkup(env.BOT_TOKEN, chatId, msgId, []).catch(() => {});
       return;
     }
-    if (Date.now() >= draft.expiresAt) {
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
-      await answerCallbackQuery(env.BOT_TOKEN, id, '⌛ Черновик устарел.');
-      if (msgId) await editMessageReplyMarkup(env.BOT_TOKEN, chatId, msgId, []).catch(() => {});
+    if (!confirm || Date.now() >= draft.expiresAt) {
+      await releaseToIntake(env, chatId, threadId, draft.items);
+      const why = confirm ? '⌛ Черновик устарел' : '✖️ Дополнение отменено';
+      await answerCallbackQuery(env.BOT_TOKEN, id, `${why} — задача не тронута.`);
+      await closeBubble(`${why} — задача продолжает работать. Написанное вернул во входящие: запустить его можно кнопкой «▶️ Запустить агента».`);
       return;
     }
-    if (!confirm) {
-      await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
-      await answerCallbackQuery(env.BOT_TOKEN, id, '✖️ Отменено — задача продолжает работать.');
-      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '✖️ Дополнение отменено — задача продолжает работать.', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-      return;
-    }
-    await setSession(env.SESSIONS, chatId, { ...session, pendingSupplementDraft: null }, threadId);
     await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
-    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, '➕ Останавливаю задачу и перезапускаю с дополнением…', { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    await closeBubble('➕ Останавливаю задачу и перезапускаю с дополнением…');
     await stopTask(env, { username: session.username, chatId, threadId }).catch(() => {});
-    return runTask(env, {
-      initiatedAt, threadId: threadId,
-      requestId: `sup-${draft.taskId}-${msgId || id}`,
-      inputItems: [{ text: draft.text, msg: { chat: { id: chatId }, threadId, text: draft.text } }],
-      userId: chatId,
-      username: session.username,
-      sessionId: draft.sessionId,
-      task: `[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]\n${draft.text}`,
-      forceClaude: true,
-      mode: 'deep',
-      initialMsgId: msgId || null,
-      telegramUserId: session.telegramUserId,
-      projectId: session.projectId || null,
-    }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
+    // Through handleMessage (not a bare runTask) so voice is transcribed and files
+    // are uploaded exactly like any intake batch; the pinned intakeRoute keeps the
+    // task's session, so no project picker and no new dialog.
+    const base = draft.items.at(-1).msg;
+    const note = '[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]';
+    const header = { text: note, msg: { chat: base.chat, text: note } };
+    const { handleMessage } = await import('./message.js');
+    return handleMessage({ ...base, intakeItems: [header, ...draft.items],
+      intakeRoute: { sessionId: draft.sessionId, forceNew: false, projectId: session.projectId || null,
+        projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } },
+    env, { mode: 'deep', forceClaude: true, initialMsgId: msgId || null, initiatedAt,
+      requestId: `sup-${draft.taskId}-${msgId || id}` })
+      .catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, id);
