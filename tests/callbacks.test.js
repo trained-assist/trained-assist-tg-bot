@@ -24,6 +24,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'stopno|',    // ↩️ Вернуться (stop) — cancels, task keeps running
   'sup|',       // ➕ Дополнить button sent by agent alongside ⛔ Стоп — arm pendingSupplement
   'qa_more|',   // 🔎 Разобраться подробнее — escalate quick answer to Claude
+  'ocl|',       // forgotten checklist «▶️ Делать» / «✖️ Отменить» (#1729 BV-08/08a)
   'ar:',        // archive sessions menu
   'sa:',        // archive single session
 ];
@@ -63,6 +64,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
     { name: 'efimova-school', label: 'efimova-school', count: 5 },
   ]),
   stopTask: vi.fn().mockResolvedValue({ killed: 1 }),
+  orphanChecklistAction: vi.fn().mockResolvedValue({ ok: true, status: 'started', text: '▶️ Взял в работу: «История группы»' }),
 }));
 
 vi.mock('../src/handlers/commands.js', () => ({
@@ -241,5 +243,48 @@ describe('act| extracted action buttons (#1542 P3)', () => {
       chat: { id: 999 }, message_id: 42, reply_markup: { inline_keyboard: [] },
     } }, { BOT_TOKEN: 'test', SESSIONS: {} });
     expect(runTask).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('ocl| forgotten checklist buttons (#1729 BV-08/08a)', () => {
+  it('«▶️ Делать» forwards to the agent route and edits the reminder to the outcome', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { orphanChecklistAction, runTask } = await import('../src/lib/agent-client.js');
+    const { answerCallbackQuery, editMessage } = await import('../src/lib/telegram.js');
+    await handleCallbackQuery({ id: 'ocl-1', data: 'ocl|do|abcdef012345', from: { id: 999 }, message: {
+      chat: { id: -100500 }, message_id: 77, message_thread_id: 12, is_topic_message: true,
+    } }, { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(orphanChecklistAction).toHaveBeenCalledOnce();
+    expect(orphanChecklistAction.mock.calls[0][1]).toMatchObject({ username: 'testuser', action: 'do', id: 'abcdef012345', chatId: -100500, threadId: 12 });
+    expect(answerCallbackQuery).toHaveBeenCalledWith('test', 'ocl-1', '▶️ Взял в работу: «История группы»');
+    expect(editMessage).toHaveBeenCalledOnce();
+    const [, chat, msgId, text, extra] = editMessage.mock.calls[0];
+    expect([chat, msgId, text]).toEqual([-100500, 77, '▶️ Взял в работу: «История группы»']);
+    expect(extra.reply_markup).toEqual({ inline_keyboard: [] });
+    expect(runTask).not.toHaveBeenCalled(); // deterministic route, no LLM run from the gateway
+  });
+
+  it('«✖️ Отменить» sends action no; agent failure is answered, not swallowed', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { orphanChecklistAction } = await import('../src/lib/agent-client.js');
+    const { answerCallbackQuery, editMessage } = await import('../src/lib/telegram.js');
+    orphanChecklistAction.mockRejectedValueOnce(new Error('HTTP 502'));
+    await handleCallbackQuery({ id: 'ocl-2', data: 'ocl|no|abcdef012345', from: { id: 999 }, message: { chat: { id: 999 }, message_id: 5 } },
+      { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(orphanChecklistAction.mock.calls[0][1].action).toBe('no');
+    expect(answerCallbackQuery).toHaveBeenCalledWith('test', 'ocl-2', '⚠️ Агент недоступен — попробуй позже');
+    expect(editMessage).not.toHaveBeenCalled();
+  });
+
+  it('malformed ocl| data never reaches the agent', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { orphanChecklistAction } = await import('../src/lib/agent-client.js');
+    await handleCallbackQuery({ id: 'ocl-3', data: 'ocl|rm|x', from: { id: 999 }, message: { chat: { id: 999 }, message_id: 5 } },
+      { BOT_TOKEN: 'test', SESSIONS: {} });
+    expect(orphanChecklistAction).not.toHaveBeenCalled();
   });
 });

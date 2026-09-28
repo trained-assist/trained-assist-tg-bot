@@ -7,7 +7,7 @@ import { answerCallbackQuery } from '../lib/telegram.js';
 import { journalLoginUrl } from '../lib/journal-link.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { renderSnapshotDocument } from '../input-assembly.js';
-import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput } from '../lib/agent-client.js';
+import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput, orphanChecklistAction } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
@@ -758,6 +758,31 @@ export async function handleCallbackQuery(cq, env) {
       telegramUserId: session.telegramUserId,
       projectId: session.projectId || null,
     }).catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
+    return;
+  }
+
+  // ── Forgotten checklist (#1729 BV-08/08a) ─────────────────────────────────
+  // ocl|do|<id> «▶️ Делать» — start the orphaned checklist's continuation as its own
+  // background run; ocl|no|<id> «✖️ Отменить» — cancel it, never remind again. Sent by the
+  // agent's GTD tick (one reminder) and by /all_forgotten_checklists. The agent route is
+  // deterministic (no LLM); we edit the tapped message to its outcome and drop the buttons.
+  if (data?.startsWith('ocl|')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    const [, action, oclId] = data.split('|');
+    if ((action !== 'do' && action !== 'no') || !oclId) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Кнопка устарела'); return; }
+    let out;
+    try {
+      out = await orphanChecklistAction(env, { username: session.username, action, id: oclId, chatId, threadId });
+    } catch (err) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Агент недоступен — попробуй позже');
+      return;
+    }
+    const text = String(out?.text || (action === 'do' ? '▶️ Взял в работу' : '✖️ Отменено'));
+    await answerCallbackQuery(env.BOT_TOKEN, id, text.slice(0, 190));
+    const msgId = message?.message_id;
+    const html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, html, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    else await sendT(env, chatId, threadId, text);
     return;
   }
 
