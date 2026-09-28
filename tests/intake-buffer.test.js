@@ -271,6 +271,44 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
+  it('«▶️ Запустить агента» is gone while a run is accepted, back after it finishes', async () => {
+    // Owner 2026-09-29: «когда задача принята, надо кнопку убирать — ты не думаешь,
+    // нажата она или нет». busy = задача принята ⇒ ни одна клавиатура в чате не
+    // несёт ▶️; после run-finished кнопка возвращается вместе с held-пачкой.
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const keyboards = () => [
+      ...sendMessageWithKeyboard.mock.calls.map(c => c[3]),
+      ...editMessage.mock.calls.map(c => c[4]?.reply_markup?.inline_keyboard),
+    ];
+    const snapshot = () => keyboards().length;
+
+    await io.fetch(appendReq('start the task'));
+    await receipt(io); // idle collector, with the launch button
+    expect(JSON.stringify(keyboards().at(-1))).toContain('intake_run');
+
+    const taken = snapshot();
+    await io.fetch(flushReq()); await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+    await io.fetch(appendReq('held during run'));
+    await receipt(io); // held receipt while the run is accepted
+
+    const afterTake = keyboards().slice(taken);
+    expect(afterTake.length).toBeGreaterThan(0);
+    for (const kb of afterTake) {
+      expect(JSON.stringify(kb)).not.toContain('intake_run');
+      expect(JSON.stringify(kb)).not.toContain('Запустить агента');
+    }
+    expect(keyboards().at(-1)).toBeDefined();
+
+    const released = snapshot();
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(await state.storage.get('busy')).toBeUndefined();
+    const afterRelease = keyboards().slice(released);
+    expect(afterRelease.length).toBeGreaterThan(0); // held input re-offered WITH the button
+    expect(afterRelease.some(kb => JSON.stringify(kb).includes('intake_run'))).toBe(true);
+  });
+
   it('▶️ tap DURING a run is not a silent no-op: queued, launched right after run-finished', async () => {
     // Owner 2026-09-27: «кнопка Запустить пропала / не запускается». The held
     // receipt showed «▶️ Запустить агента», but /flush while busy returned
@@ -546,6 +584,8 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).toHaveBeenCalledWith(
       't', 42, expect.stringContaining('Задачу забрал'), expect.anything(), expect.anything());
+    // "Задачу забрал" = the tap landed: the launch button must not linger under it.
+    expect(JSON.stringify(sendMessageWithKeyboard.mock.calls.at(-1)[3])).not.toContain('intake_run');
 
     // Attachment resolves → the queued tap fires the run, no second tap needed.
     await io.fetch(new Request('https://intake/media-result', {
