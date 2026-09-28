@@ -103,6 +103,21 @@ function coalescedIntent(buf) {
   }).filter(Boolean).join('\n');
 }
 
+// What the running model sees of one held message (/held). `ready:false` = still
+// downloading/preparing — show it, but the agent must not mark it consumed.
+function heldView(item) {
+  const m = item.msg || {};
+  const { task: text, fileRefs, isVoice } = assembleInput([item], false);
+  return {
+    message_id: m.message_id ?? null,
+    date: m.date ?? null,
+    text,
+    kind: isVoice ? 'voice' : fileRefs.length ? 'file' : 'text',
+    files: fileRefs.filter(r => r.note !== false).map(r => r.name || r.id).filter(Boolean),
+    ready: !(item.mediaPending || item.preparingAt),
+  };
+}
+
 export class IntakeBuffer {
   constructor(state, env) {
     this.state = state;
@@ -323,14 +338,40 @@ export class IntakeBuffer {
     // run for the same chat can't release this chat's hold. Safety nets if this
     // never arrives: outbox permanent reject, the alarm's /tasks/running poll,
     // and BUSY_MAX_MS.
+    // Live inbox (owner 2026-09-29, «get_new_messages»): while a run is busy, `buf`
+    // holds exactly the messages that arrived after it started (_dispatch clears it).
+    // The running model pulls them through the agent's MCP tool instead of ending
+    // with «жду от тебя…». Read-only, outside _exclusive() like /picker: a single
+    // storage read is atomic and must never wait behind a long dispatch.
+    if (url.pathname === '/held' && request.method === 'GET') {
+      if (!(await this.state.storage.get('busy'))) return json({ busy: false, items: [] });
+      const requestId = url.searchParams.get('requestId');
+      const busyReq = await this.state.storage.get('busyRequestId');
+      // Another run of this chat holds the buffer — its messages are not ours to read.
+      if (requestId && busyReq && requestId !== busyReq) return json({ busy: true, mismatch: true, items: [] });
+      const buf = (await this.state.storage.get('buf')) || [];
+      return json({ busy: true, busySince: (await this.state.storage.get('busySince')) || null, items: buf.map(heldView) });
+    }
+
     if (url.pathname === '/run-finished' && request.method === 'POST') {
-      const { requestId = null } = await request.json().catch(() => ({}));
+      const { requestId = null, consumed = [] } = await request.json().catch(() => ({}));
+      const consumedIds = new Set((Array.isArray(consumed) ? consumed : []).filter(Number.isSafeInteger));
       const released = await this._exclusive(async () => {
         if (!(await this.state.storage.get('busy'))) return { busy: false };
         const busyReq = await this.state.storage.get('busyRequestId');
         if (busyReq && requestId && busyReq !== requestId) return { busy: true, mismatch: true };
+        // Messages the model already took in via get_new_messages are done — drop
+        // them so the collector doesn't re-offer them as a new task. Only for the
+        // matched run, and only ready items (a still-downloading attachment stays).
+        let dropped = 0;
+        if (consumedIds.size) {
+          const buf = (await this.state.storage.get('buf')) || [];
+          const kept = buf.filter(i => i.mediaPending || i.preparingAt || !consumedIds.has(i.msg?.message_id));
+          dropped = buf.length - kept.length;
+          if (dropped) await this.state.storage.put('buf', kept);
+        }
         await this._releaseBusyLocked();
-        return { busy: false, released: true };
+        return { busy: false, released: true, dropped };
       });
       if (released.released) await this._afterBusyRelease();
       return json(released);
