@@ -609,8 +609,11 @@ export async function handleCallbackQuery(cq, env) {
       // or duplicate tap). The callback is already acknowledged; don't add a
       // misleading instruction to resend a task that may already be running.
       // Busy/duplicate taps keep the existing status; the callback is already acknowledged.
-      // A tap during a live run is queued in the DO — say so, never a silent no-op.
-      if (r?.queued) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно.');
+      // A tap during a live run IS queued in the DO — say so, never a silent no-op.
+      // `preparing` is the other `queued` — the attachment is still downloading, so
+      // NOTHING is running: narrating «Идёт текущая задача» there is a lie (the DO
+      // already sent its own honest «📥 Задачу забрал …» collector). #293.
+      if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно.');
 
     }
     return;

@@ -168,6 +168,28 @@ describe('callbacks — intake_run while a run is already busy (дыра №4)',
   });
 });
 
+// The DO returns `queued` for a tap blocked by a still-downloading attachment (#293).
+// Nothing is running at that point, so the gateway must NOT narrate a running
+// task — the DO already sent its own honest «📥 Задачу забрал …» collector.
+describe('callbacks — intake_run while an attachment is still preparing', () => {
+  it('stays silent instead of announcing a task that is not running', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ preparing: true, queued: true }))) };
+    const env = {
+      BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret',
+      INTAKE: { idFromName: (n) => n, get: () => stub },
+    };
+
+    await handleCallbackQuery({ id: 'cq-1', data: 'intake_run', from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(stub.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 
 describe('legacy checklist footer menu', () => {
   it.each([

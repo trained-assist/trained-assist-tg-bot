@@ -292,6 +292,26 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
   });
 
+  it('a stale/duplicate tap on a run with NOTHING held reports busy, never a queued task', async () => {
+    // Owner 2026-09-28 (chat -5501536471, #293): «вычисления норм пошли, но в телегу
+    // упало ⏳ Идёт текущая задача. Запущу эти сообщения…». The run had already
+    // swallowed its own batch, so there were no «эти сообщения» to queue: the
+    // promise was false and it read like a failed launch. Arm nothing, say nothing.
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq()); await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+    expect(await state.storage.get('buf')).toBeUndefined();
+
+    const tap = await (await io.fetch(flushReq())).json();
+    expect(tap).toEqual({ busy: true }); // no `queued` → the gateway sends no bubble
+    expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
+
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1); // no phantom second launch
+  });
+
   it('▶️ tap on a STALE hold (agent says nothing runs) self-heals and launches now', async () => {
     const state = makeState();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ running: false })));
