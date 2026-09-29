@@ -2,12 +2,13 @@ import { startNewDialog } from '../lib/project-choice.js';
 import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage, deleteMessage } from '../lib/telegram.js';
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
-import { getAgentHealth, getSessions, getFiles, runTask, getSkills, stopTask, reportBugOrFeature } from '../lib/agent-client.js';
+import { getAgentHealth, getSessions, getFiles, runTask, getSkills, reportBugOrFeature } from '../lib/agent-client.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 import { resolveAudience } from '../lib/audience.js';
 import { isCommandVisible } from '../lib/command-visibility.js';
 import { handleMessage } from './message.js';
+import { stopChat, stopReplyText } from '../lib/stop-chat.js';
 import { isProjectSwitch } from '../lib/project-command.js';
 import commandsRegistry from '../../commands-registry.json';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
@@ -770,16 +771,11 @@ async function cmdStop(msg, env) {
   const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
 
-  try {
-    const result = await stopTask(env, { username: session.username, chatId, threadId });
-    if (result.killed > 0) {
-      return sendIn(env, chatId, threadId, '🛑 Задача остановлена.');
-    } else {
-      return sendIn(env, chatId, threadId, '🤷 Нет активных задач для остановки.');
-    }
-  } catch (e) {
-    return sendIn(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
-  }
+  // #1856: the stop reaches the intake queue too (held, never auto-launched) —
+  // it must work even when the agent has nothing running.
+  const result = await stopChat(env, { username: session.username, chatId, threadId, replyTo: msg.message_id });
+  const text = stopReplyText(result);
+  if (text) return sendIn(env, chatId, threadId, text);
 }
 
 async function cmdAllOn(msg, env) {

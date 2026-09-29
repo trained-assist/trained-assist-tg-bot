@@ -102,6 +102,12 @@ const CANCEL_BTN = [[{ text: '↩️ Отменить передачу аген�
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
 const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. «▶️ Запустить агента» — запущу их сразу после неё.`;
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
+// ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
+// NEW message sent after the stop re-arms launching.
+const stoppedText = n => `⛔ Остановлено. ${n} сообщений ждут и сами не запустятся. «▶️ Запустить агента» — передам их агенту; новое сообщение вернёт обычный режим (они войдут в него же).`;
+// A new message after ⛔ re-arms the normal flow; the pre-stop messages ride along
+// only in plain sight — the collector names them (#1856).
+const resumedNote = k => ` В том числе ${k} — отложенные до ⛔ Стоп («📋 Посмотреть input»).`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
 // Judge failure ≠ judge verdict (#248). Before this, a timeout/5xx from the gate
@@ -310,7 +316,9 @@ export class IntakeBuffer {
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
         alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
-        stranded: !busy && ((buf || []).length > 0) && !alarm && !debounceExpiresAt && !receiptDue,
+        stopped: (await this.state.storage.get('stopped')) || null,
+        stranded: !busy && ((buf || []).length > 0) && !alarm && !debounceExpiresAt && !receiptDue
+          && !(await this.state.storage.get('stopped')),
       });
     }
 
@@ -354,10 +362,61 @@ export class IntakeBuffer {
         await this.state.storage.delete('launchAfterRelease');
         await this.state.storage.delete('launchWhenReady');
         await this.state.storage.delete('launchQueued');
+        await this.state.storage.delete('stopped');
+        await this.state.storage.delete('resumedHeld');
         await this.state.storage.deleteAlarm();
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
       return json(result);
+    }
+
+    // ⛔ Стоп (#1856) — /stop, /стоп and the ⛔ button call this BEFORE the agent's
+    // /tasks/stop, so it works even when the agent has nothing running. In prod
+    // (29.09) most stops landed between runs: the agent killed 0 processes and the
+    // gateway then launched the next buffered batch anyway — via run-finished →
+    // _afterBusyRelease (launchAfterRelease), the judge's debounce alarm (30 s /
+    // 3 min) or a remembered ▶️ (launchWhenReady). Stop therefore:
+    //   • drops every launch intent and the judge timer/verdict state;
+    //   • marks the chat `stopped` — _afterBusyRelease / alarm / _mediaResult
+    //     never auto-dispatch while it is set;
+    //   • KEEPS the messages and shows «⛔ Остановлено. N ждут — ▶️».
+    // Only an explicit ▶️ (/flush) or a NEW message after the stop clears it.
+    if (url.pathname === '/stop' && request.method === 'POST') {
+      const { replyTo = null, chatId: reqChatId = null, threadId: reqThreadId = null } =
+        await request.json().catch(() => ({}));
+      const res = await this._exclusive(async () => {
+        const store = this.state.storage;
+        const had = !!((await store.get('launchAfterRelease')) || (await store.get('launchWhenReady'))
+          || (await store.get('launchQueued')) || (await store.get('debounceExpiresAt')));
+        for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'debounceExpiresAt',
+          'gateLevel', 'shortDebounce', 'gateConsulted', 'gateErrAttempts', 'receiptDue', 'resumedHeld']) {
+          await store.delete(k);
+        }
+        await store.put('stopped', Date.now());
+        const busy = !!(await store.get('busy'));
+        const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
+        // The alarm only stays for what is not a launch: the busy safety poll and
+        // media recovery. Everything else it could do now is dispatch.
+        if (busy) await store.setAlarm(Date.now() + BUSY_POLL_MS);
+        else if (items.some(i => i.mediaPending)) await store.setAlarm(Date.now() + 60_000);
+        else await store.deleteAlarm();
+        const prevCollector = items.length ? await store.get('collectorMsgId') : null;
+        if (prevCollector) await store.delete('collectorMsgId');
+        return { held: items.length, busy, hadIntent: had, prevCollector, last: items.at(-1)?.msg || null };
+      });
+      console.log(`[stop] intake chat=${res.last?.chat?.id ?? reqChatId} held=${res.held} busy=${res.busy} hadIntent=${res.hadIntent}`);
+      if (res.held) {
+        const chatId = res.last?.chat?.id ?? reqChatId;
+        const threadId = res.last ? threadIdOf(res.last) : reqThreadId;
+        // The old collector may sit off-screen with ▶️/↩️ on it: neutralise it and
+        // post a fresh one right under the stop, where the user is looking.
+        if (res.prevCollector && chatId) {
+          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⛔ Остановлено — порция отложена, см. ниже.',
+            { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+        }
+        await this._showCollector(chatId, res.held, replyTo || res.last?.message_id, threadId);
+      }
+      return json({ stopped: true, held: res.held, busy: res.busy, hadIntent: res.hadIntent });
     }
 
     if (url.pathname === '/media-result' && request.method === 'POST') {
@@ -418,6 +477,9 @@ export class IntakeBuffer {
         if (session) return this._ingestMedia(msg, session);
       }
       // Reserve BEFORE STT/network awaits: launch must not silently omit a slow voice.
+      // reservedAt decides later whether a ⛔ Стоп pressed during preflight holds
+      // this message (sent before the stop) or it re-arms the flow (sent after).
+      const reservedAt = Date.now();
       const accepted = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
         const seen = (await this.state.storage.get('received')) || [];
@@ -468,10 +530,18 @@ export class IntakeBuffer {
         await this.state.storage.put('received', [...seen, msg.message_id].slice(-1000));
         const seq = ((await this.state.storage.get('armSeq')) || 0) + 1;
         await this.state.storage.put('armSeq', seq);
-        return { items, busy: await this.state.storage.get('busy'), seq };
+        const stopped = await this.state.storage.get('stopped');
+        const heldByStop = !!stopped && reservedAt <= stopped;
+        if (stopped && !heldByStop && !result.handled) await this._resumeAfterStopLocked(msg.message_id);
+        return { items, busy: await this.state.storage.get('busy'), seq, heldByStop };
       });
       if (result.handled) return json({ handled: true });
       if (!claim.items.length) return json({ buffered: 0 });
+      if (claim.heldByStop) {
+        // Sent before ⛔ — joins the held batch; the stopped collector counts it.
+        await this._scheduleReceipt();
+        return json({ buffered: claim.items.length, stopped: true });
+      }
       if (claim.busy) {
         await this._showHeldNotice(msg.chat.id, claim.items.length, msg.message_id, threadIdOf(msg));
         return json({ buffered: claim.items.length });
@@ -491,6 +561,7 @@ export class IntakeBuffer {
         if (!msg.message_id || !items.some(item => item.msg.message_id === msg.message_id)) {
           items.push({ text, msg });
           await this.state.storage.put('buf', items);
+          if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
         }
         return items;
       });
@@ -512,6 +583,11 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
+      // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
+      await this._exclusive(async () => {
+        await this.state.storage.delete('stopped');
+        await this.state.storage.delete('resumedHeld');
+      });
       // Button tap / force word while a run is in flight. Never a second
       // concurrent run (#1527 F1), but never a silent no-op either: the held
       // «▶️ Запустить агента» button used to do nothing mid-run. First self-heal
@@ -663,6 +739,8 @@ export class IntakeBuffer {
       // doesn't fire while we're still waiting for the transcript.
       await this.state.storage.delete('debounceExpiresAt');
       await this.state.storage.delete('gateLevel');
+      // A new attachment after ⛔ Стоп is a new user action (#1856).
+      if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
       return true;
     });
     if (!accepted) return json({ duplicate: true });
@@ -759,7 +837,10 @@ export class IntakeBuffer {
       if (!result.error) {
         const remaining = (await this.state.storage.get('buf')) || [];
         const busy = await this.state.storage.get('busy');
-        if (!busy && remaining.length && !remaining.some(i => i.mediaPending)) {
+        // ⛔ Стоп held the batch: the transcript only refreshes the stopped
+        // collector (receipt above) — no timer, no remembered launch (#1856).
+        const stopped = await this.state.storage.get('stopped');
+        if (!busy && !stopped && remaining.length && !remaining.some(i => i.mediaPending)) {
           // The user tapped «▶️ Запустить» while the attachment was still
           // downloading — the tap was honoured then («задачу забрал»), so start
           // now instead of making them find the button again.
@@ -773,6 +854,18 @@ export class IntakeBuffer {
       }
     }
     return response;
+  }
+
+  // Must be called inside _exclusive. A NEW message after ⛔ Стоп lifts the hold
+  // (#1856): the normal collector/judge flow resumes for the whole buffer, and the
+  // collector names how many of those messages were held by the stop, so they
+  // never ride along unseen.
+  async _resumeAfterStopLocked(newMessageId = null) {
+    const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+    const held = items.filter(i => i.msg?.message_id !== newMessageId).length;
+    await this.state.storage.delete('stopped');
+    if (held) await this.state.storage.put('resumedHeld', held);
+    else await this.state.storage.delete('resumedHeld');
   }
 
   // Idle + non-busy: (re)arm the debounce timer and show the launch button with
@@ -827,6 +920,7 @@ export class IntakeBuffer {
     const applied = await this._exclusive(async () => {
       if (JSON.stringify((await store.get('buf')) || []) !== snapshot) return false;
       if (await store.get('busy')) return false;
+      if (await store.get('stopped')) return false;
       if (await store.get('debounceExpiresAt') !== debounceExpiresAt) return false;
       const delay = Number.isFinite(verdict?.delayMs) && verdict.delayMs > 0 ? verdict.delayMs : DEBOUNCE_MS;
       const expiresAt = Date.now() + delay;
@@ -870,7 +964,12 @@ export class IntakeBuffer {
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
       const queued = !!(await this.state.storage.get('launchQueued'));
-      const text = override || (queued ? queuedText(items.length || count) : collectorText(items.length || count));
+      const stopped = !!(await this.state.storage.get('stopped'));
+      const resumedHeld = (await this.state.storage.get('resumedHeld')) || 0;
+      const n = items.length || count;
+      const text = override || (queued ? queuedText(n)
+        : stopped ? stoppedText(n)
+        : collectorText(n) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
       // so «задачу забрал» can be walked back. Otherwise launch button under every
       // status that is not "the batch is taken" (issue #303).
@@ -905,6 +1004,8 @@ export class IntakeBuffer {
   async _dispatch(expectedBuffer) {
     const buf = await this._exclusive(async () => {
       if (await this.state.storage.get('busy')) return [];
+      // ⛔ Стоп holds the batch: only /flush (which lifts the hold first) may launch.
+      if (await this.state.storage.get('stopped')) return [];
       if (expectedBuffer !== undefined && JSON.stringify((await this.state.storage.get('buf')) || []) !== expectedBuffer) return [];
       // Cancel any pending debounce alarm — dispatch is happening now (manually or
       // via the timer itself). Without this the alarm could fire a second dispatch.
@@ -925,6 +1026,7 @@ export class IntakeBuffer {
       // (the «📨 Передаю» status below is STATUS_BTN, and a stale flag would put
       // cancel under the NEXT batch's collector).
       await this.state.storage.delete('launchQueued');
+      await this.state.storage.delete('resumedHeld');
       return items;
     });
     if (!buf.length) return;
@@ -1051,11 +1153,14 @@ export class IntakeBuffer {
     if (remaining.some(i => i.mediaPending)) return; // _mediaResult shows the collector later
     // The user already tapped «▶️ Запустить» during the run — honour it now
     // instead of re-offering the button and waiting for another tap.
-    if (await this.state.storage.get('launchAfterRelease')) {
+    // ⛔ Стоп (#1856) cleared launchAfterRelease already; `stopped` is the belt to
+    // those braces — a run that ends after a stop never launches the held batch.
+    if ((await this.state.storage.get('launchAfterRelease')) && !(await this.state.storage.get('stopped'))) {
       await this.state.storage.delete('launchAfterRelease');
       await this._dispatch();
       return;
     }
+    await this.state.storage.delete('launchAfterRelease');
     const last = remaining[remaining.length - 1];
     await this._showCollector(last.msg.chat?.id, remaining.length, last.msg.message_id, threadIdOf(last.msg));
   }
@@ -1106,10 +1211,11 @@ export class IntakeBuffer {
         // would re-paint «▶️ Запустить агента — запущу сразу после неё» over an
         // already-tapped launch, i.e. put the button back before its undo.
         const queued = busy && !!(await this.state.storage.get('launchQueued'));
+        const stopped = !!(await this.state.storage.get('stopped'));
         await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          queued ? null : (busy ? heldText(items.length) : null));
+          queued || stopped ? null : (busy ? heldText(items.length) : null));
         // Settled burst, run idle: let the judge set the real delay + say why (29.09).
-        if (!busy) await this._consultGate(last.chat?.id, threadIdOf(last));
+        if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
       }
     }
     await this._recoverMedia();
@@ -1130,7 +1236,7 @@ export class IntakeBuffer {
       }
     }
     if (debounceExpiresAt && Date.now() >= debounceExpiresAt &&
-        !(await this.state.storage.get('busy'))) {
+        !(await this.state.storage.get('busy')) && !(await this.state.storage.get('stopped'))) {
       const buf = (await this.state.storage.get('buf')) || [];
       const snapshot = JSON.stringify(buf);
       if (buf.length && !buf.some(i => i.mediaPending || i.preparingAt)) {
@@ -1149,7 +1255,7 @@ export class IntakeBuffer {
         const current = await this._exclusive(async () => {
           if (JSON.stringify((await this.state.storage.get('buf')) || []) !== snapshot ||
               await this.state.storage.get('debounceExpiresAt') !== debounceExpiresAt ||
-              await this.state.storage.get('busy')) return false;
+              await this.state.storage.get('busy') || await this.state.storage.get('stopped')) return false;
           await this.state.storage.delete('debounceExpiresAt');
           await this.state.storage.delete('gateLevel');
           return true;

@@ -1041,3 +1041,45 @@ describe('queued launch has an «↩️ Отменить передачу аге
     expect(kb).not.toContain('intake_run');
   });
 });
+
+// #1856 — ⛔ Стоп reaches the buffer itself (/stop), not only the agent.
+describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
+  const stopReq = () => new Request('https://intake/stop', { method: 'POST', body: JSON.stringify({ replyTo: 7 }) });
+
+  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector «Остановлено»', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('сделай отчёт'));
+    await state.storage.delete('receiptDue');
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    let answer;
+    checkCompleteness.mockImplementationOnce(() => new Promise(r => { answer = r; }));
+    const alarm = io.alarm();
+    await drain();
+    await io.fetch(stopReq());
+    answer({ level: 'clear', complete: true });
+    await alarm; await drain();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await state.storage.get('stopped')).toBeTruthy();
+    const texts = [...sendMessageWithKeyboard.mock.calls.map(c => c[2]), ...editMessage.mock.calls.map(c => c[3])];
+    expect(texts.some(t => /Остановлено\. 1 сообщений ждут/.test(t))).toBe(true);
+  });
+
+  it('while busy: keeps the busy safety poll, drops launchAfterRelease; run-finished releases without launching', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('first'));
+    await io.fetch(flushReq()); await drain();
+    await io.fetch(appendReq('held'));
+    await state.storage.put('launchAfterRelease', true);
+    const res = await (await io.fetch(stopReq())).json();
+    expect(res).toMatchObject({ stopped: true, held: 1, busy: true, hadIntent: true });
+    expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now());
+    expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await state.storage.get('busy')).toBeUndefined();
+    // ▶️ lifts the hold.
+    await io.fetch(flushReq()); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(2);
+    expect(handleMessage.mock.calls[1][0].text).toBe('held');
+  });
+});

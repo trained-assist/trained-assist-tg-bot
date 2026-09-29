@@ -10,6 +10,7 @@ import { conversationKey, threadExtra, threadIdOf } from '../conversation-contex
 import { renderSnapshotDocument } from '../input-assembly.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput, orphanChecklistAction } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
+import { stopChat, stopReplyText } from '../lib/stop-chat.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
 // message_thread_id so it lands in the same forum topic as its trigger. editMessage
@@ -840,14 +841,14 @@ export async function handleCallbackQuery(cq, env) {
       return;
     }
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
-    try {
-      const result = await stopTask(env, { username: session.username, chatId, threadId });
-      const text = result.killed > 0 ? '⛔ Задача остановлена.' : '🤷 Нет активной задачи для остановки.';
-      if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-      else await sendT(env, chatId, threadId, text);
-    } catch (e) {
-      await sendT(env, chatId, threadId, `❌ Ошибка: ${e.message}`);
+    // #1856: same path as /stop — hold the intake queue first, then kill the run.
+    const result = await stopChat(env, { username: session.username, chatId, threadId });
+    const text = stopReplyText(result, { button: true });
+    if (result.error && result.killed === 0 && (result.held || result.hadIntent)) {
+      console.warn('[stop] agent stop failed after intake hold:', result.error.message);
     }
+    if (msgId) await editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    else await sendT(env, chatId, threadId, text);
     return;
   }
 
