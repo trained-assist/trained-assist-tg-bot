@@ -42,8 +42,12 @@ describe('input-assembly token compressor', () => {
   });
 });
 
-describe('renderSnapshotDocument — компактный снапшот «что уходит модели»', () => {
-  it('shows the assembled task (what the model receives) plus file names — not the raw metadata dump', () => {
+describe('renderSnapshotDocument — файл input = текст задачи as-is, без комментариев', () => {
+  // Replaces the 26.09 «truthfulness note» test: the owner (29.09) ruled that
+  // explanations inside the input file («модель получает сверх…», «вход N
+  // токенов», file list) hide the real input. The file is the input verbatim;
+  // context goes only to the Telegram caption.
+  it('snapshot: document is exactly the task that went to the agent', () => {
     const input = {
       state: 'snapshot',
       id: 'tg-abc',
@@ -52,28 +56,11 @@ describe('renderSnapshotDocument — компактный снапшот «чт�
       body: { task: '[Сообщение 1]\nмой голос\n[голосовое]',
         fileRefs: [{ id: 'a1', name: 'audio.ogg' }, { id: 't1', name: 'transcript.txt' }] },
     };
-    const doc = renderSnapshotDocument(input, 'Вход запуска tg-abc (зафиксирован)');
-    expect(doc).toContain('[Сообщение 1]\nмой голос\n[голосовое]');
-    expect(doc).toContain('Файлы: audio.ogg, transcript.txt');
-    expect(doc).not.toContain('"state"');
-    expect(doc).not.toContain('"file_id"');
-    expect(doc).not.toContain('Полный snapshot и метаданные');
-    // Truthfulness: the snapshot must NOT pretend the 1-sentence task is the
-    // whole model input — the model also gets the system prompt (role/persona),
-    // MCP tool definitions and context sections, so the run footer's
-    // «вход N токенов» is the total input (2026-09-26 owner caught this).
-    expect(doc).toContain('Это только текст задачи');
-    expect(doc).toContain('системный промпт');
-    expect(doc).toContain('MCP-инструментов');
-    expect(doc).toContain('ВЕСЬ вход модели');
+    expect(renderSnapshotDocument(input)).toBe('[Сообщение 1]\nмой голос\n[голосовое]');
   });
 
-  it('deduplicates repeated file refs and handles a draft with no body', () => {
-    const doc = renderSnapshotDocument(
-      { items: [{ text: 'a', msg: { text: 'a' } }], task: 'a', pending: false },
-      'Текущий input: 1 сообщений');
-    expect(doc).toContain('Текущий input: 1 сообщений');
-    expect(doc).toContain('\na');
+  it('draft: document is exactly the assembled task, no heading', () => {
+    expect(renderSnapshotDocument({ items: [{ text: 'a', msg: { text: 'a' } }], task: 'a', pending: false })).toBe('a');
   });
 });
 

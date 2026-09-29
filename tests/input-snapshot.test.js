@@ -123,6 +123,35 @@ it('inspection callback prefers the REAL model input from the agent when the run
   expect(asked[1].headers.Authorization).toBe('Bearer test');
 });
 
+// US-INPUT-01 (QA): launch a session → «📋 Посмотреть input» → the file is the
+// agent's real input byte-for-byte; no wrapper, no explanations prepended/appended.
+it('US-INPUT-01: real input file is verbatim — no gateway text added', async () => {
+  const { env } = world();
+  await runTask(env, { userId: 42, username: 'alice', requestId: 'qa', initialMsgId: 99,
+    task: 'задача', sessionId: 's1', inputItems: [item(1, 'задача')] });
+  send.mockClear();
+  const real = 'You are a personal AI assistant…\n\n# РОЛЬ\n…\n\n[Сообщение 1]\nзадача';
+  fetch.mockImplementation(async url => String(url).includes('/internal/run-input')
+    ? new Response(real, { status: 200 })
+    : Response.json({ durable: true, taskId: 't' }));
+  await handleCallbackQuery({ id: 'cb-qa', data: 'input_run|99', message: { message_id: 200, chat: { id: 42 } } }, env);
+  const docs = send.mock.calls.filter(c => typeof c[2] === 'string' && c[2].endsWith('.txt'));
+  expect(docs).toHaveLength(1);
+  expect(docs[0][2]).toBe('agent-input.txt');
+  expect(docs[0][3]).toBe(real);
+});
+
+it('US-INPUT-01: agent input missing → file is the task text only, no «сверх этого» commentary', async () => {
+  const { env } = world();
+  await runTask(env, { userId: 42, username: 'alice', requestId: 'qa2', initialMsgId: 99,
+    task: 'только задача', sessionId: 's1', inputItems: [item(1, 'только задача')] });
+  send.mockClear();
+  await handleCallbackQuery({ id: 'cb-qa2', data: 'input_run|99', message: { message_id: 200, chat: { id: 42 } } }, env);
+  const doc = send.mock.calls.find(c => c[2] === 'input-snapshot.txt');
+  expect(doc[3]).toBe('только задача');
+  expect(doc[3]).not.toMatch(/системный промпт|сверх|токенов/);
+});
+
 it('inspection callback sends the full private snapshot to the original topic, journal links the saved session', async () => {
   const { env, io } = world();
   await runTask(env, { userId: 42, username: 'alice', requestId: 'inspect', initialMsgId: 99,
