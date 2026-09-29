@@ -68,6 +68,19 @@ describe('pure helpers', () => {
     expect(historyEntry(gmsg(5, 'x'.repeat(5000))).text.length).toBeLessThan(1100);
   });
 
+  it('historyEntry keeps the file handle so the agent can download an ambient file', () => {
+    const doc = historyEntry(gmsg(6, undefined, {
+      document: { file_id: 'BQAC', file_name: 'pool.xlsx', mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', file_size: 12345 },
+      caption: 'пул проектов',
+    }));
+    expect(doc.text).toBe('[файл pool.xlsx] пул проектов');
+    expect(doc.file).toEqual({ kind: 'document', fileId: 'BQAC', name: 'pool.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: 12345 });
+    expect(historyEntry(gmsg(7, undefined, { photo: [{ file_id: 's' }, { file_id: 'L' }] })).file).toMatchObject({ kind: 'photo', fileId: 'L' });
+    expect(historyEntry(gmsg(8, 'просто текст')).file).toBeUndefined();
+    const block = formatHistoryBlock([{ ...doc, ts: Date.now() }]);
+    expect(block).toContain('get_group_file message_id=6');
+  });
+
   it('pruneHistory drops >24h, dedups by message id, caps at HISTORY_MAX', () => {
     const now = Date.now();
     const old = { id: 1, ts: now - HISTORY_TTL_MS - 1, from: 'a', text: 'old' };

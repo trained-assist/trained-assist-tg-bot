@@ -142,7 +142,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     const history = formatHistoryBlock(pending);
     if (history) {
       body.context = body.context ? `${history}\n\n${body.context}` : history;
-      body.groupHistory = pending.map(({ id, seq, ts, from, text }) => ({ id, seq, ts, from, text }));
+      body.groupHistory = pending.map(({ id, seq, ts, from, text, file }) => ({ id, seq, ts, from, text, ...(file ? { file } : {}) }));
     }
   }
   // Acked only once the agent accepted the run: a failed run repeats the entries next time.

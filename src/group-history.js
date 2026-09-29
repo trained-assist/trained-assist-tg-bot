@@ -45,15 +45,33 @@ function mediaTag(msg) {
   return '';
 }
 
+// Telegram handle of the attachment, so the agent can download it later
+// (get_group_file). Without it an ambient file was a bare «[файл имя]» the agent
+// could never open. file_id is scoped to this bot — the agent fetches it with the
+// same bot's token.
+function mediaFile(msg) {
+  const pick = (kind, m, name) => m?.file_id
+    ? { kind, fileId: m.file_id, ...(name ? { name } : {}), ...(m.mime_type ? { mime: m.mime_type } : {}), ...(Number.isFinite(m.file_size) ? { size: m.file_size } : {}) }
+    : null;
+  if (msg?.document) return pick('document', msg.document, msg.document.file_name);
+  if (msg?.photo?.length) return pick('photo', msg.photo[msg.photo.length - 1]);
+  if (msg?.voice) return pick('voice', msg.voice);
+  if (msg?.audio) return pick('audio', msg.audio, msg.audio.file_name);
+  if (msg?.video) return pick('video', msg.video, msg.video.file_name);
+  if (msg?.video_note) return pick('video', msg.video_note);
+  return null;
+}
+
 /** Compact, storable record of one ambient group message, or null if nothing to keep. */
 export function historyEntry(msg, now = Date.now()) {
   const tag = mediaTag(msg);
+  const file = mediaFile(msg);
   let text = String(msg?.text || msg?.caption || '').trim();
   if (text.length > HISTORY_TEXT_MAX) text = text.slice(0, HISTORY_TEXT_MAX) + '…';
   const body = [tag, text].filter(Boolean).join(' ');
   if (!body) return null;
   const ts = Number.isFinite(msg?.date) ? msg.date * 1000 : now;
-  return { id: msg?.message_id ?? null, ts, from: authorOf(msg), text: body };
+  return { id: msg?.message_id ?? null, ts, from: authorOf(msg), text: body, ...(file ? { file } : {}) };
 }
 
 /** Keep entries within the window, dedup by message id, oldest first, capped. */
@@ -88,7 +106,8 @@ export function maxSeq(entries) {
 /** Reference block for the agent; newest lines win if the block would be too long. */
 export function formatHistoryBlock(entries) {
   if (!entries?.length) return '';
-  const lines = entries.map(e => `[${mskTime(e.ts)} МСК] ${e.from}: ${e.text}`);
+  const lines = entries.map(e => `[${mskTime(e.ts)} МСК] ${e.from}: ${e.text}` +
+    (e.file && e.id != null ? ` (скачать: get_group_file message_id=${e.id})` : ''));
   let total = 0;
   let start = lines.length;
   while (start > 0 && total + lines[start - 1].length + 1 <= HISTORY_BLOCK_MAX) total += lines[--start].length + 1;
