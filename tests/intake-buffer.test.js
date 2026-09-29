@@ -271,42 +271,51 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
-  it('«▶️ Запустить агента» is gone while a run is accepted, back after it finishes', async () => {
-    // Owner 2026-09-29: «когда задача принята, надо кнопку убирать — ты не думаешь,
-    // нажата она или нет». busy = задача принята ⇒ ни одна клавиатура в чате не
-    // несёт ▶️; после run-finished кнопка возвращается вместе с held-пачкой.
+  it('«▶️ Запустить агента»: нет под «задача принята», есть под held-порцией во время задачи', async () => {
+    // Owner 2026-09-29 01:04: «когда задача принята, надо кнопку убирать — ты не
+    // думаешь, нажата она или нет» ⇒ статус «📨 Передаю собранный input агенту…»
+    // без ▶️, и остаётся таким.
+    // Owner 2026-09-29 04:02: «вообще нет кнопки запустить … хотя я ни разу не
+    // нажимал» (issue #303) ⇒ сообщения, пришедшие ВО ВРЕМЯ прогона, — отдельная
+    // порция, её квитанция несёт ▶️; тап ставит запуск в очередь на конец прогона.
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-    const keyboards = () => [
-      ...sendMessageWithKeyboard.mock.calls.map(c => c[3]),
-      ...editMessage.mock.calls.map(c => c[4]?.reply_markup?.inline_keyboard),
+    // Per-mock counts, NOT one merged index: the merged array puts every send
+    // before every edit, so a slice on a single counter mis-reads a phase that
+    // switched from edit to send (which is exactly what the held receipt does).
+    const counts = () => [sendMessageWithKeyboard.mock.calls.length, editMessage.mock.calls.length];
+    const since = ([s, e]) => [
+      ...sendMessageWithKeyboard.mock.calls.slice(s).map(c => c[3]),
+      ...editMessage.mock.calls.slice(e).map(c => c[4]?.reply_markup?.inline_keyboard),
     ];
-    const snapshot = () => keyboards().length;
+    const kbText = kb => JSON.stringify(kb);
 
     await io.fetch(appendReq('start the task'));
     await receipt(io); // idle collector, with the launch button
-    expect(JSON.stringify(keyboards().at(-1))).toContain('intake_run');
+    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
 
-    const taken = snapshot();
+    const taken = counts();
     await io.fetch(flushReq()); await drain();
     expect(await state.storage.get('busy')).toBe(true);
+    const dispatch = since(taken);
+    expect(dispatch.length).toBeGreaterThan(0); // «📨 Передаю собранный input агенту…»
+    for (const kb of dispatch) {
+      expect(kbText(kb)).not.toContain('intake_run');
+    }
+
+    const heldStart = counts();
     await io.fetch(appendReq('held during run'));
     await receipt(io); // held receipt while the run is accepted
+    const held = since(heldStart);
+    expect(held.length).toBeGreaterThan(0);
+    expect(held.some(kb => kbText(kb).includes('▶️ Запустить агента'))).toBe(true);
 
-    const afterTake = keyboards().slice(taken);
-    expect(afterTake.length).toBeGreaterThan(0);
-    for (const kb of afterTake) {
-      expect(JSON.stringify(kb)).not.toContain('intake_run');
-      expect(JSON.stringify(kb)).not.toContain('Запустить агента');
-    }
-    expect(keyboards().at(-1)).toBeDefined();
-
-    const released = snapshot();
+    const released = counts();
     await io.fetch(runFinishedReq('req-default')); await drain();
     expect(await state.storage.get('busy')).toBeUndefined();
-    const afterRelease = keyboards().slice(released);
+    const afterRelease = since(released);
     expect(afterRelease.length).toBeGreaterThan(0); // held input re-offered WITH the button
-    expect(afterRelease.some(kb => JSON.stringify(kb).includes('intake_run'))).toBe(true);
+    expect(afterRelease.some(kb => kbText(kb).includes('intake_run'))).toBe(true);
   });
 
   it('the judge sets the delay and the collector says it (30 s continuation)', async () => {
