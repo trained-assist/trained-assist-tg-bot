@@ -37,36 +37,13 @@ export function assembleInput(items, batch = true) {
     fileRefs: prepared.flatMap(p => p.refs), isVoice: prepared.some(p => p.isVoice) };
 }
 
-// Compact inspection document for the «Посмотреть input» file. Shows the
-// assembled task as-is (what the gateway sent the model) plus a truthful note
-// that the model's FULL input is much larger: it also carries the system
-// prompt (role/persona, project rules, answer-mode block), the MCP tool
-// definitions and the context sections (agent notes, requirements log, session
-// history). Those are assembled agent-side at run time and are identical
-// boilerplate for every run of the profile — so they are not repeated here,
-// but the user must not be left believing the 1-sentence task is all the model
-// sees (2026-09-26: the report footer «вход N токенов» is the TOTAL input,
-// task included; the old doc silently equated the task with the whole input).
-export function renderSnapshotDocument(input, heading) {
-  const task = input.body?.task ?? input.task ?? '';
-  const lines = [heading, '',
-    'Это только текст задачи — как он ушёл из шлюза в модель.',
-    '',
-    'Модель получает сверх этого текста:',
-    '• системный промпт — роль/персона, правила, режим ответа',
-    '• определения MCP-инструментов (все подключённые тулзы)',
-    '• контекстные секции и историю сессии',
-    '',
-    'Поэтому «вход N токенов» в отчёте запуска — это ВЕСЬ вход модели, а не только этот текст.',
-    '',
-    '────────── Текст задачи (как ушёл модели) ──────────',
-    task];
-  const files = [];
-  const seen = new Set();
-  for (const ref of input.body?.fileRefs || []) {
-    const key = ref.id || ref.name;
-    if (!seen.has(key)) { seen.add(key); files.push(ref.name || ref.id); }
-  }
-  if (files.length) lines.push('', `Файлы: ${files.join(', ')}`);
-  return lines.join('\n');
+// «Посмотреть input» document when the agent's real input is unavailable
+// (not launched yet, or an old run). The file IS the task text exactly as the
+// gateway sends it — nothing else: no heading, no «модель получает сверх…»
+// explanations, no file list (owner 29.09: commentary inside the input file
+// hides the input; the doc must be as-is). Context lives in the Telegram
+// caption, never in the file. After launch the button returns the agent's
+// real input (system prompt + task, fetchRunInput) instead of this.
+export function renderSnapshotDocument(input) {
+  return input.body?.task ?? input.task ?? '';
 }

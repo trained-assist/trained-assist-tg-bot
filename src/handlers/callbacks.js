@@ -595,12 +595,11 @@ export async function handleCallbackQuery(cq, env) {
       await sendJournalLink(env, chatId, threadId, { username: session.username, sessionId: sid });
       return;
     }
-    const heading = input.state === 'snapshot' ? `Вход запуска ${input.id} (зафиксирован)`
-      : `Текущий input: ${(input.items || []).length} сообщений${input.pending ? ' — вложения ещё обрабатываются' : ''}`;
-    // Dispatched run: prefer the REAL model input from the agent (system prompt +
-    // context/task exactly as the engine received it, written at spawn time).
-    // A miss — old run, agent without the feature, network — falls back to the
-    // gateway-side snapshot below, so the button never dead-ends.
+    // Dispatched run: the REAL model input from the agent (system prompt +
+    // context/task exactly as the engine received it, written at spawn time),
+    // sent verbatim. A miss — not launched yet, old run, network — falls back
+    // to the task text as-is. Either way the FILE is the input and nothing
+    // else; the only context is the one-line caption (owner 29.09).
     if (input.state === 'snapshot') {
       const real = await fetchRunInput(env, input.body);
       if (real) {
@@ -609,10 +608,10 @@ export async function handleCallbackQuery(cq, env) {
         return;
       }
     }
-    // Compact inspection document: what the model actually receives (the task)
-    // plus per-message format markers — not the raw Telegram snapshot with
-    // entities/offsets, chat/from objects and media ids (token waste read-back).
-    const document = renderSnapshotDocument(input, heading);
+    const heading = input.state === 'snapshot'
+      ? `Запуск ${input.id}: полный input агента не найден — в файле текст задачи, как ушёл агенту`
+      : `Ещё не запущено (${(input.items || []).length} сообщ.${input.pending ? ', вложения обрабатываются' : ''}): в файле текст задачи. Полный input агента — этой кнопкой после запуска`;
+    const document = renderSnapshotDocument(input);
     await sendDocument(env.BOT_TOKEN, chatId, 'input-snapshot.txt', document, heading.slice(0, 900), threadId);
     return;
   }
