@@ -897,3 +897,93 @@ describe('IntakeBuffer — /clear escape hatch', () => {
     expect(await state.storage.get('busy')).toBe(true);
   });
 });
+
+// ── Issue #305: a queued ▶️ tap turns the button into its own undo ────────────
+// Owner 29.09.2026: «кнопка "передать агенту" должна пропасть после нажатия …
+// оставить хвост: "отменить передачу агенту". так что кнопка в любом случае будет
+// и кейс более четкий».
+describe('queued launch has an «↩️ Отменить передачу агента» tail (#305)', () => {
+  async function queueWhileBusy() {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq()); await drain();
+    await io.fetch(appendReq('supplement during run'));
+    const tap = await (await io.fetch(flushReq())).json();
+    expect(tap).toMatchObject({ busy: true, queued: true });
+    return { state, io };
+  }
+
+  it('a queued ▶️ tap swaps the button for ↩️ and says the batch is waiting', async () => {
+    const { state } = await queueWhileBusy();
+    expect(await state.storage.get('launchQueued')).toBe(true);
+
+    const [token, chatId, text, keyboard] = sendMessageWithKeyboard.mock.calls.at(-1);
+    expect(token).toBe('t'); expect(chatId).toBe(42);
+    expect(text).toContain('уйдёт агенту сразу после текущей задачи');
+    const kb = JSON.stringify(keyboard);
+    expect(kb).toContain('intake_cancel');
+    expect(kb).not.toContain('intake_run');
+  });
+
+  it('a receipt/alarm re-render while queued keeps ↩️, never paints ▶️ back', async () => {
+    const { state, io } = await queueWhileBusy();
+    await receipt(io); // the held receipt renders from the alarm
+    const [, , , text, opts] = editMessage.mock.calls.at(-1);
+    expect(text).toContain('уйдёт агенту сразу после текущей задачи');
+    const kb = JSON.stringify(opts);
+    expect(kb).toContain('intake_cancel');
+    expect(kb).not.toContain('intake_run');
+    expect(await state.storage.get('launchQueued')).toBe(true);
+  });
+
+  it('↩️ cancel clears the queue, restores ▶️, and the batch does NOT auto-launch', async () => {
+    const { state, io } = await queueWhileBusy();
+    const res = await (await io.fetch(new Request('https://intake/cancel', { method: 'POST' }))).json();
+    expect(res).toEqual({ cancelled: true });
+    expect(await state.storage.get('launchQueued')).toBeUndefined();
+    expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
+
+    // Collector re-rendered with ▶️ back (held receipt — busy is still true).
+    const [, , , text, opts] = editMessage.mock.calls.at(-1);
+    expect(text).toContain('Получил ещё');
+    expect(JSON.stringify(opts)).toContain('intake_run');
+    expect(JSON.stringify(opts)).not.toContain('intake_cancel');
+
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1); // no phantom launch after cancel
+  });
+
+  it('cancel with nothing queued reports cancelled:false and renders nothing', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    const res = await (await io.fetch(new Request('https://intake/cancel', { method: 'POST' }))).json();
+    expect(res).toEqual({ cancelled: false });
+    expect(editMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+  });
+
+  it('run-finished consumes the queue flag along with the launch', async () => {
+    const { state, io } = await queueWhileBusy();
+    await io.fetch(runFinishedReq('req-default')); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(2);
+    expect(await state.storage.get('launchQueued')).toBeUndefined();
+    expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
+  });
+
+  it('a queued tap on a still-downloading batch wears ↩️ too', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('buf', [
+      { text: 'вот файл', msg: { chat: { id: 42 }, message_id: 6 } },
+      { text: undefined, msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-1' },
+        mediaPending: true, mediaOwner: 'alice', mediaFirstSeenAt: Date.now() },
+    ]);
+    const res = await io.fetch(flushReq());
+    expect(await res.json()).toMatchObject({ preparing: true, queued: true });
+    expect(await state.storage.get('launchQueued')).toBe(true);
+    const kb = JSON.stringify(sendMessageWithKeyboard.mock.calls.at(-1)[3]);
+    expect(kb).toContain('intake_cancel');
+    expect(kb).not.toContain('intake_run');
+  });
+});
