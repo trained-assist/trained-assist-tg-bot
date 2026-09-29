@@ -104,6 +104,15 @@ const heldText = n => `✓ Получил ещё ${n} сообщений, пок
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
+// Judge failure ≠ judge verdict (#248). Before this, a timeout/5xx from the gate
+// consumed the debounce and the expiry branch went dark: buffer non-empty, no
+// timer, no busy — the user's messages just sat there (live chat -1003814002203,
+// 29.09). On `error` we keep the batch, retry the judge after a short pause, and
+// only after the budget is spent hand over to the explicit «нажми ▶️» text.
+const GATE_ERR_RETRY_MS = 60_000;      // first retry pause; grows is unnecessary — the judge is either up or not
+const GATE_ERR_MAX_ATTEMPTS = 3;       // then stop retrying and offer the button plainly
+const gateRetryText = (n) => `Судья запуска недоступен — повторю проверку через минуту (попытка ${n} из ${GATE_ERR_MAX_ATTEMPTS}). Агента можно запустить вручную: «▶️ Запустить агента».`;
+
 // The user's typed instruction for a batch: prepared file contents must never
 // masquerade as it (same rule as the expiry gate below — one definition).
 function coalescedIntent(buf) {
@@ -270,13 +279,20 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/debug' && request.method === 'GET') {
-      const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel] =
+      const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel,
+        receiptDue, collectorMsgId, gateConsulted, gateErrAttempts] =
         await Promise.all([
           this.state.storage.get('buf'), this.state.storage.get('retryBatch'),
           this.state.storage.get('retryBatchAttempts'), this.state.storage.get('busy'),
           this.state.storage.get('busySince'), this.state.storage.get('launching'),
           this.state.storage.get('debounceExpiresAt'), this.state.storage.get('gateLevel'),
+          this.state.storage.get('receiptDue'), this.state.storage.get('collectorMsgId'),
+          this.state.storage.get('gateConsulted'), this.state.storage.get('gateErrAttempts'),
         ]);
+      // `alarm` answers the one question the old dump could not: is anything at all
+      // still scheduled for this chat, or is it asleep? A non-empty buffer with no
+      // alarm and no busy IS the dead-end (#248, chat -1003814002203).
+      const alarm = await this.state.storage.getAlarm();
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
@@ -292,6 +308,9 @@ export class IntakeBuffer {
         buf: summarize(buf), retryBatch: summarize(retryBatch), retryBatchAttempts: retryBatchAttempts || 0,
         busy: !!busy, busySince: busySince || null, launching: summarize(launching),
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
+        alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
+        gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
+        stranded: !busy && ((buf || []).length > 0) && !alarm && !debounceExpiresAt && !receiptDue,
       });
     }
 
@@ -764,6 +783,9 @@ export class IntakeBuffer {
     await this.state.storage.delete('gateLevel');
     await this.state.storage.delete('shortDebounce');
     await this.state.storage.delete('gateConsulted');
+    // New input invalidates the previous judge-failure budget (#248): the retry
+    // count belongs to one batch, not to the chat forever.
+    await this.state.storage.delete('gateErrAttempts');
     await this.state.storage.put('autoPolicy', 'quiet-3m-v1');
     const debounceMs = DEBOUNCE_MS;
     const expiresAt = Date.now() + debounceMs;
@@ -799,6 +821,9 @@ export class IntakeBuffer {
     try {
       verdict = await checkCompleteness(this.env, { text: intent, username: session?.username || null, chatId, threadId });
     } catch { return; } // keep the default timer; the expiry gate re-checks
+    // Judge unavailable: not a verdict — keep the default timer (the expiry branch
+    // owns the bounded retry) instead of recording an `error` as «checked».
+    if (verdict?.level === 'error') return;
     const applied = await this._exclusive(async () => {
       if (JSON.stringify((await store.get('buf')) || []) !== snapshot) return false;
       if (await store.get('busy')) return false;
@@ -1131,7 +1156,25 @@ export class IntakeBuffer {
         });
         if (!current) return;
         if (verdict?.level === 'clear' || verdict?.level === 'likely' || verdict?.level === 'continue') {
+          await this.state.storage.delete('gateErrAttempts');
           await this._dispatch(snapshot);
+        } else if (verdict?.level === 'error' && chatId) {
+          // The judge did not answer — NOT «your input is unclear» (#248). Keep the
+          // batch and the timer alive: re-arm a short retry instead of going dark.
+          const attempts = ((await this.state.storage.get('gateErrAttempts')) || 0) + 1;
+          if (attempts < GATE_ERR_MAX_ATTEMPTS) {
+            await this.state.storage.put('gateErrAttempts', attempts);
+            await this.state.storage.put('gateLevel', 'error');
+            const retryAt = Date.now() + GATE_ERR_RETRY_MS;
+            await this.state.storage.put('debounceExpiresAt', retryAt);
+            await this.state.storage.setAlarm(retryAt);
+            await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), gateRetryText(attempts));
+          } else {
+            // Budget spent: stop retrying, but never strand — the explicit
+            // «нажми ▶️» text (and its button) is the way out.
+            await this.state.storage.delete('gateErrAttempts');
+            await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
+          }
         } else if (chatId) {
           await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
         }

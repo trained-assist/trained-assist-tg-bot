@@ -556,6 +556,60 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
+  // #248: a judge that did NOT answer must not read as «недостаточно контекста»,
+  // and must not consume the only timer the batch had (live dead-end 2026-09-29:
+  // buffer non-empty, debounce null, no alarm, nothing ever launched).
+  it('a judge failure re-arms a retry and never strands the batch', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ level: 'error', complete: false, retryable: true });
+
+    await io.fetch(appendReq('сделай отчёт по выставке'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+
+    expect(handleMessage).not.toHaveBeenCalled();
+    const retry = editMessage.mock.calls.filter(c => String(c[3]).includes('Судья запуска недоступен'));
+    expect(retry.length).toBe(1);
+    // The batch keeps a live timer and an alarm — a retry is actually scheduled.
+    expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now());
+    expect(state._dump().alarm).not.toBeNull();
+    expect(await state.storage.get('gateErrAttempts')).toBe(1);
+
+    // Second failure: one more retry (attempt 2 of 3), still scheduled.
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    expect(await state.storage.get('gateErrAttempts')).toBe(2);
+    expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now());
+
+    // Third failure: budget spent — stop retrying, hand over to the explicit
+    // «нажми ▶️» text (and its button). The way out always exists.
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
+    const plain = editMessage.mock.calls.filter(c => String(c[3]).includes('Не хватает контекста'));
+    expect(plain.length).toBe(1);
+    expect(await state.storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(await state.storage.get('gateErrAttempts')).toBeUndefined();
+  });
+
+  it('a judge recovery inside the retry budget still auto-dispatches', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValueOnce({ level: 'error', complete: false, retryable: true });
+    await io.fetch(appendReq('сделай отчёт по выставке'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
+
+    checkCompleteness.mockResolvedValue({ level: 'clear', complete: true });
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm(); await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('cancels a pending gate decision when a new message arrives before its timer fires', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
