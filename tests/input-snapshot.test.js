@@ -148,6 +148,23 @@ it('inspection callback sends the full private snapshot to the original topic, j
   expect(JSON.parse(Buffer.from(new URL(resolved.url).searchParams.get('t').split('.')[0], 'base64url'))).toMatchObject({ u: 'alice', s: 's-42-1790000000000' });
 });
 
+it('a journal button that carries its own session id works even without an intake snapshot', async () => {
+  // No runTask → the DO has no snapshot for message 99. The old code dead-ended
+  // with «сохранённый input недоступен» even though the 3rd part of the button
+  // already knew the session the agent ran on (owner 29.09: journal tap in a
+  // test chat answered exactly this). The snapshot is only needed for legacy
+  // two-part buttons.
+  const { env } = world();
+  send.mockClear();
+  await handleCallbackQuery({ id: 'cb-no-snapshot', data: 'input_journal|99|s-42-1790000000000',
+    message: { message_id: 200, chat: { id: 42 } } }, env);
+  const button = send.mock.calls[0][3].reply_markup.inline_keyboard[0][0];
+  expect(button.url).toMatch(/^https:\/\/app\.trainedassist\.store\/web\/magic\?t=[\w-]+\.[\w-]+$/);
+  const payload = JSON.parse(Buffer.from(new URL(button.url).searchParams.get('t').split('.')[0], 'base64url'));
+  expect(payload).toMatchObject({ u: 'alice', s: 's-42-1790000000000' });
+  expect(send.mock.calls[0][2]).not.toContain('недоступен');
+});
+
 it('snapshot matches the durable outbox payload when the caller omitted requestId', async () => {
   const { env, io } = world();
   let enqueued;
