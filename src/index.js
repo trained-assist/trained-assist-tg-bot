@@ -141,6 +141,17 @@ app.post('/debug/intake/:chatId/restore', async c => {
   return stub.fetch('https://intake/restore', { method: 'POST', body: await c.req.text() });
 });
 
+// Ops escape hatch for a batch that is buffered but will not auto-launch (no
+// timer, no ▶️ tap available): flush it as if the button had been pressed —
+// same /flush path, so a live run is never doubled (it queues instead). Added
+// with #248: the live dead-end of 2026-09-29 was only fixable by a tap in chat.
+app.post('/debug/intake/:chatId/flush', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
+  const res = await stub.fetch('https://intake/flush', { method: 'POST' });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // Debug: POST raw audio bytes, get back exactly what Deepgram returned (or the
 // raw network error). Isolates the Deepgram leg of transcribeVoice from
 // Telegram getFile, so an "Не удалось подготовить вложение" report can be

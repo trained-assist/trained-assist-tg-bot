@@ -276,6 +276,13 @@ export async function classifyMessage(env, { message, sessions }) {
  * coalesced intake buffer reads as a finished, actionable request. Returns
  * { level: 'clear'|'likely'|'insufficient' }. Errors hold the buffer for manual launch.
  */
+// A judge that did not answer is NOT a verdict. Collapsing timeout/5xx/bad body
+// into `insufficient` (the pre-#248 behaviour) made a degraded judge look exactly
+// like «your message is unclear» — the batch then lost its auto-launch timer with
+// nothing telling the user why. `error` is retried by the intake DO instead of
+// being announced as a verdict (#248, live chat -1003814002203, 2026-09-29).
+const gateError = () => ({ level: 'error', complete: false, delayMs: null, announce: null, retryable: true });
+
 export async function checkCompleteness(env, { text, username = null, chatId = null, threadId = null } = {}) {
   // The verdict now carries delayMs/announce too (agent #1823): the judge decides
   // how long to wait and what to say. Older agents simply omit those fields, so the
@@ -294,12 +301,12 @@ export async function checkCompleteness(env, { text, username = null, chatId = n
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { level: 'insufficient', complete: false, delayMs: null, announce: null };
+    if (!res.ok) return gateError();
     const result = await res.json();
-    return ['clear', 'likely', 'insufficient', 'continue'].includes(result?.level)
-      ? result : { level: 'insufficient', complete: false, delayMs: null, announce: null };
+    return ['clear', 'likely', 'insufficient', 'continue', 'error'].includes(result?.level)
+      ? result : gateError();
   } catch {
-    return { level: 'insufficient', complete: false, delayMs: null, announce: null };
+    return gateError();
   }
 }
 

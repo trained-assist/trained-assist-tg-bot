@@ -2,14 +2,29 @@ import { it, expect, vi, afterEach } from 'vitest';
 import { checkCompleteness } from '../src/lib/agent-client.js';
 afterEach(()=>vi.unstubAllGlobals());
 
-const HOLD = { level: 'insufficient', complete: false, delayMs: null, announce: null };
+// Changed with #248 (was: every failure → `insufficient`). A judge that did not
+// answer is not a verdict: collapsing a timeout/5xx/bad body into «недостаточно
+// контекста» made a degraded judge indistinguishable from a real one and killed
+// the batch's auto-launch timer silently (live chat -1003814002203, 2026-09-29).
+// Requirement now: failures surface as `error` (the intake DO retries them), while
+// a genuine `insufficient` from the judge still wins unchanged.
+const ERROR = { level: 'error', complete: false, delayMs: null, announce: null, retryable: true };
 
-it.each(['network', 'http', 'json', 'unknown'])('gate %s failure holds instead of launching',async kind=>{
+it.each(['network', 'http', 'json', 'unknown'])('gate %s failure reports error, not a hold verdict',async kind=>{
   vi.stubGlobal('fetch',vi.fn(async()=>{
     if(kind==='network') throw Error('offline');
     return {ok:kind!=='http',json:async()=>{if(kind==='json')throw Error('bad JSON');return {level:'unknown'};}};
   }));
-  expect(await checkCompleteness({AGENT_URL:'https://agent',AGENT_SECRET:'test'},{text:'task'})).toEqual(HOLD);
+  expect(await checkCompleteness({AGENT_URL:'https://agent',AGENT_SECRET:'test'},{text:'task'})).toEqual(ERROR);
+});
+
+it('a real insufficient verdict is passed through unchanged (not an error)', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true, json: async () => ({ level: 'insufficient', complete: false, delayMs: null, announce: 'x' }),
+  })));
+  const r = await checkCompleteness({ AGENT_URL: 'https://agent', AGENT_SECRET: 't' }, { text: 'task' });
+  expect(r.level).toBe('insufficient');
+  expect(r.retryable).toBeUndefined();
 });
 
 it('forwards the chat identity so the judge can see the previous agent answer', async () => {
