@@ -288,3 +288,41 @@ describe('ocl| forgotten checklist buttons (#1729 BV-08/08a)', () => {
     expect(orphanChecklistAction).not.toHaveBeenCalled();
   });
 });
+
+// #305: the ↩️ tail left in place of ▶️ after a queued tap.
+describe('callbacks — intake_cancel (#305)', () => {
+  it('asks the DO to cancel the queued transfer and confirms in the chat', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ cancelled: true }))) };
+    const env = {
+      BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret',
+      INTAKE: { idFromName: (n) => n, get: () => stub },
+    };
+
+    await handleCallbackQuery({ id: 'cq-1', data: 'intake_cancel', from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    expect(stub.fetch).toHaveBeenCalledTimes(1);
+    expect(String(stub.fetch.mock.calls[0][0])).toContain('/cancel');
+    expect(sendMessage.mock.calls.at(-1)?.[2] || '').toContain('Передача отменена');
+  });
+
+  it('stays silent when there was nothing queued to cancel', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify({ cancelled: false }))) };
+    const env = {
+      BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret',
+      INTAKE: { idFromName: (n) => n, get: () => stub },
+    };
+
+    await handleCallbackQuery({ id: 'cq-1', data: 'intake_cancel', from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    expect(stub.fetch).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});

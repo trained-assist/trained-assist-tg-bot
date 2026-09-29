@@ -614,8 +614,27 @@ export async function handleCallbackQuery(cq, env) {
       // `preparing` is the other `queued` — the attachment is still downloading, so
       // NOTHING is running: narrating «Идёт текущая задача» there is a lie (the DO
       // already sent its own honest «📥 Задачу забрал …» collector). #293.
-      if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно.');
+      // The DO has already swapped ▶️ for «↩️ Отменить передачу агенту» on the
+      // collector (launchQueued) — name that tail in the bubble so the two read
+      // as one state (owner 29.09: «кнопка в любом случае будет и кейс более чёткий»).
+      if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно. Передумал — отменяй кнопкой «↩️ Отменить передачу агенту».');
 
+    }
+    return;
+  }
+
+  // «↩️ Отменить передачу агенту» — the tail left in place of ▶️ once a tap is
+  // remembered (issue #305). Clears the queue in the DO; the DO itself re-renders
+  // the collector with ▶️ back (single owner of that message — no edit from here,
+  // so the two writes can't race). Stopping a RUNNING task is /tasks/stop, not this.
+  if (data === 'intake_cancel') {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '↩️ Отменяю передачу…');
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+      const r = await stub.fetch('https://intake/cancel', { method: 'POST' })
+        .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
+      if (r?.cancelled) await sendT(env, chatId, threadId, '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
     }
     return;
   }

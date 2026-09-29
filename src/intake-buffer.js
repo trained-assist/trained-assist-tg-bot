@@ -92,9 +92,16 @@ const STATUS_BTN = [[{ text: '📋 Посмотреть input', callback_data: '
 // Status overrides that themselves mean "the batch is taken" (📨 dispatching, 📥
 // queued) — even before `busy` is set the launch button must go.
 const TOOK_IT = /^(?:📨|📥)/;
+// Shown in place of ▶️ once the user HAS tapped it (`launchQueued`): the launch is
+// remembered (launchAfterRelease / launchWhenReady) and the only meaningful action
+// left is to take it back. The owner's ask (29.09, 05:0x): «кнопка должна пропасть
+// после нажатия … оставить хвост: отменить передачу агенту» — so the button never
+// just vanishes, it turns into its own undo, and the state is unambiguous.
+const CANCEL_BTN = [[{ text: '↩️ Отменить передачу агенту', callback_data: 'intake_cancel' }]];
 
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
 const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. «▶️ Запустить агента» — запущу их сразу после неё.`;
+const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 const insufficientText = 'Не хватает контекста для автозапуска. Дополни input или нажми «▶️ Запустить агента».';
 
 // The user's typed instruction for a batch: prepared file contents must never
@@ -326,6 +333,8 @@ export class IntakeBuffer {
         await this.state.storage.delete('collectorMsgId');
         await this.state.storage.delete('launching');
         await this.state.storage.delete('launchAfterRelease');
+        await this.state.storage.delete('launchWhenReady');
+        await this.state.storage.delete('launchQueued');
         await this.state.storage.deleteAlarm();
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
@@ -501,6 +510,14 @@ export class IntakeBuffer {
             ...((await this.state.storage.get('buf')) || [])];
           if (!held.length) return json({ busy: true });
           await this.state.storage.put('launchAfterRelease', true);
+          // Turn ▶️ into its own undo right away (owner 29.09): a tap that leaves
+          // the launch button sitting under the receipt reads as «не нажимается»,
+          // and a vanished button reads as «пропала». queuedText + ↩️ is the whole
+          // state in one screen; every later re-render (receipt/alarm) follows the
+          // same launchQueued flag in _showCollector.
+          await this.state.storage.put('launchQueued', true);
+          const lastHeld = held[held.length - 1]?.msg;
+          await this._showCollector(lastHeld?.chat?.id, held.length, lastHeld?.message_id, threadIdOf(lastHeld));
           return json({ busy: true, queued: true });
         }
         return json({ flushed: true, healed: true });
@@ -516,12 +533,45 @@ export class IntakeBuffer {
         // is running yet (busy is false here), so the caller must NOT narrate it
         // as a running task — our own collector line below is the honest wording.
         await this.state.storage.put('launchWhenReady', true);
+        // Same rule as the busy-queue tap: after «задачу забрал» the ▶️ is done —
+        // the tail becomes ↩️ cancel, so this queued launch can also be taken back.
+        await this.state.storage.put('launchQueued', true);
         await this._showCollector(buf[0].msg.chat.id, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf[0].msg),
           '📥 Задачу забрал — часть сообщений ещё грузится. Сохраню всё и начну, как только получу вложения.');
         return json({ preparing: true, queued: true });
       }
       await this._dispatch();
       return json({ flushed: true });
+    }
+
+    // «↩️ Отменить передачу агенту» — undo of a TAPPED (remembered) launch.
+    // Clears only the queue (launchAfterRelease/launchWhenReady/launchQueued);
+    // a running task is never touched — stopping THAT is /tasks/stop's job.
+    // The held messages stay exactly where they were: the next render simply
+    // offers ▶️ again.
+    if (url.pathname === '/cancel' && request.method === 'POST') {
+      const cancelled = await this._exclusive(async () => {
+        const had = !!((await this.state.storage.get('launchQueued'))
+          || (await this.state.storage.get('launchAfterRelease'))
+          || (await this.state.storage.get('launchWhenReady')));
+        await this.state.storage.delete('launchQueued');
+        await this.state.storage.delete('launchAfterRelease');
+        await this.state.storage.delete('launchWhenReady');
+        return had;
+      });
+      if (cancelled) {
+        // Re-render the same collector with ▶️ back — done outside the lock
+        // (Telegram I/O), same single-owner serialization as every collector edit.
+        const items = [...((await this.state.storage.get('retryBatch')) || []),
+          ...((await this.state.storage.get('buf')) || [])];
+        const last = items[items.length - 1]?.msg;
+        if (last) {
+          const busy = await this.state.storage.get('busy');
+          await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+            busy ? heldText(items.length) : null);
+        }
+      }
+      return json({ cancelled });
     }
 
     return new Response('not found', { status: 404 });
@@ -794,14 +844,18 @@ export class IntakeBuffer {
       if (!chatId) return null;
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
-      const text = override || collectorText(items.length || count);
-      // Launch button under every status that is not "the batch is taken". TOOK_IT
-      // (📨 dispatching / 📥 queued — the 📥 bubble can appear before any release) is
-      // the only mask: those describe input that has already left for the agent.
-      // busy deliberately does NOT mask it — held input is a batch of its own, and
+      const queued = !!(await this.state.storage.get('launchQueued'));
+      const text = override || (queued ? queuedText(items.length || count) : collectorText(items.length || count));
+      // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
+      // so «задачу забрал» can be walked back. Otherwise launch button under every
+      // status that is not "the batch is taken" (issue #303).
+      // TOOK_IT (📨 dispatching / 📥 queued — the 📥 bubble can appear before any
+      // release) describes input that has already left for the agent.
+      // busy deliberately does NOT mask ▶️ — held input is a batch of its own, and
       // killing the button here left the chat with no way to launch it (issue #303).
-      const launchable = !TOOK_IT.test(override || '');
-      const keyboard = launchable ? LAUNCH_BTN : STATUS_BTN;
+      const keyboard = queued ? CANCEL_BTN
+        : TOOK_IT.test(override || '') ? STATUS_BTN
+        : LAUNCH_BTN;
       const prevId = await this.state.storage.get('collectorMsgId');
       if (prevId) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
@@ -842,6 +896,10 @@ export class IntakeBuffer {
       await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       if (!retryBatch) await this.state.storage.delete('buf');
       await this.state.storage.delete('retryBatch');
+      // Point of no return: the batch is leaving — the ↩️ tail must not outlive it
+      // (the «📨 Передаю» status below is STATUS_BTN, and a stale flag would put
+      // cancel under the NEXT batch's collector).
+      await this.state.storage.delete('launchQueued');
       return items;
     });
     if (!buf.length) return;
@@ -951,6 +1009,11 @@ export class IntakeBuffer {
     await this.state.storage.delete('busyChatId');
     await this.state.storage.delete('busyThread');
     await this.state.storage.delete('launching');
+    // The queue intent itself (launchAfterRelease) is consumed by
+    // _afterBusyRelease right after this — but the ↩️ UI flag dies with the run
+    // that justified it, so the first post-release collector can't wear a stale
+    // cancel button (dispatch clears it again for its own «📨» status).
+    await this.state.storage.delete('launchQueued');
     await this.state.storage.deleteAlarm();
   }
 
@@ -1014,8 +1077,12 @@ export class IntakeBuffer {
       if (items.length) {
         const last = items.at(-1).msg;
         const busy = await this.state.storage.get('busy');
+        // A queued tap owns the render (queuedText + ↩️): passing heldText here
+        // would re-paint «▶️ Запустить агента — запущу сразу после неё» over an
+        // already-tapped launch, i.e. put the button back before its undo.
+        const queued = busy && !!(await this.state.storage.get('launchQueued'));
         await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          busy ? heldText(items.length) : null);
+          queued ? null : (busy ? heldText(items.length) : null));
         // Settled burst, run idle: let the judge set the real delay + say why (29.09).
         if (!busy) await this._consultGate(last.chat?.id, threadIdOf(last));
       }
