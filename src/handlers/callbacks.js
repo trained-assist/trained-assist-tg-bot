@@ -22,6 +22,14 @@ function sendT(env, chatId, threadId, text, extra = {}) {
 function sendKbT(env, chatId, threadId, text, keyboard, extra = {}, lifecycleEnv = env) {
   return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) }, lifecycleEnv);
 }
+// One-tap journal link: signed for the profile that PRESSED the button (not the
+// one that ran the task), one-time, valid 10 minutes. URL button, not text: no
+// link preview fetches it; a stale one → re-tap.
+async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
+  const url = await journalLoginUrl(env, { username, sessionId });
+  return sendT(env, chatId, threadId, '📜 Журнал диалога — ссылка одноразовая, входит под твоим профилем, действует 10 минут.',
+    { reply_markup: { inline_keyboard: [[{ text: '📜 Открыть журнал', url }]] } });
+}
 
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
@@ -556,6 +564,23 @@ export async function handleCallbackQuery(cq, env) {
   if (['input_draft', 'input_run', 'input_journal'].includes(data?.split('|')[0])) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id);
+
+    // «📜 Журнал» on a modern button already knows the session the agent ran on
+    // (3rd part, input_journal|msg|sid) — the intake snapshot is only needed for
+    // the legacy two-part buttons. Skipping the lookup here fixes the dead-end
+    // where a tap on a card without an intake snapshot answered
+    // «Для этого сообщения сохранённый input недоступен.» even though the
+    // button carried everything needed to build the journal link. The snapshot
+    // only held the id the gateway requested, which the agent may have healed
+    // onto another session anyway (see b10b909) — the button id is the better one.
+    if (data.split('|')[0] === 'input_journal') {
+      const buttonSid = data.split('|')[2];
+      if (buttonSid && /^[a-zA-Z0-9_.-]{1,128}$/.test(buttonSid)) {
+        await sendJournalLink(env, chatId, threadId, { username: session.username, sessionId: buttonSid });
+        return;
+      }
+    }
+
     if (!env.INTAKE) return;
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const params = new URLSearchParams({ messageId: data.split('|')[1] || String(message.message_id), username: session.username,
@@ -564,18 +589,10 @@ export async function handleCallbackQuery(cq, env) {
     if (!response.ok) { await sendT(env, chatId, threadId, 'Для этого сообщения сохранённый input недоступен.'); return; }
     const input = await response.json();
     if (data.split('|')[0] === 'input_journal') {
-      // Prefer the id the agent actually ran on (3rd part, input_journal|msg|sid);
-      // the snapshot only has the id the gateway requested, which the agent may
-      // have healed onto another session. Old two-part buttons fall back to it.
-      const buttonSid = data.split('|')[2];
-      const sid = (buttonSid && /^[a-zA-Z0-9_.-]{1,128}$/.test(buttonSid) ? buttonSid : null) || input.body?.sessionId;
+      // Legacy two-part button: fall back to the snapshot id.
+      const sid = input.body?.sessionId;
       if (!sid) { await sendT(env, chatId, threadId, 'Журнал появится после создания диалога.'); return; }
-      // One-time login link minted per tap for the profile that pressed it, so
-      // the web app opens this dialog already logged in (not as another profile).
-      // URL button, not text: no link preview fetches it; a stale one → re-tap.
-      const url = await journalLoginUrl(env, { username: session.username, sessionId: sid });
-      await sendT(env, chatId, threadId, '📜 Журнал диалога — ссылка одноразовая, входит под твоим профилем, действует 10 минут.',
-        { reply_markup: { inline_keyboard: [[{ text: '📜 Открыть журнал', url }]] } });
+      await sendJournalLink(env, chatId, threadId, { username: session.username, sessionId: sid });
       return;
     }
     // Dispatched run: the REAL model input from the agent (system prompt +
