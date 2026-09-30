@@ -12,3 +12,10 @@ Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/317 — фа�
 - [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/317
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (повторное открытие пикера не оставляет живых кнопок у старого)
+
+# Ф3-part — явный выбор «В очередь» в busy (2026-09-30)
+Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/318 — часть Ф3 плана architecture (RC-01/02/06, part of #316)
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/318
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (busy-квитанция: «▶️ В очередь после текущей» + честный текст)
