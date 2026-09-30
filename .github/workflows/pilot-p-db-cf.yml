@@ -1,0 +1,39 @@
+# One-off architecture pilot (trained-agent-architecture pilots/p-db): runs the
+# Cloudflare Workflows + D1 scenario on the real account, because only this repo's CI
+# holds the Cloudflare token. Lives on a branch only — never merged; does not touch the
+# gateway worker (throwaway resources named p-db-pilot-<run>, deleted by run-cf.sh).
+name: pilot-p-db-cf
+
+on:
+  push:
+    branches: ['eng/trained-assist-product-owner-pilot-p-db-cf-ci']
+
+jobs:
+  real-cf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-agent-architecture
+          ref: eng/trained-assist-product-owner-pilot-p-db-cf-real
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install wrangler
+        working-directory: pilots/p-db/cf-workflows
+        run: npm ci
+      - name: Run scenario on real Cloudflare
+        working-directory: pilots/p-db/cf-workflows
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          RUN: ${{ github.run_id }}
+        run: ./run-cf.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p-db-cf-results
+          path: |
+            pilots/p-db/cf-workflows/run-cf.log
+            pilots/p-db/cf-workflows/results-cf.json
