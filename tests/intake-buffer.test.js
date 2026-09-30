@@ -126,7 +126,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // the enqueue. Before this fix it was cleared in _dispatch's finally right
     // after the 202, which let a mid-run message auto-dispatch as a SECOND task.
     expect(await state.storage.get('busy')).toBe(true);
-    expect(await state.storage.get('busyRequestId')).toBe('req-default');
+    expect(await state.storage.get('busyRequestIds')).toEqual(['req-default']);
     expect(await state.storage.get('buf')).toBeUndefined();
 
     // The collector ("Принял N, жми «Запустить»") is stale procedural noise once the
@@ -140,7 +140,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ released: true });
     expect(await state.storage.get('busy')).toBeUndefined();
-    expect(await state.storage.get('busyRequestId')).toBeUndefined();
+    expect(await state.storage.get('busyRequestIds')).toBeUndefined();
   });
 
   it('busy arms the per-minute poll instead of sleeping until BUSY_MAX', async () => {
@@ -175,6 +175,41 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // The matching one releases.
     await io.fetch(runFinishedReq('req-default'));
     expect(await state.storage.get('busy')).toBeUndefined();
+  });
+
+  it('RC-03 prep: a busy window with two live runs releases only after the LAST run finishes', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBe(true);
+    // The explicit parallel dispatch (Ф4/RC-03, added by the next slice) appends
+    // its id — the hold must cover BOTH runs.
+    await state.storage.put('busyRequestIds', ['req-default', 'req-parallel']);
+
+    const first = await io.fetch(runFinishedReq('req-default'));
+    expect(await first.json()).toMatchObject({ busy: true, stillRunning: true });
+    expect(await state.storage.get('busy')).toBe(true);
+
+    const last = await io.fetch(runFinishedReq('req-parallel'));
+    expect(await last.json()).toMatchObject({ busy: false, released: true });
+    expect(await state.storage.get('busy')).toBeUndefined();
+  });
+
+  it('legacy scalar busyRequestId (deploy with a run in flight) is still honoured', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('start the task'));
+    await io.fetch(flushReq());
+    await drain();
+    await state.storage.delete('busyRequestIds');
+    await state.storage.put('busyRequestId', 'req-default');
+
+    const foreign = await io.fetch(runFinishedReq('someone-elses-request'));
+    expect(await foreign.json()).toMatchObject({ busy: true, mismatch: true });
+    const own = await io.fetch(runFinishedReq('req-default'));
+    expect(await own.json()).toMatchObject({ busy: false, released: true });
   });
 
   it('run-finished with no active run is a harmless no-op', async () => {
