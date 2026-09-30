@@ -26,3 +26,10 @@ Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/321 — по�
 - [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/321
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (поведение нейтрально, hold на месте)
+
+# Ф4-B2 — кнопка «⚡ Параллельно» (2026-09-30)
+Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/322 — явный второй ран в busy-окне (RC-03, part of #316)
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/322
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (кнопка на busy-квитанции, параллельный ран в отдельной сессии)
