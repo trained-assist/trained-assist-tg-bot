@@ -15,6 +15,7 @@ const KNOWN_CALLBACK_PREFIXES = [
   'fl:',        // file browser navigate
   'fr:',        // file browser read
   'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
+  'intake_parallel', // «⚡ Параллельно» — explicit parallel launch from the busy menu (RC-03, #316)
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
   'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
@@ -92,7 +93,7 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       // Build a minimal callback_query
       const data = prefix === 'workrun|' ? `${prefix}s-123` :
-                   prefix === 'sl:' || prefix === 'nd:' ? prefix :
+                   prefix === 'sl:' || prefix === 'nd:' || prefix === 'intake_parallel' ? prefix :
                    `${prefix}test-id`;
 
       const cq = {

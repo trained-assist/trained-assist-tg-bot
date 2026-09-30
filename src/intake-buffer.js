@@ -102,8 +102,11 @@ const CANCEL_BTN = [[{ text: '↩️ Отменить передачу аген�
 // after the current run (Ф3 «меню явного выбора», RC-02, tg-bot#316). The generic
 // «Запустить агента» wording belongs to idle, where the tap starts the run itself;
 // under a running task it read as «и что случится, если нажать?».
+// The busy menu has TWO explicit choices now (RC-02 / RC-03): queue after the
+// current run, or launch right now as a parallel run in its own session.
 const QUEUE_BTN = [[{ text: '▶️ В очередь после текущей', callback_data: 'intake_run' },
-  { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
+  { text: '⚡ Параллельно', callback_data: 'intake_parallel' }],
+  [{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
 const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Решать тебе: ▶️ «В очередь после текущей» — уйдут сразу после неё; пока не нажал — ждут и сами никуда не уйдут.`;
@@ -597,6 +600,10 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/flush' && request.method === 'POST') {
+      // `parallel: true` — the user's explicit «⚡ Параллельно» (RC-03): launch
+      // this batch NOW as a second run of the same busy window instead of
+      // queueing it after the current one. Legacy callers send no body.
+      const { parallel = false } = await request.json().catch(() => ({}));
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
       await this._exclusive(async () => {
         await this.state.storage.delete('stopped');
@@ -609,6 +616,9 @@ export class IntakeBuffer {
       // is really going, remember the tap and launch right after it ends.
       if ((await this.state.storage.get('busy')) === true) {
         const since = (await this.state.storage.get('busySince')) || 0;
+        // Set the intent BEFORE the self-heal: if the hold turns out to be stale
+        // (run already dead), the released window dispatches — still in parallel mode.
+        if (parallel) await this.state.storage.put('launchParallel', true);
         if (!(await this._pollRunFinishedIfIdle(since, { launch: true }))) {
           // Only promise a queued launch when there IS held input to launch after
           // the run. A stale/duplicate tap on a run that already swallowed its own
@@ -617,7 +627,27 @@ export class IntakeBuffer {
           // as a failed launch (#293, owner 2026-09-28, chat -5501536471).
           const held = [...((await this.state.storage.get('retryBatch')) || []),
             ...((await this.state.storage.get('buf')) || [])];
-          if (!held.length) return json({ busy: true });
+          if (!held.length) {
+            // Nothing to launch — drop the intent we just staged (a stale flag
+            // would hijack the NEXT normal dispatch).
+            if (parallel) await this.state.storage.delete('launchParallel');
+            return json({ busy: true });
+          }
+          if (parallel) {
+            // Attachments still landing: remember the intent (the tap is NOT
+            // dropped) and start the moment the last one is ready — same UX as
+            // the normal «📥 Задачу забрал» preparing flow, but in parallel mode.
+            const pendingMedia = held.some(i => i.mediaPending
+              || (i.preparingAt && Date.now() - i.preparingAt < 120000));
+            if (pendingMedia) {
+              await this.state.storage.put('launchWhenReady', true);
+              return json({ busy: true, parallel: true, preparing: true });
+            }
+            // Take the batch right now — _dispatch joins the open window (its
+            // ack appends this run's requestId; the hold drops after the LAST one).
+            await this._dispatch();
+            return json({ busy: true, parallel: true });
+          }
           await this.state.storage.put('launchAfterRelease', true);
           // Turn ▶️ into its own undo right away (owner 29.09): a tap that leaves
           // the launch button sitting under the receipt reads as «не нажимается»,
@@ -641,6 +671,7 @@ export class IntakeBuffer {
         // `queued: true` means only "the tap is remembered, not dropped": NOTHING
         // is running yet (busy is false here), so the caller must NOT narrate it
         // as a running task — our own collector line below is the honest wording.
+        if (parallel) await this.state.storage.put('launchParallel', true);
         await this.state.storage.put('launchWhenReady', true);
         // Same rule as the busy-queue tap: after «задачу забрал» the ▶️ is done —
         // the tail becomes ↩️ cancel, so this queued launch can also be taken back.
@@ -649,8 +680,9 @@ export class IntakeBuffer {
           '📥 Задачу забрал — часть сообщений ещё грузится. Сохраню всё и начну, как только получу вложения.');
         return json({ preparing: true, queued: true });
       }
+      if (parallel) await this.state.storage.put('launchParallel', true);
       await this._dispatch();
-      return json({ flushed: true });
+      return json(parallel ? { flushed: true, parallel: true } : { flushed: true });
     }
 
     // «↩️ Отменить передачу агенту» — undo of a TAPPED (remembered) launch.
@@ -666,6 +698,7 @@ export class IntakeBuffer {
         await this.state.storage.delete('launchQueued');
         await this.state.storage.delete('launchAfterRelease');
         await this.state.storage.delete('launchWhenReady');
+        await this.state.storage.delete('launchParallel');
         return had;
       });
       if (cancelled) {
@@ -1018,8 +1051,11 @@ export class IntakeBuffer {
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a new button afterwards).
   async _dispatch(expectedBuffer) {
+    const parallel = !!(await this.state.storage.get('launchParallel'));
     const buf = await this._exclusive(async () => {
-      if (await this.state.storage.get('busy')) return [];
+      // A parallel dispatch (RC-03) is allowed to start while the window is
+      // open — it JOINS it; every other dispatch still waits for the release.
+      if ((await this.state.storage.get('busy')) && !parallel) return [];
       // ⛔ Стоп holds the batch: only /flush (which lifts the hold first) may launch.
       if (await this.state.storage.get('stopped')) return [];
       if (expectedBuffer !== undefined && JSON.stringify((await this.state.storage.get('buf')) || []) !== expectedBuffer) return [];
@@ -1032,10 +1068,15 @@ export class IntakeBuffer {
       if (!items.length) return [];
       if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
-      await this.state.storage.put('busy', true);
-      await this.state.storage.put('busySince', Date.now());
+      // The FIRST run of a window owns busy/since; a parallel dispatch joins an
+      // already open window without resetting its age (BUSY_MAX counts from A).
+      const windowOwned = !(await this.state.storage.get('busy'));
+      if (windowOwned) {
+        await this.state.storage.put('busy', true);
+        await this.state.storage.put('busySince', Date.now());
+        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+      }
       await this.state.storage.put('launching', items);
-      await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       if (!retryBatch) await this.state.storage.delete('buf');
       await this.state.storage.delete('retryBatch');
       // Point of no return: the batch is leaving — the ↩️ tail must not outlive it
@@ -1043,6 +1084,7 @@ export class IntakeBuffer {
       // cancel under the NEXT batch's collector).
       await this.state.storage.delete('launchQueued');
       await this.state.storage.delete('resumedHeld');
+      await this.state.storage.delete('launchParallel'); // consumed by THIS dispatch
       return items;
     });
     if (!buf.length) return;
@@ -1076,7 +1118,7 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', initialMsgId,
+      await handleMessage(msg, this.env, { mode: 'deep', ...(parallel ? { parallel: true } : {}), initialMsgId,
         onRunAccepted: (ack) => { runAck = ack || null; },
         onIntakePrepared: async (index, prepared) => {
           buf[index] = { ...buf[index], msg: prepared };
@@ -1087,7 +1129,17 @@ export class IntakeBuffer {
         // requestId is what the agent echoes back in run-finished. The outbox
         // ack has no requestId field — its taskId IS the dispatch requestId.
         const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
-        if (dispatchRequestId) await this.state.storage.put('busyRequestIds', [dispatchRequestId]);
+        if (dispatchRequestId) {
+          const ids = await this._busyRequestIds();
+          if (!ids.includes(dispatchRequestId)) await this.state.storage.put('busyRequestIds', [...ids, dispatchRequestId]);
+          // Race: the window's first run reported finished while this dispatch
+          // was still in flight and released the hold — reopen it for THIS run.
+          if (!(await this.state.storage.get('busy'))) {
+            await this.state.storage.put('busy', true);
+            await this.state.storage.put('busySince', Date.now());
+            await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+          }
+        }
         if (runAck.outbox) await this.state.storage.put('busyViaOutbox', true);
         await this.state.storage.delete('launching');
         await this.state.storage.delete('retryBatchAttempts');
@@ -1177,7 +1229,11 @@ export class IntakeBuffer {
   async _afterBusyRelease() {
     await this._recoverMedia();
     const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
-    if (!remaining.length) { await this.state.storage.delete('launchAfterRelease'); return; }
+    if (!remaining.length) {
+      await this.state.storage.delete('launchAfterRelease');
+      await this.state.storage.delete('launchParallel'); // staged intent with no batch
+      return;
+    }
     if (remaining.some(i => i.mediaPending)) return; // _mediaResult shows the collector later
     // The user already tapped «▶️ Запустить» during the run — honour it now
     // instead of re-offering the button and waiting for another tap.
@@ -1185,6 +1241,13 @@ export class IntakeBuffer {
     // those braces — a run that ends after a stop never launches the held batch.
     if ((await this.state.storage.get('launchAfterRelease')) && !(await this.state.storage.get('stopped'))) {
       await this.state.storage.delete('launchAfterRelease');
+      await this._dispatch();
+      return;
+    }
+    // A remembered preparing-tap (launchWhenReady, incl. the parallel one) with
+    // nothing pending left: start it now instead of re-offering the button.
+    if (await this.state.storage.get('launchWhenReady')) {
+      await this.state.storage.delete('launchWhenReady');
       await this._dispatch();
       return;
     }
