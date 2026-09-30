@@ -271,7 +271,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect((await state.storage.get('buf')).length).toBe(2);
   });
 
-  it('«▶️ Запустить агента»: нет под «задача принята», есть под held-порцией во время задачи', async () => {
+  it('launch button: нет под «задача принята», под held-порцией — явный выбор «В очередь» (Ф3)', async () => {
     // Owner 2026-09-29 01:04: «когда задача принята, надо кнопку убирать — ты не
     // думаешь, нажата она или нет» ⇒ статус «📨 Передаю собранный input агенту…»
     // без ▶️, и остаётся таким.
@@ -293,6 +293,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     await io.fetch(appendReq('start the task'));
     await receipt(io); // idle collector, with the launch button
     expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
+    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('▶️ Запустить агента');
 
     const taken = counts();
     await io.fetch(flushReq()); await drain();
@@ -308,7 +309,18 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     await receipt(io); // held receipt while the run is accepted
     const held = since(heldStart);
     expect(held.length).toBeGreaterThan(0);
-    expect(held.some(kb => kbText(kb).includes('▶️ Запустить агента'))).toBe(true);
+    // Ф3 (RC-02): busy wording is the explicit choice — «В очередь после текущей»,
+    // not the idle «Запустить агента» (whose tap starts the run itself).
+    expect(held.some(kb => kbText(kb).includes('▶️ В очередь после текущей'))).toBe(true);
+    expect(held.some(kb => kbText(kb).includes('▶️ Запустить агента'))).toBe(false);
+    // RC-01/RC-06: the receipt spells out that nothing runs without the tap
+    // (held receipt may be a fresh send or an edit of the live collector).
+    const heldTexts = [
+      ...sendMessageWithKeyboard.mock.calls.slice(heldStart[0]).map(c => c[2]),
+      ...editMessage.mock.calls.slice(heldStart[1]).map(c => c[3]),
+    ].filter(t => typeof t === 'string' && t.includes('Получил ещё'));
+    expect(heldTexts.at(-1)).toContain('Решать тебе');
+    expect(heldTexts.at(-1)).toContain('сами никуда не уйдут');
 
     const released = counts();
     await io.fetch(runFinishedReq('req-default')); await drain();
