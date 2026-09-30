@@ -5,3 +5,10 @@
 - [x] Wire running/completed controls and journal (companion agent branch).
 - [x] Replace superseded receipt tests; 569 tests + 286 mandatory scenarios + workerd/R2 runtime passed.
 - [ ] Green CI and staging on PR revisions, merge, deploy and verify live SHA.
+
+# Ф1 — кнопочная гигиена: superseded-пикер теряет кнопки сразу (2026-09-30)
+Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/317 — фаза Ф1 плана trained-assist/trained-agent-architecture (US-BUG-01)
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/317
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (повторное открытие пикера не оставляет живых кнопок у старого)
