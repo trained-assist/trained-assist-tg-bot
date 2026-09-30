@@ -5,7 +5,7 @@ import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { handleCommand } from '../src/handlers/commands.js';
 import { getSession, setSession } from '../src/lib/kv.js';
 import { getProjectDecision, runTask, getSessions, classifyMessage } from '../src/lib/agent-client.js';
-import { sendMessage, sendMessageWithKeyboard } from '../src/lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessageReplyMarkup } from '../src/lib/telegram.js';
 
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(), getProjectDecision: vi.fn(), getSessions: vi.fn(), classifyMessage: vi.fn(), runTask: vi.fn().mockResolvedValue({}),
@@ -13,6 +13,7 @@ vi.mock('../src/lib/agent-client.js', async original => ({
 vi.mock('../src/lib/telegram.js', async original => ({
   ...await original(), sendMessage: vi.fn().mockResolvedValue({ result: { message_id: 50 } }),
   sendMessageWithKeyboard: vi.fn(), editMessage: vi.fn().mockResolvedValue({ ok: true }),
+  editMessageReplyMarkup: vi.fn().mockResolvedValue({ ok: true }),
   answerCallbackQuery: vi.fn().mockResolvedValue({ ok: true }),
 }));
 let env, mid;
@@ -179,6 +180,26 @@ describe('project selection through actual creation, message and callback handle
     session.pendingProjectChoice.createdAt = Date.now() - 11 * 60 * 1000;
     await setSession(env.SESSIONS, chatId, session); await tap('pc:0');
     expect((await getSession(env.SESSIONS, chatId)).projectId).toBe('old-project');
+  });
+
+  // Ф1 / US-BUG-01 (trained-assist-tg-bot#315): a re-opened picker used to leave the
+  // superseded one with live buttons until the TTL cron — superseded pickers cluttered
+  // the chat. The new picker now drops the old keyboard immediately (text stays).
+  it('re-opened picker immediately drops the buttons of the superseded one', async () => {
+    await tap('nd:');
+    const first = (await getSession(env.SESSIONS, chatId)).pendingProjectChoice.messageId;
+    await tap('nd:');
+    const second = (await getSession(env.SESSIONS, chatId)).pendingProjectChoice.messageId;
+    expect(second).not.toBe(first);
+    expect(editMessageReplyMarkup).toHaveBeenCalledWith('test', chatId, first, []);
+  });
+  it('the first picker in a chat clears nothing', async () => {
+    await tap('nd:');
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
+  });
+  it('pagination edits the same picker — no supersede clear', async () => {
+    await tap('nd:'); await tap('pc:page:1');
+    expect(editMessageReplyMarkup).not.toHaveBeenCalled();
   });
   it('«🔀 Переструктурировать проекты» is offered on the picker and skips project selection', async () => {
     await tap('nd:');
