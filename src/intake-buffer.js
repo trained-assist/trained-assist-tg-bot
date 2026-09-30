@@ -98,9 +98,15 @@ const TOOK_IT = /^(?:📨|📥)/;
 // после нажатия … оставить хвост: отменить передачу агенту» — so the button never
 // just vanishes, it turns into its own undo, and the state is unambiguous.
 const CANCEL_BTN = [[{ text: '↩️ Отменить передачу агенту', callback_data: 'intake_cancel' }]];
+// Busy context: the same intake_run tap is an EXPLICIT choice — queue this batch
+// after the current run (Ф3 «меню явного выбора», RC-02, tg-bot#316). The generic
+// «Запустить агента» wording belongs to idle, where the tap starts the run itself;
+// under a running task it read as «и что случится, если нажать?».
+const QUEUE_BTN = [[{ text: '▶️ В очередь после текущей', callback_data: 'intake_run' },
+  { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
-const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. «▶️ Запустить агента» — запущу их сразу после неё.`;
+const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Решать тебе: ▶️ «В очередь после текущей» — уйдут сразу после неё; пока не нажал — ждут и сами никуда не уйдут.`;
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 // ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
 // NEW message sent after the stop re-arms launching.
@@ -965,6 +971,7 @@ export class IntakeBuffer {
       if (!override && !items.length) return null;
       const queued = !!(await this.state.storage.get('launchQueued'));
       const stopped = !!(await this.state.storage.get('stopped'));
+      const busy = !!(await this.state.storage.get('busy'));
       const resumedHeld = (await this.state.storage.get('resumedHeld')) || 0;
       const n = items.length || count;
       const text = override || (queued ? queuedText(n)
@@ -979,6 +986,7 @@ export class IntakeBuffer {
       // killing the button here left the chat with no way to launch it (issue #303).
       const keyboard = queued ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
+        : busy ? QUEUE_BTN
         : LAUNCH_BTN;
       const prevId = await this.state.storage.get('collectorMsgId');
       if (prevId) {
