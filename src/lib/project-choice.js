@@ -1,6 +1,6 @@
 import { getProjectDecision, runTask } from './agent-client.js';
 import { getSession, setSession, newSessionId, withKvConsistencyRetry } from './kv.js';
-import { sendMessage, sendMessageWithKeyboard, editMessage, answerCallbackQuery } from './telegram.js';
+import { sendMessage, sendMessageWithKeyboard, editMessage, editMessageReplyMarkup, answerCallbackQuery } from './telegram.js';
 import { PICKER_TTL_MS, trackUI, projectChoiceExpired } from './transient-ui.js';
 import { shouldAskProject } from '../intake-routing.js';
 import { mirrorPicker } from './picker-mirror.js';
@@ -76,10 +76,19 @@ export async function openProjectChoice(env, chatId, session, { decision, input 
     input = previous;
     opts = session.pendingProjectChoice.opts;
   }
+  const prevPickerMessageId = session.pendingProjectChoice?.messageId || null;
   const pending = { choices: decision.choices || [], createdAt: Date.now(), expiresAt: Date.now() + PICKER_TTL_MS, token: crypto.randomUUID(), input,
     opts, contextFromSession, messageId: null, mismatch: decision.mismatch || null };
   await setSession(env.SESSIONS, chatId, { ...session, pendingProjectChoice: pending }, threadId);
   const messageId = await render(env, chatId, pending, 0, threadId);
+  // US-BUG-01 (Ф1, trained-assist-tg-bot#315): a re-opened picker sends a fresh
+  // message while the previous one still shows live buttons until the TTL cron —
+  // chat gets cluttered with superseded pickers. Same pattern the intake collector
+  // uses for its predecessor: drop the old keyboard immediately, keep the text.
+  // Tap-safety of the old picker (rejectExpiredUI) and the TTL cron stay as they are.
+  if (prevPickerMessageId && prevPickerMessageId !== messageId) {
+    await editMessageReplyMarkup(env.BOT_TOKEN, chatId, prevPickerMessageId, []).catch(() => {});
+  }
   if (input && opts.initialMsgId) {
     await editMessage(env.BOT_TOKEN, chatId, opts.initialMsgId, '📂 Задача сохранена. Выбери проект в меню ниже.',
       { reply_markup: { inline_keyboard: [] } }).catch(() => {});
