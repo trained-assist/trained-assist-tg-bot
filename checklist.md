@@ -21,8 +21,8 @@ Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/318 — ча�
 - [ ] Deployed to prod — verified live (busy-квитанция: «▶️ В очередь после текущей» + честный текст)
 
 # Ф4-B1 — busy-окно = set requestId (2026-09-30)
-Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/320 — подготовка «⚡ Параллельно» (RC-03, part of #316)
+Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/321 — подготовка «⚡ Параллельно» (RC-03, part of #316; #320 закрыт — ветка была переиспользована)
 
-- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/320
+- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/321
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (поведение нейтрально, hold на месте)
