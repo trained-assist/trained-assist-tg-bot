@@ -140,6 +140,15 @@ export async function handleMessage(msg, env, opts = {}) {
 
   let route = opts.intakeRoute || msg.intakeRoute ||
     await resolveSessionRoute(chatId, session, msg.text || msg.caption || '', env);
+  // RC-03 «⚡ Параллельно»: the batch becomes its OWN fresh session — never the
+  // one the first run is writing to (the agent's session writer guard would just
+  // queue it, and two writers of one history stay impossible, CH-05). The project
+  // comes from the chat's pinned/current project; the picker is skipped — a
+  // parallel launch must not stop mid-run for a question.
+  if (opts.parallel) {
+    route = { ...route, sessionId: newSessionId(chatId), forceNew: true,
+      projectChosen: false, projectId: session.projectId || null, contextFromSession: null };
+  }
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
   const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
   if (pendingPickerExpired) {
@@ -151,7 +160,7 @@ export async function handleMessage(msg, env, opts = {}) {
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   // /project <…> manages projects itself (agent quick answer) — never gate it behind the picker.
   const projectCommand = PROJECT_COMMAND_RE.test(msg.text || '');
-  if (!projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
+  if (!opts.parallel && !projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg, threadId,
@@ -231,6 +240,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       context,
       sessionId,
       forceNew: !!route.forceNew,
+      parallel: !!opts.parallel,
       contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
       forceClaude: opts.forceClaude || undefined,

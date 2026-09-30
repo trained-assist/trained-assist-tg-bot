@@ -616,13 +616,20 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  if (data === 'intake_run' || data?.startsWith('workrun|')) {
+  if (data === 'intake_run' || data === 'intake_parallel' || data?.startsWith('workrun|')) {
+    const parallel = data === 'intake_parallel';
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Передаю задачу…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…');
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-      const r = await stub.fetch('https://intake/flush', { method: 'POST' })
+      const r = await stub.fetch('https://intake/flush', { method: 'POST', body: JSON.stringify({ parallel }) })
         .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
+      // RC-03: an accepted parallel launch says so — it is a DIFFERENT claim
+      // from «запущу после текущей» and must not reuse that wording.
+      if (parallel && r?.parallel) {
+        await sendT(env, chatId, threadId, '⚡ Запускаю параллельно — новая сессия, текущая задача не прерывается.');
+        return;
+      }
       // An empty buffer is a normal no-op after dispatch (including a stale
       // or duplicate tap). The callback is already acknowledged; don't add a
       // misleading instruction to resend a task that may already be running.

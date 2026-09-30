@@ -55,7 +55,7 @@ function appendReq(text, flush = false) {
     body: JSON.stringify({ text, msg: { chat: { id: 42 }, text }, flush }),
   });
 }
-const flushReq = () => new Request('https://intake/flush', { method: 'POST' });
+const flushReq = (parallel = false) => new Request('https://intake/flush', { method: 'POST', ...(parallel ? { body: JSON.stringify({ parallel: true }) } : {}) });
 
 // Let dynamic import() inside _dispatch settle across a few macrotasks.
 async function drain() { for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0)); }
@@ -210,6 +210,70 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(await foreign.json()).toMatchObject({ busy: true, mismatch: true });
     const own = await io.fetch(runFinishedReq('req-default'));
     expect(await own.json()).toMatchObject({ busy: false, released: true });
+  });
+
+  it('RC-03: «⚡ Параллельно» launches the held batch NOW as a second run of the same window', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('first task'));
+    await io.fetch(flushReq());
+    await drain();
+    expect(await state.storage.get('busy')).toBe(true); // run A owns the window
+
+    await io.fetch(appendReq('second task during the run'));
+    handleMessage.mockImplementation(async (msg, env, opts) => {
+      opts?.onRunAccepted?.({ requestId: 'req-parallel', durable: true, taskId: 'task-parallel' });
+    });
+    const res = await (await io.fetch(flushReq(true))).json();
+    expect(res).toMatchObject({ busy: true, parallel: true });
+    await drain();
+
+    // The second batch dispatches IMMEDIATELY (not queued behind run-finished)…
+    expect(handleMessage).toHaveBeenCalledTimes(2);
+    expect(handleMessage.mock.calls[1][2]).toMatchObject({ parallel: true, mode: 'deep' });
+    // …and joins the same busy window.
+    expect(await state.storage.get('busyRequestIds')).toEqual(['req-default', 'req-parallel']);
+
+    // A finishes first — the hold must stay (P is still live).
+    const first = await (await io.fetch(runFinishedReq('req-default'))).json();
+    expect(first).toMatchObject({ busy: true, stillRunning: true });
+    expect(await state.storage.get('busy')).toBe(true);
+    // P finishes last — only now the window releases.
+    const last = await (await io.fetch(runFinishedReq('req-parallel'))).json();
+    expect(last).toMatchObject({ busy: false, released: true });
+    expect(await state.storage.get('busy')).toBeUndefined();
+  });
+
+  it('RC-03: a parallel tap with an empty buffer is a no-op and leaves no stale intent', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('first task'));
+    await io.fetch(flushReq());
+    await drain();
+    const res = await (await io.fetch(flushReq(true))).json();
+    expect(res).toEqual({ busy: true });
+    expect(await state.storage.get('launchParallel')).toBeUndefined();
+    expect(handleMessage).toHaveBeenCalledTimes(1); // only the first run — no new dispatch
+  });
+
+  it('«⚡ Параллельно» with attachments still downloading: intent survives until the last one lands', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await io.fetch(appendReq('first task'));
+    await io.fetch(flushReq());
+    await drain();
+    // Second batch has a still-downloading item — the tap is remembered, not dropped.
+    const items = [{ text: 'x', msg: { chat: { id: 42 }, message_id: 77, text: 'x' }, mediaPending: true }];
+    await state.storage.put('buf', items);
+    const res = await (await io.fetch(flushReq(true))).json();
+    expect(res).toMatchObject({ busy: true, parallel: true, preparing: true });
+    expect(await state.storage.get('launchParallel')).toBe(true);
+    expect(await state.storage.get('launchWhenReady')).toBe(true);
+
+    // /cancel drops the parallel intent along with the queue.
+    await (await io.fetch(new Request('https://intake/cancel', { method: 'POST' }))).json();
+    expect(await state.storage.get('launchParallel')).toBeUndefined();
+    expect(await state.storage.get('launchWhenReady')).toBeUndefined();
   });
 
   it('run-finished with no active run is a harmless no-op', async () => {
