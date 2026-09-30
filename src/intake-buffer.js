@@ -431,7 +431,7 @@ export class IntakeBuffer {
 
     // Agent → gateway run-finished (epic #1527 PR1): the primary release signal
     // for the busy hold. The agent pushes this when an admitted run settles
-    // (success/error/stop/quick); the sender matches busyRequestId so a foreign
+    // (success/error/stop/quick); the sender matches the busy request-id set so a foreign
     // run for the same chat can't release this chat's hold. Safety nets if this
     // never arrives: outbox permanent reject, the alarm's /tasks/running poll,
     // and BUSY_MAX_MS.
@@ -443,9 +443,9 @@ export class IntakeBuffer {
     if (url.pathname === '/held' && request.method === 'GET') {
       if (!(await this.state.storage.get('busy'))) return json({ busy: false, items: [] });
       const requestId = url.searchParams.get('requestId');
-      const busyReq = await this.state.storage.get('busyRequestId');
+      const busyIds = await this._busyRequestIds();
       // Another run of this chat holds the buffer — its messages are not ours to read.
-      if (requestId && busyReq && requestId !== busyReq) return json({ busy: true, mismatch: true, items: [] });
+      if (requestId && busyIds.length && !busyIds.includes(requestId)) return json({ busy: true, mismatch: true, items: [] });
       const buf = (await this.state.storage.get('buf')) || [];
       return json({ busy: true, busySince: (await this.state.storage.get('busySince')) || null, items: buf.map(heldView) });
     }
@@ -455,8 +455,8 @@ export class IntakeBuffer {
       const consumedIds = new Set((Array.isArray(consumed) ? consumed : []).filter(Number.isSafeInteger));
       const released = await this._exclusive(async () => {
         if (!(await this.state.storage.get('busy'))) return { busy: false };
-        const busyReq = await this.state.storage.get('busyRequestId');
-        if (busyReq && requestId && busyReq !== requestId) return { busy: true, mismatch: true };
+        const ids = await this._busyRequestIds();
+        if (requestId && ids.length && !ids.includes(requestId)) return { busy: true, mismatch: true };
         // Messages the model already took in via get_new_messages are done — drop
         // them so the collector doesn't re-offer them as a new task. Only for the
         // matched run, and only ready items (a still-downloading attachment stays).
@@ -466,6 +466,14 @@ export class IntakeBuffer {
           const kept = buf.filter(i => i.mediaPending || i.preparingAt || !consumedIds.has(i.msg?.message_id));
           dropped = buf.length - kept.length;
           if (dropped) await this.state.storage.put('buf', kept);
+        }
+        // One window may cover several live runs (explicit «⚡ Параллельно»,
+        // RC-03): the hold is released only when the LAST of them reports in.
+        // requestId-less pushes keep their legacy meaning — release everything.
+        const remaining = requestId ? ids.filter(id => id !== requestId) : [];
+        if (remaining.length) {
+          await this.state.storage.put('busyRequestIds', remaining);
+          return { busy: true, stillRunning: true, dropped };
         }
         await this._releaseBusyLocked();
         return { busy: false, released: true, dropped };
@@ -1079,7 +1087,7 @@ export class IntakeBuffer {
         // requestId is what the agent echoes back in run-finished. The outbox
         // ack has no requestId field — its taskId IS the dispatch requestId.
         const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
-        if (dispatchRequestId) await this.state.storage.put('busyRequestId', dispatchRequestId);
+        if (dispatchRequestId) await this.state.storage.put('busyRequestIds', [dispatchRequestId]);
         if (runAck.outbox) await this.state.storage.put('busyViaOutbox', true);
         await this.state.storage.delete('launching');
         await this.state.storage.delete('retryBatchAttempts');
@@ -1135,11 +1143,23 @@ export class IntakeBuffer {
   // push / agent restart), or BUSY_MAX_MS. Until then every new message lands
   // in the buffer as held — never as a second queued task (US-SUP-01 / CH-10).
 
+  // The set of live run requestIds the current busy window covers — the scalar
+  // `busyRequestId` before it (kept as a read fallback so a deploy with a run in
+  // flight does not orphan the hold). Usually one id; the explicit parallel
+  // launch (RC-03) appends a second.
+  async _busyRequestIds() {
+    const ids = await this.state.storage.get('busyRequestIds');
+    if (Array.isArray(ids)) return ids;
+    const legacy = await this.state.storage.get('busyRequestId');
+    return legacy ? [legacy] : [];
+  }
+
   // Must be called inside _exclusive: clear the whole busy record.
   async _releaseBusyLocked() {
     await this.state.storage.delete('busy');
     await this.state.storage.delete('busySince');
-    await this.state.storage.delete('busyRequestId');
+    await this.state.storage.delete('busyRequestIds');
+    await this.state.storage.delete('busyRequestId'); // legacy scalar (pre-set key)
     await this.state.storage.delete('busyViaOutbox');
     await this.state.storage.delete('busyChatId');
     await this.state.storage.delete('busyThread');
