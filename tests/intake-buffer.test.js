@@ -21,6 +21,7 @@ vi.mock('../src/lib/telegram.js', () => ({
 }));
 vi.mock('../src/lib/agent-client.js', () => ({
   checkCompleteness: (...a) => checkCompleteness(...a),
+  agentBases: env => [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))],
 }));
 
 import { IntakeBuffer } from '../src/intake-buffer.js';
@@ -588,6 +589,34 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
       global.fetch = realFetch;
     }
     expect(await state.storage.get('busy')).toBe(true);
+  });
+
+  it('alarm poll asks every backend: a run on the regional VM keeps the chat busy (#326)', async () => {
+    const state = makeState();
+    const realFetch = global.fetch;
+    const io = new IntakeBuffer(state, {
+      BOT_TOKEN: 't', AGENT_URL: 'https://agent.example', AGENT_RU_URL: 'https://ru.example', AGENT_SECRET: 'sek',
+    });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - 60_000);
+    await state.storage.put('busyChatId', 42);
+    const seen = [];
+    global.fetch = async url => {
+      seen.push(String(url));
+      return { ok: true, json: async () => ({ running: String(url).startsWith('https://ru.example') }) };
+    };
+    try {
+      await io.alarm();
+      expect(seen).toContain('https://agent.example/tasks/running?chatId=42');
+      expect(seen).toContain('https://ru.example/tasks/running?chatId=42');
+      expect(await state.storage.get('busy')).toBe(true); // RU reports running
+
+      global.fetch = async () => ({ ok: true, json: async () => ({ running: false }) });
+      await io.alarm();
+      expect(await state.storage.get('busy')).toBeUndefined(); // both idle → released
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 
   it('alarm poll is skipped for outbox dispatches (delivery not yet counted)', async () => {
