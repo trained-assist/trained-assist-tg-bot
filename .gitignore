@@ -8,3 +8,6 @@ staging-results/
 wrangler.preview.toml
 
 node_modules
+
+# Reference clones used as read-only contract samples (never committed).
+refs/
