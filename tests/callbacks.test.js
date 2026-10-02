@@ -16,6 +16,10 @@ const KNOWN_CALLBACK_PREFIXES = [
   'fr:',        // file browser read
   'workrun|',   // legacy «⏻ Запустить проработку» from old chats — now flushes the intake buffer (#530 §B)
   'intake_parallel', // «⚡ Параллельно» — explicit parallel launch from the busy menu (RC-03, #316)
+  'intake_stopsupp', // «🛑 Стоп и запуск с добавкой» — stop the run, continue it with the held input (RC-04, #316)
+  'intake_stopnew',  // «⛔ Стоп → новая задача» — stop the run, start the held input as its own task (RC-05, #316)
+  'intake_stopyes|', // ⛔ Точно остановить under either stop option — confirm, stop, launch
+  'intake_stopno|',  // ↩️ Вернуться — cancels the question, the task keeps running
   'pp:',        // project picker — pick/create typed project at new dialog (#517)
   'plan|',      // «▶️ Действуй дальше по плану» — continue deep session by the plan (#530)
   'menu|',      // multi-button menu — continue deep session by the tapped option (§D)
@@ -93,7 +97,8 @@ describe('callbacks — all known prefixes are handled (not silently ignored)', 
 
       // Build a minimal callback_query
       const data = prefix === 'workrun|' ? `${prefix}s-123` :
-                   prefix === 'sl:' || prefix === 'nd:' || prefix === 'intake_parallel' ? prefix :
+                   prefix === 'sl:' || prefix === 'nd:' || prefix === 'intake_parallel'
+                     || prefix === 'intake_stopsupp' || prefix === 'intake_stopnew' ? prefix :
                    `${prefix}test-id`;
 
       const cq = {
