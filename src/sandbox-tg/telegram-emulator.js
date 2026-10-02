@@ -121,8 +121,14 @@ export class TelegramEmulator {
   async fetch(input, init = {}) {
     const url = new URL(typeof input === 'string' ? input : input.url);
     const parts = url.pathname.split('/').filter(Boolean);
-    if (parts[0] !== 'bot' || parts.length < 2) return json({ ok: false, error_code: 404, description: 'not found' }, 404);
-    const method = parts.slice(2).join('/');
+    let method;
+    if (parts[0] === 'bot' && parts.length >= 3) {
+      method = parts.slice(2).join('/');
+    } else if (parts[0]?.startsWith('bot') && parts.length >= 2) {
+      method = parts.slice(1).join('/');
+    } else {
+      return json({ ok: false, error_code: 404, description: 'not found' }, 404);
+    }
     const body = await readJsonBody(input, init);
     const fault = this.faults.find(item => item.scope === 'send');
     if (fault) this.faults.splice(this.faults.indexOf(fault), 1);

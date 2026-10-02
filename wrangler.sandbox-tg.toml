@@ -1,0 +1,37 @@
+name = "trained-assist-tg-sandbox"
+main = "src/sandbox-tg/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# Reconciliation alarm — retries failed deliveries and pushes terminal results.
+[triggers]
+crons = ["* * * * *"]
+
+# Sandbox-only bindings — separate from the production worker:
+# TG_SLICE  — KV namespace for the slice durable state (ingress dedup,
+#             conversation index, delivery queue). Separate id from the
+#             production KV; the production worker never reads it.
+[[kv_namespaces]]
+binding = "TG_SLICE"
+id = "00000000000000000000000000000032"
+
+[vars]
+TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
+TG_SLICE_MODE = "direct"
+
+# Secrets (set via `wrangler secret put` — never in repo):
+#   TG_SANDBOX_BOT_TOKEN        — test bot token only
+#   CONTROL_PLANE_URL           — new control plane sandbox URL
+#   CONTROL_PLANE_PRINCIPAL     — admission principal for the sandbox
+#   CONTROL_PLANE_PROFILE       — sandbox profile in Task Store
+#   CONTROL_PLANE_API_KEY       — optional bearer key
+#   TELEGRAM_WEBHOOK_SECRET     — fail-closed webhook verification
+#   TG_SLICE_ALLOWED_CHATS      — comma-separated allowed chat ids
+#   TG_SLICE_CHAT_PROFILES      — chatId:profileId pairs
+#   TG_SLICE_EVENT_TRANSPORT    — auto | events-endpoint | status-history
+#   CONTROL_PLANE_SESSION_ID    — source session id (C01)
+
+# Nothing here is a credential: tokens/keys are secrets.

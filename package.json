@@ -1,7 +1,7 @@
 {
   "name": "trained-assist-tg-bot",
   "version": "0.1.0",
-  "description": "Trained Assist \u2014 Telegram bot (Cloudflare Worker)",
+  "description": "Trained Assist — Telegram bot (Cloudflare Worker)",
   "main": "src/index.js",
   "scripts": {
     "dev": "wrangler dev",
