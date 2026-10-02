@@ -237,6 +237,26 @@ describe('Ф3 busy menu — the two stop options (RC-04/RC-05)', () => {
     expect(say('Не удалось подтвердить остановку')).toBeTruthy();
   });
 
+  it('a busy-window alarm while the stop is in flight keeps the choice (no lost, no phantom run)', async () => {
+    await busyWindow();
+    await tap('intake_stopsupp', 901);
+    await drain();
+    await tap('intake_stopyes|supp', 902);
+    await drain();
+    // The stop is done, but the killed run's run-finished has not landed yet: the
+    // window still belongs to it. A routine alarm tick must NOT take the batch out
+    // of the launch position — that would silently drop the user's choice.
+    expect(await store().get('busy')).toBe(true);
+    await fireAlarmAt(Date.now() + 60_000);
+    expect(await store().get('stopLaunch')).toMatchObject({ mode: 'supp' });
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    // …and once the release really comes, the choice still runs, exactly once.
+    await runFinished();
+    await drain();
+    expect(handleMessage).toHaveBeenCalledTimes(2);
+    expect(handleMessage.mock.calls.at(-1)[0].intakeItems[0].text).toContain('Дополнение к задаче');
+  });
+
   it('«↩️ Отменить передачу агенту» cancels a pending stop+launch and says the task stays stopped', async () => {
     await busyWindow();
     await tap('intake_stopsupp', 901);
