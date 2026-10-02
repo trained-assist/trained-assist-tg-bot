@@ -28,7 +28,9 @@
     "tests/journal-link.test.js",
     "tests/conversation-context.test.js",
     "tests/forum-topics-isolation.test.js",
-    "tests/forum-topics-routing.test.js"
+    "tests/forum-topics-routing.test.js",
+    "tests/backend-call-map.test.js",
+    "tests/live-message-count.test.js"
   ],
   "node": []
 }
