@@ -33,6 +33,7 @@ vi.mock('../src/lib/agent-client.js', () => ({
   classifyMessage: (...a) => classifyMessage(...a),
   getProjectDecision: (...a) => getProjectDecision(...a),
   classifyAgentError: (...a) => classifyAgentError(...a),
+  agentBases: env => [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))],
 }));
 vi.mock('../src/lib/kv.js', () => ({
   getSession: (...a) => getSession(...a),

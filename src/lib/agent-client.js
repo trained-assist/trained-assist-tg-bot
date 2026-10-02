@@ -411,6 +411,16 @@ export async function orphanChecklistAction(env, { username, action, id, chatId 
   return res.json();
 }
 
+// Every configured agent VM (primary + regional). A chat-scoped operation must
+// reach the VM that actually holds the task, but the gateway does not track the
+// per-task routing decision (#326): so stop/status fan out to all backends. The
+// operation stays scoped by audience+chat(+topic), so a backend that has no such
+// task simply answers 0. This collapses to one call once RU routing is removed
+// (#302 / #326 option B) — the adapter never needs an address inside its payload.
+export function agentBases(env) {
+  return [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))];
+}
+
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
   const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   // ALWAYS scope the stop by this bot's audience + the chat (+ forum topic when
@@ -429,15 +439,31 @@ export async function stopTask(env, { username, chatId = null, threadId = null }
   // Test mode (DESIGN §2.1): the live run is registered under the RESERVE id —
   // translate, or /stop finds nothing to kill.
   if (isTestChat(env, chatId)) body.chatId = reserveChatId(env, chatId);
-  const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${env.AGENT_SECRET}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
-  return res.json();
+  // A RU-routed run lives on the regional VM; stop must reach it there (#326).
+  let killed = 0;
+  let answered = false;
+  let lastError = null;
+  for (const base of agentBases(env)) {
+    try {
+      const res = await fetch(`${base}/tasks/stop`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${env.AGENT_SECRET}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
+      const data = await res.json();
+      answered = true;
+      killed += data?.killed || 0;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  // Report an error only when no backend could be reached — a regional hiccup
+  // must not turn a successful primary stop into a failure.
+  if (!answered && lastError) throw lastError;
+  return { killed };
 }
