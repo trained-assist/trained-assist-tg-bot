@@ -7,11 +7,32 @@ export class RunOutbox {
   constructor(state, env) { this.state = state; this.env = env; }
   async fetch(request) {
     return this.state.blockConcurrencyWhile(async () => {
+      const path = new URL(request.url).pathname;
+      // User-initiated stop (INV-08 / SS-05): drop every queued delivery for this
+      // chat so it cannot self-launch after the user stopped it. A tombstone is
+      // kept per requestId so a later re-enqueue of the same id cannot resurrect
+      // the job. blockConcurrencyWhile makes this atomic against an in-flight alarm.
+      if (path === '/cancel') {
+        const { chatId, threadId = null } = await request.json();
+        const jobs = [...(await this.state.storage.list({ prefix: 'job:' }))];
+        let cancelled = 0;
+        await this.state.storage.transaction(async txn => {
+          for (const [key, job] of jobs) {
+            if (String(job.chatId) !== String(chatId)) continue;
+            if (threadId != null && String(job.threadId ?? '') !== String(threadId)) continue;
+            await txn.put(`cancelled:${job.id}`, { at: Date.now(), chatId: job.chatId, threadId: job.threadId ?? null });
+            await txn.delete(key);
+            for (let i = 0; i < job.chunks; i++) await txn.delete(`${job.id}:${i}`);
+            cancelled++;
+          }
+        });
+        return Response.json({ cancelled });
+      }
       const { agentUrl, body } = await request.json();
       const id = body.requestId;
       if (!id || ![this.env.AGENT_URL, this.env.AGENT_RU_URL].includes(agentUrl)) return Response.json({ error: 'invalid delivery' }, { status: 400 });
       const key = `job:${id}`;
-      if (!await this.state.storage.get(key) && !await this.state.storage.get(`done:${id}`) && !await this.state.storage.get(`failed:${id}`)) {
+      if (!await this.state.storage.get(key) && !await this.state.storage.get(`done:${id}`) && !await this.state.storage.get(`failed:${id}`) && !await this.state.storage.get(`cancelled:${id}`)) {
         const data = JSON.stringify(body);
         if (new TextEncoder().encode(data).length > 32 * 1024 * 1024) return Response.json({ error: 'payload exceeds 32 MiB' }, { status: 413 });
         const chunks = Math.ceil(data.length / 32000);

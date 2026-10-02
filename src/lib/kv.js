@@ -116,6 +116,28 @@ export async function scheduleRetry(kv, { chatId, text, opts }) {
   return key;
 }
 
+// User-initiated stop (INV-08 / SS-05): drop pending recovery entries for a chat
+// so a stop cannot be undone by the next cron tick. Thread-scoped when given.
+export async function cancelRetries(kv, chatId, threadId = null) {
+  if (!kv) return 0;
+  let cancelled = 0;
+  let cursor;
+  do {
+    const list = await kv.list({ prefix: `retry:${chatId}:`, ...(cursor ? { cursor } : {}) });
+    for (const k of list.keys) {
+      if (threadId != null) {
+        let opts = {};
+        try { opts = JSON.parse(await kv.get(k.name) || '{}').opts || {}; } catch { opts = {}; }
+        if (String(opts.threadId ?? '') !== String(threadId)) continue;
+      }
+      await kv.delete(k.name);
+      cancelled++;
+    }
+    cursor = list.list_complete === false ? list.cursor : null;
+  } while (cursor);
+  return cancelled;
+}
+
 export async function takeDueRetries(kv) {
   const due = [];
   let cursor;

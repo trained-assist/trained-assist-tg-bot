@@ -12,6 +12,7 @@
     "tests/agent-client.test.js",
     "tests/intake-buffer.test.js",
     "tests/run-outbox.test.js",
+    "tests/stop-cancels-queues.test.js",
     "tests/restart-command.test.js",
     "tests/release-gates.test.js",
     "tests/media-retry.test.js",
