@@ -7,6 +7,7 @@ import { PROJECT_COMMAND_RE } from '../lib/project-command.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
+import { transcribeAudio } from '../lib/speech.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { threadExtra, threadIdOf } from '../conversation-context.js';
 import { noContentNudgeText } from '../group-routing.js';
@@ -553,37 +554,44 @@ async function transcribeAndDispatch(chatId, session, env, opts, humanCaption, f
   await handleText(chatId, session, task, env, { ...opts, isVoice: true, mode: opts.mode || null });
 }
 
-export async function transcribeVoice(fileId, mimeType, env) {
-  const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
-  const fileData = await readMedia(
-    `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
-  );
-  if (!fileData.ok) {
-    return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
+// Формат распознавания (tg-bot#319): единственный контракт — sibling-скил
+// speech_transcribe через POST /action агента. Свой вызова Deepgram здесь больше нет.
+//
+// opts.fileRef — файл уже лежит на агенте (prepareIntake закачал его через
+// storeTelegramFile), тогда Telegram-файл качать второй раз не нужно.
+// opts.username обязателен: без профиля /action не зовётся (скил работает от USER_ID).
+export async function transcribeVoice(fileId, mimeType, env, opts = {}) {
+  const { username, fileRef } = opts;
+  let bytes = null;
+  let key = null;
+
+  if (!fileRef?.path) {
+    const tgBase = (env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
+    const fileData = await readMedia(
+      `${tgBase}/bot${env.BOT_TOKEN}/getFile?file_id=${fileId}`
+    );
+    if (!fileData.ok) {
+      return { transcript: null, error: `getFile failed: ${JSON.stringify(fileData)}` };
+    }
+    // File download always goes through api.telegram.org/file/ — use same proxy base
+    const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
+    bytes = await readMedia(audioUrl, {}, 'arrayBuffer', 120000);
+    key = `${username}:${fileId}`;
   }
 
-  // File download always goes through api.telegram.org/file/ — use same proxy base
-  const audioUrl = `${tgBase}/file/bot${env.BOT_TOKEN}/${fileData.result.file_path}`;
-  const audioBuffer = await readMedia(audioUrl, {}, 'arrayBuffer', 120000);
-
-  const dgText = await readMedia(
-    'https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Token ${env.DEEPGRAM_API_KEY}`,
-        'Content-Type': mimeType || 'audio/ogg; codecs=opus',
-      },
-      body: audioBuffer,
-    }, 'text', 120000
-  );
-  const dgData = JSON.parse(dgText);
-  const transcript = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-  if (!transcript) {
-    const confidence = dgData?.results?.channels?.[0]?.alternatives?.[0]?.confidence;
-    return { transcript: null, error: `empty transcript (size: ${audioBuffer.byteLength}b, confidence: ${confidence})` };
+  try {
+    const result = await transcribeAudio(env, {
+      username, fileRef, bytes, key,
+      name: fileRef?.name || 'audio',
+      mime: mimeType || fileRef?.mime || 'audio/ogg',
+      // preflight жил на readMedia со встроенными повторами — сохраняем их.
+      retry: true,
+    });
+    if (!result.text) return { transcript: null, error: 'empty transcript' };
+    return { transcript: result.text, error: null };
+  } catch (e) {
+    return { transcript: null, error: e.message };
   }
-  return { transcript, error: null };
 }
 
 const DOWNLOAD_TIMEOUT_MS = 20_000;

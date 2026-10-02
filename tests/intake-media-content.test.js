@@ -79,7 +79,9 @@ beforeEach(() => {
   });
 });
 
-const env = { BOT_TOKEN: 't', TELEGRAM_API_URL: 'https://api.telegram.org' };
+// AGENT_URL обязателен с Ф4 (#319): распознавание идёт на агента
+// (PUT /intake-files → POST /action), воркер свой вызов Deepgram больше не делает.
+const env = { BOT_TOKEN: 't', TELEGRAM_API_URL: 'https://api.telegram.org', AGENT_URL: 'https://agent.test', AGENT_SECRET: 'secret' };
 
 describe('media reaches the agent as a file, not a tag string', () => {
   it('CONTROL: a direct photo (no buffer) is downloaded and passed as fileBase64', async () => {
@@ -325,6 +327,9 @@ it('real batch retry reuses the first voice transcript when the second file fail
  expect(runTask.mock.calls[0][1].task).toContain('привет как дела');
  expect(runTask.mock.calls[0][1].task).toContain('таблица кандидатов');
  expect(runTask.mock.calls[0][1].fileRefs).toHaveLength(3);
- expect(globalThis.fetch.mock.calls.filter(([u]) => String(u).includes('deepgram.com'))).toHaveLength(1);
+ // Требование прежнее — «первая расшифровка переиспользуется, а не считается заново».
+ // Меняется только наблюдаемый сигнал: с Ф4 (#319) транскрибация уходит POST /action
+ // агенту, прямого адреса Deepgram в вызовах больше нет.
+ expect(globalThis.fetch.mock.calls.filter(([u]) => String(u).endsWith('/action'))).toHaveLength(1);
  expect(sendMessage.mock.calls.filter(c => c[2] === '🎤 привет как дела')).toHaveLength(1);
 });

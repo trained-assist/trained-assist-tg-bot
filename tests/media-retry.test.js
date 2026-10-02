@@ -52,20 +52,41 @@ it('re-downloads consumed streams and preserves upload identity on retry', async
   const ref = await storeTelegramFile({ chat: { id: 1 }, message_id: 2 }, { file_id: 'voice' }, env, { username: 'test' });
   expect(downloads).toBe(2); expect(uploads[0]).toEqual(uploads[1]); expect(ref.id).toBe(uploads[0].id);
 });
-it('retries transcription without re-downloading audio', async () => {
-  vi.useFakeTimers(); let dg = 0;
-  const fetcher = vi.fn(async url => {
-    if (url.includes('/getFile')) return json({ ok: true, result: { file_path: 'voice.ogg' } });
-    if (url.includes('/file/bot')) return new Response('audio');
-    dg++;
-    if (dg === 1) return new Response('', { status: 503 });
-    return json({ results: { channels: [{ alternatives: [{ transcript: 'hello' }] }] } });
+// ЗАМЕНА устаревшего теста с тем же названием (путь правил владелец: указать замену и причину).
+// Причина: тест описывал ретраи НАПРЯМУЮ к Deepgram, а Ф4 (trained-assist-tg-bot#319)
+// убрал прямой вызов — распознавание идёт PUT /intake-files → POST /action агента.
+// Изменился способ (транспорт), требование НЕ изменилось: сбой транскрибации
+// повторяется, аудио не скачивается второй раз.
+it('retries transcription without re-downloading audio (через POST /action)', async () => {
+  // Настоящие таймеры и потолок 10 с: у retryMedia настоящий backoff (500 мс на сбой).
+  // Под фейковыми таймерами промис закачки ставит свой таймер ДО того, как
+  // runAllTimersAsync успевает увидеть очередь, и тест виснет до 5-секундного
+  // лимита — поведение-то самое обычное, таймеры здесь не предмет проверки.
+  let downloads = 0, uploads = 0, actions = 0;
+  const fetcher = vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/getFile')) return json({ ok: true, result: { file_path: 'voice.ogg' } });
+    if (u.includes('/file/bot')) { downloads++; return new Response('audio'); }
+    if (u.includes('/intake-files') && opts.method === 'PUT') {
+      uploads++;
+      const id = new URL(u).searchParams.get('id');
+      if (uploads === 1) return new Response('', { status: 503 }); // закачка тоже повторяется
+      return json({ id, name: 'voice.ogg', mime: 'audio/ogg', size: 5, path: `media/intake-store/${id}/data` });
+    }
+    if (u.endsWith('/action')) {
+      actions++;
+      if (actions === 1) return new Response('', { status: 503 }); // транскрибация тоже повторяется
+      return json({ ok: true, result: { text: 'hello', duration: 1, language: 'ru' } });
+    }
+    throw new Error('unexpected fetch ' + u);
   });
   vi.stubGlobal('fetch', fetcher);
-  const result = transcribeVoice('voice', null, env);
-  await vi.runAllTimersAsync();
-  expect(await result).toEqual({ transcript: 'hello', error: null }); expect(fetcher).toHaveBeenCalledTimes(4);
-});
+  // Профиль обязателен с Ф4: /action работает от USER_ID.
+  const result = transcribeVoice('voice', null, env, { username: 'test' });
+  expect(await result).toEqual({ transcript: 'hello', error: null });
+  expect(downloads).toBe(1);   // аудио качается ровно один раз
+  expect(actions).toBe(2);     // транскрибация повторилась после 503
+}, 10000);
 it('same media in different buffered messages has independent retention identity', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     if (url.includes('/getFile')) return json({ ok: true, result: { file_path: 'same.pdf' } });

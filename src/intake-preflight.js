@@ -24,7 +24,8 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
     msg = { ...msg, fileRef };
     await checkpoint(msg);
     const { transcript, error } = msg.transcript ? { transcript: msg.transcript }
-      : await transcribeVoice(media.file_id, media.mime_type || null, env);
+      : await transcribeVoice(media.file_id, media.mime_type || null, env,
+          { username: session.username, fileRef: msg.fileRef });
     if (!transcript) throw new Error(error || 'Пустая расшифровка');
     const notifyTranscript = msg.transcriptNotified === false || !msg.transcript;
     msg = { ...msg, transcript, transcriptNotified: !notifyTranscript };

@@ -18,6 +18,12 @@ async function upload(env, username, id, name, mime, body, base = env.AGENT_URL)
   if (meta.id !== id || typeof meta.size !== 'number') throw new Error('Сервер не подтвердил сохранение файла');
   return meta;
 }
+// Same store, exposed for callers that already hold the bytes and only need the
+// path back (the speech leg, tg-bot#319): PUT /intake-files answers with
+// `path` relative to the profile workspace, which is exactly the `source` value
+// speech_transcribe takes. No second upload from the caller.
+export const putIntakeFile = upload;
+
 export async function storeTelegramFile(msg, file, env, session) {
   if (file.file_size > MAX_BYTES) throw new Error('Файл больше 20 MB');
   const id = await identity(msg, file);
