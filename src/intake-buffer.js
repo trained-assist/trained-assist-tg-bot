@@ -818,6 +818,12 @@ export class IntakeBuffer {
   async _consumeStopLaunch() {
     const spec = await this.state.storage.get('stopLaunch');
     if (!spec) return false;
+    // The window still belongs to the run being stopped: launching NOW would lose
+    // the bookkeeping (_dispatch refuses a non-empty busy window) and, worse, take
+    // the batch out of the launch position while nobody may launch it. Wait for
+    // the release — run-finished, the self-heal poll or BUSY_MAX — which always
+    // ends in _afterBusyRelease and comes back here.
+    if (await this.state.storage.get('busy')) return false;
     const items = [...((await this.state.storage.get('retryBatch')) || []),
       ...((await this.state.storage.get('buf')) || [])];
     if (!items.length) {
