@@ -30,7 +30,7 @@ export class RunOutbox {
       }
       const { agentUrl, body } = await request.json();
       const id = body.requestId;
-      if (!id || ![this.env.AGENT_URL, this.env.AGENT_RU_URL].includes(agentUrl)) return Response.json({ error: 'invalid delivery' }, { status: 400 });
+      if (!id || agentUrl !== this.env.AGENT_URL) return Response.json({ error: 'invalid delivery' }, { status: 400 });
       const key = `job:${id}`;
       if (!await this.state.storage.get(key) && !await this.state.storage.get(`done:${id}`) && !await this.state.storage.get(`failed:${id}`) && !await this.state.storage.get(`cancelled:${id}`)) {
         const data = JSON.stringify(body);

@@ -104,7 +104,6 @@ export async function handleCommand(msg, env) {
     case '/закрыть':           return cmdClose(chatId, env, threadId);
     case '/files':
     case '/папки':             return cmdFiles(chatId, env, '', threadId);
-    case '/ru':                return cmdRu(msg, env);
     case '/стоп':
     case '/stop':              return cmdStop(msg, env);
     case '/clean_buffer':
@@ -288,64 +287,12 @@ async function cmdStatus(chatId, env, threadId = null) {
   const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) return sendIn(env, chatId, threadId, '⚠️ Ты не авторизован. /login username password');
 
-  const [agentOk, agentRuOk] = await Promise.all([
-    getAgentHealth(env),
-    env.AGENT_RU_URL ? getAgentHealth({ ...env, AGENT_URL: env.AGENT_RU_URL }) : Promise.resolve(null),
-  ]);
-
-  const ruLine = agentRuOk !== null
-    ? `\nRU-агент: ${agentRuOk ? '✅ онлайн' : '❌ офлайн'} (nalog.ru, РФ-сервисы)`
-    : '';
+  const agentOk = await getAgentHealth(env);
 
   return sendIn(env, chatId, threadId,
     `📊 <b>${session.name}</b>\n` +
-    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}` +
-    ruLine
+    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}`
   );
-}
-
-async function cmdRu(msg, env) {
-  const { chat, text } = msg;
-  const chatId = chat.id;
-  const threadId = threadIdOf(msg);
-  const session = await getSession(env.SESSIONS, chatId, threadId);
-  if (!session) return sendIn(env, chatId, threadId, '⚠️ Сначала войди: /login username password');
-
-  const task = text.replace(/^\/ru\s*/i, '').trim();
-  if (!task) {
-    return sendIn(env, chatId, threadId,
-      '🇷🇺 <b>Российский IP агент</b>\n\n' +
-      'Используй: <code>/ru ваша задача</code>\n\n' +
-      'Задачи, переданные через /ru, выполняются на VM с российским IP-адресом.\n' +
-      'Нужно для: nalog.ru, gosuslugi.ru и других РФ-сервисов.\n\n' +
-      'Пример: <code>/ru проверь мои доходы на nalog.ru</code>'
-    );
-  }
-
-  if (!env.AGENT_RU_URL) {
-    return sendIn(env, chatId, threadId, '❌ RU-агент не настроен.');
-  }
-
-  try {
-    const sessionId = newSessionId(chatId);
-    await runTask(env, {
-      initiatedAt: Number.isFinite(msg.date) ? msg.date * 1000 : Date.now(), threadId: threadIdOf(msg),
-      requestId: `command-${chatId}-${msg.message_id}`,
-      userId: chatId,
-      username: session.username,
-      task,
-      context: null,
-      sessionId,
-      forceRu: true,
-    });
-    await setSession(env.SESSIONS, chatId, {
-      ...session,
-      lastSessionId: sessionId,
-      lastMessageAt: Date.now(),
-    }, threadId);
-  } catch (err) {
-    await sendIn(env, chatId, threadId, `❌ Ошибка RU-агента: ${err.message}`);
-  }
 }
 
 async function cmdVersion(chatId, env, threadId = null) {

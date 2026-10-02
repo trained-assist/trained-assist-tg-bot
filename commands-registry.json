@@ -286,16 +286,6 @@
       "description": "Файлы и папки профиля"
     },
     {
-      "command": "/ru",
-      "aliases": [],
-      "handler": "local",
-      "audiences": [
-        "default",
-        "freelance"
-      ],
-      "description": "Задача через РФ IP (nalog.ru и т.п.)"
-    },
-    {
       "command": "/stop",
       "aliases": [
         "/стоп"

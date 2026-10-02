@@ -18,7 +18,6 @@ vi.mock('../src/lib/agent-client.js', () => ({
   classifyMessage: (...a) => classifyMessage(...a),
   getProjectDecision: (...a) => getProjectDecision(...a),
   classifyAgentError: (...a) => classifyAgentError(...a),
-  pickAgentUrl: vi.fn(async () => 'http://agent'),
 }));
 vi.mock('../src/lib/kv.js', () => ({
   getSession: (...a) => getSession(...a),

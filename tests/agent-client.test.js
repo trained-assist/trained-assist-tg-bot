@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { pickAgentUrl, runTask, getSessions } from '../src/lib/agent-client.js';
+import { runTask, getSessions, stopTask } from '../src/lib/agent-client.js';
 import { resolveAudience } from '../src/lib/audience.js';
 
 describe('resolveAudience', () => {
@@ -11,15 +11,7 @@ describe('resolveAudience', () => {
 });
 
 const BASE = 'https://gcp.example.com';
-const RU   = 'https://ru.example.com';
 const USER = 'testuser';
-
-function mockCapabilities(caps) {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({ capabilities: caps }),
-  }));
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -27,54 +19,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-});
-
-describe('pickAgentUrl', () => {
-  it('returns AGENT_URL when AGENT_RU_URL not configured', async () => {
-    const env = { AGENT_URL: BASE };
-    expect(await pickAgentUrl(env, USER, 'nalog task')).toBe(BASE);
-    expect(await pickAgentUrl(env, USER, 'nalog task', true)).toBe(BASE);
-  });
-
-  it('returns AGENT_URL for non-RU task when user has no RU capabilities', async () => {
-    mockCapabilities([]);
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'write some code')).toBe(BASE);
-  });
-
-  it('returns AGENT_URL for RU-keyword task when user has no nalog token', async () => {
-    mockCapabilities([]); // user has no RU-only services connected
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(BASE);
-  });
-
-  it('returns AGENT_RU_URL for nalog task when user has nalog capability', async () => {
-    mockCapabilities(['nalog']);
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(RU);
-    expect(await pickAgentUrl(env, USER, 'nalog.ru отчёт')).toBe(RU);
-    expect(await pickAgentUrl(env, USER, 'чек нпд')).toBe(RU);
-  });
-
-  it('returns AGENT_RU_URL for forceRu=true without fetching capabilities', async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'написать тест', true)).toBe(RU);
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('falls back to AGENT_URL when capabilities endpoint is unreachable', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')));
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'проверь налоги')).toBe(BASE);
-  });
-
-  it('handles STT dot-splitting: "na log.ru" routes to RU if user has nalog', async () => {
-    mockCapabilities(['nalog']);
-    const env = { AGENT_URL: BASE, AGENT_RU_URL: RU, AGENT_SECRET: 'x' };
-    expect(await pickAgentUrl(env, USER, 'зайди на na log.ru')).toBe(RU);
-  });
 });
 
 it('durable dispatch keeps original request time and forum topic before network delivery', async () => {
@@ -235,5 +179,26 @@ describe('runTask projectPicked wire field', () => {
     expect(await send({ projectId: 'p1' })).not.toHaveProperty('projectPicked');
     expect(await send({ projectId: 'p1', projectPicked: false })).not.toHaveProperty('projectPicked');
     expect(await send({ projectPicked: true })).not.toHaveProperty('projectPicked');
+  });
+});
+
+// #302/#326 (решение 02.10.2026): выбор машины ушёл из бота — стоп всегда идёт
+// на единственный адрес и возвращает ответ агента как есть.
+describe('stopTask — один адрес (#302)', () => {
+  it('ходит только на AGENT_URL и возвращает ответ агента', async () => {
+    const seen = [];
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      seen.push(String(url));
+      return { ok: true, json: async () => ({ killed: 2 }) };
+    }));
+    const res = await stopTask({ AGENT_URL: BASE, AGENT_SECRET: 's' }, { username: USER, chatId: 42 });
+    expect(seen).toEqual([`${BASE}/tasks/stop`]);
+    expect(res).toEqual({ killed: 2 });
+  });
+
+  it('падает, если агент недоступен', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('down'); }));
+    await expect(stopTask({ AGENT_URL: BASE, AGENT_SECRET: 's' }, { username: USER, chatId: 42 }))
+      .rejects.toThrow('down');
   });
 });

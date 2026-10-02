@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { getProjectDecision } from '../src/lib/agent-client.js';
-const env = { AGENT_URL: 'https://agent', AGENT_RU_URL: 'https://other', AGENT_SECRET: 'test' };
+const env = { AGENT_URL: 'https://agent', AGENT_SECRET: 'test' };
 const args = { username: 'owner', chatId: 42 };
 const response = data => ({ ok: true, json: async () => data });
 afterEach(() => vi.unstubAllGlobals());

@@ -7,7 +7,7 @@ describe('fetchRunInput — «Посмотреть инпут» asks the agent f
   it('derives the taskId, calls the routed agent with Bearer auth, returns the document', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('REAL DOC', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    const env = { AGENT_URL: 'https://gcp', AGENT_RU_URL: null, AGENT_SECRET: 's3c' };
+    const env = { AGENT_URL: 'https://gcp', AGENT_SECRET: 's3c' };
     const out = await fetchRunInput(env, { username: 'vova', audience: 'default', requestId: 'msg-9-1', task: 'привет' });
     expect(out).toBe('REAL DOC');
     expect(fetchMock).toHaveBeenCalledTimes(1);
