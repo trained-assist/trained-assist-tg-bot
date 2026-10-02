@@ -33,3 +33,10 @@ Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/322 — яв�
 - [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/322
 - [ ] Merged to main
 - [ ] Deployed to prod — verified live (кнопка на busy-квитанции, параллельный ран в отдельной сессии)
+
+# Тестовый режим шлюза — журнал вместо Telegram (2026-10-02)
+Goal: https://github.com/trained-assist/trained-assist-tg-bot/pull/330 — US-TEST-01, issue #329; порядок выпуска: агент #2023 ✅ в проде → этот PR → включить TEST_CHAT_IDS последним
+
+- [ ] CI green on https://github.com/trained-assist/trained-assist-tg-bot/pull/330
+- [ ] Merged to main
+- [ ] Deployed to prod — verified live (TEST_CHAT_IDS пуст → режим выключен; вкл. на тест-чат даёт строки [test-mode] в журнале, в Telegram тишина)
