@@ -50,6 +50,7 @@
       "description": "Проект чата: показать/закрепить/открепить (/project unpin)"
     },
     { "command": "/settings", "aliases": ["/config", "/настройки"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Настройки чата: проект, движок, роль, что сохранено" },
+    { "command": "/test_mode", "aliases": [], "handler": "local", "adminOnly": true, "audiences": ["default", "recruiter", "freelance"], "description": "Статус тестового режима (TEST_CHAT_IDS)" },
     {
       "command": "/build_spec",
       "aliases": [
