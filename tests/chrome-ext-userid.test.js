@@ -22,7 +22,6 @@ vi.mock('../src/lib/agent-client.js', () => ({
   getSkills: vi.fn(),
   setUserToken: vi.fn(),
   needsRuAgent: vi.fn(),
-  pickAgentUrl: vi.fn(),
 }));
 
 import { getSession, setSession } from '../src/lib/kv.js';

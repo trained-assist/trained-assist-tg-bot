@@ -8,6 +8,7 @@ import { join, relative } from 'node:path';
 // HTTP-вызовов бота к агенту зафиксирован здесь как факт. НОВЫЙ прямой вызов вне
 // адаптера (src/lib/agent-client.js) падает этим тестом — его нужно либо провести
 // через адаптер, либо осознанно добавить в карту вместе с обоснованием в PR.
+// RU-маршрутизация снята (#302): guard ниже запрещает второй адрес в src.
 //
 // Это характеризация, а не идеальная картина: известные обходы адаптера
 // (stats/cleanup-flood/maintenance/tasks/running/intake-quick/intake-files/
@@ -49,11 +50,11 @@ function backendCalls(source) {
 // Ожидаемая карта: файл → endpoint-ы. «*» — URL собирается helper'ом.
 const EXPECTED = {
   'lib/agent-client.js': [
-    '/capabilities', '/run', '/projects', '/project-decision', '/sessions',
+    '/run', '/projects', '/project-decision', '/sessions',
     '/sessions/archive', '/files', '/files/read', '/classify', '/intake-gate',
     '/tokens', '/skills', '/report', '/health', '/internal/orphan-checklists/action',
     '/internal/run-input', '/tasks/stop',
-    '/projects', // 2-й вызов: getProjects RU-ветка (probe AGENT_RU_URL) — #302 снимет
+    '/projects', // 2-й: фолбэк getProjectDecision на базовый список
   ],
   'run-outbox.js': ['/maintenance', '/run'],
   'handlers/commands.js': ['/cleanup-flood', '/maintenance'],
@@ -62,11 +63,6 @@ const EXPECTED = {
   'intake-preflight.js': ['/intake-quick'],
   'lib/intake-files.js': ['/intake-files*', '/intake-files*', '/intake-files/release'],
 };
-
-// Кто СМЕТ трогать адресата. Маршрутизация RU/EU — зона инфраструктуры
-// (решение владельца 02.10.2026: выбор машины уходит из бота, #302/#326).
-const PICK_AGENT_URL_IMPORTERS = ['intake-preflight.js'];
-const RU_ADDRESS_USERS = ['handlers/commands.js', 'lib/agent-client.js', 'run-outbox.js'];
 
 const files = walk(SRC).map(f => relative(SRC, f));
 const read = file => readFileSync(join(SRC, file), 'utf8');
@@ -96,19 +92,12 @@ describe('карта обращений к backend (контракт #327, эт�
     expect(mismatches, `Карта разошлась с кодом: ${JSON.stringify(mismatches, null, 2)}`).toEqual([]);
   });
 
-  it('pickAgentUrl импортирует только известный файл (маршрутизация не размножается)', () => {
-    const importers = files.filter(file =>
-      /import\s*\{[^}]*pickAgentUrl[^}]*\}\s*from/.test(read(file)));
-    expect([...importers].sort()).toEqual(PICK_AGENT_URL_IMPORTERS);
-  });
-
-  it('AGENT_RU_URL не появляется в новых файлах (миграция #302/#326 инкрементальна)', () => {
-    const users = files.filter(file => /AGENT_RU_URL/.test(read(file)));
-    expect([...users].sort()).toEqual(RU_ADDRESS_USERS);
-  });
-
-  it('/capabilities вызывается только из адаптера', () => {
-    const users = files.filter(file => /\/capabilities/.test(read(file)));
-    expect([...users].sort()).toEqual(['lib/agent-client.js']);
+  it('выбора машины в src нет — guard решения 02.10.2026 (#302/#326)', () => {
+    // Запретительный guard: выбор машины — не предмет бота. Любая новая ссылка
+    // на второй адрес / на выбор маршрута / на /capabilities-проброску в
+    // прод-коде роняет CI, иначе логика вырастет заново (вторая попытка за месяц).
+    const banned = /AGENT_RU_URL|pickAgentUrl|RU_ONLY_SERVICES|forceRu|getCapabilities|\/capabilities/;
+    const offenders = files.filter(file => banned.test(read(file)));
+    expect(offenders, `Выбор машины вернулся в шлюз: ${offenders.join(', ')}`).toEqual([]);
   });
 });

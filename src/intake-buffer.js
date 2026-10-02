@@ -2,7 +2,7 @@ import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
-import { checkCompleteness, agentBases } from './lib/agent-client.js';
+import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 // Durable Object: per-chat intake buffer.
 //
@@ -1428,28 +1428,17 @@ export class IntakeBuffer {
   // and releasing early while a job is still queued reopens the double-run hole.
   async _pollRunFinishedIfIdle(since, { launch = false } = {}) {
     const chatId = await this.state.storage.get('busyChatId');
-    const bases = agentBases(this.env);
-    if (!chatId || !bases.length) return false;
+    if (!chatId || !this.env.AGENT_URL) return false;
     if (await this.state.storage.get('busyViaOutbox')) return false;
     if (Date.now() - since < 30_000) return false; // warmup: ack → counter visible
-    // The run may have been routed to the regional VM (#326): ask every backend.
-    // A chat is still busy if ANY backend reports a run for it. Release only when
-    // at least one backend answered and none reports running — an all-error tick
-    // is transient and must not release the hold.
-    let answered = false;
     try {
-      for (const base of bases) {
-        try {
-          const res = await fetch(`${base}/tasks/running?chatId=${encodeURIComponent(chatId)}`, {
-            headers: { Authorization: `Bearer ${this.env.AGENT_SECRET || ''}` },
-            signal: AbortSignal.timeout(5000),
-          });
-          if (!res.ok) continue;
-          answered = true;
-          if ((await res.json()).running) return false;
-        } catch { /* try the next backend */ }
-      }
-      if (!answered) return false;
+      const res = await fetch(`${this.env.AGENT_URL}/tasks/running?chatId=${encodeURIComponent(chatId)}`, {
+        headers: { Authorization: `Bearer ${this.env.AGENT_SECRET || ''}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (data.running) return false;
       const released = await this._exclusive(async () => {
         if (!(await this.state.storage.get('busy'))) return false;
         await this._releaseBusyLocked();

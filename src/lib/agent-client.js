@@ -6,59 +6,9 @@ import { pendingGroupHistory, formatHistoryBlock, ackGroupHistory, maxSeq, isGro
 import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
 // HTTP client for trained-assist-agent
 
-// Services that only work from Russian IP — routing based on which VM holds the token,
-// not on keyword-matching the task text.
-// Each entry: service name (matches filename in ~/agent-tokens/{userId}/) → task aliases
-const RU_ONLY_SERVICES = {
-  nalog:     ['nalog', 'налог', 'нпд', 'lknpd', 'самозанят', 'чек нпд', 'выбить чек', 'пробить чек', 'fns.ru'],
-  gosuslugi: ['gosuslugi', 'госуслуги', 'esia', 'есиа', 'mos.ru'],
-};
-
-// Fetch what services this user has tokens for on a given agent VM.
-// Returns [] on timeout or error (fail-open: route to GCP by default).
-async function getCapabilities(agentUrl, secret, userId) {
-  try {
-    const res = await fetch(`${agentUrl}/capabilities?userId=${userId}`, {
-      headers: { 'Authorization': `Bearer ${secret}` },
-      signal: AbortSignal.timeout(2500),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.capabilities || [];
-  } catch {
-    return [];
-  }
-}
-
-// Returns the agent URL to use for this task.
-// Queries RU VM capabilities first; falls back to GCP on error/timeout.
-// username: alphanumeric profile name (NOT the numeric Telegram chat ID)
-export async function pickAgentUrl(env, username, task, forceRu = false) {
-  if (forceRu && env.AGENT_RU_URL) return env.AGENT_RU_URL;
-  if (!env.AGENT_RU_URL) return env.AGENT_URL;
-
-  // Empty task → no RU-only keyword can match → skip the 2.5s capability probe
-  if (!task) return env.AGENT_URL;
-
-  const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
-  if (ruCaps.length === 0) return env.AGENT_URL;
-
-  // Normalize task for matching (collapse STT dot-splitting like "na log.ru" → "nalog.ru")
-  const lc = task.toLowerCase().replace(/\s*\.\s*/g, '.').replace(/\bna\s+log\b/g, 'nalog');
-
-  for (const cap of ruCaps) {
-    const aliases = RU_ONLY_SERVICES[cap];
-    if (!aliases) continue; // service isn't RU-only, skip
-    if (aliases.some(kw => lc.includes(kw))) return env.AGENT_RU_URL;
-  }
-
-  return env.AGENT_URL;
-}
-
 // The REAL model input of a dispatched run (agent-side: system prompt +
 // context/task exactly as the engine received it) for the «Посмотреть input»
-// button — GET /internal/run-input. Tries the agent pickAgentUrl chooses for
-// the same task text (how the run was routed), then the other configured agent.
+// button — GET /internal/run-input on the single configured agent (#302).
 // Never throws: a miss (run predates the feature, other agent, network) returns
 // null and the caller falls back to its gateway-side snapshot view.
 export async function fetchRunInput(env, body) {
@@ -66,8 +16,7 @@ export async function fetchRunInput(env, body) {
     const taskId = runInputTaskId(body);
     const username = body?.username;
     if (!taskId || !username) return null;
-    const primary = await pickAgentUrl(env, username, body.task || '');
-    const candidates = [...new Set([primary, env.AGENT_RU_URL, env.AGENT_URL].filter(Boolean))];
+    const candidates = [env.AGENT_URL]; // one backend (#302): no routing choice
     const query = `username=${encodeURIComponent(username)}&taskId=${encodeURIComponent(taskId)}`;
     for (const base of candidates) {
       try {
@@ -88,13 +37,7 @@ export async function fetchRunInput(env, body) {
 }
 
 export async function getProjects(env, { username, userId }) {
-  // Probe RU VM capabilities so users with nalog/gosuslugi tokens see projects
-  // from the VM their tasks actually run on, not always GCP.
-  let agentUrl = env.AGENT_URL;
-  if (username && env.AGENT_RU_URL) {
-    const ruCaps = await getCapabilities(env.AGENT_RU_URL, env.AGENT_SECRET, username);
-    if (ruCaps.length > 0) agentUrl = env.AGENT_RU_URL;
-  }
+  const agentUrl = env.AGENT_URL; // profile data lives on the one backend (#302)
   const audience = resolveAudience(env);
   try {
     const res = await fetch(
@@ -109,7 +52,7 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceRu, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
   const audience = resolveAudience(env);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
   // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
@@ -163,7 +106,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     Object.assign(body, snapshot.body);
   }
 
-  const agentUrl = await pickAgentUrl(env, body.username, body.task || '', forceRu);
+  const agentUrl = env.AGENT_URL; // placement is not the gateway's business (#302/#326, решение 02.10.2026)
   await copyRefsToAgent(env, body.username, body.fileRefs || [], agentUrl);
 
   if (env.RUN_OUTBOX) {
@@ -198,7 +141,7 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     });
     if (res.ok) {
       const ack=await res.json();
-      if(ack.durable){await releaseBufferPins(env,username,fileRefs);if(agentUrl!==env.AGENT_URL)await releaseBufferPins(env,username,fileRefs,agentUrl);}
+      if(ack.durable){await releaseBufferPins(env,username,fileRefs);}
       await ackHistory();
       return ack;
     }
@@ -411,16 +354,6 @@ export async function orphanChecklistAction(env, { username, action, id, chatId 
   return res.json();
 }
 
-// Every configured agent VM (primary + regional). A chat-scoped operation must
-// reach the VM that actually holds the task, but the gateway does not track the
-// per-task routing decision (#326): so stop/status fan out to all backends. The
-// operation stays scoped by audience+chat(+topic), so a backend that has no such
-// task simply answers 0. This collapses to one call once RU routing is removed
-// (#302 / #326 option B) — the adapter never needs an address inside its payload.
-export function agentBases(env) {
-  return [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))];
-}
-
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
   const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   // ALWAYS scope the stop by this bot's audience + the chat (+ forum topic when
@@ -439,31 +372,17 @@ export async function stopTask(env, { username, chatId = null, threadId = null }
   // Test mode (DESIGN §2.1): the live run is registered under the RESERVE id —
   // translate, or /stop finds nothing to kill.
   if (isTestChat(env, chatId)) body.chatId = reserveChatId(env, chatId);
-  // A RU-routed run lives on the regional VM; stop must reach it there (#326).
-  let killed = 0;
-  let answered = false;
-  let lastError = null;
-  for (const base of agentBases(env)) {
-    try {
-      const res = await fetch(`${base}/tasks/stop`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${env.AGENT_SECRET}`,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
-      const data = await res.json();
-      answered = true;
-      killed += data?.killed || 0;
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  // Report an error only when no backend could be reached — a regional hiccup
-  // must not turn a successful primary stop into a failure.
-  if (!answered && lastError) throw lastError;
-  return { killed };
+  // One backend since #302/#326 (решение 02.10.2026: выбор машины — не предмет
+  // бота): the agent owns placement, so the stop always reaches the run there.
+  const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.AGENT_SECRET}`,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
+  return res.json();
 }

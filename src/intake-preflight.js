@@ -2,7 +2,6 @@
 import { getSession } from './lib/kv.js';
 import { threadExtra, threadIdOf } from './conversation-context.js';
 import { sendMessage, sendDocument } from './lib/telegram.js';
-import { pickAgentUrl } from './lib/agent-client.js';
 import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/intake-files.js';
 import { transcribeVoice } from './handlers/message.js';
 
@@ -69,7 +68,7 @@ export async function preflight(msg, env, checkpoint) {
   // cannot consume it. Transcribed audio is eligible just like typed text.
   if (!query || prepared.photo || (prepared.document && !prepared.transcript)) return { msg: prepared };
   try {
-    const agentUrl = await pickAgentUrl(env, session.username, query);
+    const agentUrl = env.AGENT_URL; // one backend (#302)
     const response = await fetch(`${agentUrl}/intake-quick`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.AGENT_SECRET}` },
       body: JSON.stringify({ username: session.username, userId: msg.chat.id, query,

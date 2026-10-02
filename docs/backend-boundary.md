@@ -1,54 +1,48 @@
-# Граница backend: операция → адресат (#326)
+# Граница backend: один адрес (#302, #326)
 
-Контракт шлюза `trained-assist-tg-bot` с агентом. Фиксирует, **куда** уходит каждая
-операция, чтобы выбор исполнителя (RU/EU) не создавал асимметрию. Проверяется
-`tests/backend-call-map.test.js` — новый прямой вызов к агенту вне этой карты
-роняет CI.
+Контракт шлюза `trained-assist-tg-bot` с агентом. Решение владельца
+02.10.2026 (голосовое, зафиксировано в #326): **боту не нужно знать, где
+ранится** — выбор машины (opencode можно на РФ-слоте, Codex/Claude нельзя)
+живёт в инфраструктуре/ядре, а не в шлюзе.
 
-## Адреса
+## Адрес
 
-Агент — **один логический backend** с двумя развёртываниями:
+У шлюза **один** backend — `AGENT_URL`. Все операции (запуск, стоп, статус,
+файлы, проекты, сессии, быстрый ответ, input рана) идут на него. Агент сам
+решает, где выполнять задачу: RU-IP-сервисы (Налог.ру, ЕСИА) обслуживает
+ru-edge внутри агента (#1288) — бот в этом процессе не участвует.
 
-- `AGENT_URL` — основной VM;
-- `AGENT_RU_URL` — региональный VM (сервисы, работающие только с российского IP:
-  ФНС/налог, госуслуги). Может отсутствовать.
+Секрет `AGENT_RU_URL` в воркере больше не читается кодом (может остаться
+определённым в Cloudflare до ручной чистки — на поведение не влияет).
+Факт до удаления: `POST /run` на все известные RU-адреса отдавал 404
+(раннера нет, `alesa-agent.service` выключен с 30.08) — фича была мёртвой,
+удаление не регрессирует живое (#302).
 
-Подача задачи (`POST /run`) выбирает VM по `pickAgentUrl`: явный `/ru` + `forceRu`
-или авто-по ключевым словам при наличии у профиля RU-только токена. Больше нигде
-адресат не вычисляется.
+## Гард
 
-## Правило
+`tests/backend-call-map.test.js` содержит запретительный тест: любая ссылка
+на `AGENT_RU_URL` / `pickAgentUrl` / `RU_ONLY_SERVICES` / `forceRu` /
+`getCapabilities` / `/capabilities` в `src/**` роняет CI. Обхода карты вызовов
+(новый прямой fetch к агенту вне `src/lib/agent-client.js`) тоже нет — он
+описан там же.
 
-**Chat-scoped операции фанаутятся на все настроенные backend'ы** (`agentBases(env)`),
-потому что шлюз не хранит маршрут конкретной задачи: задача могла уйти на RU VM, а
-стоп/статус обязаны найти её там. Операция при этом скоупится по
-`audience + chatId (+ threadId)`, поэтому backend без такой задачи просто отвечает
-`0`/`running:false` — вреда нет.
+## Карта (все адреса — `AGENT_URL`)
 
-Когда RU-маршрутизация будет снята (#302 / вариант B), `agentBases` вырождается в
-один адрес, и фанаут исчезает сам — интерфейс адаптера не меняется.
+| Операция | Endpoint | Код |
+|---|---|---|
+| Подача задачи | `POST /run` | `lib/agent-client.js` `runTask` |
+| Быстрый ответ | `POST /intake-quick` | `intake-preflight.js` |
+| Стоп | `POST /tasks/stop` | `lib/agent-client.js` `stopTask` |
+| Busy-пол | `GET /tasks/running` | `intake-buffer.js` `_pollRunFinishedIfIdle` |
+| Файлы: загрузка/копия/release | `PUT /intake-files`, `POST /intake-files/release` | `lib/intake-files.js` |
+| Input рана | `GET /internal/run-input` | `lib/agent-client.js` `fetchRunInput` |
+| Проекты | `GET /projects`, `/project-decision` | `lib/agent-client.js` |
+| Профильные/admin | `/sessions`, `/classify`, `/intake-gate`, `/tokens`, `/skills`, `/report`, `/health`, `/files`, `/files/read`, `/stats`, `/cleanup-flood`, `/maintenance`, `/internal/orphan-checklists/action`, `/capabilities`-нет | `lib/agent-client.js`, `handlers/*` |
 
-## Карта
+## История
 
-| Операция | Endpoint | Адресат | Код |
-|---|---|---|---|
-| Подача задачи | `POST /run` | `pickAgentUrl` (может быть RU) | `lib/agent-client.js` `runTask` |
-| Быстрый ответ | `POST /intake-quick` | `pickAgentUrl` (может быть RU) | `intake-preflight.js` |
-| **Стоп** | `POST /tasks/stop` | **все backend'ы** (`agentBases`), `killed` суммируется | `lib/agent-client.js` `stopTask` |
-| **Busy-пол** | `GET /tasks/running` | **все backend'ы**; busy, если хоть один `running` | `intake-buffer.js` `_pollRunFinishedIfIdle` |
-| Файлы: загрузка | `PUT /intake-files` | `AGENT_URL` (на входе маршрут ещё неизвестен) | `lib/intake-files.js` |
-| Файлы: копия на VM рана | `PUT /intake-files` | адрес рана (`copyRefsToAgent`) | `lib/intake-files.js` |
-| Файлы: снятие pin | `POST /intake-files/release` | основной + адрес рана | `lib/intake-files.js` `releaseBufferPins` |
-| Input рана | `GET /internal/run-input` | `pickAgentUrl` + фолбэк на оба | `lib/agent-client.js` `fetchRunInput` |
-| Профильные/admin | `/projects`, `/sessions`, `/classify`, `/intake-gate`, `/tokens`, `/skills`, `/report`, `/health`, `/files`, `/files/read`, `/stats`, `/cleanup-flood`, `/maintenance`, `/internal/orphan-checklists/action` | `AGENT_URL` | `lib/agent-client.js`, `handlers/*` |
-
-Профильные данные (сессии/проекты/токены) живут на основном VM; RU VM —
-только исполнение RU-задач. Перенос профильного состояния в общую модель —
-отдельная работа (C04, placement).
-
-## Открытый вопрос
-
-Вариант **B** — снять авто-маршрутизацию по ключевым словам (#302), оставив явный
-`/ru` как ручной override. Это продуктовое решение владельца; при его принятии
-`pickAgentUrl`/`RU_ONLY_SERVICES` удаляются, карта выше сжимается до `AGENT_URL`.
-Текущий код — вариант **A** (адресат операции определён явно, фанаутом).
+- #326 (PR #335, 02.10): переходный фанаут стоп/busy на все адреса — снят этим
+  же решением, когда маршрутность удалена из бота (#302).
+- Удалённые символы: `pickAgentUrl`, `RU_ONLY_SERVICES`, `getCapabilities`,
+  `forceRu`, команда `/ru`, ветка `AGENT_RU_URL` в `getProjects` и
+  `fetchRunInput`, список допустимых адресов в `run-outbox`.
