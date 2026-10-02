@@ -1,3 +1,4 @@
+import { initTestMode } from '../lib/test-mode.js';
 import { assembleInput } from '../input-assembly.js';
 import { readMedia } from '../lib/media-retry.js';
 import { enqueueRecovery } from '../retry-queue.js';
@@ -340,6 +341,9 @@ async function recoveryNotice(env, chatId, text, threadId = null) {
 }
 
 export async function processDueRetries(env) {
+  // Test mode init point #3 — cron retries send outside any webhook dispatch
+  // (DESIGN §2.2).
+  initTestMode(env);
   if (env.RETRY_QUEUE && !env.RECOVERY_STORE) {
     const stub = env.RETRY_QUEUE.get(env.RETRY_QUEUE.idFromName('recovery'));
     const response = await stub.fetch('https://recovery/drain', { method: 'POST' });

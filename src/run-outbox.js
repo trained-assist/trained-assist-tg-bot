@@ -1,4 +1,5 @@
 import { releaseBufferPins } from './lib/intake-files.js';
+import { applyTestDelivery, isTestChat, suppress } from './lib/test-mode.js';
 const AGENT_DOWN_NOTICE_MS = 30_000;
 // One durable outbox per profile/chat. Alarms retry until the agent acknowledges
 // the stable requestId. Files are chunked below DO's per-value storage limit.
@@ -50,6 +51,12 @@ export class RunOutbox {
             signal: AbortSignal.timeout(5000),
           });
           if (!capability.ok || (await capability.json()).durableIngress !== 1) throw Error('Durable ingress is not ready');
+          // Test mode, last hop before POST /run (DESIGN §2.1): flag + reserve
+          // id in ONE branch; job.chatId stays REAL (used by notify/release above).
+          try {
+            const parsed = JSON.parse(data);
+            if (applyTestDelivery(this.env, parsed)) data = JSON.stringify(parsed);
+          } catch { /* keep the original payload */ }
           const res = await fetch(`${job.agentUrl}/run`, {
             method: 'POST', headers: { Authorization: `Bearer ${this.env.AGENT_SECRET}`, 'Content-Type': 'application/json' },
             body: data, signal: AbortSignal.timeout(10000),
@@ -96,6 +103,8 @@ export class RunOutbox {
     });
   }
   async notify(job, text) {
+    // Test mode: job.chatId is the REAL id (never swapped) — gate it here.
+    if (isTestChat(this.env, job.chatId)) { suppress(job.chatId, 'notify', text); return; }
     const method = job.initialMsgId ? 'editMessageText' : 'sendMessage';
     try {
       await fetch(`https://api.telegram.org/bot${this.env.BOT_TOKEN}/${method}`, {

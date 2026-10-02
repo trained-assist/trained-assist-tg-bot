@@ -56,8 +56,55 @@ it('forwards consumed message ids (live inbox) to the IntakeBuffer', async () =>
   });
 });
 
+const CTRL_OR_PLAIN = 555000; // обычный (не тестовый) чат
 const heldReq = (qs, token = 'test-secret') => new Request(`https://worker/internal/held-messages?${qs}`, {
   headers: token ? { Authorization: `Bearer ${token}` } : {},
+});
+
+// ── G5: тестовый режим — инверсия резервного id + журнал ответа (DESIGN §2.1/§2.2) ──
+const RESERVE = -(1e14); // TEST_CHAT_IDS с одним id → индекс 0
+const TEST = 777000111;
+
+function testEnv(ids) {
+  const { env, stub } = makeEnv();
+  env.TEST_CHAT_IDS = ids;
+  return { env, stub };
+}
+
+it('test mode: run-finished под резервным id уходит в IntakeBuffer РЕАЛЬНОГО чата и пишет журнал', async () => {
+  const { env, stub } = testEnv(String(TEST));
+  const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const res = await worker.fetch(req({
+    chatId: RESERVE, requestId: 'intake-tm', outcome: 'done',
+    answer: 'Ответ агента в журнал.',
+  }), env);
+  expect(res.status).toBe(200);
+  expect(env.INTAKE.idFromName).toHaveBeenCalledWith(String(TEST)); // инверсия
+  const lines = spy.mock.calls.map(c => c.join(' '));
+  expect(lines.some(l => l.includes(`[test-mode] kind=run-finished chat=${TEST} requestId=intake-tm outcome=done`))).toBe(true);
+  expect(lines.some(l => l.includes(`[test-mode] kind=agent-answer chat=${TEST} requestId=intake-tm`) && l.includes('Ответ агента в журнал.'))).toBe(true);
+  spy.mockRestore();
+});
+
+it('test mode: обычный чат без answer — ни одной строки журнала; резерв без списка не инвертируется', async () => {
+  const { env, stub } = testEnv(String(TEST));
+  const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  await worker.fetch(req({ chatId: CTRL_OR_PLAIN, requestId: 'r-plain', outcome: 'done' }), env);
+  expect(env.INTAKE.idFromName).toHaveBeenCalledWith(String(CTRL_OR_PLAIN)); // не тестовый → свой id
+  // резерв при ВЫКЛЮЧЕННОМ списке → чужой (не инвертируем) чат, but the route still accepts it
+  const { env: envOff } = testEnv('');
+  await worker.fetch(req({ chatId: RESERVE, requestId: 'r-off', outcome: 'done' }), envOff);
+  expect(envOff.INTAKE.idFromName).toHaveBeenCalledWith(String(RESERVE));
+  expect(spy.mock.calls.map(c => c.join(' ')).some(l => l.includes('[test-mode]'))).toBe(false);
+  spy.mockRestore();
+  expect(stub.fetch).toHaveBeenCalled();
+});
+
+it('held-messages: резервный id читает IntakeBuffer реального чата', async () => {
+  const { env, stub } = testEnv(String(TEST));
+  stub.fetch.mockResolvedValue(Response.json({ busy: true, items: [] }));
+  await worker.fetch(heldReq(`chatId=${RESERVE}&requestId=intake-tm`), env);
+  expect(env.INTAKE.idFromName).toHaveBeenCalledWith(String(TEST));
 });
 
 it('held-messages: auth + chat validation, then reads the right IntakeBuffer', async () => {

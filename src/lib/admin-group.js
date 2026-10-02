@@ -1,3 +1,4 @@
+import commandsRegistry from '../../commands-registry.json';
 // Admin-group identity. A Telegram basic group gets a new id when it is
 // upgraded to a supergroup (toggling history visibility, adding admins with
 // some rights, >200 members…): -4312117839 → -1004312117839. The configured
@@ -24,10 +25,32 @@ export function isAdminGroupChat(chatId, adminGroupId) {
 
 const ADMIN_ONLY_RE = /^\/(adduser|deluser|listusers|resetpass)(?:@\w+)?(?:\s|$)/i;
 
+// Registry-driven local admin-only commands (commands-registry.json:
+// handler:"local" + adminOnly, e.g. /test_mode). Same treatment as the
+// hand-listed ADMIN_ONLY_RE: usable in the admin chat, adminOnlyHint elsewhere.
+// Deliberately NOT including forward+adminOnly entries (/get_webpass) — those
+// keep their existing passthrough behaviour outside the admin chat.
+const ADMIN_ONLY_LOCAL = new Set(
+  commandsRegistry.commands
+    .filter(c => c.handler === 'local' && c.adminOnly)
+    .flatMap(c => [c.command, ...c.aliases])
+);
+
+function commandToken(text) {
+  return String(text || '').trim().split(/\s+/)[0].split('@')[0].toLowerCase();
+}
+
 // Exact-token match (unlike isUserMgmtCommand's prefix match) — used only to
 // explain a refusal outside the admin chat instead of "Неизвестная команда".
 export function isAdminOnlyCommand(text) {
-  return ADMIN_ONLY_RE.test(String(text || '').trim());
+  return ADMIN_ONLY_RE.test(String(text || '').trim()) || ADMIN_ONLY_LOCAL.has(commandToken(text));
+}
+
+// Local admin-only commands — the admin-group branch in index.js must route
+// these to handleCommand (it otherwise only forwards user-mgmt commands and
+// drops everything else in silence).
+export function isAdminLocalCommand(text) {
+  return ADMIN_ONLY_LOCAL.has(commandToken(text));
 }
 
 export function adminOnlyHint(chatId) {

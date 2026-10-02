@@ -18,6 +18,10 @@ MEDIA_PIPELINE = "r2" # Release controller enables only after both VM readers pa
 RECOVERY_IMPORT_LEGACY = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
+# Test mode (US-TEST-01): comma-separated chat ids whose runs are logged to
+# Workers Logs instead of Telegram (delivery:"log" + reserve chatId).
+# EMPTY = disabled. Flip it only AFTER both agent and gateway ship the mode.
+TEST_CHAT_IDS = ""
 
 # Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
 [[durable_objects.bindings]]
@@ -73,6 +77,7 @@ MEDIA_PIPELINE = "off"
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
+TEST_CHAT_IDS = ""
 
 # DO binding must be redeclared per named env (migrations are top-level, shared).
 [[env.staging.durable_objects.bindings]]
@@ -105,6 +110,7 @@ MEDIA_PIPELINE = "off" # No R2 bucket declared for this env — keep media inges
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_recruiter_assistant_bot"
 INTAKE_DEBOUNCE = "on"
+TEST_CHAT_IDS = ""
 SESSION_NAMESPACE = "recruiter"
 
 [[env.recruiter.durable_objects.bindings]]
@@ -148,6 +154,7 @@ routes = [
 MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter).
 RECOVERY_IMPORT_LEGACY = "off"
 INTAKE_DEBOUNCE = "on"
+TEST_CHAT_IDS = ""
 SESSION_NAMESPACE = "freelance"
 # Real third bot confirmed via getMe: id 8912732465, @freelance_spec_bot.
 # Group mention/reply routing and the /start greeting depend on this value.
