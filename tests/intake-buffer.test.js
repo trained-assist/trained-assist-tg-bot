@@ -418,8 +418,12 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
       ...sendMessageWithKeyboard.mock.calls.slice(heldStart[0]).map(c => c[2]),
       ...editMessage.mock.calls.slice(heldStart[1]).map(c => c[3]),
     ].filter(t => typeof t === 'string' && t.includes('Получил ещё'));
-    expect(heldTexts.at(-1)).toContain('Решать тебе');
+    expect(heldTexts.at(-1)).toContain('Решаешь ты');
     expect(heldTexts.at(-1)).toContain('сами никуда не уйдут');
+    // RC-04/RC-05: both stop options are on the same receipt as the queue/parallel
+    // choices — the user decides about the held input where he sees it (#316).
+    expect(held.some(kb => kbText(kb).includes('Стоп и запуск с добавкой'))).toBe(true);
+    expect(held.some(kb => kbText(kb).includes('Стоп → новая задача'))).toBe(true);
 
     const released = counts();
     await io.fetch(runFinishedReq('req-default')); await drain();
@@ -1132,7 +1136,9 @@ describe('queued launch has an «↩️ Отменить передачу аге
   it('↩️ cancel clears the queue, restores ▶️, and the batch does NOT auto-launch', async () => {
     const { state, io } = await queueWhileBusy();
     const res = await (await io.fetch(new Request('https://intake/cancel', { method: 'POST' }))).json();
-    expect(res).toEqual({ cancelled: true });
+    // stopLaunchCancelled rides along: «↩️ Отменить» must also cover a pending
+    // «стоп + запуск» choice, and the user has to be told the task stays stopped.
+    expect(res).toEqual({ cancelled: true, stopLaunchCancelled: false });
     expect(await state.storage.get('launchQueued')).toBeUndefined();
     expect(await state.storage.get('launchAfterRelease')).toBeUndefined();
 
@@ -1150,7 +1156,7 @@ describe('queued launch has an «↩️ Отменить передачу аге
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     const res = await (await io.fetch(new Request('https://intake/cancel', { method: 'POST' }))).json();
-    expect(res).toEqual({ cancelled: false });
+    expect(res).toEqual({ cancelled: false, stopLaunchCancelled: false });
     expect(editMessage).not.toHaveBeenCalled();
     expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
   });
