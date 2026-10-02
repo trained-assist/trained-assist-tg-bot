@@ -17,6 +17,12 @@
 //
 // The emulator is transport-agnostic: `fetch` is a plain handler, so tests use
 // it in-process and the e2e harness wraps it in a node http server.
+//
+// `Buffer` must be imported explicitly: Cloudflare Workers never expose it as an
+// ambient global (only via `import … from 'node:buffer'`), so a bare `Buffer.`
+// here would crash at photo-upload time under nodejs_compat. Guarded by
+// tests/no-bare-buffer.test.js.
+import { Buffer } from 'node:buffer';
 
 export class TelegramEmulator {
   constructor(options = {}) {
