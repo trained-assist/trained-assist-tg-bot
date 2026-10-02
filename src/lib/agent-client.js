@@ -3,6 +3,7 @@ import { copyRefsToAgent, releaseBufferPins } from './intake-files.js';
 import { resolveAudience } from './audience.js';
 import { runInputTaskId } from '../input-assembly.js';
 import { pendingGroupHistory, formatHistoryBlock, ackGroupHistory, maxSeq, isGroupChatId } from '../group-history.js';
+import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
 // HTTP client for trained-assist-agent
 
 // Services that only work from Russian IP — routing based on which VM holds the token,
@@ -177,6 +178,10 @@ export async function runTask(env, { userId, username, task, context, sessionId,
     await ackHistory();
     return queued;
   }
+
+  // Test mode, last hop before POST /run on the DIRECT path (the outbox path
+  // applies the same switchover in RunOutbox.alarm). No-op for regular chats.
+  applyTestDelivery(env, body);
 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 2000;
@@ -421,6 +426,9 @@ export async function stopTask(env, { username, chatId = null, threadId = null }
   // payload for non-forum chats, reintroducing the cross-interface kill.
   const body = { username, chatId, audience: resolveAudience(env) };
   if (tid != null) body.threadId = tid;
+  // Test mode (DESIGN §2.1): the live run is registered under the RESERVE id —
+  // translate, or /stop finds nothing to kill.
+  if (isTestChat(env, chatId)) body.chatId = reserveChatId(env, chatId);
   const res = await fetch(`${env.AGENT_URL}/tasks/stop`, {
     method: 'POST',
     headers: {

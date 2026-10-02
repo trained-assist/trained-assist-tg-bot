@@ -13,6 +13,7 @@ import { isProjectSwitch } from '../lib/project-command.js';
 import commandsRegistry from '../../commands-registry.json';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { setGroupHistoryEnabled } from '../group-history.js';
+import { isTestChat, suppress, testChatList } from '../lib/test-mode.js';
 
 // Topic-aware outbound helpers (issue #255): new messages must carry the forum
 // topic id; threadExtra() is empty without one (private/non-forum unchanged).
@@ -119,6 +120,7 @@ export async function handleCommand(msg, env) {
     case '/history_on':        return cmdGroupHistory(msg, env, true);
     case '/report':
     case '/report_bug_or_feature_request': return cmdReport(msg, env);
+    case '/test_mode':         return cmdTestMode(msg, env);
     default:
       // Unified fallback for unregistered commands — `known command → its handler`,
       // `unknown command → agent`. Never reply "unknown command" / treat it as an
@@ -750,7 +752,10 @@ async function cmdCleanUpFlood(msg, env) {
     const raw = env.SESSIONS ? await env.SESSIONS.get(`sent:${chatId}`) : null;
     ids = raw ? JSON.parse(raw) : [];
   } catch { ids = []; }
-  const bot = ids.length ? await deleteManyMessages(env.BOT_TOKEN, chatId, ids) : { deleted: 0, failed: 0 };
+  // Test mode: deletions in a test chat are journal lines, not Telegram calls.
+  const bot = isTestChat(env, chatId)
+    ? (suppress(chatId, 'deleteMessages', `${ids.length} ids`), { deleted: 0, failed: 0 })
+    : ids.length ? await deleteManyMessages(env.BOT_TOKEN, chatId, ids) : { deleted: 0, failed: 0 };
   try { if (env.SESSIONS) await env.SESSIONS.delete(`sent:${chatId}`); } catch { /* ignore */ }
 
   const deleted = (agent?.deleted || 0) + bot.deleted;
@@ -863,6 +868,21 @@ async function cmdAllOff(msg, env) {
   return sendIn(env, chatId, threadId,
     '⚪ <b>Режим выключен.</b>\n\nТеперь для обращения к агенту нужен reply или упоминание @.',
     { disable_notification: true }
+  );
+}
+
+// Read-only status of the test mode (DESIGN R11). Enabling/disabling is a
+// [vars] edit of TEST_CHAT_IDS + redeploy — there is deliberately no toggle and
+// no second source of state.
+async function cmdTestMode(msg, env) {
+  const chatId = msg.chat.id;
+  const list = testChatList(env);
+  const here = isTestChat(env, chatId);
+  return sendIn(env, chatId, threadIdOf(msg),
+    `🧪 <b>Тестовый режим</b>\n\n` +
+    `Чатов в TEST_CHAT_IDS: <b>${list.length}</b>\n` +
+    `Этот чат: ${here ? '<b>тестовый</b> — ответы агента идут в журнал, не в Telegram' : 'обычный'}\n\n` +
+    `Включение/выключение: правка TEST_CHAT_IDS в [vars] окружения + рестарт.`
   );
 }
 

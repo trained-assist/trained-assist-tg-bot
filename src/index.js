@@ -7,7 +7,8 @@ import { handleCommand, isAdminForwardedCommand } from './handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from './handlers/user-mgmt.js';
 import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
-import { isAdminGroupChat, isAdminOnlyCommand, adminOnlyHint } from './lib/admin-group.js';
+import { isAdminGroupChat, isAdminOnlyCommand, isAdminLocalCommand, adminOnlyHint } from './lib/admin-group.js';
+import { initTestMode, isTestChat, realChatId, rememberCallback } from './lib/test-mode.js';
 import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { recordGroupMessage } from './group-history.js';
@@ -48,7 +49,20 @@ app.post('/internal/run-finished', async c => {
   const requestId = typeof body?.requestId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId) ? body.requestId : null;
   // Message ids the model already took in mid-run via get_new_messages (live inbox).
   const consumed = Array.isArray(body?.consumed) ? body.consumed.map(Number).filter(Number.isSafeInteger).slice(0, 200) : [];
-  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+  // Test mode (DESIGN §2.1/§2.2): the run went out under a reserve chatId —
+  // translate back BEFORE choosing the IntakeBuffer, or `busy` never releases.
+  // Journal lines: run-finished when this is a test chat, agent-answer whenever
+  // the agent returned its answer (contract: only sent with delivery:"log").
+  const realChat = realChatId(c.env, chatId);
+  const answer = typeof body?.answer === 'string' && body.answer ? body.answer.slice(0, 8000) : null;
+  const outcome = ['done', 'error', 'stopped', 'quick'].includes(body?.outcome) ? body.outcome : null;
+  if (isTestChat(c.env, realChat) && outcome) {
+    console.log(`[test-mode] kind=run-finished chat=${realChat} requestId=${requestId || '-'} outcome=${outcome}`);
+  }
+  if (answer != null) {
+    console.log(`[test-mode] kind=agent-answer chat=${realChat} requestId=${requestId || '-'} len=${answer.length} text=${answer.slice(0, 4000)}`);
+  }
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(realChat, threadId)));
   const res = await stub.fetch('https://intake/run-finished', {
     method: 'POST',
     body: JSON.stringify(consumed.length ? { requestId, consumed } : { requestId }),
@@ -72,7 +86,9 @@ app.get('/internal/held-messages', async c => {
   if (threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) return c.json({ error: 'invalid threadId' }, 400);
   const rawReq = c.req.query('requestId');
   const requestId = rawReq && /^[a-zA-Z0-9_-]{1,128}$/.test(rawReq) ? rawReq : null;
-  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+  // Test mode: same reserve→real inversion as /internal/run-finished (§2.1).
+  const realChat = realChatId(c.env, chatId);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(realChat, threadId)));
   const res = await stub.fetch(`https://intake/held${requestId ? `?requestId=${encodeURIComponent(requestId)}` : ''}`);
   const payload = await res.json().catch(() => ({}));
   return c.json(payload, res.status);
@@ -241,7 +257,13 @@ async function dispatch(update, env) {
 
 export async function dispatchInner(update, env) {
   env = applySessionNamespace(env);
+  // Test mode init point #1 — every webhook update lands here before any send
+  // (lib/telegram.js reads the module cache; see DESIGN §2.2).
+  initTestMode(env);
   if (update.callback_query) {
+    // answerCallbackQuery has no chat id — remember where this callback came
+    // from so the ack can be gated (DESIGN §2.2, callback registry).
+    rememberCallback(update.callback_query.id, update.callback_query.message?.chat?.id);
     await handleCallbackQuery(update.callback_query, env);
     return;
   }
@@ -288,7 +310,7 @@ export async function dispatchInner(update, env) {
     }
     if (isUserMgmtCommand(text)) {
       await handleUserMgmt(msg, env);
-    } else if (isAdminForwardedCommand(text) || /^\/restart(?:@\w+)?(?:\s|$)/i.test(text)) {
+    } else if (isAdminForwardedCommand(text) || isAdminLocalCommand(text) || /^\/restart(?:@\w+)?(?:\s|$)/i.test(text)) {
       // Strip the bot mention so the agent sees a clean "/get_webpass <username>".
       const cleanText = text.replace(new RegExp(`@${env.BOT_USERNAME}`, 'g'), '').trim();
       await handleCommand({ ...msg, text: cleanText }, env);

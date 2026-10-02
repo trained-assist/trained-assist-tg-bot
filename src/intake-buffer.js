@@ -1,3 +1,4 @@
+import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
@@ -161,6 +162,9 @@ export class IntakeBuffer {
     // wrapper. Without this, session reads inside the DO ignore the namespace and
     // can find sessions from a different bot (cross-bot auto-login bug).
     this.env = applySessionNamespace(env);
+    // Test mode init point #2 — every send this accumulator makes goes through
+    // lib/telegram.js, which reads the module cache (DESIGN §2.2).
+    initTestMode(this.env);
     this.mutation = Promise.resolve();
     this.uiMutation = Promise.resolve();
     this.historyMutation = Promise.resolve();

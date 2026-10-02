@@ -1,4 +1,5 @@
 import { trackUI, forgetUI } from './transient-ui.js';
+import { isTestChatCached, suppress, callbackChatId } from './test-mode.js';
 import commandsRegistry from '../../commands-registry.json';
 import { resolveAudience } from './audience.js';
 import { isCommandVisible } from './command-visibility.js';
@@ -114,6 +115,7 @@ export async function getRegisteredCommands(token) {
 }
 
 export async function sendMessage(token, chatId, text, extra = {}) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'sendMessage', text);
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -131,6 +133,7 @@ export async function sendMessage(token, chatId, text, extra = {}) {
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', text);
   const { lifecycleEnv, ...telegramExtra } = extra;
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',
@@ -147,6 +150,7 @@ export async function editMessage(token, chatId, messageId, text, extra = {}) {
 }
 
 export async function editMessageReplyMarkup(token, chatId, messageId, inlineKeyboard = []) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessageReplyMarkup', `msg=${messageId}`);
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -160,11 +164,14 @@ export async function sendMessageWithKeyboard(token, chatId, text, inlineKeyboar
     reply_markup: { inline_keyboard: inlineKeyboard },
     ...extra,
   });
+  if (result?.suppressed) return result;
   if (result.ok) await trackUI(lifecycleEnv, chatId, result.result?.message_id, inlineKeyboard, result.result?.date ? result.result.date * 1000 : Date.now());
   return result;
 }
 
 export async function answerCallbackQuery(token, callbackQueryId, text = '') {
+  const cbChatId = callbackChatId(callbackQueryId);
+  if (cbChatId != null && isTestChatCached(cbChatId)) return suppress(cbChatId, 'answerCallbackQuery', text);
   await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -173,6 +180,7 @@ export async function answerCallbackQuery(token, callbackQueryId, text = '') {
 }
 
 export async function pinChatMessage(token, chatId, messageId, { silent = false } = {}) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'pinChatMessage', `msg=${messageId}`);
   const res = await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -184,6 +192,7 @@ export async function pinChatMessage(token, chatId, messageId, { silent = false 
 }
 
 export async function unpinChatMessage(token, chatId, messageId) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'unpinChatMessage', `msg=${messageId}`);
   await fetch(`https://api.telegram.org/bot${token}/unpinChatMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -192,6 +201,7 @@ export async function unpinChatMessage(token, chatId, messageId) {
 }
 
 export async function deleteMessage(token, chatId, messageId) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'deleteMessage', `msg=${messageId}`);
   await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -201,6 +211,7 @@ export async function deleteMessage(token, chatId, messageId) {
 
 
 export async function sendDocument(token, chatId, filename, content, caption = '', threadId = null) {
+  if (isTestChatCached(chatId)) return suppress(chatId, 'sendDocument', `${filename} ${caption}`);
   const form = new FormData();
   form.append('chat_id', String(chatId));
   form.append('document', new Blob([content], { type: 'text/plain' }), filename);

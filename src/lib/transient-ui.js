@@ -1,4 +1,5 @@
 import { withKvConsistencyRetry } from './kv.js';
+import { isTestChat, suppress } from './test-mode.js';
 
 // Only disposable navigation/picker messages belong here. Results, intake
 // collectors, login replies and URL buttons are never deleted by this policy.
@@ -26,6 +27,9 @@ export async function forgetUI(env, chatId, messageId) {
   if (env?.SESSIONS) await env.SESSIONS.delete(key(env, chatId, messageId));
 }
 async function telegram(env, method, body) {
+  // Test mode: this helper owns retireUI's deleteMessage/editMessageReplyMarkup —
+  // suppress them before the network (DESIGN §2.2 gate table).
+  if (body?.chat_id != null && isTestChat(env, body.chat_id)) return suppress(body.chat_id, method, body.text || `msg=${body.message_id}`);
   const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
@@ -125,6 +129,12 @@ export async function rejectExpiredUI(cq, env, session) {
   }
 
   if (!expired && !superseded && !missing && !projectMissing) return false;
+  // Test mode: the ack carries no chat id — gate by the callback's chat (the
+  // reject itself still happens logically; only the network call is skipped).
+  if (isTestChat(env, cq.message?.chat?.id)) {
+    suppress(cq.message.chat.id, 'answerCallbackQuery', cq.data);
+    return true;
+  }
   await telegram(env, 'answerCallbackQuery', { callback_query_id: cq.id, text: '⌛ Меню устарело. Открой его заново или отправь задачу.' });
   if (await retireUI(env, cq.message.chat.id, cq.message.message_id)) await forgetUI(env, cq.message.chat.id, cq.message.message_id);
   return true;
