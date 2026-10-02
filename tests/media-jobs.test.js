@@ -14,21 +14,35 @@ function state() {
 }
 function bucket() {
   const data = new Map();
-  const get=async k=>{const v=data.get(k);return v && {...v,body:new Response(v.bytes).body,text:async()=>new TextDecoder().decode(v.bytes)};};
+  const get=async k=>{const v=data.get(k);return v && {...v,body:new Response(v.bytes).body,text:async()=>new TextDecoder().decode(v.bytes),arrayBuffer:async()=>v.bytes.buffer.slice(v.bytes.byteOffset,v.bytes.byteOffset+v.bytes.byteLength)};};
   return {data,get,head:get,put:vi.fn(async(k,bytes,meta)=>{const v={...meta,size:bytes.byteLength,bytes:new Uint8Array(bytes)};data.set(k,v);return v;})};
 }
 const msg={chat:{id:42},message_id:7,voice:{file_id:'f',file_unique_id:'u',file_size:3}};
 async function fixture(message=msg) {
  const s=state(),b=bucket(),intake=state();
- const env={MEDIA_BUCKET:b,MEDIA_PIPELINE:'r2',BOT_TOKEN:'test',DEEPGRAM_API_KEY:'test',SESSIONS:{},AGENT_SECRET:'secret'};
+ // Ф4 (#319): у воркера больше нет ключа Deepgram — распознавание идёт на агента
+ // (PUT /intake-files → POST /action), поэтому в env обязан быть AGENT_URL.
+ const env={MEDIA_BUCKET:b,MEDIA_PIPELINE:'r2',BOT_TOKEN:'test',SESSIONS:{},AGENT_SECRET:'secret',AGENT_URL:'https://agent'};
  const jobs=new Map();
  env.MEDIA_JOBS={idFromName:n=>n,get:n=>{if(!jobs.has(n))jobs.set(n,new MediaJob(s,env));return {fetch:(u,o)=>jobs.get(n).fetch(new Request(u,o))};}};
  const io=new IntakeBuffer(intake,env);
  env.INTAKE={idFromName:n=>n,get:()=>({fetch:(u,o)=>io.fetch(new Request(u,o))})};
- const net=vi.fn(async url=>{
+ // Модель агента ровно в объёме, который использует контракт Ф4 (#319):
+ // PUT /intake-files (принимает байты, отдаёт path) и POST /action (скил speech_transcribe).
+ const net=vi.fn(async (url,init)=>{
   if(String(url).includes('/getFile'))return Response.json({ok:true,result:{file_path:'voice.ogg',file_size:3}});
   if(String(url).includes('/file/'))return new Response(new Uint8Array([1,2,3]));
-  if(String(url).includes('deepgram'))return Response.json({results:{channels:[{alternatives:[{transcript:'Привет'}]}]}});
+  if(String(url).includes('/intake-files')){
+    const id=new URL(url).searchParams.get('id');
+    const body=new Uint8Array(await new Response(init?.body||new Uint8Array()).arrayBuffer());
+    return Response.json({id,name:'voice.ogg',mime:'audio/ogg',size:body.byteLength,path:`media/intake-store/${id}/data`});
+  }
+  if(String(url).endsWith('/action')){
+    const payload=JSON.parse(init.body);
+    if(payload.tool!=='speech_transcribe')throw Error('unexpected tool '+payload.tool);
+    if(!String(payload.params.source).startsWith('media/intake-store/'))throw Error('unexpected source '+payload.params.source);
+    return Response.json({ok:true,result:{text:'Привет',duration:1.5,language:'ru'}});
+  }
   throw Error('Unexpected network '+url);
  });vi.stubGlobal('fetch',net);
  await io.fetch(new Request('https://intake/ingest',{method:'POST',body:JSON.stringify({msg:message})}));

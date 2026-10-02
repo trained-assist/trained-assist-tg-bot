@@ -70,9 +70,21 @@ async function fakeFetch(url, init = {}) {
     if (path.startsWith('/intake-files')) {
       if ((init.method || 'GET') === 'PUT') {
         const q = new URL(u).searchParams;
-        return Response.json({ id: q.get('id'), name: q.get('name') || 'f', mime: init.headers?.['Content-Type'] || 'image/jpeg', size: 4 });
+        const id = q.get('id');
+        // `path` — контракт trained-assist-agent#2052: путь, по которому скил
+        // speech_transcribe сам прочитает файл (Ф4, tg-bot#319).
+        return Response.json({ id, name: q.get('name') || 'f', mime: init.headers?.['Content-Type'] || 'image/jpeg', size: 4,
+          path: `media/intake-store/${id}/data` });
       }
       return Response.json({ ok: true }); // release / read
+    }
+    // Ф4 (#319): распознавание речи идёт мостом POST /action, а не напрямую в Deepgram.
+    // Текст так же берём из той же «транскрипции», что и раньше — меняется транспорт,
+    // не содержимое.
+    if (path.startsWith('/action')) {
+      const req = bodyOf(init);
+      if (req.tool !== 'speech_transcribe') return Response.json({ ok: false, error: 'unknown tool' }, { status: 404 });
+      return Response.json({ ok: true, result: { text: 'сделай анализ откликов', duration: 2, language: 'ru' } });
     }
     return Response.json({ ok: false }, { status: 404 });
   }

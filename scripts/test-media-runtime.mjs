@@ -13,12 +13,30 @@ try {
  mf=new Miniflare({modules:true,modulesRoot:root,scriptPath:script,compatibilityDate:'2024-01-01',compatibilityFlags:['nodejs_compat'],
   durableObjects:{INTAKE:{className:'IntakeBuffer',useSQLite:true},MEDIA_JOBS:{className:'MediaJob',useSQLite:true}},
   r2Buckets:['MEDIA_BUCKET'],kvNamespaces:['SESSIONS'],
-  bindings:{MEDIA_PIPELINE:'r2',BOT_TOKEN:'fake',AGENT_SECRET:'fake',DEEPGRAM_API_KEY:'fake'},
+  // Ф4 (#319): у воркера больше нет ключа Deepgram — распознавание идёт на агента
+  // (PUT /intake-files → POST /action), поэтому в bindings адрес агента обязателен.
+  bindings:{MEDIA_PIPELINE:'r2',BOT_TOKEN:'fake',AGENT_SECRET:'fake',AGENT_URL:'https://agent.test'},
   outboundService:async request=>{
    const url=new URL(request.url);
    if(url.pathname.endsWith('/getFile')) {const id=url.searchParams.get('file_id');return MFResponse.json({ok:true,result:{file_path:id,file_size:fileSizes.get(id)}});}
    if(url.pathname.includes('/file/')) {downloads++;const id=url.pathname.split('/').at(-1);return new MFResponse(id==='f'?new Uint8Array([1,2,3]):new Uint8Array(fileSizes.get(id)).fill(7));}
-   if(url.hostname==='api.deepgram.com') {transcriptions++;assert.deepEqual([...new Uint8Array(await request.arrayBuffer())],[1,2,3]);return MFResponse.json({results:{channels:[{alternatives:[{transcript:'workerd transcript'}]}]}});}
+   // Модель агента ровно в объёме контракта Ф4: принял файл → вернул path;
+   // /action → скил speech_transcribe вернул текст. Аудио обязано доехать целым.
+   if(url.hostname==='agent.test') {
+    if(url.pathname==='/intake-files'&&request.method==='PUT') {
+     const id=url.searchParams.get('id');
+     assert.deepEqual([...new Uint8Array(await request.arrayBuffer())],[1,2,3]);
+     return MFResponse.json({id,name:'voice.ogg',mime:'audio/ogg',size:3,path:`media/intake-store/${id}/data`});
+    }
+    if(url.pathname==='/action') {
+     const payload=await request.json();
+     assert.equal(payload.tool,'speech_transcribe');
+     transcriptions++;
+     assert.ok(String(payload.params.source).startsWith('media/intake-store/'));
+     return MFResponse.json({ok:true,result:{text:'workerd transcript',duration:1,language:'ru'}});
+    }
+    throw Error('Unexpected agent request '+url.pathname);
+   }
    if(url.hostname==='api.telegram.org')return MFResponse.json({ok:true,result:{message_id:100}});
    throw Error('Unexpected outbound request');
   },

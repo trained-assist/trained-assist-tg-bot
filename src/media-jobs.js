@@ -1,6 +1,7 @@
 import { conversationKey, threadIdOf } from './conversation-context.js';
 // Per-attachment durable state machine. No byte transfer in intake/webhook requests.
 import { checkMediaResponse } from './lib/media-retry.js';
+import { transcribeAudio } from './lib/speech.js';
 export const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const hex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 export const digest = async bytes => hex(await crypto.subtle.digest('SHA-256', bytes));
@@ -135,16 +136,22 @@ export class MediaJob {
         if (saved) {
           job.transcript = await saved.text(); job.transcriptRef = reference(saved, transcriptId);
         } else {
-          if (!this.env.DEEPGRAM_API_KEY) throw Object.assign(new Error('Распознавание не настроено'), { permanent: true });
+          // tg-bot#319: единственный контракт речи — sibling-скил speech_transcribe через
+          // POST /action агента. Свой вызов Deepgram (и свой ключ в env воркера) убран,
+          // guard-тест держит src/** без api.deepgram.com.
           const original = await this.env.MEDIA_BUCKET.get(objectKey(job.username, job.id));
           if (!original) throw new Error('Original missing from R2');
-          const response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true', {
-            method: 'POST', headers: { Authorization: `Token ${this.env.DEEPGRAM_API_KEY}`, 'Content-Type': job.fileRef.mime },
-            body: original.body, signal: AbortSignal.timeout(120000), duplex: 'half',
+          const bytes = await original.arrayBuffer();
+          const { text } = await transcribeAudio(this.env, {
+            username: job.username,
+            bytes,
+            // Детерминированный ключ: повтор того же job кладёт байты в тот же файл
+            // вместо новой копии (на этом рассчитан рестейдж R2 → intake-store).
+            key: `speech:${job.username}:${job.id}`,
+            name: job.fileRef?.name || 'audio',
+            mime: job.fileRef?.mime || 'application/octet-stream',
           });
-          checkMediaResponse(response, 'Распознавание');
-          const data = await response.json();
-          job.transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
+          job.transcript = text;
           if (!job.transcript) throw Object.assign(new Error('Не удалось распознать речь'), { permanent: true });
           job.transcriptRef = await saveObject(this.env, job.username, transcriptId, new TextEncoder().encode(job.transcript), `transcript-${job.msg.message_id}.txt`, 'text/plain; charset=utf-8');
         }

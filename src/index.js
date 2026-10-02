@@ -1,4 +1,5 @@
 import { serveMedia } from './media-jobs.js';
+import { transcribeAudio } from './lib/speech.js';
 import { resolveBotContext, envForBot } from './lib/bot-context.js';
 import { processExpiredUI } from './lib/transient-ui.js';
 import { Hono } from 'hono';
@@ -168,28 +169,36 @@ app.post('/debug/intake/:chatId/flush', async c => {
   return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
-// Debug: POST raw audio bytes, get back exactly what Deepgram returned (or the
-// raw network error). Isolates the Deepgram leg of transcribeVoice from
-// Telegram getFile, so an "Не удалось подготовить вложение" report can be
-// narrowed to a specific external call without needing a fresh file_id from
-// the reporting chat. Added investigating a live report on chat 8815112204 /
-// recruiter env, 2026-09-23. Gated on AGENT_SECRET since it spends the
-// worker's Deepgram quota on arbitrary input.
+// Debug: POST raw audio bytes, get back what speech_transcribe returned (or the
+// error). Isolates the transcription leg of transcribeVoice from Telegram getFile,
+// so an "Не удалось подготовить вложение" report can be narrowed to a specific
+// external call without needing a fresh file_id from the reporting chat. Added
+// investigating a live report on chat 8815112204 / recruiter env, 2026-09-23.
+// Gated on AGENT_SECRET since it spends the speech quota on arbitrary input.
+//
+// tg-bot#319: путь теперь шлюз → /intake-files → POST /action, а не напрямую в
+// Deepgram. Профиль обязателен: /action работает от USER_ID, «универсального»
+// профиля здесь быть не должно. X-Mime-Type больше не нужен — формат скил
+// определяет сам (по расширению либо magic-байтам).
 app.post('/debug/transcribe-test', async (c) => {
   if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
-  const mimeType = c.req.header('X-Mime-Type') || 'audio/ogg; codecs=opus';
+  const username = c.req.query('username');
+  if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) return c.json({ error: 'username required' }, 400);
   const audioBuffer = await c.req.arrayBuffer();
+  const bytesSent = audioBuffer.byteLength;
   try {
-    const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ru&smart_format=true', {
-      method: 'POST',
-      headers: { Authorization: `Token ${c.env.DEEPGRAM_API_KEY}`, 'Content-Type': mimeType },
-      body: audioBuffer,
-      signal: AbortSignal.timeout(120000),
+    const result = await transcribeAudio(c.env, {
+      username,
+      bytes: audioBuffer,
+      // Стабильный ключ: повторные вызовы перезаписывают один файл, а не плодят
+      // новые записи в intake-store (диагностика зовётся часто и вручную).
+      key: `debug:${username}`,
+      name: 'debug-audio',
+      mime: c.req.header('X-Mime-Type') || 'application/octet-stream',
     });
-    const text = await res.text();
-    return c.json({ ok: res.ok, status: res.status, bytesSent: audioBuffer.byteLength, body: text.slice(0, 2000) });
+    return c.json({ ok: true, bytesSent, text: result.text, duration: result.duration, language: result.language });
   } catch (e) {
-    return c.json({ ok: false, error: e.message, name: e.name, bytesSent: audioBuffer.byteLength }, 500);
+    return c.json({ ok: false, error: e.message, permanent: !!e.permanent, bytesSent }, e.permanent ? 422 : 500);
   }
 });
 
