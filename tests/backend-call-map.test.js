@@ -62,6 +62,12 @@ const EXPECTED = {
   'intake-buffer.js': ['/tasks/running'],
   'intake-preflight.js': ['/intake-quick'],
   'lib/intake-files.js': ['/intake-files*', '/intake-files*', '/intake-files/release'],
+  // Ф4 (#319): распознавание речи. Отдельный файл, а не адаптер, потому что связка
+  // «байты → PUT /intake-files → POST /action → speech_transcribe» неразделима: положив
+  // только вызов в адаптер, пришлось бы в каждом новом тесте на голос дописывать
+  // transcribeViaAgent в vi.mock (19 файлов мокают адаптер целиком). Карта — тот же
+  // декларативный запрет на новые прямые вызовы, просто с явной записью.
+  'lib/speech.js': ['/action'],
 };
 
 const files = walk(SRC).map(f => relative(SRC, f));
