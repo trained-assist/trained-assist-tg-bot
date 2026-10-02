@@ -103,18 +103,37 @@ const CANCEL_BTN = [[{ text: '↩️ Отменить передачу аген�
 // after the current run (Ф3 «меню явного выбора», RC-02, tg-bot#316). The generic
 // «Запустить агента» wording belongs to idle, where the tap starts the run itself;
 // under a running task it read as «и что случится, если нажать?».
-// The busy menu has TWO explicit choices now (RC-02 / RC-03): queue after the
-// current run, or launch right now as a parallel run in its own session.
+// The busy menu carries ALL FOUR explicit choices of the scenario (§3):
+// queue after the current run (RC-02), launch now as a parallel run in its own
+// session (RC-03), stop the run and continue it with this input (RC-04), or stop
+// it and start this input as an independent task (RC-05). The two stop options
+// are the reason the menu exists: «➕ Дополнить» on the running task's message
+// was removed (owner 30.09) — the same decision now lives where the user actually
+// makes it: on the receipt of the input being held.
+const STOP_SUPP_BTN = { text: '🛑 Стоп и запуск с добавкой', callback_data: 'intake_stopsupp' };
+const STOP_NEW_BTN = { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' };
 const QUEUE_BTN = [[{ text: '▶️ В очередь после текущей', callback_data: 'intake_run' },
   { text: '⚡ Параллельно', callback_data: 'intake_parallel' }],
+  [STOP_SUPP_BTN, STOP_NEW_BTN],
   [{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 
+// RC-04: the held input continues the task that just stopped — the SAME session,
+// one run, with this note ahead of the user's own words (same marker the «➕
+// Дополнить» restart used, so the model reads one history, not two).
+const SUPPLEMENT_HEADER = '[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]';
+
 const collectorText = n => `✓ Получил ${n} сообщений. Всё собрано в один input. Автозапуск — после 3 минут тишины, если задача понятна.`;
-const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Решать тебе: ▶️ «В очередь после текущей» — уйдут сразу после неё; пока не нажал — ждут и сами никуда не уйдут.`;
+const heldText = n => `✓ Получил ещё ${n} сообщений, пока идёт задача. Решаешь ты: «В очередь» — уйдут сразу после неё; «Параллельно» — сразу, отдельной сессией; «Стоп и запуск с добавкой» / «Стоп → новая задача» — остановят текущую. Пока не выбрал — ждут и сами никуда не уйдут.`;
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 // ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
 // NEW message sent after the stop re-arms launching.
 const stoppedText = n => `⛔ Остановлено. ${n} сообщений ждут и сами не запустятся. «▶️ Запустить агента» — передам их агенту; новое сообщение вернёт обычный режим (они войдут в него же).`;
+// RC-04/RC-05 — a chosen «стоп + запуск» is in flight. The batch WILL start on its
+// own here (that is what was chosen), so the text must not promise a button and
+// must not re-ask the question; the only thing left is to take it back.
+const stopLaunchText = (n, mode) => mode === 'supp'
+  ? `⛔ Задача остановлена. ${n} сообщ. уйдут одним запуском — продолжу её с ними.`
+  : `⛔ Задача остановлена. ${n} сообщ. уйдут одним запуском — новой задачей.`;
 // A new message after ⛔ re-arms the normal flow; the pre-stop messages ride along
 // only in plain sight — the collector names them (#1856).
 const resumedNote = k => ` В том числе ${k} — отложенные до ⛔ Стоп («📋 Посмотреть input»).`;
@@ -575,7 +594,18 @@ export class IntakeBuffer {
         const stopped = await this.state.storage.get('stopped');
         const heldByStop = !!stopped && reservedAt <= stopped;
         if (stopped && !heldByStop && !result.handled) await this._resumeAfterStopLocked(msg.message_id);
-        return { items, busy: await this.state.storage.get('busy'), seq, heldByStop };
+        const busy = !!(await this.state.storage.get('busy'));
+        // RC-06: input that sat in the buffer WHILE a run was going is the user's
+        // unanswered batch — after the run ends it waits for an explicit choice,
+        // never for the quiet-period gate (which would start it on its own). Mark
+        // it here, atomically with the write, so the gate's decision after the
+        // release can tell «held during a run» from «ordinary idle input».
+        if (busy) {
+          const marked = items.map(i => (i.heldWhileBusy ? i : { ...i, heldWhileBusy: true }));
+          await this.state.storage.put('buf', marked);
+          return { items: marked, busy, seq, heldByStop };
+        }
+        return { items, busy, seq, heldByStop };
       });
       if (result.handled) return json({ handled: true });
       if (!claim.items.length) return json({ buffered: 0 });
@@ -604,6 +634,13 @@ export class IntakeBuffer {
           items.push({ text, msg });
           await this.state.storage.put('buf', items);
           if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
+        }
+        // RC-06, same marker as /ingest: anything sitting in the buffer during a
+        // run waits for an explicit choice afterwards, not for the quiet gate.
+        if (await this.state.storage.get('busy')) {
+          const marked = items.map(i => (i.heldWhileBusy ? i : { ...i, heldWhileBusy: true }));
+          await this.state.storage.put('buf', marked);
+          return marked;
         }
         return items;
       });
@@ -717,16 +754,20 @@ export class IntakeBuffer {
     // offers ▶️ again.
     if (url.pathname === '/cancel' && request.method === 'POST') {
       const cancelled = await this._exclusive(async () => {
-        const had = !!((await this.state.storage.get('launchQueued'))
-          || (await this.state.storage.get('launchAfterRelease'))
-          || (await this.state.storage.get('launchWhenReady')));
-        await this.state.storage.delete('launchQueued');
-        await this.state.storage.delete('launchAfterRelease');
-        await this.state.storage.delete('launchWhenReady');
-        await this.state.storage.delete('launchParallel');
-        return had;
+        const store = this.state.storage;
+        const had = !!((await store.get('launchQueued'))
+          || (await store.get('launchAfterRelease'))
+          || (await store.get('launchWhenReady'))
+          || (await store.get('stopLaunch'))); // RC-04/05: отмена действует на ЛЮБОЙ пункт меню
+        const stopLaunchCancelled = !!(await store.get('stopLaunch'));
+        await store.delete('launchQueued');
+        await store.delete('launchAfterRelease');
+        await store.delete('launchWhenReady');
+        await store.delete('launchParallel');
+        await store.delete('stopLaunch');
+        return { had, stopLaunchCancelled };
       });
-      if (cancelled) {
+      if (cancelled?.had) {
         // Re-render the same collector with ▶️ back — done outside the lock
         // (Telegram I/O), same single-owner serialization as every collector edit.
         const items = [...((await this.state.storage.get('retryBatch')) || []),
@@ -738,10 +779,103 @@ export class IntakeBuffer {
             busy ? heldText(items.length) : null);
         }
       }
-      return json({ cancelled });
+      return json({ cancelled: !!cancelled?.had, stopLaunchCancelled: !!cancelled?.stopLaunchCancelled });
+    }
+
+    // «🛑 Стоп и запуск с добавкой» / «⛔ Стоп → новая задача» (RC-04 / RC-05) —
+    // the second half of those menu options. The gateway has ALREADY stopped the
+    // run honestly (stopChat: intake hold → outbox/recovery cancel → kill) before
+    // calling this; the DO only owns what happens to the held batch now.
+    //
+    // busy (the stop's run-finished push has not landed yet) → remember the choice
+    // and let the release path run it: that is the one moment where the killed
+    // run is provably gone AND the fresh dispatch gets the whole busy-window
+    // bookkeeping (busy, requestId, alarm, «📨 Передаю…» collector). No window,
+    // no intent left (a lost run-finished is released by the per-minute self-heal).
+    // not busy (SS-08: the run had already finished) → degrade to an ordinary
+    // launch, honestly narrated by the caller.
+    if (url.pathname === '/stop-launch' && request.method === 'POST') {
+      const { mode = 'new', route = null } = await request.json().catch(() => ({}));
+      const res = await this._exclusive(async () => {
+        const store = this.state.storage;
+        if (await store.get('stopLaunch')) return { already: true };
+        const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
+        if (!items.length) return { nothing: true };
+        if (await store.get('busy')) {
+          await store.put('stopLaunch', { mode: mode === 'supp' ? 'supp' : 'new', route, at: Date.now() });
+          return { waiting: true, count: items.length };
+        }
+        await this._prepareStopLaunchLocked({ mode: mode === 'supp' ? 'supp' : 'new', route }, items);
+        return { launching: true, count: items.length };
+      });
+      if (res.launching) await this._dispatch();
+      return json(res);
     }
 
     return new Response('not found', { status: 404 });
+  }
+
+  // Move the held batch into the launch position and drop every OTHER launch
+  // intent, so exactly one run can come out of a stop-and-launch choice (K7:
+  // «ровно один ран — без дубля из буфера, retry или GTD»). Must run inside
+  // _exclusive; `spec` is re-read under the lock by _consumeStopLaunch.
+  async _prepareStopLaunchLocked(spec, items) {
+    const store = this.state.storage;
+    await store.delete('stopped'); // the explicit choice IS the lift of the ⛔ hold
+    for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+      'debounceExpiresAt', 'gateLevel', 'gateConsulted', 'gateErrAttempts', 'receiptDue']) {
+      await store.delete(k);
+    }
+    const batch = spec.mode === 'supp' ? [this._supplementHeaderItem(items.at(-1), spec.route), ...items] : items;
+    await store.put('retryBatch', batch);
+    await store.delete('buf');
+    return batch;
+  }
+
+  // RC-04/RC-05 — run the batch the user chose. Called from the release path, the
+  // alarm and the media-completion path; whoever gets there first runs it once
+  // (the flag is taken under the lock). Still-preparing attachments are NOT lost:
+  // the choice stays remembered and the next tick tries again.
+  async _consumeStopLaunch() {
+    const spec = await this.state.storage.get('stopLaunch');
+    if (!spec) return false;
+    // The window still belongs to the run being stopped: launching NOW would lose
+    // the bookkeeping (_dispatch refuses a non-empty busy window) and, worse, take
+    // the batch out of the launch position while nobody may launch it. Wait for
+    // the release — run-finished, the self-heal poll or BUSY_MAX — which always
+    // ends in _afterBusyRelease and comes back here.
+    if (await this.state.storage.get('busy')) return false;
+    const items = [...((await this.state.storage.get('retryBatch')) || []),
+      ...((await this.state.storage.get('buf')) || [])];
+    if (!items.length) {
+      await this._exclusive(async () => {
+        if (!(await this.state.storage.get('stopLaunch'))) return;
+        await this.state.storage.delete('stopLaunch');
+        await this.state.storage.delete('stopped');
+      });
+      return false;
+    }
+    if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) {
+      await this.state.storage.setAlarm(Date.now() + 60_000); // вложения ещё едут
+      return false;
+    }
+    const taken = await this._exclusive(async () => {
+      const current = await this.state.storage.get('stopLaunch');
+      if (!current) return false;
+      await this.state.storage.delete('stopLaunch');
+      await this._prepareStopLaunchLocked(current, items);
+      return true;
+    });
+    if (!taken) return false;
+    await this._dispatch();
+    return true;
+  }
+
+  // The RC-04 marker rides as a normal buffer item so the whole path (assemble,
+  // snapshot, run) stays the ordinary one — it only sorts first and pins the
+  // session the stopped task was running in.
+  _supplementHeaderItem(base, route) {
+    return { text: SUPPLEMENT_HEADER, msg: { ...(base?.msg || {}), chat: base?.msg?.chat, text: SUPPLEMENT_HEADER, intakeRoute: route } };
   }
 
   // Every routed message passes here first: while «➕ Дополнить» is armed it joins
@@ -802,7 +936,8 @@ export class IntakeBuffer {
       if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
       // Reservation and watchdog survive a crash before enqueue's network call.
       await this.state.storage.transaction(async tx => {
-        items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username, mediaFirstSeenAt: Date.now() });
+        items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username, mediaFirstSeenAt: Date.now(),
+          ...(await tx.get('busy') ? { heldWhileBusy: true } : {}) });
         await tx.put('buf', items);
         await tx.put('received', [...seen, msg.message_id].slice(-1000));
         await tx.setAlarm(Date.now() + 60000);
@@ -909,10 +1044,19 @@ export class IntakeBuffer {
       if (!result.error) {
         const remaining = (await this.state.storage.get('buf')) || [];
         const busy = await this.state.storage.get('busy');
+        const ready = !busy && remaining.length && !remaining.some(i => i.mediaPending);
+        // RC-04/RC-05: the attachment the chosen launch was waiting for just
+        // landed and the run it continues is already gone — run the choice now.
+        // Checked BEFORE the ⛔ hold: the hold is set by the stop that made this
+        // choice, and it must not block the launch it authorised.
+        if (ready && await this.state.storage.get('stopLaunch')) {
+          await this._consumeStopLaunch();
+          return;
+        }
         // ⛔ Стоп held the batch: the transcript only refreshes the stopped
         // collector (receipt above) — no timer, no remembered launch (#1856).
         const stopped = await this.state.storage.get('stopped');
-        if (!busy && !stopped && remaining.length && !remaining.some(i => i.mediaPending)) {
+        if (ready && !stopped) {
           // The user tapped «▶️ Запустить» while the attachment was still
           // downloading — the tap was honoured then («задачу забрал»), so start
           // now instead of making them find the button again.
@@ -945,6 +1089,7 @@ export class IntakeBuffer {
   // a media item whose transcript just resolved) so the auto-dispatch gate is
   // never silently skipped for one of them.
   async _armAutoDispatch(chatId, remaining, replyToMessageId, threadId = null) {
+    if (await this._autoLaunchBlocked(remaining)) return; // RC-06: no silent start
     await this.state.storage.delete('gateLevel');
     await this.state.storage.delete('shortDebounce');
     await this.state.storage.delete('gateConsulted');
@@ -967,6 +1112,19 @@ export class IntakeBuffer {
     try { return await getSession(this.env.SESSIONS, chatId, threadId); } catch { return null; }
   }
 
+  // RC-06 (Ф3): two states where NOTHING may launch itself.
+  //   • a «стоп + запуск» choice is waiting for its confirmed start;
+  //   • the whole buffer is input that arrived DURING a run (heldWhileBusy) and
+  //     the user has chosen nothing yet — once the run ends the collector shows
+  //     the menu and the batch waits (US-BUF-04's quiet auto-start stays for
+  //     idle input, and a NEW message after the release re-arms it, exactly as
+  //     stoppedText promises: «новое сообщение вернёт обычный режим»).
+  async _autoLaunchBlocked(buf) {
+    if (await this.state.storage.get('stopLaunch')) return true;
+    const items = buf || (await this.state.storage.get('buf')) || [];
+    return items.length > 0 && items.every(i => i.heldWhileBusy);
+  }
+
   // Owner 2026-09-29: the delay and the reason must be spoken, and a short
   // «продолжай» may only fast-launch when the judge can see the previous agent
   // answer. The agent gate is the single source of that verdict; this asks it
@@ -980,6 +1138,7 @@ export class IntakeBuffer {
     if (!debounceExpiresAt) return;
     const buf = (await store.get('buf')) || [];
     if (!buf.length || buf.some(i => i.mediaPending || i.preparingAt)) return;
+    if (await this._autoLaunchBlocked(buf)) return; // RC-06 — nothing starts itself
     const snapshot = JSON.stringify(buf);
     if ((await store.get('gateConsulted')) === snapshot) return; // once per input
     const intent = coalescedIntent(buf);
@@ -1044,9 +1203,11 @@ export class IntakeBuffer {
       const queued = !!(await this.state.storage.get('launchQueued'));
       const stopped = !!(await this.state.storage.get('stopped'));
       const busy = !!(await this.state.storage.get('busy'));
+      const stopLaunch = await this.state.storage.get('stopLaunch');
       const resumedHeld = (await this.state.storage.get('resumedHeld')) || 0;
       const n = items.length || count;
-      const text = override || (queued ? queuedText(n)
+      const text = (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
+        : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
         : collectorText(n) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
@@ -1056,7 +1217,7 @@ export class IntakeBuffer {
       // release) describes input that has already left for the agent.
       // busy deliberately does NOT mask ▶️ — held input is a batch of its own, and
       // killing the button here left the chat with no way to launch it (issue #303).
-      const keyboard = queued ? CANCEL_BTN
+      const keyboard = (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : busy ? QUEUE_BTN
         : LAUNCH_BTN;
@@ -1278,6 +1439,10 @@ export class IntakeBuffer {
   // Never inside the lock — Telegram I/O.
   async _afterBusyRelease() {
     await this._recoverMedia();
+    // RC-04/RC-05 first: the user already chose «стоп + запуск», and this is the
+    // moment the stopped run is provably gone. Launching here (before any other
+    // remembered intent) is what keeps it to exactly one run.
+    if (await this._consumeStopLaunch()) return;
     const remaining = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
     if (!remaining.length) {
       await this.state.storage.delete('launchAfterRelease');
@@ -1340,6 +1505,9 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    // A «стоп + запуск» choice waiting for its start outranks every timer below
+    // (RC-04/RC-05): if the run is gone and the batch is ready, run it now.
+    if (await this._consumeStopLaunch()) return;
     const receiptDue = await this.state.storage.get('receiptDue');
     if (receiptDue) {
       if (Date.now() < receiptDue && !((await this.state.storage.get('debounceExpiresAt')) <= Date.now())) { await this.state.storage.setAlarm(receiptDue); return; }
@@ -1379,6 +1547,17 @@ export class IntakeBuffer {
     if (debounceExpiresAt && Date.now() >= debounceExpiresAt &&
         !(await this.state.storage.get('busy')) && !(await this.state.storage.get('stopped'))) {
       const buf = (await this.state.storage.get('buf')) || [];
+      // RC-06: the expiry gate is the LAST automatic door. A batch that only sat
+      // in the buffer during a run never walks through it — the run's end shows
+      // the menu and the batch waits for the user's explicit choice. The timer is
+      // dropped (not left to fire again) so nothing can start it later either.
+      if (await this._autoLaunchBlocked(buf)) {
+        await this._exclusive(async () => {
+          await this.state.storage.delete('debounceExpiresAt');
+          await this.state.storage.delete('gateLevel');
+        });
+        return;
+      }
       const snapshot = JSON.stringify(buf);
       if (buf.length && !buf.some(i => i.mediaPending || i.preparingAt)) {
         const chatId = buf[buf.length - 1].msg.chat?.id;

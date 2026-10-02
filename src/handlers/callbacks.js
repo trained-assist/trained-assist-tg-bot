@@ -647,6 +647,85 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  // ── Ф3 busy menu: stop options (RC-04 / RC-05, tg-bot#316) ──────────────────
+  // «🛑 Стоп и запуск с добавкой» / «⛔ Стоп → новая задача» live on the RECEIPT
+  // of the held input, not on the running task's message: that is where the user
+  // actually decides what to do with the new input. Both are destructive, so the
+  // tap only ASKS (SS-01) and the confirm does the stop + launch in one move.
+  // The confirm bubble is its own message: the collector is owned by the DO and
+  // re-renders itself on the stop — editing it would race that write.
+  if (data === 'intake_stopsupp' || data === 'intake_stopnew') {
+    const mode = data === 'intake_stopsupp' ? 'supp' : 'new';
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    let held = 0;
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+      const r = await stub.fetch('https://intake/held').then(x => x.json()).catch(() => null);
+      held = r?.items?.length || 0;
+    }
+    if (!held) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '🤷 Порция уже передана — нечего запускать');
+      await sendT(env, chatId, threadId, '🤷 Порция уже ушла агенту — запускать тут нечего.');
+      return;
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, id, mode === 'supp' ? '🛑 Стоп и запуск с добавкой…' : '⛔ Стоп → новая задача…');
+    const ask = mode === 'supp'
+      ? `🛑 Остановить текущую задачу и сразу продолжить её с этими ${held} сообщ. (тот же диалог, один запуск)?`
+      : `⛔ Остановить текущую задачу и начать эти ${held} сообщ. НОВОЙ задачей?`;
+    await sendKbT(env, chatId, threadId, ask, [[
+      { text: '↩️ Вернуться', callback_data: `intake_stopno|${mode}` },
+      { text: '⛔ Точно остановить', callback_data: `intake_stopyes|${mode}` },
+    ]], { reply_to_message_id: message?.message_id, allow_sending_without_reply: true }, env);
+    return;
+  }
+
+  if (data?.startsWith('intake_stopyes|') || data?.startsWith('intake_stopno|')) {
+    const mode = data.split('|')[1] === 'supp' ? 'supp' : 'new';
+    const confirm = data.startsWith('intake_stopyes|');
+    const msgId = message?.message_id;
+    const close = text => msgId
+      ? editMessage(env.BOT_TOKEN, chatId, msgId, text, { lifecycleEnv: env, reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      : null;
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    if (!confirm) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, '↩️ Отменено — задача продолжает работать.');
+      await close('↩️ Остановка отменена — задача продолжает работать.');
+      return;
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
+    await close('⛔ Останавливаю задачу…');
+    // Same honest stop as /stop and the ⛔ button: hold the intake queue, cancel
+    // queued delivery, kill the chain. The launch happens after, never before —
+    // an unconfirmed stop must not be followed by a new run (F7 / SS-03).
+    const result = await stopChat(env, { username: session.username, chatId, threadId });
+    if (result.error && !result.killed) {
+      console.warn('[stop-launch] stop not confirmed:', result.error.message);
+      await close('⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача продолжает работать.');
+      return;
+    }
+    const sessionId = session.activeSessionId || session.lastSessionId;
+    const route = mode === 'supp' ? { sessionId, forceNew: false, projectId: session.projectId || null,
+      projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } : null;
+    const r = env.INTAKE
+      ? await env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)))
+        .fetch('https://intake/stop-launch', { method: 'POST', body: JSON.stringify({ mode, route }) })
+        .then(x => x.json()).catch(err => { console.error('[stop-launch]', err.message); return null; })
+      : null;
+    if (r?.already) {
+      await close('⏳ Уже выполняется — порция уйдёт одним запуском.');
+      return;
+    }
+    if (r?.nothing) {
+      await close('🤷 Порция уже передана — запускать тут нечего.');
+      return;
+    }
+    const what = mode === 'supp' ? 'продолжу её с твоими сообщениями' : 'запущу их новой задачей';
+    await close(r?.waiting
+      ? `⛔ Задача остановлена. Как только остановка подтвердится — ${what}.`
+      : `⛔ Задача уже завершалась. ${mode === 'supp' ? 'Продолжаю её' : 'Запускаю'} с твоими сообщениями.`);
+    return;
+  }
+
   // «↩️ Отменить передачу агенту» — the tail left in place of ▶️ once a tap is
   // remembered (issue #305). Clears the queue in the DO; the DO itself re-renders
   // the collector with ▶️ back (single owner of that message — no edit from here,
@@ -658,7 +737,9 @@ export async function handleCallbackQuery(cq, env) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const r = await stub.fetch('https://intake/cancel', { method: 'POST' })
         .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
-      if (r?.cancelled) await sendT(env, chatId, threadId, '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
+      if (r?.cancelled) await sendT(env, chatId, threadId, r?.stopLaunchCancelled
+        ? '↩️ Передача отменена — сообщения остались в порции. Задача при этом осталась остановленной: запустить порцию можно кнопкой в меню.'
+        : '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
     }
     return;
   }
