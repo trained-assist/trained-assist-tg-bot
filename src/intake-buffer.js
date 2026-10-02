@@ -129,6 +129,19 @@ const GATE_ERR_RETRY_MS = 60_000;      // first retry pause; grows is unnecessar
 const GATE_ERR_MAX_ATTEMPTS = 3;       // then stop retrying and offer the button plainly
 const gateRetryText = (n) => `Судья запуска недоступен — повторю проверку через минуту (попытка ${n} из ${GATE_ERR_MAX_ATTEMPTS}). Агента можно запустить вручную: «▶️ Запустить агента».`;
 
+// «Не хватает контекста» = park, never auto-launch. Product rule (owner 2026-09-22,
+// #200): a half-written batch must not be guessed at — but it must not be SILENT
+// either. Two live incidents (chat -1003814002203 29.09, -5423662529 02.10) had the
+// same shape: the verdict only EDITED a collector bubble far up the chat and dropped
+// the timer, so the user saw nothing and the batch sat for hours. Fix, both halves:
+//   • the notice is a NEW message anchored under the user's own message (fresh: true)
+//     — an edit of an old bubble is invisible once the chat has scrolled;
+//   • the parked batch keeps ONE re-offer timer, then a durable `parked` marker in
+//     /debug so it stays discoverable. Auto-launch stays OFF: guessing at an
+//     unfinished task is worse than asking.
+const PARK_REOFFER_MS = 15 * 60_000;   // one visible re-offer before the batch goes quiet for good
+const parkReofferText = n => `Напоминаю: ${n} сообщ. ждут запуска — контекста для автозапуска так и не хватило. Дополни текст или нажми «▶️ Запустить агента».`;
+
 // The user's typed instruction for a batch: prepared file contents must never
 // masquerade as it (same rule as the expiry gate below — one definition).
 function coalescedIntent(buf) {
@@ -299,7 +312,7 @@ export class IntakeBuffer {
 
     if (url.pathname === '/debug' && request.method === 'GET') {
       const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel,
-        receiptDue, collectorMsgId, gateConsulted, gateErrAttempts] =
+        receiptDue, collectorMsgId, gateConsulted, gateErrAttempts, parkedAt, parkReoffers] =
         await Promise.all([
           this.state.storage.get('buf'), this.state.storage.get('retryBatch'),
           this.state.storage.get('retryBatchAttempts'), this.state.storage.get('busy'),
@@ -307,6 +320,7 @@ export class IntakeBuffer {
           this.state.storage.get('debounceExpiresAt'), this.state.storage.get('gateLevel'),
           this.state.storage.get('receiptDue'), this.state.storage.get('collectorMsgId'),
           this.state.storage.get('gateConsulted'), this.state.storage.get('gateErrAttempts'),
+          this.state.storage.get('parkedAt'), this.state.storage.get('parkReoffers'),
         ]);
       // `alarm` answers the one question the old dump could not: is anything at all
       // still scheduled for this chat, or is it asleep? A non-empty buffer with no
@@ -329,9 +343,13 @@ export class IntakeBuffer {
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
         alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
+        parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
         stopped: (await this.state.storage.get('stopped')) || null,
+        // A parked batch is an intentional wait for ▶️ (visible, one re-offer) —
+        // not a dead-end. `stranded` now means: buffer non-empty, nothing
+        // scheduled, and NOT parked = genuinely lost.
         stranded: !busy && ((buf || []).length > 0) && !alarm && !debounceExpiresAt && !receiptDue
-          && !(await this.state.storage.get('stopped')),
+          && !(await this.state.storage.get('stopped')) && !parkedAt,
       });
     }
 
@@ -377,6 +395,8 @@ export class IntakeBuffer {
         await this.state.storage.delete('launchQueued');
         await this.state.storage.delete('stopped');
         await this.state.storage.delete('resumedHeld');
+        await this.state.storage.delete('parkedAt');
+        await this.state.storage.delete('parkReoffers');
         await this.state.storage.deleteAlarm();
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
@@ -402,7 +422,8 @@ export class IntakeBuffer {
         const had = !!((await store.get('launchAfterRelease')) || (await store.get('launchWhenReady'))
           || (await store.get('launchQueued')) || (await store.get('debounceExpiresAt')));
         for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'debounceExpiresAt',
-          'gateLevel', 'shortDebounce', 'gateConsulted', 'gateErrAttempts', 'receiptDue', 'resumedHeld']) {
+          'gateLevel', 'shortDebounce', 'gateConsulted', 'gateErrAttempts', 'receiptDue', 'resumedHeld',
+          'parkedAt', 'parkReoffers']) {
           await store.delete(k);
         }
         await store.put('stopped', Date.now());
@@ -930,6 +951,9 @@ export class IntakeBuffer {
     // New input invalidates the previous judge-failure budget (#248): the retry
     // count belongs to one batch, not to the chat forever.
     await this.state.storage.delete('gateErrAttempts');
+    // …and any parked state: a new message means the user answered the ask.
+    await this.state.storage.delete('parkedAt');
+    await this.state.storage.delete('parkReoffers');
     await this.state.storage.put('autoPolicy', 'quiet-3m-v1');
     const debounceMs = DEBOUNCE_MS;
     const expiresAt = Date.now() + debounceMs;
@@ -1005,7 +1029,10 @@ export class IntakeBuffer {
 
   // Serialize Telegram edits independently of buffer mutations. A slow send cannot
   // create two collectors, and each edit reads the latest durable count.
-  async _showCollector(chatId, count, replyToMessageId, threadId = null, override = null) {
+  // `fresh: true` skips the edit path and POSTS a new bubble. Every other caller
+  // keeps editing the one collector: for count updates an edit is the right call
+  // (no chat noise), but for a verdict the user must SEE it — see _offerManualLaunch.
+  async _showCollector(chatId, count, replyToMessageId, threadId = null, override = null, { fresh = false } = {}) {
     const previous = this.uiMutation;
     let release;
     this.uiMutation = new Promise(resolve => { release = resolve; });
@@ -1034,7 +1061,7 @@ export class IntakeBuffer {
         : busy ? QUEUE_BTN
         : LAUNCH_BTN;
       const prevId = await this.state.storage.get('collectorMsgId');
-      if (prevId) {
+      if (prevId && !fresh) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
           { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
         if (edited?.ok || /message is not modified/i.test(edited?.description || '')) return prevId;
@@ -1046,14 +1073,31 @@ export class IntakeBuffer {
       }
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
       const id = sent?.result?.message_id;
-      if (id) await this.state.storage.put('collectorMsgId', id);
+      // A fresh bubble becomes THE collector: the older one is edited to a neutral
+      // line so two launch buttons never compete (same reason as /stop).
+      if (id && fresh) {
+        await editMessage(this.env.BOT_TOKEN, chatId, prevId, '↑ Сообщение выше устарело — новое ниже.',
+          { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+        await this.state.storage.put('collectorMsgId', id);
+      } else if (id) await this.state.storage.put('collectorMsgId', id);
       else await this._scheduleReceipt();
       return id || null;
     } finally { release(); }
   }
 
+  // Parked = the judge said «insufficient» (or its retry budget ran out). The batch
+  // stays, the user is asked ONCE in a fresh bubble, and one re-offer timer keeps
+  // the chat from going silent forever. Auto-launch stays off by design (#200).
+  async _parkBatch(chatId, buf, threadId, text) {
+    const last = buf.at(-1).msg;
+    await this._showCollector(chatId, buf.length, last.message_id, threadId, text, { fresh: true });
+    await this.state.storage.put('parkedAt', Date.now());
+    await this.state.storage.put('parkReoffers', 0);
+    await this.state.storage.setAlarm(Date.now() + PARK_REOFFER_MS);
+  }
+
   // Coalesce the buffer into one message and run it. Marks the chat busy so
-  // anything sent during the run is held (surfaced with a new button afterwards).
+  // anything sent during the run is held (surfaced with a fresh button afterwards).
   async _dispatch(expectedBuffer) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
     const buf = await this._exclusive(async () => {
@@ -1067,6 +1111,8 @@ export class IntakeBuffer {
       // via the timer itself). Without this the alarm could fire a second dispatch.
       await this.state.storage.delete('debounceExpiresAt');
       await this.state.storage.delete('gateLevel');
+      await this.state.storage.delete('parkedAt');
+      await this.state.storage.delete('parkReoffers');
       const retryBatch = await this.state.storage.get('retryBatch');
       const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
@@ -1377,7 +1423,7 @@ export class IntakeBuffer {
             await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
           }
         } else if (chatId) {
-          await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
+          await this._parkBatch(chatId, buf, threadIdOf(buf.at(-1).msg), insufficientText);
         }
         return;
       }
@@ -1385,6 +1431,25 @@ export class IntakeBuffer {
     if (debounceExpiresAt && Date.now() < debounceExpiresAt) {
       const alarm = await this.state.storage.getAlarm();
       if (!alarm || alarm <= Date.now() || alarm > debounceExpiresAt) await this.state.storage.setAlarm(debounceExpiresAt);
+      return;
+    }
+    // ── Parked batch re-offer (#248) ────────────────────────────────────────────
+    // A batch the judge refused sits with no timer of its own. One visible reminder
+    // after PARK_REOFFER_MS, then quiet — the batch itself is never dropped, it
+    // waits for ▶️, a new message, or /clean_buffer. New input clears parkedAt
+    // (_armAutoDispatch), so a still-set marker means the user has not replied.
+    const parkedAt = await this.state.storage.get('parkedAt');
+    if (parkedAt && !(await this.state.storage.get('busy')) && !(await this.state.storage.get('stopped'))
+        && ((await this.state.storage.get('parkReoffers')) || 0) < 1
+        && Date.now() - parkedAt >= PARK_REOFFER_MS) {
+      const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+      if (items.length) {
+        const last = items.at(-1).msg;
+        await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+          parkReofferText(items.length), { fresh: true });
+      }
+      await this.state.storage.put('parkReoffers', 1);
+      await this.state.storage.deleteAlarm();
       return;
     }
     // ── End debounce ────────────────────────────────────────────────────────────

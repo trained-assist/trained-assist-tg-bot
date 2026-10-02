@@ -675,15 +675,26 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
 
     checkCompleteness.mockResolvedValue({ level: 'insufficient', complete: false });
 
-    await io.fetch(appendReq('сделай так чтобы'));
+    // Real ingest shape (message_id present) — the notice must be anchored to the
+    // user's own message so it lands right below it in the chat.
+    await io.fetch(new Request('https://intake/ingest', { method: 'POST',
+      body: JSON.stringify({ msg: { chat: { id: 42 }, message_id: 5, text: 'сделай так чтобы' } }) }));
     await state.storage.put('debounceExpiresAt', Date.now() - 1);
     await io.alarm();
 
     expect(handleMessage).not.toHaveBeenCalled();
     expect(checkCompleteness).toHaveBeenCalledTimes(1);
-    const notice = editMessage.mock.calls.filter(c => String(c[3]).includes('Не хватает контекста'));
+    // #248: the ask is a NEW bubble under the user's message, not an edit of a
+    // collector that may sit far up the chat (the 02.10 silent-chat incident).
+    const notice = sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('Не хватает контекста'));
     expect(notice.length).toBe(1);
-    // No re-armed alarm and no gate-decision to resume from — only a new
+    expect(notice[0][4].reply_to_message_id).toBe(5);
+    // The batch is parked, not stranded: a re-offer timer is armed and the state
+    // is discoverable in /debug.
+    expect(await state.storage.get('parkedAt')).toBeGreaterThan(0);
+    expect(await state.storage.get('parkReoffers')).toBe(0);
+    expect(state._dump().alarm).not.toBeNull();
+    // No re-armed debounce and no gate-decision to resume from — only a new
     // message or the ▶️ button can move this forward.
     expect(await state.storage.get('gateLevel')).toBeUndefined();
     expect(await state.storage.get('debounceExpiresAt')).toBeUndefined();
@@ -692,6 +703,48 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // even a later alarm fire (no new debounce armed) must not launch it.
     await io.alarm();
     expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it('a parked batch re-offers once, then stays parked and discoverable', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ level: 'insufficient', complete: false });
+    await io.fetch(appendReq('сделай так чтобы'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    expect(sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('Не хватает контекста')).length).toBe(1);
+
+    // Past the re-offer window: one visible reminder, then quiet.
+    await state.storage.put('parkedAt', Date.now() - 16 * 60_000);
+    await io.alarm();
+    const reminders = sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('Напоминаю'));
+    expect(reminders.length).toBe(1);
+    expect(await state.storage.get('parkReoffers')).toBe(1);
+    expect(state._dump().alarm).toBeNull();
+
+    // Still parked, still not launched, and /debug no longer calls it stranded.
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('Напоминаю')).length).toBe(1);
+    const debug = await (await io.fetch(new Request('https://intake/debug'))).json();
+    expect(debug.parkedAt).toBeGreaterThan(0);
+    expect(debug.stranded).toBe(false);
+  });
+
+  it('new input clears the parked state and re-arms the normal flow', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    checkCompleteness.mockResolvedValue({ level: 'insufficient', complete: false });
+    await io.fetch(appendReq('сделай так чтобы'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+    expect(await state.storage.get('parkedAt')).toBeGreaterThan(0);
+
+    await io.fetch(appendReq('вот продолжение задачи'));
+    expect(await state.storage.get('parkedAt')).toBeUndefined();
+    expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now());
   });
 
   // #248: a judge that did NOT answer must not read as «недостаточно контекста»,
