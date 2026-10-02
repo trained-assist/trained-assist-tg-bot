@@ -21,7 +21,6 @@ vi.mock('../src/lib/telegram.js', () => ({
 }));
 vi.mock('../src/lib/agent-client.js', () => ({
   checkCompleteness: (...a) => checkCompleteness(...a),
-  agentBases: env => [...new Set([env.AGENT_URL, env.AGENT_RU_URL].filter(Boolean))],
 }));
 
 import { IntakeBuffer } from '../src/intake-buffer.js';
