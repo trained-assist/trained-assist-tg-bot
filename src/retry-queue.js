@@ -28,6 +28,22 @@ export class RetryQueue {
         const key = await scheduleRetry(this.store, await request.json());
         return Response.json({ key });
       }
+      // User-initiated stop (INV-08 / SS-05): a queued recovery attempt is an
+      // automatic resumption of the same work and must not survive the stop.
+      if (path === '/cancel') {
+        const { chatId, threadId = null } = await request.json();
+        let cancelled = 0;
+        for (const [key, row] of await this.state.storage.list({ prefix: `retry:${chatId}:` })) {
+          if (threadId != null) {
+            let opts = {};
+            try { opts = JSON.parse(row?.value ?? '{}').opts || {}; } catch { opts = {}; }
+            if (String(opts.threadId ?? '') !== String(threadId)) continue;
+          }
+          await this.state.storage.delete(key);
+          cancelled++;
+        }
+        return Response.json({ cancelled });
+      }
       if (path !== '/drain') return new Response('Not found', { status: 404 });
       // Only production imports the old shared-KV queue. Staging and recruiter
       // must never consume production work (those envs share KV namespaces).
