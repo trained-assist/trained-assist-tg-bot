@@ -1280,3 +1280,104 @@ describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
     expect(handleMessage.mock.calls[1][0].text).toBe('held');
   });
 });
+
+// ── Инвариант «буфер без таймера невозможен» (инцидент 2026-10-04) ────────────
+// Репро: чат -5496844108 — голосовое принято и расшифровано за 4 с, автозапуск
+// не взведён, кнопки нет; 6 мин 42 с тишины, ответ только после ручного тапа по
+// старой кнопке. Агент был здоров (health/readiness 200).
+//
+// _ensureArmed закрывает три ветки, где аларм съеден, а буфер — нет:
+//   H1 резервация судьи проиграла гонку (`!current` в alarm)
+//   H2 бюджет повторов судьи исчерпан
+//   H3 media-ошибка: deleteAlarm в транзакции, а текст в буфере остался
+describe('IntakeBuffer — инвариант: непустой буфер всегда имеет таймер', () => {
+  const mediaResult = (payload) => new Request('https://intake/media-result', {
+    method: 'POST', body: JSON.stringify(payload),
+  });
+
+  it('H1: проигранная резервация судьи оставляет буфер с таймером, а не без него', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    // Судья отвечает «clear», но прямо в ответе меняет буфер — резервация не
+    // совпадёт и _dispatch будет корректно пропущен.
+    checkCompleteness.mockImplementation(async () => {
+      const items = await state.storage.get('buf');
+      await state.storage.put('buf', [...items, { text: 'late', msg: { chat: { id: 42 }, text: 'late', message_id: 99 } }]);
+      return { level: 'clear', complete: true };
+    });
+
+    await io.fetch(appendReq('сделай отчёт'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await state.storage.deleteAlarm();
+    await io.alarm();
+
+    expect(handleMessage).not.toHaveBeenCalled();      // резервация проиграла — запуска нет
+    expect(state._dump().alarm).not.toBeNull();        // …но буфер не брошен без таймера
+  });
+
+  it('H2: исчерпанный бюджет повторов судьи оставляет буфер с таймером', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    checkCompleteness.mockResolvedValue({ level: 'error', complete: false });
+
+    await io.fetch(appendReq('сделай отчёт'));
+    // Бюджет уже исчерпан предыдущими попытками.
+    await state.storage.put('gateErrAttempts', 99);
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await state.storage.deleteAlarm();
+    await io.alarm();
+
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await state.storage.get('gateErrAttempts')).toBeUndefined();
+    expect(state._dump().alarm).not.toBeNull();        // watchdog вместо тишины
+  });
+
+  it('H3: ошибка медиа при оставшемся тексте не оставляет буфер без таймера', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('buf', [
+      { text: 'посмотри это', msg: { chat: { id: 42 }, text: 'посмотри это', message_id: 5 } },
+      { text: undefined, msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-1' },
+        mediaPending: true, mediaOwner: 'alice' },
+    ]);
+    await state.storage.deleteAlarm();
+
+    await io.fetch(mediaResult({ id: 'job-1', messageId: 7, username: 'alice', error: 'Очередь обработки временно недоступна' }));
+
+    // Медиа вышло из пачки, текст остался — и у него есть таймер.
+    expect((await state.storage.get('buf')).length).toBe(1);
+    expect(state._dump().alarm).not.toBeNull();
+  });
+
+  it('сбой отправки кнопки: watchdog доводит до живой кнопки, а не до тишины', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    checkCompleteness.mockResolvedValue({ level: 'insufficient', complete: false });
+    // Первая попытка показать кнопку не дошла.
+    sendMessageWithKeyboard.mockResolvedValueOnce({ ok: false, description: 'Bad Request' });
+
+    await io.fetch(appendReq('сделай так чтобы'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await state.storage.deleteAlarm();
+    await io.alarm();
+
+    const parked = await state.storage.get('parkedAt');
+    expect(parked).toBeTruthy();                        // парковка состоялась
+
+    // Следующий тик watchdog показывает кнопку снова — отправка теперь успешна.
+    await state.storage.deleteAlarm();
+    await io.alarm();
+    const keyboard = JSON.stringify(sendMessageWithKeyboard.mock.calls.at(-1)?.[3] ?? '');
+    expect(keyboard).toContain('intake_run');
+  });
+
+  it('инвариант не трогает ⛔ hold и busy: там свои таймеры и никакого автозапуска', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('buf', [{ text: 'часть', msg: { chat: { id: 42 }, text: 'часть', message_id: 5 } }]);
+    await state.storage.put('stopped', true);
+    await state.storage.deleteAlarm();
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+});
