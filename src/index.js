@@ -10,7 +10,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, isAdminLocalCommand, adminOnlyHint } from './lib/admin-group.js';
 import { initTestMode, isTestChat, realChatId, rememberCallback } from './lib/test-mode.js';
-import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
+import { sendMessage, sendMessageWithKeyboard, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { recordGroupMessage } from './group-history.js';
 import { shouldDebounce, shouldAskProject, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
@@ -70,6 +70,71 @@ app.post('/internal/run-finished', async c => {
   });
   const payload = await res.json().catch(() => ({}));
   return c.json(payload, res.status);
+});
+
+/** Отметка отправленного сообщения для /clean_up_flood (та же схема, что у буфера). */
+async function recordGatewaySent(env, chatId, messageId) {
+  if (!env?.SESSIONS) return;
+  try {
+    const key = `sent:${chatId}`;
+    const val = await env.SESSIONS.get(key);
+    const ids = val ? JSON.parse(val) : [];
+    if (!ids.includes(messageId)) ids.push(messageId);
+    await env.SESSIONS.put(key, JSON.stringify(ids.slice(-300)), { expirationTtl: 3 * 24 * 60 * 60 });
+  } catch (e) {
+    console.error('[deliver] sent-record failed:', e.message);
+  }
+}
+
+// Control plane → gateway: доставка сообщения в канал (архитектурная граница:
+// outbox принадлежит control plane, канал/кнопка/обработчик запуска — шлюзу).
+//
+// Возвращаем providerMessageId ТОЛЬКО когда Telegram реально принял сообщение.
+// Это единственное доказательство доставки: 200 без message_id означает, что
+// control plane не должен считать доставку выполненной (arch#132, Приоритет 3b).
+app.post('/deliver', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  const body = await c.req.json().catch(() => null);
+  const deliveryId = typeof body?.deliveryId === 'string' ? body.deliveryId.slice(0, 128) : null;
+  const channel = typeof body?.channel === 'string' ? body.channel : null;
+  // Адрес доставки: для Telegram это chat id (в т.ч. отрицательный — группа).
+  const rawDest = body?.destinationId;
+  const chatId = Number(rawDest);
+  if (!deliveryId) return c.json({ error: 'invalid deliveryId' }, 400);
+  if (channel !== 'telegram') return c.json({ error: 'unsupported channel' }, 400, { channel });
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return c.json({ error: 'invalid destinationId' }, 400);
+
+  const message = body?.message && typeof body.message === 'object' ? body.message : {};
+  const kind = typeof message.kind === 'string' ? message.kind : 'text';
+  const text = typeof message.text === 'string' && message.text ? message.text.slice(0, 4000) : null;
+  if (!text) return c.json({ error: 'missing message text' }, 400);
+
+  const threadId = Number.isInteger(Number(body?.threadId)) && Number(body?.threadId) > 0
+    ? Number(body.threadId)
+    : null;
+  const extra = threadId ? { message_thread_id: threadId } : {};
+
+  // Кнопка запуска: адресная. `intake_run` сливает буфер ЭТОГО чата, а проверка
+  // актуальности и защита от второго запуска живут в нём же (пустой буфер → ответ
+  // «нечего запускать», идущий ран → «уже идёт»), поэтому повторное нажатие или
+  // гонка с начавшейся работой не создают второй запуск.
+  const keyboard = kind === 'stuck_input'
+    ? { inline_keyboard: [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]] }
+    : undefined;
+
+  const result = await sendMessageWithKeyboard(c.env.BOT_TOKEN, chatId, text, keyboard, extra)
+    .catch(async () => sendMessage(c.env.BOT_TOKEN, chatId, text, extra));
+
+  const providerMessageId = result?.result?.message_id;
+  if (!providerMessageId) {
+    // Канал не принял: это НЕ доставка. Честный отказ, чтобы control plane
+    // повторил, а не записал «успех».
+    return c.json({ error: 'channel did not accept', description: result?.description || null }, 502);
+  }
+  await recordGatewaySent(c.env, chatId, providerMessageId);
+  return c.json({ providerMessageId, kind, deliveryId });
 });
 
 // Agent → gateway: messages the user sent AFTER the current run started (live inbox,
