@@ -126,3 +126,58 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     expect(SESSIONS.put).toHaveBeenCalledWith('sent:42', expect.stringContaining('556'), expect.anything());
   });
 });
+
+// ── Контракт стыка C02.1 ─────────────────────────────────────────────────────
+// Контр plane считает доставку выполненной ТОЛЬКО по providerMessageId. Тест
+// прибивает wire-форму, от которой зависит control plane: если хоть одно поле или
+// код ответа разъедутся, seam-тест control plane упадёт — а не прода.
+describe('Контракт стыка C02.1 — форма, от которой зависит control plane', () => {
+  it('запрос несёт ровно те поля и тот заголовок, которые ждёт адаптер', async () => {
+    await deliver({
+      deliveryId: 'd-contract', channel: 'telegram', destinationId: '-100500',
+      userTaskId: 'ut-1', conversationId: 'conv-1', audienceId: 'aud-1',
+      message: { kind: 'stuck_input', text: '⏳ жду', actions: ['launch'] },
+    });
+    expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
+  });
+
+  it('успех — ровно { providerMessageId } в теле, без «ok» вместо него', async () => {
+    const res = await deliver({
+      deliveryId: 'd', channel: 'telegram', destinationId: '42', message: { text: 'x' },
+    });
+    const body = await res.json();
+    expect(body).toHaveProperty('providerMessageId');
+    expect(typeof body.providerMessageId).toBe('number');
+  });
+
+  it('отказ канала — 502 и providerMessageId ОТСУТСТВУЕТ (не null, не 0)', async () => {
+    sendMessageWithKeyboard.mockResolvedValue({ ok: false, description: 'chat not found' });
+    const res = await deliver({
+      deliveryId: 'd', channel: 'telegram', destinationId: '42', message: { text: 'x' },
+    });
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect('providerMessageId' in body).toBe(false);
+  });
+
+  it('неверный секрет — 401, и Telegram НЕ вызывается вовсе', async () => {
+    const res = await app_fetch_without_secret();
+    expect(res.status).toBe(401);
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('не-telegram канал отвергается до обращения к Telegram (повтор не поможет)', async () => {
+    const res = await deliver({ deliveryId: 'd', channel: 'web', destinationId: '42', message: { text: 'x' } });
+    expect(res.status).toBe(400);
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+  });
+});
+
+async function app_fetch_without_secret() {
+  const mod = await import('../src/index.js');
+  return mod.default.fetch(
+    new Request('https://x/deliver', { method: 'POST', body: '{}' }),
+    env(),
+  );
+}
