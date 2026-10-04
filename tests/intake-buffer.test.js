@@ -1381,3 +1381,73 @@ describe('IntakeBuffer — инвариант: непустой буфер вс�
     expect(handleMessage).not.toHaveBeenCalled();
   });
 });
+
+// ── Граница исключения для outbox-окна (прод 2026-10-04) ─────────────────────
+// busyViaOutbox отключал самопроверку БЕЗ СРОКА. Если задача ушла через outbox и
+// не доставилась (агент был разрушен), очередь повторяла вечно, а чат оставался
+// «занятым» до BUSY_MAX_MS = 45 минут: -5111318625 простоял 33 минуты, шесть
+// сообщений внутри, запуска не было. Исключение теперь ограничено по времени.
+describe('IntakeBuffer — busyViaOutbox не отключает опрос навсегда', () => {
+  const withOutboxWindow = async (io, state, { ageMs }) => {
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - ageMs);
+    await state.storage.put('busyChatId', 42);
+    await state.storage.put('busyViaOutbox', true);
+    await state.storage.put('busyViaOutboxAt', Date.now() - ageMs);
+  };
+
+  it('в пределах десяти минут очередь ещё владеет окном — опрос молчит', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 5 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 5 * 60_000);
+
+    expect(released).toBe(false);
+    expect(await state.storage.get('busy')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('после границы ответ агента становится истиной: ничего не идёт — холд отпускается', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 11 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 11 * 60_000);
+
+    expect(released).toBe(true);
+    expect(await state.storage.get('busy')).toBeFalsy();
+    expect(await state.storage.get('busyViaOutbox')).toBeFalsy();
+    expect(await state.storage.get('busyViaOutboxAt')).toBeFalsy();
+    vi.unstubAllGlobals();
+  });
+
+  it('агент ещё что-то делает — холд остаётся даже после границы', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 11 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: true })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 11 * 60_000);
+
+    expect(released).toBe(false);
+    expect(await state.storage.get('busy')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('окно без outbox ведёт себя как раньше: 30 с прогрева, потом опрос решает', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - 5 * 60_000);
+    await state.storage.put('busyChatId', 42);
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    expect(await io._pollRunFinishedIfIdle(Date.now())).toBe(false); // прогрев
+    expect(await io._pollRunFinishedIfIdle(Date.now() - 5 * 60_000)).toBe(true);
+    expect(await state.storage.get('busy')).toBeFalsy();
+    vi.unstubAllGlobals();
+  });
+});
