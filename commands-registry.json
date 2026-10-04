@@ -7,6 +7,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -19,6 +20,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -49,8 +51,32 @@
       ],
       "description": "Проект чата: показать/закрепить/открепить (/project unpin)"
     },
-    { "command": "/settings", "aliases": ["/config", "/настройки"], "handler": "forward", "audiences": ["default", "freelance"], "description": "Настройки чата: проект, движок, роль, что сохранено" },
-    { "command": "/test_mode", "aliases": [], "handler": "local", "adminOnly": true, "audiences": ["default", "recruiter", "freelance"], "description": "Статус тестового режима (TEST_CHAT_IDS)" },
+    {
+      "command": "/settings",
+      "aliases": [
+        "/config",
+        "/настройки"
+      ],
+      "handler": "forward",
+      "audiences": [
+        "default",
+        "freelance"
+      ],
+      "description": "Настройки чата: проект, движок, роль, что сохранено"
+    },
+    {
+      "command": "/test_mode",
+      "aliases": [],
+      "handler": "local",
+      "adminOnly": true,
+      "audiences": [
+        "default",
+        "sales",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Статус тестового режима (TEST_CHAT_IDS)"
+    },
     {
       "command": "/build_spec",
       "aliases": [
@@ -133,6 +159,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -144,6 +171,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -155,6 +183,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -166,6 +195,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -177,6 +207,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -188,6 +219,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -241,6 +273,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -254,6 +287,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -267,6 +301,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -280,6 +315,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -293,6 +329,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -304,6 +341,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -318,6 +356,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -361,6 +400,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -372,6 +412,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -383,6 +424,7 @@
       "handler": "local",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -401,6 +443,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -448,6 +491,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -470,6 +514,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -837,6 +882,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -852,6 +898,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -867,6 +914,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],
@@ -882,6 +930,7 @@
       "handler": "forward",
       "audiences": [
         "default",
+        "sales",
         "recruiter",
         "freelance"
       ],

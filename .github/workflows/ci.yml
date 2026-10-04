@@ -130,6 +130,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           FREELANCE_BOT_TOKEN: ${{ secrets.FREELANCE_BOT_TOKEN }}
+          SALES_BOT_TOKEN: ${{ secrets.SALES_BOT_TOKEN }}
           BUILD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -145,11 +146,20 @@ jobs:
             echo "Deploying $name…"
             deploy "$name"
           done
+          # Both optional bots are gated on their token being provisioned: while
+          # the secret is empty the env stays INERT (skipped with a warning,
+          # never a failure) — same contract as freelance.
           if [ -n "${FREELANCE_BOT_TOKEN:-}" ]; then
             echo "Deploying freelance…"
             deploy freelance
           else
             echo "::warning::FREELANCE_BOT_TOKEN not provisioned — skipping freelance deploy (env stays inert)"
+          fi
+          if [ -n "${SALES_BOT_TOKEN:-}" ]; then
+            echo "Deploying sales…"
+            deploy sales
+          else
+            echo "::warning::SALES_BOT_TOKEN not provisioned — skipping sales deploy (env stays inert)"
           fi
 
   deploy-staging:
@@ -205,6 +215,7 @@ jobs:
       - name: Verify enabled Workers (buildSha + bot identity)
         env:
           FREELANCE_BOT_TOKEN: ${{ secrets.FREELANCE_BOT_TOKEN }}
+          SALES_BOT_TOKEN: ${{ secrets.SALES_BOT_TOKEN }}
           BUILD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -244,6 +255,11 @@ jobs:
             verify freelance "https://tg-freelance.trainedassist.store"
           else
             echo "::warning::FREELANCE_BOT_TOKEN not provisioned — skipping freelance smoke (env stays inert)"
+          fi
+          if [ -n "${SALES_BOT_TOKEN:-}" ]; then
+            verify sales "https://trained-assist-tg-bot-sales.skillset-apply.workers.dev"
+          else
+            echo "::warning::SALES_BOT_TOKEN not provisioned — skipping sales smoke (env stays inert)"
           fi
 
   autofix:
