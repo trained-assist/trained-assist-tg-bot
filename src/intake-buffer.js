@@ -74,6 +74,12 @@ const BUSY_POLL_MS = 60_000;     // while busy, the alarm ticks this often and a
                                  // push. The hold is released on the first idle tick,
                                  // so a dropped push costs ~1 min, not BUSY_MAX_MS.
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
+// How long the agent's /tasks/running answer stays untrusted for a window whose
+// dispatch went through the outbox. Two owners release that hold before this (the
+// outbox on permanent reject and on prolonged agent downtime); this only covers a
+// lost outbox record. Well under BUSY_MAX_MS so a lost job degrades to «agent says
+// nothing is running» instead of «chat frozen for 45 minutes» (prod 2026-10-04).
+const OUTBOX_POLL_GRACE_MS = 10 * 60_000;
 const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: past this the
                                        // item is dropped from the batch as failed, so a lost
                                        // MediaJob alarm can't leave the chat permanently
@@ -1384,7 +1390,10 @@ export class IntakeBuffer {
             await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
           }
         }
-        if (runAck.outbox) await this.state.storage.put('busyViaOutbox', true);
+        if (runAck.outbox) {
+          await this.state.storage.put('busyViaOutbox', true);
+          await this.state.storage.put('busyViaOutboxAt', Date.now());
+        }
         await this.state.storage.delete('launching');
         await this.state.storage.delete('retryBatchAttempts');
         // busy intentionally KEPT: the run's lifetime owns it now (#1527 F1).
@@ -1457,6 +1466,7 @@ export class IntakeBuffer {
     await this.state.storage.delete('busyRequestIds');
     await this.state.storage.delete('busyRequestId'); // legacy scalar (pre-set key)
     await this.state.storage.delete('busyViaOutbox');
+    await this.state.storage.delete('busyViaOutboxAt');
     await this.state.storage.delete('busyChatId');
     await this.state.storage.delete('busyThread');
     await this.state.storage.delete('launching');
@@ -1514,7 +1524,26 @@ export class IntakeBuffer {
   async _pollRunFinishedIfIdle(since, { launch = false } = {}) {
     const chatId = await this.state.storage.get('busyChatId');
     if (!chatId || !this.env.AGENT_URL) return false;
-    if (await this.state.storage.get('busyViaOutbox')) return false;
+    // Outbox dispatches are excluded WHILE THE OUTBOX STILL OWNS THE JOB: their
+    // counter only appears when the outbox actually delivers, so `running:false`
+    // says nothing about a job still queued, and releasing would reopen the
+    // double-run hole. That exclusion used to be permanent, which made a lost or
+    // undeliverable outbox job pin the chat until BUSY_MAX_MS — 45 minutes of a
+    // chat that accepts messages and never runs them (prod 2026-10-04, chat
+    // -5111318625: 33 minutes held, six messages inside, no run).
+    //
+    // The exclusion is now BOUNDED. Two independent owners already release the hold:
+    // the outbox itself on permanent reject, and the outbox on prolonged agent
+    // downtime (`run-outbox.js`, releaseIntakeBusy). This grace is the third and
+    // last line, for the case where the outbox record itself was lost — then the
+    // agent's answer is the only truth left, and a silent `running:false` for this
+    // long means there is nothing running to wait for.
+    const viaOutbox = await this.state.storage.get('busyViaOutbox');
+    if (viaOutbox) {
+      const outboxAt = (await this.state.storage.get('busyViaOutboxAt')) || since;
+      if (Date.now() - outboxAt < OUTBOX_POLL_GRACE_MS) return false;
+      console.log(`[intake ${chatId}] outbox hold exceeded grace (${OUTBOX_POLL_GRACE_MS}ms) — trusting the agent's answer`);
+    }
     if (Date.now() - since < 30_000) return false; // warmup: ack → counter visible
     try {
       const res = await fetch(`${this.env.AGENT_URL}/tasks/running?chatId=${encodeURIComponent(chatId)}`, {
