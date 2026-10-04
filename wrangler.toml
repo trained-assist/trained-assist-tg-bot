@@ -228,6 +228,87 @@ class_name = "RetryQueue"
 name = "RETRY_QUEUE"
 class_name = "RetryQueue"
 
+# ── Sales environment (fourth bot on the shared contour; sales-skill#19) ────
+# INERT until SALES_BOT_TOKEN is provisioned: ci.yml's deploy/smoke loop skips
+# this env while that secret is empty (warning, not failure).
+#
+# This is the bot the exhibition catalogs deep-link to:
+#   https://<event_key>.sales-manager-assistant.ru → t.me/cmr_management_bot?start=<eventKey>_deal_<id>
+# The username is the one the old @cmr_management_bot used, so existing catalog
+# links keep working — but the backend is this worker, not
+# flexi-exhibition-deal-bot (which is being decommissioned, sales-skill#19
+# решение владельца №3).
+[env.sales]
+name = "trained-assist-tg-bot-sales"
+
+[env.sales.vars]
+MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter/freelance).
+RECOVERY_IMPORT_LEGACY = "off"
+INTAKE_DEBOUNCE = "on"
+TEST_CHAT_IDS = ""
+SESSION_NAMESPACE = "sales"
+# Confirmed via getMe: id 8807961966, @cmr_management_bot.
+# Group mention/reply routing and the /start greeting depend on this value.
+BOT_USERNAME = "cmr_management_bot"
+
+# USERS — shared with production, exactly like recruiter/freelance: the new bot
+# works with the existing profile/login system, not a separate registration.
+# SESSIONS — its OWN KV: the sales bot must never read another bot's login
+# sessions (this also sidesteps the shared-namespace `list` leak — see
+# src/lib/session-namespace.js).
+[[env.sales.kv_namespaces]]
+binding = "USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+[[env.sales.kv_namespaces]]
+binding = "SESSIONS"
+id = "52240aec81e449eb81bac93ac7917d1f"
+
+# Durable Objects: own bindings + own initial migrations, same reasoning as the
+# freelance env — this worker has never been deployed, so every class is new
+# HERE. Top-level and the other envs must NOT re-declare new_sqlite_classes for
+# classes they already created (CF API code 10074).
+[[env.sales.durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+[[env.sales.durable_objects.bindings]]
+name = "RETRY_QUEUE"
+class_name = "RetryQueue"
+
+[[env.sales.durable_objects.bindings]]
+name = "MEDIA_JOBS"
+class_name = "MediaJob"
+
+[[env.sales.durable_objects.bindings]]
+name = "RUN_OUTBOX"
+class_name = "RunOutbox"
+
+[[env.sales.migrations]]
+tag = "v1"
+new_sqlite_classes = ["IntakeBuffer"]
+
+[[env.sales.migrations]]
+tag = "v2-run-outbox"
+new_sqlite_classes = ["RunOutbox"]
+
+[[env.sales.migrations]]
+tag = "v3-recovery"
+new_sqlite_classes = ["RetryQueue"]
+
+[[env.sales.migrations]]
+tag = "v4-media"
+new_sqlite_classes = ["MediaJob"]
+
+# Secrets for sales — set once, only when enabling:
+#   wrangler secret put BOT_TOKEN --env sales
+#   wrangler secret put AGENT_URL --env sales
+#   wrangler secret put AGENT_SECRET --env sales
+#   wrangler secret put TELEGRAM_WEBHOOK_SECRET --env sales  # setWebhook secret_token
+#
+# TELEGRAM_WEBHOOK_SECRET is REQUIRED for every bot env: /webhook fails closed
+# without it (prod smoke asserts unsigned → 401).
+
 # Staging already deployed the planned-restart outbox from PR #103. Preserve
 # its class and migration history; production has not deployed that change.
 [[env.staging.migrations]]
