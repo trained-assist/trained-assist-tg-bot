@@ -79,6 +79,11 @@ const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: pas
                                        // MediaJob alarm can't leave the chat permanently
                                        // un-launchable («ещё грузится» on every tap).
 
+// Safety-net cadence for the buffer invariant below (see _ensureArmed). The
+// debounce / park / media / busy alarms are the normal paths; this only
+// re-checks when a branch consumed its alarm and left the batch un-timed.
+const ARM_WATCHDOG_MS = 60_000;
+
 const RECEIPT_MS = 1500;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
@@ -1068,6 +1073,8 @@ export class IntakeBuffer {
           }
         }
       }
+      // H3: media-error path above can drop the alarm with items still buffered.
+      await this._ensureArmed(notify.chatId);
     }
     return response;
   }
@@ -1105,6 +1112,32 @@ export class IntakeBuffer {
     await this.state.storage.put('debounceExpiresAt', expiresAt);
     await this.state.storage.setAlarm(expiresAt);
     await this._scheduleReceipt();
+  }
+
+  // ИНВАРИАНТ: непустой буфер, который никто не держит (не busy, не ⛔ hold),
+  // всегда имеет живой аларм.
+  //
+  // Все нормальные ветки взводят свой таймер (дебаунс / park re-offer / media
+  // watchdog / busy poll). Остаются три, где аларм уже съеден, а буфер — нет:
+  //   H1 резервация судьи проиграла гонку (`!current` в alarm) — уходим без таймера;
+  //   H2 бюджет повторов судьи исчерпан — остаётся только кнопка коллектора;
+  //   H3 `_mediaResult` с ошибкой медиа снимает аларм в транзакции, а items
+  //      (текст) в буфере остаются.
+  // Именно этот класс дал инцидент 2026-10-04 (чат -5496844108): голосовое
+  // принято и расшифровано, автозапуск не взведён, кнопки нет — 6 мин 42 с тишины,
+  // ответ только после ручного тапа по старой кнопке. Агент при этом был здоров.
+  //
+  // Это НЕ перезапуск судьи: ожидание нового контекста (_armAutoDispatch на новом
+  // вводе) и проверка зависания (этот инвариант) — разные механизмы. На неизменном
+  // вводе LLM не зовётся.
+  async _ensureArmed(chatId) {
+    const store = this.state.storage;
+    const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
+    if (!items.length) return;
+    if (await store.get('busy')) return;      // busy-poll держит свой таймер
+    if (await store.get('stopped')) return;   // ⛔ hold: запускать нельзя by design
+    if ((await store.getAlarm()) !== null) return; // таймер уже есть
+    await store.setAlarm(Date.now() + ARM_WATCHDOG_MS);
   }
 
   // Chat session for the judge — a missing/odd KV in tests must never break the gate.
@@ -1580,7 +1613,12 @@ export class IntakeBuffer {
           await this.state.storage.delete('gateLevel');
           return true;
         });
-        if (!current) return;
+        if (!current) {
+          // H1: the reservation lost the race (buffer changed / became busy /
+          // stopped). The batch is still waiting — it must keep a timer.
+          await this._ensureArmed(chatId);
+          return;
+        }
         if (verdict?.level === 'clear' || verdict?.level === 'likely' || verdict?.level === 'continue') {
           await this.state.storage.delete('gateErrAttempts');
           await this._dispatch(snapshot);
@@ -1600,6 +1638,9 @@ export class IntakeBuffer {
             // «нажми ▶️» text (and its button) is the way out.
             await this.state.storage.delete('gateErrAttempts');
             await this._showCollector(chatId, buf.length, buf.at(-1).msg.message_id, threadIdOf(buf.at(-1).msg), insufficientText);
+            // H2: this branch has no debounce left, so the watchdog is the only
+            // thing that can re-offer if that send did not land.
+            await this._ensureArmed(chatId);
           }
         } else if (chatId) {
           await this._parkBatch(chatId, buf, threadIdOf(buf.at(-1).msg), insufficientText);
