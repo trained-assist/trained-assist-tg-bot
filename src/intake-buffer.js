@@ -64,6 +64,9 @@ const BUSY_MAX_MS = 45 * 60_000; // safety: release a run marked busy whose isol
                                  // died mid-flight. Must exceed the longest
                                  // legitimate session (~40 min agent cap).
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
+// Safety-net cadence for the invariant below. The debounce alarm is the normal
+// path; this only re-checks when a branch left the buffer with NO timer armed.
+const WATCHDOG_MS = 60_000;
 
 const LAUNCH_BTN = [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]];
 
@@ -413,6 +416,10 @@ export class IntakeBuffer {
           await this._armAutoDispatch(notify.chatId, remaining, notify.messageId);
         }
       }
+      // Safety net: if the arm above was skipped (busy, another item still
+      // pending, or a media error) the buffer must still have a live timer —
+      // otherwise it sits silent forever (the 2026-10-04 incident).
+      await this._ensureArmed(notify.chatId);
     }
     return response;
   }
@@ -430,6 +437,35 @@ export class IntakeBuffer {
     await this.state.storage.put('debounceExpiresAt', expiresAt);
     await this.state.storage.setAlarm(expiresAt);
     await this._showCollector(chatId, remaining.length, replyToMessageId);
+  }
+
+  // INVARIANT: a non-empty, non-busy buffer must always have a live alarm.
+  //
+  // The 2026-10-04 incident: _mediaResult deleted the watchdog alarm in its
+  // transaction and the conditional _armAutoDispatch after it never ran (busy /
+  // another item still pending), so the buffer was left with NO timer and NO
+  // launch button. Nothing ever revisited it — the user saw only the
+  // "🎙 Принял голосовое" receipt and ~7 minutes of silence until they tapped a
+  // stale ▶️ button. Every branch that can leave items buffered must end by
+  // calling this; it is the safety net that makes "no timer" impossible.
+  async _ensureArmed(chatId) {
+    if (!chatId) return;
+    const buf = (await this.state.storage.get('buf')) || [];
+    if (!buf.length || (await this.state.storage.get('busy'))) return;
+    if ((await this.state.storage.getAlarm()) !== null) return; // a timer is already armed
+    await this.state.storage.setAlarm(Date.now() + WATCHDOG_MS);
+  }
+
+  // Re-show the launch button only when there isn't a live one already. Used by
+  // the watchdog so a failed collector send is retried without spamming the chat
+  // on every tick.
+  async _maybeReshowCollector(chatId) {
+    if (!chatId) return;
+    const buf = (await this.state.storage.get('buf')) || [];
+    if (!buf.length || (await this.state.storage.get('busy'))) return;
+    if (await this.state.storage.get('debounceExpiresAt')) return; // debounce owns the next step
+    if (await this.state.storage.get('collectorMsgId')) return;     // a live button already exists
+    await this._showCollector(chatId, buf.length, buf[buf.length - 1].msg.message_id);
   }
 
   // ACK every accumulated message with a FRESH bubble anchored to it — never an
@@ -491,7 +527,12 @@ export class IntakeBuffer {
       const retryBatch = await this.state.storage.get('retryBatch');
       const items = retryBatch || (await this.state.storage.get('buf')) || [];
       if (!items.length) return [];
-      if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
+      if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) {
+        // Not launchable yet — keep a live timer so the buffer is revisited once
+        // the transcript/preparation resolves instead of sitting silent.
+        await this._ensureArmed(items[0].msg.chat?.id);
+        return [];
+      }
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       await this.state.storage.put('busy', true);
       await this.state.storage.put('busySince', Date.now());
@@ -593,7 +634,8 @@ export class IntakeBuffer {
         // Skip if media is still pending: _mediaResult will show the collector once the
         // transcript arrives, so the button never appears above the transcript in chat.
         if (!remaining.some(i => i.mediaPending)) {
-          await this._showCollector(chatId, remaining.length, remaining[remaining.length - 1].msg.message_id);
+          await this._maybeReshowCollector(chatId);
+          await this._ensureArmed(chatId);
         }
       }
     }
@@ -639,11 +681,28 @@ export class IntakeBuffer {
           await this.state.storage.delete('gateLevel');
           return true;
         });
-        if (!current) return;
+        // The reservation lost the race (buffer changed / became busy): the
+        // buffer is still waiting, so it MUST keep a live timer. Returning
+        // here without one was a silent dead-end.
+        if (!current) {
+          await this._ensureArmed(chatId);
+          return;
+        }
         if (verdict?.level === 'clear' || verdict?.level === 'likely') {
           await this._dispatch(snapshot);
         } else if (chatId) {
-          await sendTracked(this.env, chatId, insufficientText);
+          // Gate said "insufficient": never leave the user without a live launch
+          // affordance. Re-offer the ▶️ button (the text already points at it)
+          // and re-arm so the gate gets another chance once context is added.
+          // The snapshot guard keeps an unchanged buffer from spamming the chat.
+          const lastSnapshot = await this.state.storage.get('insufficientSnapshot');
+          if (lastSnapshot !== snapshot) {
+            await this.state.storage.put('insufficientSnapshot', snapshot);
+            await sendKeyboardTracked(this.env, chatId, insufficientText, LAUNCH_BTN,
+              anchor(buf[buf.length - 1].msg.message_id)).catch(() => {});
+          }
+          await this.state.storage.put('debounceExpiresAt', Date.now() + DEBOUNCE_MS);
+          await this.state.storage.setAlarm(Date.now() + DEBOUNCE_MS);
         }
         return;
       }
@@ -667,10 +726,13 @@ export class IntakeBuffer {
         await this.state.storage.delete('busySince');
       });
     }
-    const buf = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
-    if (buf.length) {
-      const last = buf[buf.length - 1].msg;
-      await this._showCollector(last.chat?.id, buf.length, last.message_id);
+    // Watchdog tail: a non-empty, non-busy buffer with no debounce armed must
+    // still show a live launch button. `_maybeReshowCollector` no-ops when one
+    // already exists, so this never spams — it only covers a failed send.
+    const tail = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+    if (tail.length) {
+      await this._maybeReshowCollector(tail[tail.length - 1].msg.chat?.id);
+      await this._ensureArmed(tail[tail.length - 1].msg.chat?.id);
     }
   }
 }

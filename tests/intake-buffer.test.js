@@ -240,7 +240,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('"insufficient" never auto-dispatches — says so plainly and leaves the button, no force-fallback', async () => {
+  it('"insufficient" never auto-dispatches — says so plainly, leaves a live ▶️ button, and re-arms', async () => {
     const state = makeState();
     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
 
@@ -252,17 +252,25 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
 
     expect(handleMessage).not.toHaveBeenCalled();
     expect(checkCompleteness).toHaveBeenCalledTimes(1);
-    const notice = sendMessage.mock.calls.filter(c => String(c[2]).includes('не хватает контекста'));
+    // The notice is delivered WITH a launch button — the user must always have a
+    // live affordance, never a silent buffer (the 2026-10-04 incident).
+    const notice = sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('не хватает контекста'));
     expect(notice.length).toBe(1);
-    // No re-armed alarm and no gate-decision to resume from — only a new
-    // message or the ▶️ button can move this forward.
+    expect(JSON.stringify(notice[0][3])).toContain('intake_run');
+    // No gate-decision to resume from, but the debounce IS re-armed so the gate
+    // gets another chance once the user adds context.
     expect(await state.storage.get('gateLevel')).toBeUndefined();
-    expect(await state.storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(await state.storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now());
 
-    // Confirm the old "force-dispatch after a grace period" fallback is gone:
-    // even a later alarm fire (no new debounce armed) must not launch it.
+    // Three minutes later the re-armed debounce fires; the gate re-runs. Still
+    // insufficient → still no dispatch, and the unchanged buffer must not spam a
+    // second notice (the snapshot guard).
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
     await io.alarm();
     expect(handleMessage).not.toHaveBeenCalled();
+    expect(checkCompleteness).toHaveBeenCalledTimes(2);
+    const notices = sendMessageWithKeyboard.mock.calls.filter(c => String(c[2]).includes('не хватает контекста'));
+    expect(notices.length).toBe(1);
   });
 
   it('cancels a pending gate decision when a new message arrives before its timer fires', async () => {
@@ -303,6 +311,77 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // this buffer could only ever be launched by tapping the button.
     expect(state._dump().alarm).not.toBeNull();
     expect(await state.storage.get('debounceExpiresAt')).toBeTruthy();
+  });
+
+  // ── 2026-10-04 incident regression: a buffer must never be timer-less ──────
+  // The voice message was accepted, transcribed fine, and then the chat went
+  // silent for ~7 minutes: _mediaResult deleted the watchdog alarm and the
+  // conditional _armAutoDispatch never ran, so nothing revisited the buffer.
+
+  it('media result while busy still arms a timer (no auto-launch, no silence)', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+
+    // Realistic busy state: _dispatch set busy AND armed the BUSY_MAX_MS alarm.
+    await state.storage.put('busy', true);
+    await state.storage.setAlarm(Date.now() + 45 * 60_000);
+    await state.storage.put('buf', [{
+      text: undefined,
+      msg: { chat: { id: 42 }, message_id: 7, mediaJob: 'job-1' },
+      mediaPending: true, mediaOwner: 'alice',
+    }]);
+
+    await io.fetch(new Request('https://intake/media-result', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: 'job-1', messageId: 7, username: 'alice',
+        fileRef: { id: 'job-1', storage: 'r2' }, transcript: 'сделай отчёт',
+      }),
+    }));
+
+    // The conditional _armAutoDispatch is skipped while busy, but the buffer is
+    // still non-empty → a timer must exist.
+    expect(state._dump().alarm).not.toBeNull();
+    // …and it must NOT auto-launch while a run is in flight.
+    expect(await state.storage.get('debounceExpiresAt')).toBeFalsy();
+  });
+
+  it('a lost reservation in alarm() keeps a live timer — no silent dead-end', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    // A concurrent ingest lands while the gate is being asked: the buffer the
+    // reservation compares against no longer matches, so the dispatch is
+    // correctly skipped — but the buffer must keep a timer.
+    checkCompleteness.mockImplementation(async () => {
+      const buf = await state.storage.get('buf');
+      await state.storage.put('buf', [...buf, { text: 'late', msg: { chat: { id: 42 }, text: 'late', message_id: 99 } }]);
+      return { level: 'clear' };
+    });
+
+    await io.fetch(appendReq('сделай отчёт'));
+    await state.storage.put('debounceExpiresAt', Date.now() - 1);
+    await io.alarm();
+
+    expect(handleMessage).not.toHaveBeenCalled();       // reservation lost → no dispatch
+    expect(state._dump().alarm).not.toBeNull();         // …but the buffer is not abandoned
+  });
+
+  it('after busy clears, the watchdog tail shows a live button and arms a timer', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    sendMessageWithKeyboard.mockClear();
+
+    await state.storage.put('buf', [{ text: 'partial', msg: { chat: { id: 42 }, text: 'partial', message_id: 1 } }]);
+    await state.storage.put('debounceExpiresAt', null);
+    await state.storage.deleteAlarm();
+
+    await io.alarm();
+
+    // A live ▶️ button was shown…
+    expect(sendMessageWithKeyboard).toHaveBeenCalled();
+    expect(JSON.stringify(sendMessageWithKeyboard.mock.calls[0][3])).toContain('intake_run');
+    // …and the buffer is not left without a timer.
+    expect(state._dump().alarm).not.toBeNull();
   });
 });
 
