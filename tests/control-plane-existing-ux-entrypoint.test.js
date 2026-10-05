@@ -81,6 +81,15 @@ describe('signed existing-UX ingress', () => {
     expect(answerCallbackQuery).toHaveBeenCalledWith(state.env.TG_SANDBOX_BOT_TOKEN, 'owned', expect.stringContaining('ещё не подключена'));
   });
 
+  it('does not expose native stop before exit provenance is accepted', async () => {
+    const state = fixture();
+    const update = { update_id: 2, callback_query: { id: 'owned', data: 'intake_stopyes|supp', from: { id: 7 }, message: state.update.message } };
+    const response = await state.send(update);
+    expect(await response.json()).toMatchObject({ ok: true, unsupported: true });
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+    expect(state.collectorCalls).toEqual([]);
+  });
+
   it('refuses a changed trusted profile without reusing the existing session', async () => {
     const state = fixture();
     await state.env.SESSIONS.put('isolated-ux:1001', JSON.stringify({ username: 'integrator', controlPlaneProfile: 'other-profile' }));

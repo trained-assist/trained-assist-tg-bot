@@ -64,9 +64,10 @@ app.post('/webhook', async context => {
   if (update.callback_query) {
     rememberCallback(update.callback_query.id, message.chat.id);
     const data = update.callback_query.data ?? '';
+    const stopBlocked = data.startsWith('intake_stop') && env.TG_SLICE_STOP_ENABLED !== 'true';
     const supported = ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew', 'input_draft', 'input_run'].includes(data)
       || ['intake_stopyes|', 'intake_stopno|', 'input_run|'].some(prefix => data.startsWith(prefix));
-    if (!supported) {
+    if (!supported || stopBlocked) {
       await answerCallbackQuery(env.BOT_TOKEN, update.callback_query.id, 'Эта функция ещё не подключена к новому Control Plane.');
       return context.json({ ok: true, unsupported: true });
     }
