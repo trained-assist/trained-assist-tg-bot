@@ -8,7 +8,7 @@ enabled = true
 
 # Reconciliation alarm — retries failed deliveries and pushes terminal results.
 [triggers]
-crons = ["* * * * *"]
+crons = []
 
 # Sandbox-only bindings — separate from the production worker:
 # TG_SLICE  — KV namespace for the slice durable state (ingress dedup,
