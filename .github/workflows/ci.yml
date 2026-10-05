@@ -37,6 +37,10 @@ jobs:
           if-no-files-found: error
 
   ci:
+    needs: [sandbox-validation]
+    if: always() && !cancelled() && (needs.sandbox-validation.result == 'success' || needs.sandbox-validation.result == 'skipped')
+    outputs:
+      sandbox-validation: ${{ needs.sandbox-validation.result }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +90,7 @@ jobs:
           if-no-files-found: error
 
   staging-gate:
-    needs: [ci, scenario-gate, deploy-staging, smoke-test-staging, sandbox-validation]
+    needs: [ci, scenario-gate, deploy-staging, smoke-test-staging]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -106,16 +110,19 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, time, urllib.request
-          results = {name: job['result'] for name, job in json.loads(os.environ['NEEDS_RESULTS']).items()}
+          needs = json.loads(os.environ['NEEDS_RESULTS'])
+          job_results = {name: job['result'] for name, job in needs.items()}
           required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
           sandbox = os.environ['HEAD_BRANCH'] == 'integration/first-working-version-20261005' and os.environ['HEAD_REPO'] == os.environ['REPO']
           if sandbox:
-              expected = {'ci': 'success', 'scenario-gate': 'success', 'sandbox-validation': 'success', 'deploy-staging': 'skipped', 'smoke-test-staging': 'skipped'}
-              assert results == expected, results
+              expected = {'ci': 'success', 'scenario-gate': 'success', 'deploy-staging': 'skipped', 'smoke-test-staging': 'skipped'}
+              assert job_results == expected, job_results
+              assert needs['ci']['outputs'].get('sandbox-validation') == 'success', needs['ci']['outputs']
               print('Sandbox handlers and bundle validated without deployment on', os.environ['HEAD_SHA'])
               raise SystemExit(0)
           if os.environ['EVENT'] in ('push', 'workflow_dispatch'):
-              assert all(results.get(name) == 'success' for name in required), results
+              results = [job_results.get(name) for name in required]
+              assert all(r == 'success' for r in results), results
               raise SystemExit(0)
           base = 'https://api.github.com/repos/' + os.environ['REPO']
           def get(path):
