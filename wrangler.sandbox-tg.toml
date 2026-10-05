@@ -18,6 +18,10 @@ crons = ["* * * * *"]
 binding = "TG_SLICE"
 id = "915ffeedb74440538009bdc1bd00d381"
 
+[[services]]
+binding = "CONTROL_PLANE_SERVICE"
+service = "trained-assist-cp-v1-sandbox"
+
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"

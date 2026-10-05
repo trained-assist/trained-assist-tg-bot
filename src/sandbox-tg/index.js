@@ -87,7 +87,10 @@ app.get('/cron', async c => {
 const webhook = app;
 
 function createController(env, config = readTgSliceConfig(env)) {
-  const client = new ControlPlaneClient(config, { logSink: line => console.log(line) });
+  const client = new ControlPlaneClient(config, {
+    fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
+    logSink: line => console.log(line),
+  });
   const api = new TelegramApi(config);
   const outbox = new TgDeliveryOutbox(
     env.TG_SLICE,
