@@ -232,6 +232,9 @@ export async function classifyMessage(env, { message, sessions }) {
 const gateError = () => ({ level: 'error', complete: false, delayMs: null, announce: null, retryable: true });
 
 export async function checkCompleteness(env, { text, username = null, chatId = null, threadId = null } = {}) {
+  // Core allows 32s for provider fallbacks + 3s to read the response (#2130).
+  // Keep 5s of HTTP headroom; the old 10s limit discarded valid fallback replies.
+  const gateTimeoutMs = 40_000;
   // The verdict now carries delayMs/announce too (agent #1823): the judge decides
   // how long to wait and what to say. Older agents simply omit those fields, so the
   // gateway falls back to its own 3-minute timer.
@@ -247,7 +250,7 @@ export async function checkCompleteness(env, { text, username = null, chatId = n
         'Authorization': `Bearer ${env.AGENT_SECRET}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(gateTimeoutMs),
     });
     if (!res.ok) return gateError();
     const result = await res.json();
@@ -386,4 +389,3 @@ export async function stopTask(env, { username, chatId = null, threadId = null }
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
   return res.json();
 }
-
