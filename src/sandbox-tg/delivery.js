@@ -1,9 +1,9 @@
 // Durable delivery outbox (ACK + replay) of the Telegram slice.
 //
 // Guarantees:
-//  1. One outgoing reply per userTaskId (delivery owner). Repeated
+//  1. One outgoing reply per deliveryId (delivery owner). Repeated
 //     updates (duplicate webhook pushes) never create a second reply;
-//     the outbox record is keyed by userTaskId, and the record is
+//     receipts and terminal results have separate keys, and the record is
 //     written ONLY after the KV receipt of intake/signal — so even a
 //     lost HTTP response after persistence is recovered by replay.
 //  2. If Telegram is down (5xx / 429 / network), the outbox retries
@@ -16,6 +16,7 @@
 //     (U-10 / AC-105) by the slice handler when it sees the task go
 //     terminal — no stale launch buttons survive.
 import { logTg } from './log.js';
+import { kvEntries } from './kv.js';
 
 export const DELIVERY_STATUS = {
   pending: 'pending',
@@ -49,7 +50,7 @@ export class TgDeliveryOutbox {
   }
 
   async save(record) {
-    await this.kv.put(this.key(record.userTaskId), JSON.stringify(record));
+    await this.kv.put(this.key(record.deliveryId ?? record.userTaskId), JSON.stringify(record));
   }
 
   async delete(userTaskId) {
@@ -57,17 +58,19 @@ export class TgDeliveryOutbox {
   }
 
   /**
-   * Enqueue one reply for a task. Duplicate userTaskId = idempotent:
+   * Enqueue one reply for a task. Duplicate deliveryId = idempotent:
    * the stored reply text is re-sent verbatim; the caller decides
    * whether it is a real repeat or a replay of the same update.
    */
   async enqueue(record) {
-    const existing = await this.load(record.userTaskId);
-    if (existing?.status === DELIVERY_STATUS.sent) {
+    const deliveryId = record.deliveryId ?? record.userTaskId;
+    const existing = await this.load(deliveryId);
+    if (existing) {
       this.log({ event: 'tg.delivery.replayed', userTaskId: record.userTaskId, duplicate: true });
       return { record: existing, duplicate: true };
     }
     const next = {
+      deliveryId,
       conversationId: record.conversationId,
       userTaskId: record.userTaskId,
       destination: record.destination,
@@ -76,11 +79,11 @@ export class TgDeliveryOutbox {
       text: record.text,
       replyMarkup: record.replyMarkup ?? null,
       document: record.document ?? null,
-      status: existing ? DELIVERY_STATUS.retrying : DELIVERY_STATUS.pending,
-      attempts: existing ? existing.attempts : 0,
+      status: DELIVERY_STATUS.pending,
+      attempts: 0,
       lastStatus: null,
       history: [],
-      createdAt: existing?.createdAt ?? Date.now(),
+      createdAt: Date.now(),
     };
     await this.save(next);
     return { record: next, duplicate: false };
@@ -89,8 +92,15 @@ export class TgDeliveryOutbox {
   /** Reconciliation: retry every pending/retrying entry until the cap. */
   async drain() {
     const records = [];
-    const iter = this.kv.list({ prefix: 'delivery:' });
-    for await (const item of iter) records.push(JSON.parse(item.value));
+    for await (const item of kvEntries(this.kv, 'delivery:')) {
+      let record;
+      try {
+        record = JSON.parse(item.value);
+      } catch {
+        continue;
+      }
+      if (record && typeof record === 'object') records.push(record);
+    }
     records.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     let done = 0;
     for (const record of records) {
@@ -148,6 +158,7 @@ export class TgDeliveryOutbox {
       if (record.type === 'launch') {
         const result = await this.api.sendMessage({
           chatId: record.destination.chatId,
+          threadId: record.destination.threadId,
           text: record.text,
           replyMarkup: record.replyMarkup,
         });
@@ -156,6 +167,7 @@ export class TgDeliveryOutbox {
       if (record.type === 'message') {
         const result = await this.api.sendMessage({
           chatId: record.destination.chatId,
+          threadId: record.destination.threadId,
           text: record.text,
           replyToMessageId: record.replyToMessageId ?? null,
         });

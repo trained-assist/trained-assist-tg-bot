@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { readTgSliceConfig, authScheme } from './config.js';
+import { readTgSliceConfig } from './config.js';
 import { ControlPlaneClient } from './control-plane-client.js';
 import { TelegramApi } from './telegram.js';
 import { TgDeliveryOutbox } from './delivery.js';
@@ -11,11 +11,12 @@ import { profileForUpdate } from './profile.js';
 const app = new Hono();
 
 app.use('*', async (c, next) => {
-  const secret = c.env.TELEGRAM_WEBHOOK_SECRET;
-  if (secret) {
-    const token = c.req.header('x-telegram-bot-api-secret-token');
-    if (token !== secret) return c.json({ error: 'unsigned update refused' }, 401);
-  }
+  if (c.req.path === '/health') return next();
+  const secret = String(c.env.TELEGRAM_WEBHOOK_SECRET ?? '').trim();
+  const token = c.req.header('x-telegram-bot-api-secret-token');
+  if (!secret || token !== secret) return c.json({ error: 'unsigned update refused' }, 401);
+  const config = readTgSliceConfig(c.env);
+  c.env = { ...c.env, _sliceConfig: config, _sliceCtrl: createController(c.env, config) };
   return next();
 });
 
@@ -47,29 +48,30 @@ app.get('/cron', async c => {
 
 const webhook = app;
 
+function createController(env, config = readTgSliceConfig(env)) {
+  const client = new ControlPlaneClient(config, { logSink: line => console.log(line) });
+  const api = new TelegramApi(config);
+  const outbox = new TgDeliveryOutbox(
+    env.TG_SLICE,
+    api,
+    { deliveryMaxAttempts: config.deliveryMaxAttempts, retryBaseMs: config.deliveryRetryBaseMs, logSink: line => console.log(line) },
+  );
+  const store = new KvConversationStore(env.TG_SLICE);
+  return new TgSliceController(client, store, {
+    batchStore: new KvBatchStore(env.TG_SLICE),
+    outbox,
+    profile: config,
+    mode: env.TG_SLICE_MODE ?? MODE.direct,
+    maxTurns: config.maxTurns,
+    logSink: line => console.log(line),
+  });
+}
+
 export default {
   async fetch(request, env) {
-    const config = readTgSliceConfig(env);
-    const client = new ControlPlaneClient(config, { logSink: line => console.log(line) });
-    const api = new TelegramApi(config);
-    const outbox = new TgDeliveryOutbox(
-      env.TG_SLICE,
-      api,
-      { deliveryMaxAttempts: config.deliveryMaxAttempts, retryBaseMs: config.deliveryRetryBaseMs, logSink: line => console.log(line) },
-    );
-    const store = new KvConversationStore(env.TG_SLICE);
-    const controller = new TgSliceController(client, store, {
-      batchStore: new KvBatchStore(env.TG_SLICE),
-      outbox,
-      profile: config,
-      mode: env.TG_SLICE_MODE ?? MODE.direct,
-      maxTurns: config.maxTurns,
-      logSink: line => console.log(line),
-    });
-    const enriched = { ...env, _sliceConfig: config, _sliceCtrl: controller };
-    return webhook.fetch(request, enriched);
+    return webhook.fetch(request, env);
   },
   async scheduled(ctrl, env) {
-    await env._sliceCtrl.reconcile();
+    await createController(env).reconcile();
   },
 };

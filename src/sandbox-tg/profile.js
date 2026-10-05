@@ -53,7 +53,7 @@ export function profileForUpdate(config, update) {
 /** The message of an update, whatever carried it (message / channel_post / edited). */
 export function extractMessage(update) {
   if (!update || typeof update !== 'object') return null;
-  return update.message ?? update.channel_post ?? update.edited_message ?? null;
+  return update.message ?? update.channel_post ?? update.edited_message ?? update.callback_query?.message ?? null;
 }
 
 /** Callback query (inline keyboard) — the launch button of a batch. */

@@ -26,6 +26,7 @@ TG_SLICE_MODE = "direct"
 #   TG_SANDBOX_BOT_TOKEN        — test bot token only
 #   CONTROL_PLANE_URL           — new control plane sandbox URL
 #   CONTROL_PLANE_PRINCIPAL     — admission principal for the sandbox
+#   CONTROL_PLANE_PRINCIPAL_SIGNATURE — precomputed principal-scoped HMAC signature
 #   CONTROL_PLANE_PROFILE       — sandbox profile in Task Store
 #   CONTROL_PLANE_API_KEY       — optional bearer key
 #   TELEGRAM_WEBHOOK_SECRET     — fail-closed webhook verification

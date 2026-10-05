@@ -9,9 +9,10 @@
 import { ControlPlaneClient } from './control-plane-client.js';
 import { profileForUpdate, extractMessage, extractCallbackQuery } from './profile.js';
 import { BatchCollector, KvBatchStore, MemoryBatchStore, BATCH_STATUS, tooLargeMessage, isTooLarge, attachmentOf, launchButton } from './batch.js';
-import { ConversationSession, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
-import { TgDeliveryOutbox, DELIVERY_STATUS } from './delivery.js';
+import { ConversationSession, ConversationIndex, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
+import { TgDeliveryOutbox } from './delivery.js';
 import { logTg } from './log.js';
+import { kvEntries } from './kv.js';
 
 export const MODE = { direct: 'direct', batch: 'batch' };
 
@@ -51,7 +52,7 @@ export class TgSliceController {
       : await this.handleMessage(profile, message, update);
 
     await this.store.save({
-      id: dedupKey,
+      conversationId: dedupKey,
       status: 'processed',
       updateId: update.update_id,
       userTaskId: effects.find(e => e.userTaskId)?.userTaskId ?? null,
@@ -72,6 +73,7 @@ export class TgSliceController {
     const data = callback.data;
     if (!data?.startsWith('tg-launch:')) return [];
     const conversationId = data.slice('tg-launch:'.length);
+    if (conversationId !== profile.conversationId) return [];
     const batch = await this.batchStore.load(conversationId);
     if (!batch || batch.status !== BATCH_STATUS.collecting) return [];
     batch.status = BATCH_STATUS.launched;
@@ -86,7 +88,24 @@ export class TgSliceController {
       inputItems,
     });
     await this.client.start(receipt.userTaskId);
+    const index = await this.store.load(conversationId) ?? new ConversationIndex(conversationId, profile.profileId);
+    index.destination = profile.destination;
+    index.requestingBot = profile.requestingBot;
+    if (!index.turns.some(turn => turn.requestId === requestId)) {
+      index.turns.push({
+        seq: index.turns.length + 1,
+        conversationId,
+        kind: 'new',
+        requestId,
+        userTaskId: receipt.userTaskId,
+        text: `batch:${batch.items.length} items`,
+        inputItemCount: inputItems.length,
+        createdAt: receipt.acceptedAt,
+      });
+    }
+    await this.store.save(index);
     await this.outbox?.enqueue({
+      deliveryId: `receipt:${requestId}`,
       conversationId,
       userTaskId: receipt.userTaskId,
       destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
@@ -119,12 +138,16 @@ export class TgSliceController {
       } else throw e;
     }
     const awaiting = view.awaiting;
+    session.index.destination = profile.destination;
+    session.index.requestingBot = profile.requestingBot;
+    await this.store.save(session.index);
     const text = typeof message.text === 'string' ? message.text : null;
     if (awaiting && text != null) {
       const answer = await session.answer(text);
       const effects = [{ type: 'answer', userTaskId: answer.userTaskId, seq: answer.seq, duplicate: answer.duplicate }];
       if (!answer.duplicate) {
         await this.outbox?.enqueue({
+          deliveryId: `receipt:${answer.requestId}`,
           conversationId: profile.conversationId,
           userTaskId: answer.userTaskId,
           destination: profile.destination,
@@ -139,6 +162,7 @@ export class TgSliceController {
     const effects = [{ type: 'new', userTaskId: send.userTaskId, seq: send.seq, duplicate: send.duplicate }];
     if (!send.duplicate) {
       await this.outbox?.enqueue({
+        deliveryId: `receipt:${send.requestId}`,
         conversationId: profile.conversationId,
         userTaskId: send.userTaskId,
         destination: profile.destination,
@@ -183,13 +207,14 @@ export class TgSliceController {
 
   /** Background reconciliation: retry deliveries + push terminal results. */
   async reconcile() {
-    const drained = await this.outbox?.drain() ?? 0;
     const pushed = [];
-    const iter = this.store.kv?.list?.({ prefix: 'conv:' });
-    if (iter) {
-      for await (const item of iter) {
+    if (this.store.kv) {
+      for await (const item of kvEntries(this.store.kv, 'conv:')) {
         try {
           const index = JSON.parse(item.value);
+          if (!Array.isArray(index?.turns)) continue;
+          if (!index.destination || !this.profile.allowedChats.includes(String(index.destination.chatId))) continue;
+          if (index.requestingBot !== this.profile.botUsername) continue;
           const session = new ConversationSession(this.client, {
             conversationId: index.conversationId,
             profileId: index.profileId,
@@ -200,24 +225,28 @@ export class TgSliceController {
           const view = await session.open();
           for (const turn of view.turns) {
             if (!turn.unknownOutcome && !turn.terminal) continue;
-            const delivery = await this.outbox?.load(turn.userTaskId);
-            if (delivery?.status === DELIVERY_STATUS.sent) continue;
-            const label = turn.terminal === 'done' ? 'Готово.' : turn.terminal === 'failed' ? 'Ошибка исполнителя.' : 'Отменено.';
+            const deliveryId = `${turn.terminal ? 'terminal' : 'unknown'}:${turn.userTaskId}:g${turn.generation}`;
+            const delivery = await this.outbox?.load(deliveryId);
+            if (delivery) continue;
+            const answer = typeof turn.result === 'string' ? turn.result : turn.result?.answer;
+            const label = turn.terminal === 'done' ? 'Готово. Текст результата отсутствует.' : turn.terminal === 'failed' ? 'Ошибка исполнителя.' : turn.terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
             await this.outbox?.enqueue({
+              deliveryId,
               conversationId: index.conversationId,
               userTaskId: turn.userTaskId,
-              destination: { chatId: profile?.destination?.chatId ?? index.profileId, threadId: null },
-              requestId: `terminal:${turn.userTaskId}`,
+              destination: index.destination,
+              requestId: deliveryId,
               type: 'message',
-              text: label,
+              text: turn.terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label,
             });
             pushed.push({ userTaskId: turn.userTaskId, terminal: turn.terminal });
           }
         } catch {
-          // ignore malformed entries
+          this.log({ event: 'tg.reconcile.failed', reason: 'conversation_unavailable' });
         }
       }
     }
+    const drained = await this.outbox?.drain() ?? 0;
     return { drained, pushed };
   }
 }
