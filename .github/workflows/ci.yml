@@ -54,8 +54,39 @@ jobs:
       - name: Media pipeline in local workerd and R2
         run: npm run test:media-runtime
 
+  sandbox-validation:
+    name: sandbox-validation
+    if: (github.head_ref || github.ref_name) == 'integration/first-working-version-20261005' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Validate exported sandbox Worker handlers
+        run: npx vitest run tests/p11*.test.js --silent
+      - name: Bundle the sandbox Worker without deployment
+        run: |
+          npx wrangler deploy --dry-run --config wrangler.sandbox-tg.toml --outdir .wrangler/sandbox-ci
+          git rev-parse HEAD > .wrangler/sandbox-ci/source-sha.txt
+      - name: Save sandbox bundle and tested revision
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .wrangler/sandbox-ci/
+          include-hidden-files: true
+          if-no-files-found: error
+
   staging-gate:
-    needs: [ci, scenario-gate, deploy-staging, smoke-test-staging]
+    needs: [ci, scenario-gate, deploy-staging, smoke-test-staging, sandbox-validation]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -63,26 +94,34 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Require the actual staging deploy and smoke on this revision
+      - name: Require staging evidence or explicit sandbox validation on this revision
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           EVENT: ${{ github.event_name }}
-          PUSH_RESULTS: ${{ join(needs.*.result, ',') }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          NEEDS_RESULTS: ${{ toJSON(needs) }}
         run: |
           python3 - <<'PY'
           import json, os, time, urllib.request
+          results = {name: job['result'] for name, job in json.loads(os.environ['NEEDS_RESULTS']).items()}
+          required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
+          sandbox = os.environ['HEAD_BRANCH'] == 'integration/first-working-version-20261005' and os.environ['HEAD_REPO'] == os.environ['REPO']
+          if sandbox:
+              expected = {'ci': 'success', 'scenario-gate': 'success', 'sandbox-validation': 'success', 'deploy-staging': 'skipped', 'smoke-test-staging': 'skipped'}
+              assert results == expected, results
+              print('Sandbox handlers and bundle validated without deployment on', os.environ['HEAD_SHA'])
+              raise SystemExit(0)
           if os.environ['EVENT'] in ('push', 'workflow_dispatch'):
-              results = os.environ['PUSH_RESULTS'].split(',')
-              assert len(results) == 4 and all(r == 'success' for r in results), results
+              assert all(results.get(name) == 'success' for name in required), results
               raise SystemExit(0)
           base = 'https://api.github.com/repos/' + os.environ['REPO']
           def get(path):
               request = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
               with urllib.request.urlopen(request, timeout=15) as response:
                   return json.load(response)
-          required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
           for _ in range(60):
               runs = get('/actions/workflows/ci.yml/runs?event=push&head_sha=' + os.environ['HEAD_SHA'])['workflow_runs']
               runs = [run for run in runs if run['head_sha'] == os.environ['HEAD_SHA']]
