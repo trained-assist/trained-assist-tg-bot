@@ -96,6 +96,20 @@ async function ready(data) {
 }
 
 describe('NEW existing-UX operator harness, offline fixtures only', () => {
+  it('requires the frozen user goal result rather than any nonempty answer', async () => {
+    const data = await fixture();
+    try {
+      const config = readExistingUxConfig({ ...data.raw, expectedAnswerSubstring: 'fixture output.' });
+      expect(config.fingerprint).not.toBe(data.config.fingerprint);
+      expect(verifyExistingUxDelivery(data.status, data.deliveries, config, data.receipt).goalResultMatched).toBe(true);
+      data.status.taskStore.result.answer = 'Unrelated successful response.';
+      expect(() => verifyExistingUxDelivery(data.status, data.deliveries, config, data.receipt)).toThrow('GOAL_RESULT_MISMATCH');
+      expect(() => readExistingUxConfig({ ...data.raw, expectedAnswerSubstring: '' })).toThrow('BOUNDED_GOAL_EXPECTATION_REQUIRED');
+      expect(() => readExistingUxConfig({ ...data.raw, expectedAnswerSubstring: 'x'.repeat(1001) })).toThrow('BOUNDED_GOAL_EXPECTATION_REQUIRED');
+      expect(readExistingUxConfig(data.raw).fingerprint).toBe(data.config.fingerprint);
+    } finally { await data.cleanup(); }
+  });
+
   it.each([0, 1])('freezes identity, uses the actual collector ID, and observes stable delivery with %i engine attempts', async count => {
     const data = await fixture(count);
     try {

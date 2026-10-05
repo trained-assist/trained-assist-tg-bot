@@ -41,6 +41,9 @@ export function readExistingUxConfig(input) {
     && reference(input.callbackId) && input.callbackId.length <= 64, 'UNIQUE_FROZEN_IDS_REQUIRED');
   requireProof(isAbsolute(input.checkpointFile ?? ''), 'PRIVATE_CHECKPOINT_PATH_REQUIRED');
   requireProof([0, 1].includes(input.expectedRunCount), 'EXPLICIT_ENGINE_EXPECTATION_REQUIRED');
+  requireProof(input.expectedAnswerSubstring === undefined || (typeof input.expectedAnswerSubstring === 'string'
+    && input.expectedAnswerSubstring.trim().length > 0 && Buffer.byteLength(input.expectedAnswerSubstring) <= 1000),
+  'BOUNDED_GOAL_EXPECTATION_REQUIRED');
   const requestTimeoutMs = input.requestTimeoutMs ?? 60000;
   const overallTimeoutMs = input.overallTimeoutMs ?? 900000;
   const pollIntervalMs = input.pollIntervalMs ?? 1000;
@@ -67,6 +70,9 @@ export function readExistingUxConfig(input) {
   config.fingerprint = hash(JSON.stringify([config.gatewayUrl, config.controlPlaneUrl, scope, input.principalId,
     hash(input.webhookSecret), hash(input.principalSignature ?? ''), hash(input.apiKey ?? ''), config.updateBodies,
     input.callbackUpdateId, input.callbackId, input.expectedRunCount]));
+  if (input.expectedAnswerSubstring !== undefined) {
+    config.fingerprint = hash(JSON.stringify([config.fingerprint, input.expectedAnswerSubstring]));
+  }
   return config;
 }
 
@@ -126,6 +132,7 @@ export function verifyExistingUxDelivery(status, deliveries, config, receipt) {
     && reference(run.id) && reference(run.session_id), 'CANONICAL_RUN_REQUIRED');
   const answer = typeof task.result === 'string' ? task.result : task.result?.answer;
   requireProof(typeof answer === 'string' && answer.trim().length > 0, 'PERSISTED_ANSWER_REQUIRED');
+  requireProof(config.expectedAnswerSubstring === undefined || answer.includes(config.expectedAnswerSubstring), 'GOAL_RESULT_MISMATCH');
   const terminal = deliveries?.terminal;
   requireProof(deliveries.receipt == null && terminal?.userTaskId === config.taskId
     && terminal.deliveryId === `terminal:${config.taskId}:g1` && terminal.generation === 1
@@ -133,7 +140,8 @@ export function verifyExistingUxDelivery(status, deliveries, config, receipt) {
     && terminal.chatId === config.chatId && terminal.threadId === config.threadId && terminal.legacyStatus == null,
   'SINGLE_SCOPED_TERMINAL_DELIVERY_REQUIRED');
   return { taskId: config.taskId, generation: 1, attemptCount: status.runs.length,
-    answerHash: hash(answer), terminalAttempts: 1, providerMessageId: terminal.providerMessageId };
+    answerHash: hash(answer), terminalAttempts: 1, providerMessageId: terminal.providerMessageId,
+    ...(config.expectedAnswerSubstring === undefined ? {} : { goalResultMatched: true }) };
 }
 
 export async function operateExistingUx(mode, config, options = {}) {
