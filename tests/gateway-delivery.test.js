@@ -82,8 +82,13 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     expect(body.providerMessageId).toBe(556);
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
     // Адресная кнопка: тот же callback, который сливает буфер ЭТОГО чата.
-    const kb = JSON.stringify(sendMessageWithKeyboard.mock.calls[0][3]);
-    expect(kb).toContain('intake_run');
+    // РЕГРЕССИЯ (найдена живой приёмкой 2026-10-04): sendMessageWithKeyboard
+    // оборачивает САМ. Сюда передаются РЯДЫ, а не готовый { inline_keyboard }.
+    // Двойная обёртка даёт от Telegram «field "inline_keyboard" must be of type
+    // Array» и доставка не происходит вовсе.
+    const rows = sendMessageWithKeyboard.mock.calls[0][3];
+    expect(Array.isArray(rows)).toBe(true);
+    expect(JSON.stringify(rows)).toContain('intake_run');
     // Адрес доставки — отрицательный id группы, он не теряется.
     expect(Number(sendMessageWithKeyboard.mock.calls[0][1])).toBe(-5496844108);
   });
