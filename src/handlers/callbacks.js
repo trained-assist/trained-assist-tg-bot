@@ -11,6 +11,7 @@ import { renderSnapshotDocument } from '../input-assembly.js';
 import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask, fetchRunInput, orphanChecklistAction } from '../lib/agent-client.js';
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 import { stopChat, stopReplyText } from '../lib/stop-chat.js';
+import { controlPlaneStopDisabled } from '../lib/control-plane-stop-gate.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
 // message_thread_id so it lands in the same forum topic as its trigger. editMessage
@@ -62,6 +63,11 @@ export async function handleCallbackQuery(cq, env) {
   const threadId = threadIdOf(message);
 
   if (!chatId) return;
+  if (controlPlaneStopDisabled(env) && (data?.startsWith('intake_stop')
+      || /^(stop|stopok|stopno|sup|supok|supno)\|/.test(data || ''))) {
+    await answerCallbackQuery(env.BOT_TOKEN, id, 'Остановка Control Plane сейчас отключена. Собранный ввод сохранён.');
+    return;
+  }
 
   let session = await getSession(env.SESSIONS, chatId, threadId);
   if (!(await controlPlaneCallbackOwned(cq, env, session))) {

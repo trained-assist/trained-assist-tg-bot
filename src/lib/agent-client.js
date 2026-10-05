@@ -6,6 +6,7 @@ import { pendingGroupHistory, formatHistoryBlock, ackGroupHistory, maxSeq, isGro
 import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
 import { controlPlaneClient, runControlPlaneTask } from './control-plane-execution.js';
 import { getSession } from './kv.js';
+import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './control-plane-stop-gate.js';
 // HTTP client for trained-assist-agent
 
 // The REAL model input of a dispatched run (agent-side: system prompt +
@@ -396,6 +397,7 @@ async function stopControlPlaneTasks(env, { username, chatId, threadId }) {
 }
 
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
+  if (controlPlaneStopDisabled(env)) throw controlPlaneStopDisabledError();
   if (env.EXECUTION_BACKEND === 'control-plane') {
     try { return await stopControlPlaneTasks(env, { username, chatId, threadId }); }
     catch { throw controlPlaneStopError(); }

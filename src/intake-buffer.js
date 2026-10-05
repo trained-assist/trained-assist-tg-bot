@@ -32,6 +32,7 @@ import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem, FORCE_RUN_RE } from './intake-routing.js';
+import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './lib/control-plane-stop-gate.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { pruneHistory } from './group-history.js';
 
@@ -395,6 +396,10 @@ export class IntakeBuffer {
 
   async _fetch(request) {
     const url = new URL(request.url);
+    if (controlPlaneStopDisabled(this.env) && request.method === 'POST'
+        && ['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'].includes(url.pathname)) {
+      return Response.json({ error: 'control_plane_stop_disabled' }, { status: 409 });
+    }
     if (url.pathname === '/cp-stop-targets' && request.method === 'POST') {
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
       const source = await request.json().catch(() => null);
@@ -1115,13 +1120,13 @@ export class IntakeBuffer {
         const had = !!((await store.get('launchQueued'))
           || (await store.get('launchAfterRelease'))
           || (await store.get('launchWhenReady'))
-          || (await store.get('stopLaunch'))); // RC-04/05: отмена действует на ЛЮБОЙ пункт меню
-        const stopLaunchCancelled = !!(await store.get('stopLaunch'));
+          || (!controlPlaneStopDisabled(this.env) && (await store.get('stopLaunch')))); // RC-04/05: отмена действует на ЛЮБОЙ пункт меню
+        const stopLaunchCancelled = !controlPlaneStopDisabled(this.env) && !!(await store.get('stopLaunch'));
         await store.delete('launchQueued');
         await store.delete('launchAfterRelease');
         await store.delete('launchWhenReady');
         await store.delete('launchParallel');
-        await store.delete('stopLaunch');
+        if (!controlPlaneStopDisabled(this.env)) await store.delete('stopLaunch');
         return { had, stopLaunchCancelled };
       });
       if (cancelled === null) return new Response('Callback ownership mismatch', { status: 409 });
@@ -1184,6 +1189,7 @@ export class IntakeBuffer {
   // «ровно один ран — без дубля из буфера, retry или GTD»). Must run inside
   // _exclusive; `spec` is re-read under the lock by _consumeStopLaunch.
   async _prepareStopLaunchLocked(spec, items) {
+    if (controlPlaneStopDisabled(this.env)) throw controlPlaneStopDisabledError();
     const store = this.state.storage;
     await store.delete('stopped'); // the explicit choice IS the lift of the ⛔ hold
     for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
@@ -1201,6 +1207,7 @@ export class IntakeBuffer {
   // (the flag is taken under the lock). Still-preparing attachments are NOT lost:
   // the choice stays remembered and the next tick tries again.
   async _consumeStopLaunch() {
+    if (controlPlaneStopDisabled(this.env)) return false;
     if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return false;
     const spec = await this.state.storage.get('stopLaunch');
     if (!spec) return false;
@@ -2057,6 +2064,7 @@ export class IntakeBuffer {
   }
 
   async _driveControlPlaneStop(source) {
+    if (controlPlaneStopDisabled(this.env)) throw controlPlaneStopDisabledError();
     const prepared = await this._exclusive(async () => this._readControlPlaneStopTargets(source));
     if (prepared.unresolved) {
       await this._exclusive(async () => {
@@ -2189,12 +2197,13 @@ export class IntakeBuffer {
         if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId || receipt.durable !== true) return false;
         let routed;
         const routingKnown = record.routingOutcome?.known === true && record.routingOutcome.publicationComplete === true;
-        if (!routingKnown) {
+        const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
+        if (!routingKnown && !routingDeferred) {
           if (stopPending) return false;
           routed = await client.route(receipt.userTaskId);
           if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return false;
         }
-        if (!routingKnown && routed?.degraded === true) {
+        if (!routingKnown && !routingDeferred && routed?.degraded === true) {
           const snapshot = await this._readSnapshot(requestId);
           const envelope = snapshot?.body?.controlPlaneEnvelope;
           const message = snapshot?.items?.at(-1)?.msg;
@@ -2205,7 +2214,7 @@ export class IntakeBuffer {
             { chatId: message.chat.id, threadId: threadIdOf(message) },
             `${envelope.conversationRef}-b${requestId.slice(-24)}`);
         }
-        if (!routingKnown) {
+        if (!routingKnown && !routingDeferred) {
           await this._exclusive(async () => this.state.storage.transaction(async tx => {
             const key = `cp-acceptance:${requestId}`;
             const current = await tx.get(key);
@@ -2260,6 +2269,9 @@ export class IntakeBuffer {
         return true;
       });
       if (released) await this._afterBusyRelease();
+      if (controlPlaneStopDisabled(this.env) && (await this.state.storage.get('cpStopWindow'))?.pending) {
+        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+      }
       return released;
     } catch {
       return false;
@@ -2313,7 +2325,7 @@ export class IntakeBuffer {
   }
 
   async alarm() {
-    if (this.env.EXECUTION_BACKEND === 'control-plane') {
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && !controlPlaneStopDisabled(this.env)) {
       const stopWindow = await this.state.storage.get('cpStopWindow');
       if (stopWindow?.pending) {
         try {

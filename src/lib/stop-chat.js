@@ -11,6 +11,7 @@
 import { conversationKey } from '../conversation-context.js';
 import { stopTask } from './agent-client.js';
 import { cancelRetries } from './kv.js';
+import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './control-plane-stop-gate.js';
 
 // SS-05: a stop must also cancel work the gateway already put into delivery —
 // the durable RunOutbox and the recovery queue — not only the running process.
@@ -55,6 +56,8 @@ async function cancelRecovery(env, { chatId, threadId }) {
 }
 
 export async function stopChat(env, { username, chatId, threadId = null, replyTo = null }) {
+  if (controlPlaneStopDisabled(env)) return { killed: 0, held: 0, cancelled: 0,
+    hadIntent: false, intake: false, error: controlPlaneStopDisabledError() };
   let intake = null;
   if (env.INTAKE) {
     try {
