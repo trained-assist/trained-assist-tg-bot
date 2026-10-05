@@ -5,8 +5,9 @@
 // launched the next buffered batch (run-finished → launchAfterRelease, the judge's
 // debounce alarm, a remembered ▶️). So a stop first reaches the chat's IntakeBuffer
 // DO — clears every launch intent/timer and holds the messages (collector «⛔
-// Остановлено. N ждут — ▶️») — and only then asks the agent to kill the run. That
-// order matters: the run-finished push the kill triggers must find no intent left.
+// Остановлено. N ждут — ▶️») — then asks the selected backend to confirm it. CP
+// uses a durable conversation window and Runner evidence; legacy uses the agent
+// stop endpoint. The run-finished push must find no launch intent left.
 import { conversationKey } from '../conversation-context.js';
 import { stopTask } from './agent-client.js';
 import { cancelRetries } from './kv.js';
@@ -59,7 +60,7 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
     try {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const res = await stub.fetch('https://intake/stop', { method: 'POST',
-        body: JSON.stringify({ replyTo, chatId, threadId }) });
+        body: JSON.stringify({ replyTo, username, chatId, threadId }) });
       intake = res.ok ? await res.json() : null;
     } catch (e) {
       // Never let a buffer hiccup block the kill itself.
@@ -68,8 +69,8 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
   }
   // Cancel queued delivery BEFORE killing the run: the kill triggers run-finished,
   // which must not find a still-queued job to launch.
-  const cancelled = await cancelOutbox(env, { username, chatId, threadId })
-    + await cancelRecovery(env, { chatId, threadId });
+  const cancelled = env.EXECUTION_BACKEND === 'control-plane' ? 0
+    : await cancelOutbox(env, { username, chatId, threadId }) + await cancelRecovery(env, { chatId, threadId });
   let killed = 0;
   let error = null;
   try {
