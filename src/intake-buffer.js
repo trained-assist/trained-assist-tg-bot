@@ -398,10 +398,19 @@ export class IntakeBuffer {
     if (url.pathname === '/cp-stop-targets' && request.method === 'POST') {
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
       const source = await request.json().catch(() => null);
-      return this._exclusive(async () => {
-        try { return json(await this._readControlPlaneStopTargets(source)); }
-        catch { return new Response('Stop scope mismatch', { status: 409 }); }
-      });
+      try { await this._exclusive(async () => this._readControlPlaneStopTargets(source)); }
+      catch { return new Response('Stop scope mismatch', { status: 409 }); }
+      try { return json(await this._driveControlPlaneStop(source)); }
+      catch {
+        await this._exclusive(async () => {
+          const current = await this.state.storage.get('cpStopWindow');
+          if (current) {
+            await this.state.storage.put('cpStopWindow', { ...current, pending: true, unresolved: true });
+            await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+          }
+        });
+        return json({ unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown' });
+      }
     }
     if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/callback-owner' && request.method === 'POST') {
       const source = await request.json();
@@ -715,11 +724,20 @@ export class IntakeBuffer {
         if (this.env.EXECUTION_BACKEND === 'control-plane') {
           try {
             const session = await getSession(this.env.SESSIONS, reqChatId, reqThreadId);
-            const targets = await this._readControlPlaneStopTargets({
-              username: source.username ?? session?.username, chatId: reqChatId, threadId: reqThreadId,
-            });
-            if (targets.tasks.length || targets.unresolved) await store.put('cpStopWindow', { ...targets, pending: true });
-            if (targets.unresolved) return null;
+            const username = source.username ?? session?.username;
+            const profileId = controlPlaneClient(this.env).config.profileId;
+            const scope = await store.get('cpScope');
+            if (!username || session?.username !== username || !scope || scope.chatId !== reqChatId
+              || scope.threadId !== reqThreadId || scope.profileId !== profileId) return null;
+            const previous = await store.get('cpStopWindow');
+            if (!previous?.pending) {
+              const admissionRequestIds = [...new Set(await store.get('cpBusyRequests') || [])].sort();
+              await store.put('cpStopWindow', { intentId: crypto.randomUUID(), restart: previous?.stopConfirmed === true,
+                username, chatId: reqChatId, threadId: reqThreadId, profileId,
+                previousGroups: previous?.groups || [], admissionRequestIds, groups: [], tasks: [],
+                pending: true, unresolved: true, stopConfirmed: false,
+                createdAt: Date.now() });
+            }
           } catch { return null; }
         }
         const had = !!((await store.get('launchAfterRelease')) || (await store.get('launchWhenReady'))
@@ -734,14 +752,15 @@ export class IntakeBuffer {
         const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
         // The alarm only stays for what is not a launch: the busy safety poll and
         // media recovery. Everything else it could do now is dispatch.
-        if (busy) await store.setAlarm(Date.now() + BUSY_POLL_MS);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await store.get('cpStopWindow'))?.pending) await store.setAlarm(Date.now() + BUSY_POLL_MS);
+        else if (busy) await store.setAlarm(Date.now() + BUSY_POLL_MS);
         else if (items.some(i => i.mediaPending)) await store.setAlarm(Date.now() + 60_000);
         else await store.deleteAlarm();
         const prevCollector = items.length ? await store.get('collectorMsgId') : null;
         if (prevCollector) await store.delete('collectorMsgId');
         return { held: items.length, busy, hadIntent: had, prevCollector, last: items.at(-1)?.msg || null };
       });
-      if (res === null) return new Response('Stop admission unresolved or scope mismatch', { status: 409 });
+      if (res === null) return new Response('Stop scope mismatch', { status: 409 });
       console.log(`[stop] intake chat=${res.last?.chat?.id ?? reqChatId} held=${res.held} busy=${res.busy} hadIntent=${res.hadIntent}`);
       if (res.held) {
         const chatId = res.last?.chat?.id ?? reqChatId;
@@ -1981,12 +2000,18 @@ export class IntakeBuffer {
     if (scope && (scope.chatId !== source.chatId || scope.threadId !== threadId || scope.profileId !== profileId)) throw new Error('Stop conversation mismatch');
     if (window && (window.username !== source.username || window.chatId !== source.chatId ||
         window.threadId !== threadId || window.profileId !== profileId)) throw new Error('Stop window mismatch');
+    if (!scope && !window) throw new Error('No stop scope proof');
+    const intent = window || {
+      intentId: crypto.randomUUID(), restart: false, groups: [], tasks: [], pending: true,
+      username: source.username, chatId: source.chatId, threadId, profileId,
+    };
     const ids = [...new Set([...(await this.state.storage.get('cpBusyRequests') || []),
-      ...(window?.tasks || []).map(task => task.requestId)])];
-    let unresolved = this.cpDispatches > 0 || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length > 0;
+      ...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
+    const admissionBarrierComplete = this.cpDispatches === 0
+      && ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length === 0;
+    let unresolved = !admissionBarrierComplete;
     if (await this.state.storage.get('busy') && !ids.length) unresolved = true;
-    if (!scope && !window && !ids.length && !unresolved) throw new Error('No stop scope proof');
-    const tasks = [];
+    const grouped = new Map();
     for (const requestId of ids) {
       const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
       const receipt = record?.receipt;
@@ -1996,13 +2021,92 @@ export class IntakeBuffer {
           receipt?.durable !== true || typeof receipt?.userTaskId !== 'string' || !receipt.userTaskId ||
           snapshot?.body?.username !== source.username || envelope?.requestId !== requestId || envelope?.profileId !== profileId ||
           !snapshot?.items?.length || snapshot.items.some(item => item.msg?.chat?.id !== source.chatId || threadIdOf(item.msg) !== threadId)) {
-        return { username: source.username, chatId: source.chatId, threadId, profileId, unresolved: true, tasks: [] };
+        return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+          admissionBarrierComplete: false, admissionRequestIds: ids, unresolved: true, groups: [], tasks: [] };
       }
-      const saved = window?.tasks.find(task => task.requestId === requestId);
+      const saved = intent.tasks?.find(task => task.requestId === requestId);
       if (saved && (saved.userTaskId !== receipt.userTaskId || saved.profileId !== profileId)) throw new Error('Stop task mismatch');
-      tasks.push({ requestId, userTaskId: receipt.userTaskId, profileId });
+      const conversationId = envelope.conversationRef;
+      if (typeof conversationId !== 'string' || !conversationId) {
+        return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+          admissionBarrierComplete: false, admissionRequestIds: ids, unresolved: true, groups: [], tasks: [] };
+      }
+      if (!grouped.has(conversationId)) grouped.set(conversationId, []);
+      grouped.get(conversationId).push({ requestId, userTaskId: receipt.userTaskId, profileId, receiptId: receipt.receiptId });
     }
-    return { username: source.username, chatId: source.chatId, threadId, profileId, unresolved, tasks };
+    if (!grouped.size && scope?.conversationId) grouped.set(scope.conversationId, []);
+    const groups = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([conversationId, tasks]) => ({
+      conversationId,
+      windowId: '',
+      restart: intent.restart === true && (intent.previousGroups || []).some(previous =>
+        previous.conversationId === conversationId && previous.stopConfirmed === true),
+      admissionRequestIds: tasks.map(task => task.requestId).sort(),
+      tasks,
+    }));
+    // Hash the conversation identity so the stable per-conversation window ID is
+    // bounded and does not expose conversation data in CP diagnostics.
+    for (const group of groups) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(group.conversationId));
+      const suffix = Array.from(new Uint8Array(digest).slice(0, 8), value => value.toString(16).padStart(2, '0')).join('');
+      group.windowId = `tgstop-${intent.intentId}-${suffix}`;
+    }
+    return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+      admissionBarrierComplete: !unresolved, admissionRequestIds: ids, unresolved,
+      noRemoteStop: groups.length === 0 && ids.length === 0 && !unresolved && !(await this.state.storage.get('busy')),
+      groups, tasks: groups.flatMap(group => group.tasks) };
+  }
+
+  async _driveControlPlaneStop(source) {
+    const prepared = await this._exclusive(async () => this._readControlPlaneStopTargets(source));
+    if (prepared.unresolved) {
+      await this._exclusive(async () => {
+        const current = await this.state.storage.get('cpStopWindow');
+        if (current?.intentId === prepared.intentId) {
+          await this.state.storage.put('cpStopWindow', { ...current, admissionRequestIds: prepared.admissionRequestIds,
+            pending: true, unresolved: true });
+          await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        }
+      });
+      return { ...prepared, snapshotId: null, stopConfirmed: false };
+    }
+    if (prepared.noRemoteStop) {
+      const saved = await this._exclusive(async () => {
+        const current = await this.state.storage.get('cpStopWindow');
+        if (!current || current.intentId !== prepared.intentId) return false;
+        await this.state.storage.put('cpStopWindow', { ...current, pending: false, unresolved: false,
+          stopConfirmed: true, locallyNoRun: true, tasks: [], groups: [], updatedAt: Date.now() });
+        if (!(await this.state.storage.get('busy'))) await this.state.storage.deleteAlarm();
+        return true;
+      });
+      return { ...prepared, unresolved: !saved, stopConfirmed: saved, snapshotId: null, tasks: [] };
+    }
+    const client = controlPlaneClient(this.env);
+    const results = [];
+    for (const group of prepared.groups) {
+      const result = await client.stopTargets({ conversationId: group.conversationId,
+        windowId: group.windowId, admissionBarrierComplete: true,
+        admissionRequestIds: group.admissionRequestIds, restart: group.restart });
+      if (result.profileId !== prepared.profileId || result.conversationId !== group.conversationId) {
+        throw new Error('Control plane stop identity mismatch');
+      }
+      results.push({ ...result, windowId: group.windowId });
+    }
+    const confirmed = results.length > 0 && results.every(result => !result.unresolved && result.stopConfirmed);
+    const saved = await this._exclusive(async () => {
+      const current = await this.state.storage.get('cpStopWindow');
+      if (!current || current.intentId !== prepared.intentId) return false;
+      const tasks = results.flatMap(result => result.tasks);
+      await this.state.storage.put('cpStopWindow', { ...current, admissionRequestIds: prepared.admissionRequestIds,
+        groups: results, tasks,
+        pending: !confirmed, unresolved: !confirmed, stopConfirmed: confirmed,
+        snapshotId: results.length === 1 ? results[0].snapshotId : null, updatedAt: Date.now() });
+      if (!confirmed) await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+      else if (!(await this.state.storage.get('busy'))) await this.state.storage.deleteAlarm();
+      return true;
+    });
+    return { ...prepared, groups: results, tasks: results.flatMap(result => result.tasks),
+      unresolved: !saved || !confirmed, stopConfirmed: saved && confirmed,
+      snapshotId: results.length === 1 ? results[0].snapshotId : null };
   }
 
   async _recordControlPlaneAck(ack, items) {
@@ -2209,6 +2313,27 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    if (this.env.EXECUTION_BACKEND === 'control-plane') {
+      const stopWindow = await this.state.storage.get('cpStopWindow');
+      if (stopWindow?.pending) {
+        try {
+          const result = await this._driveControlPlaneStop({ username: stopWindow.username,
+            chatId: stopWindow.chatId, threadId: stopWindow.threadId });
+          if (result.stopConfirmed) {
+            const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+            const last = items.at(-1)?.msg;
+            await this._showCollector(last?.chat?.id ?? stopWindow.chatId, items.length,
+              last?.message_id ?? null, last ? threadIdOf(last) : stopWindow.threadId,
+              items.length ? null : '⛔ Остановка подтверждена. Новый запуск не выполнялся.');
+            return;
+          }
+        }
+        catch {
+          await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        }
+        if ((await this.state.storage.get('cpStopWindow'))?.pending) return;
+      }
+    }
     // A «стоп + запуск» choice waiting for its start outranks every timer below
     // (RC-04/RC-05): if the run is gone and the batch is ready, run it now.
     if (await this._consumeStopLaunch()) return;

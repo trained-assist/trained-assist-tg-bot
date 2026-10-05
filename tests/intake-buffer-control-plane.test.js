@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
+const { handleMessage, checkCompleteness, route, request, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
   handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), send: vi.fn(), edit: vi.fn(),
+  stopTargets: vi.fn(),
   publishRoutingDegradation: vi.fn(),
   enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
 }));
@@ -17,7 +18,7 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile' }, route, request }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile' }, route, request, stopTargets }),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -68,6 +69,9 @@ async function accept(owner, inputReceipt = receipt) {
 beforeEach(() => {
   vi.clearAllMocks();
   route.mockResolvedValue({});
+  stopTargets.mockImplementation(async input => ({ snapshotId: 'snapshot-test', profileId: 'test-profile',
+    conversationId: input.conversationId, tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
+      profileId: receipt.profileId, receiptId: 'receipt:test' }], unresolved: false, stopConfirmed: true }));
   publishRoutingDegradation.mockResolvedValue(undefined);
   request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done', generation: 1 } } });
   enqueue.mockImplementation(async record => ({ record: { ...record, status: 'pending' }, duplicate: false }));
@@ -91,18 +95,44 @@ describe('existing collector control-plane ownership', () => {
     await value.storage.put(`cp-acceptance:${receipt.requestId}`, { receipt, terminal: false,
       routingOutcome: { known: true, publicationComplete: true, degraded: false } });
     await value.storage.put('cpScope', { chatId: 42, threadId, profileId: receipt.profileId });
+    await value.owner.fetch(rpc('/stop', { username: 'test-profile', chatId: 42, threadId }));
     return { ...value, source: { username: 'test-profile', chatId: 42, threadId } };
   }
 
-  it('returns read-only stop targets only from trusted acceptance snapshots, not caller IDs', async () => {
-    const { owner, storage, source } = await stopFixture();
-    const before = await storage.list();
+  it('calls the CP stop endpoint with generic conversation identity and durable admissions', async () => {
+    const { owner, source } = await stopFixture();
     const response = await owner.fetch(rpc('/cp-stop-targets', { ...source, userTaskId: 'caller-invented' }));
-    expect(await response.json()).toEqual({ ...source, profileId: receipt.profileId, unresolved: false,
-      tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId }] });
-    expect(await storage.list()).toEqual(before);
+    const result = await response.json();
+    expect(result).toMatchObject({ profileId: receipt.profileId, unresolved: false, stopConfirmed: true,
+      tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId, receiptId: 'receipt:test' }] });
+    expect(stopTargets).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: 'tg-42-ssaved', admissionBarrierComplete: true, admissionRequestIds: [receipt.requestId], restart: false,
+    }));
     expect(route).not.toHaveBeenCalled();
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('maps one Telegram stop to separate CP windows when accepted receipts use distinct conversations', async () => {
+    const { owner, storage, env } = fixture();
+    owner.env.SESSIONS = env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    const second = { ...receipt, requestId: `tgcp-${'e'.repeat(64)}`, userTaskId: 'ut-second' };
+    await accept(owner, receipt);
+    const secondItems = [{ text: 'second', msg: { message_id: 2, chat: { id: 42 }, text: 'second' } }];
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: second.requestId,
+      controlPlaneEnvelope: { requestId: second.requestId, profileId: second.profileId, conversationRef: 'tg-42-sother' } }, items: secondItems }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: second.requestId, receipt: second }));
+    await storage.put('cpScope', { chatId: 42, threadId: null, profileId: receipt.profileId });
+    const source = { username: 'test-profile', chatId: 42, threadId: null };
+    await owner.fetch(rpc('/stop', source));
+    const response = await owner.fetch(rpc('/cp-stop-targets', source));
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.stopConfirmed).toBe(true);
+    expect(stopTargets).toHaveBeenCalledTimes(2);
+    expect(stopTargets.mock.calls.map(([input]) => [input.conversationId, input.admissionRequestIds])
+      .sort(([left], [right]) => left.localeCompare(right)))
+      .toEqual([['tg-42-sother', [second.requestId]], ['tg-42-ssaved', [receipt.requestId]]]);
+    expect(stopTargets.mock.calls.every(([input]) => !('chatId' in input) && !('username' in input))).toBe(true);
   });
 
   it.each([{ username: 'foreign' }, { chatId: 43 }, { threadId: 18 }, { chatId: '42' }])('refuses foreign stop scope %j', async changed => {
@@ -117,9 +147,10 @@ describe('existing collector control-plane ownership', () => {
     if (kind === 'busy-no-receipt') await storage.delete('cpBusyRequests');
     if (kind === 'missing-snapshot') await storage.delete(`input:${receipt.requestId}`);
     if (kind === 'wrong-receipt-profile') await storage.put(`cp-acceptance:${receipt.requestId}`, { receipt: { ...receipt, profileId: 'foreign' } });
-    expect((await (await owner.fetch(rpc('/cp-stop-targets', source))).json()).unresolved).toBe(true);
+    const response = await (await owner.fetch(rpc('/cp-stop-targets', source))).json();
+    expect(response.unresolved).toBe(kind === 'busy-no-receipt' ? false : true);
     const before = await storage.list();
-    expect((await owner.fetch(rpc('/stop', source))).status).toBe(409);
+    expect((await owner.fetch(rpc('/stop', source))).status).toBe(200);
     expect((await storage.get('cpStopWindow')).pending).toBe(true);
     expect(await storage.get(`cp-acceptance:${receipt.requestId}`)).toEqual(before.get(`cp-acceptance:${receipt.requestId}`));
   });
@@ -132,7 +163,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('cpUnresolvedLaunches', [launchKey]);
     await storage.put(`cp-launch:${launchKey}`, { msg: { ...pendingItems[0].msg, intakeItems: pendingItems },
       initialMsgId: null, profileId: receipt.profileId, botUsername: undefined });
-    expect((await owner.fetch(rpc('/stop', source))).status).toBe(409);
+    expect((await owner.fetch(rpc('/stop', source))).status).toBe(200);
     const restarted = new IntakeBuffer({ storage }, env);
     await restarted.alarm();
     expect((await storage.get('cpStopWindow')).pending).toBe(true);
@@ -183,13 +214,32 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('cpBusyRequests')).toBeUndefined();
     const restarted = new IntakeBuffer({ storage }, env);
     const targets = await (await restarted.fetch(rpc('/cp-stop-targets', source))).json();
-    expect(targets.tasks).toEqual([{ requestId: receipt.requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId }]);
+    expect(targets.tasks).toEqual([{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
+      profileId: receipt.profileId, receiptId: 'receipt:test' }]);
     expect(targets.unresolved).toBe(false);
     await restarted.fetch(rpc('/append', { text: 'запускай', msg: { chat: { id: 42 }, message_id: 2, text: 'запускай' }, telegramUpdateId: 102, flush: true }));
-    expect(handleMessage).not.toHaveBeenCalled();
-    expect(await storage.get('stopped')).toBeTruthy();
-    expect((await storage.get('buf')).map(item => item.msg.message_id)).toEqual([2]);
-    expect((await storage.get('cpStopWindow')).pending).toBe(true);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await storage.get('stopped')).toBeUndefined();
+    expect((await storage.get('buf')) || []).toEqual([]);
+    expect((await storage.get('cpStopWindow')).pending).toBe(false);
+  });
+
+  it('retries the same immutable CP stop window after an unknown admission barrier and updates the collector on confirmation', async () => {
+    const { owner, storage, source } = await stopFixture();
+    owner.cpDispatches = 1;
+    const unresolved = await (await owner.fetch(rpc('/cp-stop-targets', source))).json();
+    expect(unresolved).toMatchObject({ unresolved: true, stopConfirmed: false });
+    expect(stopTargets).not.toHaveBeenCalled();
+    owner.cpDispatches = 0;
+    stopTargets.mockResolvedValueOnce({ snapshotId: null, profileId: receipt.profileId,
+      conversationId: 'tg-42-ssaved', tasks: [], unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown' });
+    const firstPoll = await (await owner.fetch(rpc('/cp-stop-targets', source))).json();
+    expect(firstPoll.unresolved).toBe(true);
+    const firstWindowId = stopTargets.mock.calls.at(-1)[0].windowId;
+    await owner.alarm();
+    expect(stopTargets.mock.calls.at(-1)[0].windowId).toBe(firstWindowId);
+    expect((await storage.get('cpStopWindow')).pending).toBe(false);
+    expect(send).toHaveBeenCalled();
   });
 
   it('freezes a complete ordered burst despite concurrent out-of-order appends and duplicate updates', async () => {
