@@ -120,8 +120,12 @@ app.post('/deliver', async c => {
   // актуальности и защита от второго запуска живут в нём же (пустой буфер → ответ
   // «нечего запускать», идущий ран → «уже идёт»), поэтому повторное нажатие или
   // гонка с начавшейся работой не создают второй запуск.
+  // sendMessageWithKeyboard takes the ROWS ARRAY and wraps it into reply_markup
+  // itself. Passing a pre-wrapped { inline_keyboard } double-wraps it and Telegram
+  // rejects the send with «field "inline_keyboard" must be of type Array» —
+  // found by the first live acceptance run of the C02.1 seam (2026-10-04).
   const keyboard = kind === 'stuck_input'
-    ? { inline_keyboard: [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]] }
+    ? [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]]
     : undefined;
 
   const result = await sendMessageWithKeyboard(c.env.BOT_TOKEN, chatId, text, keyboard, extra)
