@@ -2325,9 +2325,11 @@ export class IntakeBuffer {
   }
 
   async alarm() {
-    if (this.env.EXECUTION_BACKEND === 'control-plane' && !controlPlaneStopDisabled(this.env)) {
+    if (this.env.EXECUTION_BACKEND === 'control-plane') {
       const stopWindow = await this.state.storage.get('cpStopWindow');
-      if (stopWindow?.pending) {
+      if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
+        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+      } else if (stopWindow?.pending) {
         try {
           const result = await this._driveControlPlaneStop({ username: stopWindow.username,
             chatId: stopWindow.chatId, threadId: stopWindow.threadId });

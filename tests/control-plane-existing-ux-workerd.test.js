@@ -50,7 +50,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -247,12 +247,45 @@ it.each(['vertical', 'route', 'intake', 'stop'])('real signed workerd SQLite exi
       expect(unexpectedRequests).toEqual([]);
       return;
     }
-    if (boundary === 'stop') {
+    if (boundary === 'stop' || boundary === 'stop-disabled') {
       expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
       expect(cpRoutes).toContainEqual({ taskId: 'ut-workerd-scenario', continue: true });
       const intake = await collector();
       expect((await intake.fetch('https://intake/stop', { method: 'POST',
         body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
+      if (boundary === 'stop-disabled') {
+        expect((await webhook(message(106, 'Preserved additional input during pending stop'))).status).toBe(200);
+        const pending = await state();
+        expect(pending.get('cpStopWindow').pending).toBe(true);
+        expect(pending.get('buf')).toHaveLength(1);
+        await runtime.dispose();
+        runtime = new Miniflare({ ...runtimeOptions,
+          bindings: { ...runtimeOptions.bindings, TG_SLICE_STOP_ENABLED: 'false' } });
+        const restored = await collector();
+        for (const path of ['/stop', '/cp-stop-targets']) {
+          expect((await restored.fetch(`https://intake${path}`, { method: 'POST',
+            body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(409);
+        }
+        completedTasks.add('ut-workerd-scenario');
+        const due = (await state()).get('receiptDue');
+        if (due) await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, due - Date.now()) + 50));
+        await state(true);
+        const delivered = await terminalProof();
+        const after = await state();
+        expect(after.get('cpStopWindow')).toEqual(pending.get('cpStopWindow'));
+        expect(after.get('buf')).toEqual(pending.get('buf'));
+        expect(after.get('stopped')).toBe(pending.get('stopped'));
+        expect(after.get('busy')).toBeUndefined();
+        await state(true);
+        expect(await terminalProof()).toEqual(delivered);
+        expect(cpStopRequests).toEqual([]);
+        expect(cpIntakes).toHaveLength(1);
+        expect(cpRoutes).toHaveLength(1);
+        expect(dispatchCount).toBe(1);
+        expect(legacyRequests).toEqual([]);
+        expect(unexpectedRequests).toEqual([]);
+        return;
+      }
       expect((await intake.fetch('https://intake/cp-stop-targets', { method: 'POST',
         body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
       expect(cpStopRequests).toHaveLength(1);
