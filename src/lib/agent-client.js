@@ -54,6 +54,10 @@ export async function getProjects(env, { username, userId }) {
 
 export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
   const audience = resolveAudience(env);
+  // Every run, not once per isolate: when a run lands in the wrong audience the
+  // sessions silently mix (cross-bot leak #1290) and the only evidence is this
+  // line next to the task text in Workers Logs.
+  console.log(`[run] audience=${audience} chat=${userId} user=${username}${audience === 'default' ? ' (SESSION_NAMESPACE unset!)' : ''} :: ${String(task || '').slice(0, 80)}`);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
   // naming-conventions refactor, plan generic-naming-conventions-refactoring §4). userId
   // here has always meant the Telegram chat to stream into; chatId is the forward-looking

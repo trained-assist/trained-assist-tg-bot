@@ -70,6 +70,11 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 
 # ── Staging environment (auto-deployed from feature branches) ──────────────
 [env.staging]
+
+# observability НЕ наследуется env'ами в wrangler (как r2_buckets) — без этого
+# блока у окружения нет ни одного лога в дашборде Cloudflare.
+[env.staging.observability]
+enabled = true
 name = "trained-assist-tg-bot-staging"
 
 [env.staging.vars]
@@ -103,6 +108,11 @@ id = "1928a191938f4f60b01fbe12d66380e0"
 # domain commands pinned in the menu — so recruiter users don't mix with the
 # general-purpose bot's user base and command set) ─────────────────────────
 [env.recruiter]
+
+# observability НЕ наследуется env'ами в wrangler (как r2_buckets) — без этого
+# блока у окружения нет ни одного лога в дашборде Cloudflare.
+[env.recruiter.observability]
+enabled = true
 name = "trained-assist-tg-bot-recruiter"
 
 [env.recruiter.vars]
@@ -141,6 +151,11 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # skips this env while that secret is empty (warning, not failure). No real
 # token/webhook is wired here — enabling + canary is a separate step after merge.
 [env.freelance]
+
+# observability НЕ наследуется env'ами в wrangler (как r2_buckets) — без этого
+# блока у окружения нет ни одного лога в дашборде Cloudflare.
+[env.freelance.observability]
+enabled = true
 name = "trained-assist-tg-bot-freelance"
 # Telegram's webhook DNS resolver could not resolve the fresh
 # *.workers.dev subdomain (main/recruiter work, this one failed with
@@ -239,6 +254,11 @@ class_name = "RetryQueue"
 # flexi-exhibition-deal-bot (which is being decommissioned, sales-skill#19
 # решение владельца №3).
 [env.sales]
+
+# observability НЕ наследуется env'ами в wrangler (как r2_buckets) — без этого
+# блока у окружения нет ни одного лога в дашборде Cloudflare.
+[env.sales.observability]
+enabled = true
 name = "trained-assist-tg-bot-sales"
 # Telegram's webhook DNS resolver could not resolve the fresh *.workers.dev
 # subdomain (main/recruiter work, this one failed with "Temporary failure in name
