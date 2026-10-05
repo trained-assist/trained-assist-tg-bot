@@ -27,6 +27,17 @@ function fixture() {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('protects operator reconciliation and reuses the scheduled controller', async () => {
+    const state = fixture();
+    expect((await worker.fetch(new Request('https://worker/cron'), state.env)).status).toBe(401);
+    const response = await worker.fetch(new Request('https://worker/cron', {
+      headers: { 'x-telegram-bot-api-secret-token': state.env.TELEGRAM_WEBHOOK_SECRET },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ reconciled: true, pushed: [] });
+    expect(state.collectorCalls).toEqual([]);
+  });
+
   it('refuses unsigned or foreign collector-state reads', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/collector-state?chatId=1001'), state.env)).status).toBe(401);

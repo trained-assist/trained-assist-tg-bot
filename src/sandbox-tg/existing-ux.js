@@ -20,6 +20,14 @@ function executionEnv(env) {
 
 app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
 
+app.get('/cron', async context => {
+  const config = readTgSliceConfig(context.env);
+  if (!config.webhookSecret || context.req.header('x-telegram-bot-api-secret-token') !== config.webhookSecret) return context.json({ error: 'unauthorized' }, 401);
+  const controller = createController(context.env, config);
+  await controller.outbox.open();
+  return context.json({ reconciled: true, ...await controller.reconcile() });
+});
+
 app.get('/collector-state', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
