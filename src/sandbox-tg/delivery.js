@@ -66,6 +66,7 @@ export class TgDeliveryOutbox {
     const deliveryId = record.deliveryId ?? record.userTaskId;
     const existing = await this.load(deliveryId);
     if (existing) {
+      if (deliveryId.startsWith('receipt:')) await this.kv.put(`delivery-receipt:${record.userTaskId}`, deliveryId);
       this.log({ event: 'tg.delivery.replayed', userTaskId: record.userTaskId, duplicate: true });
       return { record: existing, duplicate: true };
     }
@@ -86,6 +87,7 @@ export class TgDeliveryOutbox {
       createdAt: Date.now(),
     };
     await this.save(next);
+    if (deliveryId.startsWith('receipt:')) await this.kv.put(`delivery-receipt:${record.userTaskId}`, deliveryId);
     return { record: next, duplicate: false };
   }
 

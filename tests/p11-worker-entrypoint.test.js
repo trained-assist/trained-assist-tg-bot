@@ -154,7 +154,7 @@ describe('P11 exported Worker composition', () => {
     delete env.TG_SLICE;
     expect((await worker.fetch(new Request('https://sandbox.test/health'), env)).status).toBe(200);
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect((await webhook(emulator.pushMessage({ chatId: 1001, text: 'hello' }))).status).toBe(500);
+    expect((await webhook(emulator.pushMessage({ chatId: 1001, text: 'hello' }))).status).toBe(503);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

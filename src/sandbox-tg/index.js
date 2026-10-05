@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { readTgSliceConfig } from './config.js';
+import { readTgSliceConfig, TgSliceConfigError } from './config.js';
 import { ControlPlaneClient } from './control-plane-client.js';
 import { TelegramApi } from './telegram.js';
 import { TgDeliveryOutbox } from './delivery.js';
@@ -16,13 +16,20 @@ app.use('*', async (c, next) => {
   const secret = String(c.env.TELEGRAM_WEBHOOK_SECRET ?? '').trim();
   const token = c.req.header('x-telegram-bot-api-secret-token');
   if (!secret || token !== secret) return c.json({ error: 'unsigned update refused' }, 401);
-  const config = readTgSliceConfig(c.env);
-  c.env = { ...c.env, _sliceConfig: config, _sliceCtrl: createController(c.env, config) };
+  try {
+    const config = readTgSliceConfig(c.env);
+    c.env = { ...c.env, _sliceConfig: config, _sliceCtrl: createController(c.env, config) };
+  } catch (error) {
+    if (error instanceof TgSliceConfigError) return c.json({ error: 'sandbox not configured', binding: error.variable }, 503);
+    throw error;
+  }
   return next();
 });
 
 app.get('/health', c => {
-  return c.json({ status: 'ok', bot: c.env.TG_SANDBOX_BOT_USERNAME, mode: c.env.TG_SLICE_MODE ?? MODE.direct });
+  const required = ['TG_SANDBOX_BOT_TOKEN', 'CONTROL_PLANE_URL', 'CONTROL_PLANE_PRINCIPAL', 'CONTROL_PLANE_PROFILE', 'TELEGRAM_WEBHOOK_SECRET', 'TG_SLICE_ALLOWED_CHATS'];
+  const missing = required.filter(name => !String(c.env[name] ?? '').trim());
+  return c.json({ status: 'ok', readiness: missing.length ? 'not_configured' : 'configured', missingBindings: missing, bot: c.env.TG_SANDBOX_BOT_USERNAME, mode: c.env.TG_SLICE_MODE ?? MODE.direct });
 });
 
 app.post('/webhook', async c => {
@@ -46,13 +53,15 @@ app.get('/deliveries/:taskId', async c => {
   const taskId = c.req.param('taskId');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return c.json({ error: 'invalid task id' }, 400);
   const outbox = new TgDeliveryOutbox(c.env.TG_SLICE, null);
+  const generationOf = record => record ? record.generation ?? Number(record.deliveryId?.match(/:g(\d+)$/)?.[1] ?? 0) : 0;
   let terminal = await outbox.load(`terminal:${taskId}`);
   for await (const entry of kvEntries(c.env.TG_SLICE, `delivery:terminal:${taskId}:g`)) {
     const record = JSON.parse(entry.value);
     if (record.userTaskId !== taskId) continue;
-    if (!terminal || Number(record.generation ?? 0) >= Number(terminal.generation ?? 0)) terminal = record;
+    if (!terminal || generationOf(record) >= generationOf(terminal)) terminal = record;
   }
-  const records = [await outbox.load(taskId), terminal];
+  const receiptId = await c.env.TG_SLICE.get(`delivery-receipt:${taskId}`);
+  const records = [await outbox.load(receiptId ?? taskId), terminal];
   const config = c.env._sliceConfig;
   if (records.some(record => record && !config.allowedChats.includes(String(record.destination?.chatId)))) {
     return c.json({ error: 'chat not allowed' }, 403);
@@ -63,7 +72,7 @@ app.get('/deliveries/:taskId', async c => {
     status: record.status,
     attempts: record.attempts,
     providerMessageId: record.telegramMessageId ?? null,
-    generation: record.generation ?? null,
+    generation: generationOf(record),
     chatId: record.destination.chatId,
     threadId: record.destination.threadId ?? null,
   } : null;
