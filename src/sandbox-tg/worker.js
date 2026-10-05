@@ -225,11 +225,11 @@ export class TgSliceController {
         })]);
       } finally { clearTimeout(timer); }
     };
-    for (let step = 0; this.store.kv && step < 16 && performance.now() < deadline; step += 1) {
+    for (let step = 0; this.store.kv && step < 6 && performance.now() < deadline; step += 1) {
       try {
         const cursor = await bounded(() => this.outbox.discovery());
         if (cursor.conversationKey === null) {
-          const page = await bounded(() => this.store.kv.list({ prefix: 'conv:', cursor: cursor.pageCursor ?? undefined, limit: 1 }));
+          const page = await bounded(() => this.store.kv.list({ prefix: 'conv:tg-', cursor: cursor.pageCursor ?? undefined, limit: 1 }));
           const nextPageCursor = page.list_complete ? null : page.cursor;
           if (!page.list_complete && (!nextPageCursor || nextPageCursor === cursor.pageCursor)) throw new Error('discovery_pagination');
           await bounded(() => this.outbox.advanceDiscovery(cursor.revision, {

@@ -123,10 +123,21 @@ receipt and terminal deliveries may take separate ticks; overlapping scheduled
 invocations still use transactional durable claims. If the first drain claimed
 nothing, a final drain may send a newly discovered candidate, still at most one
 provider attempt per invocation. The cadence is one minute, not a delivery SLA.
-Discovery has a ten-second monotonic deadline and at most sixteen steps per tick.
+Discovery has a ten-second monotonic deadline and at most six steps per tick.
+The cap assumes no paid Worker tier: each discovery step issues at most six
+DO/KV/CP calls, plus owner open and at most two drain calls (39 total), with one
+provider call conservatively included (40). Pagination steps issue only three
+calls. No retry loop or journal pagination consumes an extra request budget.
 Each step lists at most one conversation key or examines one turn. A durable
 SQLite-owner cursor carries KV pagination, conversation key and turn offset
-across restarts. Each conversation visit examines one turn, advances to the next
+across restarts. Discovery lists only `conv:tg-`, matching the controller's actual
+`tg-<chat>[-t<thread>]` conversation IDs, so `conv:u:*` ingress dedup hints never
+consume discovery steps. Those hints are not deleted or changed. Persisted
+cursors are prefix-versioned: an older broad-prefix cursor is reset to the
+beginning with its revision fence retained before any old opaque token is used;
+the next transactional advance persists the new prefix. This changes discovery
+metadata only, never the manifest, delivery records, or conversation history.
+Each conversation visit examines one turn, advances to the next
 conversation, and durably retains its independent turn offset. Thus a large or
 growing first conversation cannot monopolize later conversations. Transactional
 revision compare-and-swap prevents stale ticks rewinding it; turn advancement
