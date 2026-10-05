@@ -205,6 +205,7 @@ export class FakeControlPlane {
     this.eventLog.push({ id: this._idn(), event_id: `evt-${this._idn()}`, user_task_id: taskId, kind: 'awaiting_answered', type: 'progress', at, payload: { awaitingInputId: aw.id, consumedByRun: aw.runId } });
     const task = this.tasks.find(t => t.user_task_id === taskId);
     task.status = 'done';
+    task.result = { answer: body?.payload?.answer ?? 'ok' };
     task.stage = 'finalize';
     this.eventLog.push({ id: this._idn(), event_id: `evt-${this._idn()}`, user_task_id: taskId, kind: 'result_ready', type: 'result_ready', at, payload: { result: { answer: body?.payload?.answer ?? 'ok' }, artifactRefs: [] } });
     const lost = this.faults.consume('loseSignalResponseOnce');
@@ -217,7 +218,7 @@ export class FakeControlPlane {
     const runs = this._runs.filter(r => r.task_id === taskId).map(r => ({ id: r.id, status: r.status, generation: r.generation, started_at: r.started_at, finished_at: r.finished_at, error_class: r.error_class, lease_until: null }));
     const openAwait = this.awaiting.find(a => a.user_task_id === taskId && a.status === 'open');
     return json({
-      taskStore: { ...task, history: JSON.stringify(this.eventLog.filter(e => e.user_task_id === taskId)) },
+      taskStore: { ...task, id: task.user_task_id, history: JSON.stringify(this.eventLog.filter(e => e.user_task_id === taskId)) },
       runs,
       awaiting: openAwait ? { id: openAwait.id, status: 'open', deadline: openAwait.deadline, question: openAwait.question } : null,
     });

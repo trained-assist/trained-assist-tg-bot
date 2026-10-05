@@ -12,7 +12,7 @@ import { BatchCollector, KvBatchStore, MemoryBatchStore, BATCH_STATUS, tooLargeM
 import { ConversationSession, ConversationIndex, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
 import { TgDeliveryOutbox } from './delivery.js';
 import { logTg } from './log.js';
-import { kvEntries } from './kv.js';
+import { hasUnknownOutcome, isTerminalTaskStatus } from './contract.js';
 
 export const MODE = { direct: 'direct', batch: 'batch' };
 
@@ -213,46 +213,60 @@ export class TgSliceController {
   /** Background reconciliation: retry deliveries + push terminal results. */
   async reconcile() {
     const pushed = [];
-    if (this.store.kv) {
-      for await (const item of kvEntries(this.store.kv, 'conv:')) {
-        try {
-          const index = JSON.parse(item.value);
-          if (!Array.isArray(index?.turns)) continue;
-          if (!index.destination || !this.profile.allowedChats.includes(String(index.destination.chatId))) continue;
-          if (index.requestingBot !== this.profile.botUsername) continue;
-          const session = new ConversationSession(this.client, {
-            conversationId: index.conversationId,
-            profileId: index.profileId,
-            store: this.store,
-            logSink: this.logSink,
-            maxTurns: this.maxTurns,
-          });
-          const view = await session.open();
-          for (const turn of view.turns) {
-            if (!turn.unknownOutcome && !turn.terminal) continue;
-            const deliveryId = `${turn.terminal ? 'terminal' : 'unknown'}:${turn.userTaskId}:g${turn.generation}`;
-            const delivery = await this.outbox?.load(deliveryId);
-            if (delivery) continue;
-            const answer = typeof turn.result === 'string' ? turn.result : turn.result?.answer;
-            const label = turn.terminal === 'done' ? 'Готово. Текст результата отсутствует.' : turn.terminal === 'failed' ? 'Ошибка исполнителя.' : turn.terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
-            await this.outbox?.enqueue({
-              deliveryId,
-              taskAcceptedAt: index.turns.find(item => item.userTaskId === turn.userTaskId && item.kind === 'new')?.providerAcceptedAt,
-              conversationId: index.conversationId,
-              userTaskId: turn.userTaskId,
-              destination: index.destination,
-              requestId: deliveryId,
-              type: 'message',
-              text: turn.terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label,
-            });
-            pushed.push({ userTaskId: turn.userTaskId, terminal: turn.terminal });
-          }
-        } catch {
-          this.log({ event: 'tg.reconcile.failed', reason: 'conversation_unavailable' });
+    let drained = await this.outbox?.drain() ?? 0;
+    const deadline = performance.now() + 10000;
+    const bounded = async operation => {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error('discovery_deadline');
+      let timer;
+      try {
+        return await Promise.race([operation(), new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('discovery_deadline')), remaining);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    for (let step = 0; this.store.kv && step < 16 && performance.now() < deadline; step += 1) {
+      try {
+        const cursor = await bounded(() => this.outbox.discovery());
+        if (cursor.conversationKey === null) {
+          const page = await bounded(() => this.store.kv.list({ prefix: 'conv:', cursor: cursor.pageCursor ?? undefined, limit: 1 }));
+          const nextPageCursor = page.list_complete ? null : page.cursor;
+          if (!page.list_complete && (!nextPageCursor || nextPageCursor === cursor.pageCursor)) throw new Error('discovery_pagination');
+          await bounded(() => this.outbox.advanceDiscovery(cursor.revision, {
+            pageCursor: page.keys.length ? cursor.pageCursor : nextPageCursor,
+            conversationKey: page.keys[0]?.name ?? null, nextPageCursor: page.keys.length ? nextPageCursor : null, turnIndex: 0,
+          }));
+          if (!page.keys.length && page.list_complete) break;
+          continue;
         }
+        const raw = await bounded(() => this.store.kv.get(cursor.conversationKey));
+        let index;
+        try { index = JSON.parse(raw); } catch { index = null; }
+        const valid = Array.isArray(index?.turns) && index.destination &&
+          this.profile.allowedChats.includes(String(index.destination.chatId)) && index.requestingBot === this.profile.botUsername &&
+          index.profileId === (this.profile.chatProfiles[String(index.destination.chatId)] ?? this.profile.profileId);
+        const entry = valid ? index.turns[cursor.turnIndex] : null;
+        const next = { pageCursor: cursor.nextPageCursor, conversationKey: null, nextPageCursor: null,
+          turnIndex: entry && cursor.turnIndex + 1 < index.turns.length ? cursor.turnIndex + 1 : 0 };
+        if (!await bounded(() => this.outbox.advanceDiscovery(cursor.revision, next)) || !entry || entry.kind !== 'new') continue;
+        const status = await bounded(() => this.client.status(entry.userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
+        if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
+        const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
+        if (!terminal && !hasUnknownOutcome(status)) continue;
+        const deliveryId = `${terminal ? 'terminal' : 'unknown'}:${entry.userTaskId}:g${status.generation}`;
+        if (await bounded(() => this.outbox.load(deliveryId))) continue;
+        const answer = typeof status.result === 'string' ? status.result : status.result?.answer;
+        const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? 'Ошибка исполнителя.' : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
+        await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
+          conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
+          requestId: deliveryId, type: 'message', text: terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label }));
+        pushed.push({ userTaskId: entry.userTaskId, terminal });
+      } catch {
+        this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable' });
+        break;
       }
     }
-    const drained = await this.outbox?.drain() ?? 0;
+    if (drained === 0 && performance.now() < deadline) drained = await this.outbox?.drain() ?? 0;
     return { drained, pushed };
   }
 }

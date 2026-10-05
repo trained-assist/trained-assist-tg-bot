@@ -249,7 +249,7 @@ describe('sandbox durable single delivery owner', () => {
       const url = new URL(input);
       if (url.origin === env.TELEGRAM_API_BASE) { providerCalls += 1; throw new Error('unexpected provider'); }
       if (url.pathname === '/route') {
-        fake.tasks[0].status = 'done'; fake.tasks[0].result = { answer: 'synthetic quick answer' };
+        fake.tasks[0].status = 'done'; fake.tasks[0].generation = 1; fake.tasks[0].result = { answer: 'synthetic quick answer' };
         return Response.json({ route: 'deterministic', execution: { agentStarted: false } });
       }
       const response = await fake.fetch(input, init);

@@ -95,6 +95,30 @@ export class TgDeliveryOwner {
             quarantinedDeliveryCount: marker.quarantinedDeliveryCount, paused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false' });
         }
         if (route === '/enqueue') return Response.json(await this.enqueue(body, config));
+        if (route === '/discovery') return Response.json(await this.state.storage.get('discovery') ??
+          { revision: 0, pageCursor: null, conversationKey: null, nextPageCursor: null, turnIndex: 0 });
+        if (route === '/advance-discovery') {
+          const next = body.next;
+          if (!Number.isSafeInteger(body.revision) || body.revision < 0 || !next ||
+              Object.keys(next).sort().join(',') !== 'conversationKey,nextPageCursor,pageCursor,turnIndex' ||
+              !Number.isSafeInteger(next.turnIndex) || next.turnIndex < 0 ||
+              ![next.pageCursor, next.nextPageCursor].every(value => value === null || typeof value === 'string' && value.length <= 2048) ||
+              !(next.conversationKey === null || typeof next.conversationKey === 'string' && next.conversationKey.startsWith('conv:') && next.conversationKey.length <= 512)) throw new Error();
+          const advanced = await this.state.storage.transaction(async storage => {
+            const current = await storage.get('discovery');
+            if ((current?.revision ?? 0) !== body.revision) return false;
+            let turnIndex = next.turnIndex;
+            if (current?.conversationKey && next.conversationKey === null) {
+              await storage.put(`discovery-turn:${current.conversationKey}`, turnIndex);
+              turnIndex = 0;
+            } else if (!current?.conversationKey && next.conversationKey) {
+              turnIndex = await storage.get(`discovery-turn:${next.conversationKey}`) ?? 0;
+            }
+            await storage.put('discovery', { ...next, turnIndex, revision: body.revision + 1 });
+            return true;
+          });
+          return Response.json({ advanced });
+        }
         if (route === '/load' && reference(body.deliveryId)) return Response.json(await this.state.storage.get(key(body.deliveryId)) ?? null);
         if (route === '/read' && reference(body.taskId)) {
           const records = [...(await this.state.storage.list({ prefix: 'delivery:' })).values()].filter(record => record.userTaskId === body.taskId);
@@ -186,5 +210,7 @@ export class TgDeliveryOwnerClient {
   open() { return this.call('open', {}); }
   load(deliveryId) { return this.call('load', { deliveryId }); }
   read(taskId) { return this.call('read', { taskId }); }
+  discovery() { return this.call('discovery', {}); }
+  async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
   async drain() { return (await this.call('drain', {})).drained; }
 }

@@ -109,8 +109,9 @@ do not force-push or replace that branch with this older source base.
 ## Autonomous scheduled reconciliation
 
 The sandbox's exported `scheduled` handler opens the existing durable owner,
-validates the immutable manifest, refreshes discovered conversation statuses,
-enqueues missing terminal notifications, and invokes one drain. No new controller,
+validates the immutable manifest, drains queued deliveries first, then performs
+bounded delivery discovery using authenticated CP typed `/status` projections.
+It does not rebuild conversations or request journal pages. No new controller,
 timer loop, model polling, or task recovery/start call is introduced. The schedule
 does not change allowed chats, namespace, manifest, tombstones, or retry policy.
 Delivery pause still prevents provider dispatch; missing/conflicting manifests
@@ -119,10 +120,29 @@ fail closed before reconciliation. Old/unknown records never become retryable.
 One scheduled invocation claims at most one eligible delivery, with the existing
 bounded provider request timeout and explicit-429 attempt cap. Thus pending
 receipt and terminal deliveries may take separate ticks; overlapping scheduled
-invocations still use transactional durable claims. The cadence is one minute,
-not a delivery SLA. Conversation discovery and CP event/status refresh retain
-their existing scan behavior; this patch does not impose a whole-tick deadline
-or guarantee progress during CP/provider outages or eventual KV discovery lag.
+invocations still use transactional durable claims. If the first drain claimed
+nothing, a final drain may send a newly discovered candidate, still at most one
+provider attempt per invocation. The cadence is one minute, not a delivery SLA.
+Discovery has a ten-second monotonic deadline and at most sixteen steps per tick.
+Each step lists at most one conversation key or examines one turn. A durable
+SQLite-owner cursor carries KV pagination, conversation key and turn offset
+across restarts. Each conversation visit examines one turn, advances to the next
+conversation, and durably retains its independent turn offset. Thus a large or
+growing first conversation cannot monopolize later conversations. Transactional
+revision compare-and-swap prevents stale ticks rewinding it; turn advancement
+precedes CP I/O, so a stalled turn does not pin future ticks. Conversation pages
+and each conversation's turn offsets wrap around independently. No user history is
+truncated, rewritten, or reclassified by the discovery cursor.
+
+Discovery waits are deadline-bounded; CP status requests also receive the shared
+deadline abort signal. Queue drain is independent and precedes those waits.
+Provider I/O retains its existing timeout and durable unknown handling; the
+discovery deadline is not a whole-tick/provider timeout or delivery SLA.
+An interrupted discovery step can be revisited on the next complete scan;
+eventual KV discovery lag or persistent CP/provider outages still prevent a
+guaranteed delivery deadline. Cursor metadata is internal transport state only,
+not a new task controller or delivery authority. Manifest/pause/quarantine
+validation remains in the same owner on every call.
 
 Parent-only live acceptance: after isolation/review, deploy this sandbox config,
 submit one reserved quick-answer task and one native task, then let genuine
