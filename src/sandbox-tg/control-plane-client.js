@@ -87,6 +87,7 @@ export class ControlPlaneClient {
   headers() {
     const headers = new Headers({ 'content-type': 'application/json' });
     headers.set('x-principal', this.config.principalId);
+    if (this.config.principalSignature) headers.set('x-principal-sig', this.config.principalSignature);
     if (this.config.apiKey) headers.set('authorization', `Bearer ${this.config.apiKey}`);
     return headers;
   }
