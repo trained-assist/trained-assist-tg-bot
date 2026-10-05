@@ -206,6 +206,27 @@ export class ControlPlaneClient {
     };
   }
 
+  /** Durable stop-window reconciliation. Telegram address mapping stays in the gateway. */
+  async stopTargets(input) {
+    const { value } = await this.request('POST', '/cp-stop-targets', { body: {
+      profileId: this.config.profileId,
+      conversationId: input.conversationId,
+      windowId: input.windowId,
+      admissionBarrierComplete: input.admissionBarrierComplete === true,
+      admissionRequestIds: input.admissionRequestIds,
+      restart: input.restart === true,
+    } });
+    return {
+      snapshotId: str(value?.snapshotId),
+      profileId: str(value?.profileId),
+      conversationId: str(value?.conversationId),
+      tasks: Array.isArray(value?.tasks) ? value.tasks : [],
+      unresolved: value?.unresolved !== false,
+      reason: str(value?.reason),
+      stopConfirmed: value?.stopConfirmed === true,
+    };
+  }
+
   /** Signal (human answer in an open awaiting). The idempotency key is mandatory. */
   async signal(userTaskId, input) {
     const { value } = await this.request('POST', '/signal', {

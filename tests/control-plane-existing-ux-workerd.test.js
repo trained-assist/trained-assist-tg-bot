@@ -50,7 +50,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -66,6 +66,7 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
   const providerEdits = [];
   const cpIntakes = [];
   const cpRoutes = [];
+  const cpStopRequests = [];
   const legacyRequests = [];
   const admittedTasks = new Map();
   const dispatchedTasks = new Set();
@@ -120,6 +121,15 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
       }
       return reply({ decisionId: 'workerd-decision', route: 'agent', mode: 'agent', needsExecutor: true,
         continuation: { owner: 'output', requested: true, issued: true, runId: `run-${task.taskId}` } });
+    }
+    if (url.hostname === 'cp.test' && url.pathname === '/cp-stop-targets') {
+      cpStopRequests.push(body);
+      const tasks = body.admissionRequestIds.map(requestId => {
+        const entry = [...admittedTasks.values()].find(value => value.envelope.requestId === requestId);
+        return { requestId, userTaskId: entry?.taskId, profileId: body.profileId, receiptId: `receipt-${entry?.taskId}` };
+      });
+      return reply({ snapshotId: `stop-${cpStopRequests.length}`, profileId: body.profileId,
+        conversationId: body.conversationId, tasks, unresolved: false, stopConfirmed: true, reason: null });
     }
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
@@ -233,6 +243,27 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
       await terminalProof();
+      expect(legacyRequests).toEqual([]);
+      expect(unexpectedRequests).toEqual([]);
+      return;
+    }
+    if (boundary === 'stop') {
+      expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
+      expect(cpRoutes).toContainEqual({ taskId: 'ut-workerd-scenario', continue: true });
+      const intake = await collector();
+      expect((await intake.fetch('https://intake/stop', { method: 'POST',
+        body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
+      expect((await intake.fetch('https://intake/cp-stop-targets', { method: 'POST',
+        body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
+      expect(cpStopRequests).toHaveLength(1);
+      expect(cpStopRequests[0]).toMatchObject({ profileId: env.CONTROL_PLANE_PROFILE,
+        conversationId: admitted.conversationRef, admissionBarrierComplete: true,
+        admissionRequestIds: [admitted.requestId], restart: false });
+      expect(cpStopRequests[0]).not.toHaveProperty('chatId');
+      expect(cpStopRequests[0]).not.toHaveProperty('username');
+      const stopped = (await state()).get('cpStopWindow');
+      expect(stopped).toMatchObject({ pending: false, unresolved: false, stopConfirmed: true,
+        tasks: [{ requestId: admitted.requestId, userTaskId: 'ut-workerd-scenario', profileId: env.CONTROL_PLANE_PROFILE }] });
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;

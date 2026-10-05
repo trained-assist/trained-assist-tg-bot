@@ -368,14 +368,6 @@ function controlPlaneStopError(code = 'CONTROL_PLANE_STOP_PENDING') {
     { code, stopConfirmed: false, pending: true, killed: 0 });
 }
 
-function nativeStopEvidence(value, target, attempts) {
-  const proofs = Array.isArray(value?.nativeStops) ? value.nativeStops : [];
-  return attempts.length > 0 && attempts.every(attempt => proofs.some(proof =>
-    proof?.taskId === target.userTaskId && proof.profileId === target.profileId && proof.attemptId === attempt.id
-    && proof.runId === attempt.session_id && proof.ownerGeneration === attempt.generation
-    && proof.exitObserved === true && ['succeeded', 'failed', 'cancelled'].includes(proof.state)));
-}
-
 async function stopControlPlaneTasks(env, { username, chatId, threadId }) {
   if (!Number.isSafeInteger(chatId) || !chatId || !username
     || (threadId !== null && (!Number.isSafeInteger(threadId) || threadId <= 0))) throw controlPlaneStopError();
@@ -386,65 +378,21 @@ async function stopControlPlaneTasks(env, { username, chatId, threadId }) {
     || (client.config.chatProfiles[String(chatId)] && client.config.chatProfiles[String(chatId)] !== profileId)
     || session?.username !== username || session.controlPlaneProfile !== profileId) throw controlPlaneStopError();
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-  const readTargets = async () => {
-    const response = await stub.fetch('https://intake/cp-stop-targets', { method: 'POST',
-      body: JSON.stringify({ username, chatId, threadId }) });
-    if (!response.ok) throw controlPlaneStopError();
-    const targets = await response.json();
-    if (targets?.username !== username || targets.chatId !== chatId || targets.threadId !== threadId
-      || targets.profileId !== profileId || targets.unresolved !== false || !Array.isArray(targets.tasks)
-      || !targets.tasks.length || targets.tasks.length > 32) throw controlPlaneStopError();
-    const taskIds = new Set();
-    const requestIds = new Set();
-    for (const task of targets.tasks) {
-      if (task?.profileId !== profileId || typeof task.userTaskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(task.userTaskId)
-        || typeof task.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(task.requestId)
-        || taskIds.has(task.userTaskId) || requestIds.has(task.requestId)) throw controlPlaneStopError();
-      taskIds.add(task.userTaskId);
-      requestIds.add(task.requestId);
-    }
-    return targets.tasks;
-  };
-  const tasks = await readTargets();
-  const prepared = [];
-  for (const target of tasks) {
-    const { value } = await client.request('POST', '/status', { body: { taskId: target.userTaskId } });
-    const row = value?.taskStore;
-    if (row?.id !== target.userTaskId || row.profile_id !== profileId || !Number.isSafeInteger(row.generation)
-      || !Array.isArray(value.runs) || value.runs.some(run => run?.task_id !== target.userTaskId
-        || typeof run.id !== 'string' || !run.id || !Number.isSafeInteger(run.generation) || run.generation < 0
-        || (run.finished_at !== null && (!Number.isSafeInteger(run.finished_at) || run.finished_at < 0)))) {
-      throw controlPlaneStopError();
-    }
-    const unfinished = value.runs.filter(run => run.finished_at === null);
-    const native = unfinished.length ? unfinished : value.runs.filter(run => run.session_id)
-      .sort((left, right) => right.generation - left.generation).slice(0, 1);
-    if (!native.length || native.some(run => run.task_id !== target.userTaskId || typeof run.id !== 'string' || !run.id
-      || !/^run_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(run.session_id ?? '')
-      || !Number.isSafeInteger(run.generation) || run.generation < 0)) throw controlPlaneStopError();
-    prepared.push({ target, attempts: native, before: value });
-  }
-  for (const { target, attempts, before } of prepared) {
-    let acknowledgement = before;
-    const alreadyTerminal = ['done', 'failed', 'cancelled'].includes(before.taskStore.status);
-    if (!alreadyTerminal) {
-      acknowledgement = await client.cancel(target.userTaskId, { reason: 'telegram_user_stop' });
-      if (!acknowledgement.cancelled || !acknowledgement.stopConfirmed || acknowledgement.status !== 'cancelled'
-        || !nativeStopEvidence(acknowledgement, target, attempts)) throw controlPlaneStopError();
-    } else if (!nativeStopEvidence(before, target, attempts)) throw controlPlaneStopError();
-    const { value } = await client.request('POST', '/status', { body: { taskId: target.userTaskId } });
-    if (value?.taskStore?.id !== target.userTaskId || value.taskStore.profile_id !== profileId
-      || value.taskStore.status !== (alreadyTerminal ? before.taskStore.status : 'cancelled') || !nativeStopEvidence(value, target, attempts)
-      || value.taskStore.generation !== (acknowledgement.generation ?? before.taskStore.generation)
-      || !Array.isArray(value.runs) || value.runs.some(run => !Number.isSafeInteger(run.finished_at) || run.finished_at < 0)
-      || !attempts.every(attempt => value.runs.some(run => run.id === attempt.id && run.task_id === target.userTaskId
-        && run.session_id === attempt.session_id && run.generation === attempt.generation
-        && ['success', 'failed', 'cancelled'].includes(run.status) && Number.isSafeInteger(run.finished_at)))) {
-      throw controlPlaneStopError();
-    }
-  }
-  if (JSON.stringify(await readTargets()) !== JSON.stringify(tasks)) throw controlPlaneStopError();
-  return { killed: tasks.length, stopConfirmed: true, status: 'stopped', userTaskIds: tasks.map(task => task.userTaskId) };
+  // Persist the local hold before any CP call. The Intake DO retains the same
+  // stop intent and retries its immutable per-conversation windows after restart.
+  const held = await stub.fetch('https://intake/stop', { method: 'POST', body: JSON.stringify({ username, chatId, threadId }) });
+  if (!held.ok) throw controlPlaneStopError();
+  const response = await stub.fetch('https://intake/cp-stop-targets', { method: 'POST',
+    body: JSON.stringify({ username, chatId, threadId }) });
+  if (!response.ok) throw controlPlaneStopError();
+  const result = await response.json();
+  if (result?.profileId !== profileId || result.unresolved !== false || result.stopConfirmed !== true
+    || !Array.isArray(result.tasks) || result.tasks.some(task => task?.profileId !== profileId
+      || typeof task.userTaskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(task.userTaskId)
+      || typeof task.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(task.requestId)
+      || typeof task.receiptId !== 'string' || !task.receiptId)) throw controlPlaneStopError();
+  return { killed: result.tasks.length, stopConfirmed: true, status: 'stopped',
+    userTaskIds: result.tasks.map(task => task.userTaskId), snapshotId: result.snapshotId ?? null };
 }
 
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
