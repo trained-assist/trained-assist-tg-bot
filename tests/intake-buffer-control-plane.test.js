@@ -142,6 +142,28 @@ describe('existing collector control-plane ownership', () => {
     expect(route).not.toHaveBeenCalled();
   });
 
+  it.each(['false', 'true'])('matches busy stop buttons to the explicit runtime gate %s', async stopEnabled => {
+    const { owner, storage } = fixture();
+    owner.env.TG_SLICE_STOP_ENABLED = stopEnabled;
+    await storage.put('busy', true);
+    await storage.put('buf', items);
+    await owner._showCollector(42, 1, 1);
+    const buttons = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data.split('|')[0]);
+    expect(buttons).toEqual(expect.arrayContaining(['intake_run', 'intake_parallel', 'input_draft']));
+    expect(buttons.includes('intake_stopsupp')).toBe(stopEnabled === 'true');
+    expect(buttons.includes('intake_stopnew')).toBe(stopEnabled === 'true');
+  });
+
+  it('preserves legacy busy stop buttons despite the control-plane gate', async () => {
+    const { storage, env } = fixture();
+    const owner = new IntakeBuffer({ storage }, { ...env, EXECUTION_BACKEND: 'legacy', TG_SLICE_STOP_ENABLED: 'false' });
+    await storage.put('busy', true);
+    await storage.put('buf', items);
+    await owner._showCollector(42, 1, 1);
+    const buttons = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(buttons).toEqual(expect.arrayContaining(['intake_stopsupp', 'intake_stopnew']));
+  });
+
   it('shows unconfirmed stop even with held input rather than claiming the task stopped', async () => {
     const { owner, storage, source } = await stopFixture();
     await owner.fetch(rpc('/stop', source));

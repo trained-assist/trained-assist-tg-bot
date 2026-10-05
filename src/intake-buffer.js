@@ -1607,7 +1607,9 @@ export class IntakeBuffer {
       // killing the button here left the chat with no way to launch it (issue #303).
       const keyboard = (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
-        : busy ? QUEUE_BTN
+        : busy ? (this.env.EXECUTION_BACKEND === 'control-plane' && this.env.TG_SLICE_STOP_ENABLED === 'false'
+          ? QUEUE_BTN.map(row => row.filter(button => !button.callback_data.startsWith('intake_stop'))).filter(row => row.length)
+          : QUEUE_BTN)
         : this.env.EXECUTION_BACKEND === 'control-plane'
           ? LAUNCH_BTN.map(row => row.map(button => button.callback_data === 'intake_run'
             ? { ...button, text: '▶️ Запустить' } : button))
