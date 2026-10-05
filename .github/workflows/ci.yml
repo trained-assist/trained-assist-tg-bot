@@ -60,7 +60,7 @@ jobs:
 
   sandbox-validation:
     name: sandbox-validation
-    if: (github.head_ref || github.ref_name) == 'integration/first-working-version-20261005' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: contains(fromJSON('["integration/first-working-version-20261005","integration/tg-existing-ux-new-router-20261005"]'), github.head_ref || github.ref_name) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -80,12 +80,15 @@ jobs:
       - name: Bundle the sandbox Worker without deployment
         run: |
           npx wrangler deploy --dry-run --config wrangler.sandbox-tg.toml --outdir .wrangler/sandbox-ci
+          npx wrangler deploy --dry-run --config wrangler.sandbox-tg-existing-ux.toml --outdir .wrangler/sandbox-ci-existing-ux
           git rev-parse HEAD > .wrangler/sandbox-ci/source-sha.txt
       - name: Save sandbox bundle and tested revision
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-validation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .wrangler/sandbox-ci/
+          path: |
+            .wrangler/sandbox-ci/
+            .wrangler/sandbox-ci-existing-ux/
           include-hidden-files: true
           if-no-files-found: error
 
@@ -113,7 +116,8 @@ jobs:
           needs = json.loads(os.environ['NEEDS_RESULTS'])
           job_results = {name: job['result'] for name, job in needs.items()}
           required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
-          sandbox = os.environ['HEAD_BRANCH'] == 'integration/first-working-version-20261005' and os.environ['HEAD_REPO'] == os.environ['REPO']
+          sandbox_branches = {'integration/first-working-version-20261005', 'integration/tg-existing-ux-new-router-20261005'}
+          sandbox = os.environ['HEAD_BRANCH'] in sandbox_branches and os.environ['HEAD_REPO'] == os.environ['REPO']
           if sandbox:
               expected = {'ci': 'success', 'scenario-gate': 'success', 'deploy-staging': 'skipped', 'smoke-test-staging': 'skipped'}
               assert job_results == expected, job_results
@@ -213,7 +217,7 @@ jobs:
     outputs:
       worker: ${{ steps.preview.outputs.worker }}
     needs: [ci, scenario-gate]
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/integration/first-working-version-20261005'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !contains(fromJSON('["integration/first-working-version-20261005","integration/tg-existing-ux-new-router-20261005"]'), github.ref_name)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -239,7 +243,7 @@ jobs:
   smoke-test-staging:
     runs-on: ubuntu-latest
     needs: deploy-staging
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/integration/first-working-version-20261005'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !contains(fromJSON('["integration/first-working-version-20261005","integration/tg-existing-ux-new-router-20261005"]'), github.ref_name)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
