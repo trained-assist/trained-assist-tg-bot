@@ -4,7 +4,7 @@ Scope: [architecture #140](https://github.com/trained-assist/trained-agent-archi
 
 **Live ingress and reconciliation are paused pending delivery-owner review and deployment.** Independent readback observed different Bot API message IDs for the same caps receipt and terminal delivery. A sequential harness PASS does not establish single-writer delivery safety or clear that failure. Keep the original timeout and duplicate-delivery evidence; do not rerun either case to replace it.
 
-This harness posts an authorized Telegram-shaped update to the deployed sandbox's real `/webhook` handler, repeats the **identical serialized body**, checks the same `userTaskId`, polls signed CP `/status`, and drives protected gateway `/cron`. It requires a stored terminal delivery with `status=sent` and `providerMessageId`. A second reconciliation must preserve delivery IDs, provider message IDs, attempts, task generation, and run IDs.
+This harness posts an authorized Telegram-shaped update to the deployed sandbox's real `/webhook` handler, repeats the **identical serialized body**, checks the same `userTaskId`, and polls signed CP `/status` and gateway delivery summaries. Default `manual` mode drives protected gateway `/cron`; opt-in `autonomous` mode never does and waits for natural scheduled delivery. Both require a stored terminal delivery with `status=sent` and `providerMessageId`, followed by unchanged delivery/task/run readback. Autonomous readback is not reported as a manual reconciliation replay.
 
 Injected ingress proves the gateway path. It does **not** prove an incoming message sent by a human through Telegram. That separate #140 acceptance check requires the owner's authorized test bot/chat and a genuine user message. A bot's `sendMessage` does not create a user inbound update. Bot API acceptance does **not** prove human reading.
 
@@ -26,7 +26,7 @@ The harness reads only environment variables and an optional flat private JSON o
 | `CONTROL_PLANE_PRINCIPAL_SIGNATURE` | Required precomputed 64-character hex HMAC-SHA256; sent as `x-principal-sig` alongside `x-principal`. No root signing secret needed. |
 | `CONTROL_PLANE_PROFILE` | Required intended CP profile; account for a deployed per-chat profile override. Checked when CP exposes `profile_id`; current raw status omits it and authorizes task access by principal. |
 | `CONTROL_PLANE_API_KEY` | Optional additional CP bearer authentication. |
-| `TG_SANDBOX_BOT_TOKEN` | Optional; used **only** for read-only `getMe` against real Telegram. Gateway owns outgoing delivery credentials. |
+| `TG_SANDBOX_BOT_TOKEN` | Optional in manual mode; used **only** for read-only `getMe` against real Telegram. Ignored in autonomous mode: no provider request even if supplied. Gateway owns outgoing delivery credentials. |
 | `TEST_CHAT_TYPE` | Optional `private`, `group`, or `supergroup`; defaults to private for positive chat IDs, supergroup for negative IDs. |
 | `TEST_THREAD_ID` | Optional positive forum topic ID; requires supergroup. Delivery must match this thread. |
 | `SMOKE_TEXT` | Optional exact task text, default `Каково состояние системы?`; use an approved request with no unrelated external effects. |
@@ -36,6 +36,7 @@ The harness reads only environment variables and an optional flat private JSON o
 | `SMOKE_TIMEOUT_MS` | Overall network/poll/replay deadline, default 120000, maximum 900000. |
 | `SMOKE_REQUEST_TIMEOUT_MS` | Per-request deadline, default 60000, maximum 60000; capped by remaining overall time, including response-body parsing. The synchronous ingress may include selector/writer latency; timeout does not authorize a fresh update or task. |
 | `SMOKE_POLL_INTERVAL_MS` | Default 2000, range 100–30000. |
+| `SMOKE_RECONCILIATION_MODE` | Exact enum `manual` (default) or `autonomous`; any other value is blocked before HTTP. Autonomous requires explicit IDs/date and a loaded prepared private `INTEGRATION_UPDATE_FILE`, not newly generated update bytes. |
 
 The private `/tmp/ta-integrator-v1-runtime/client-bindings.json` currently contains principal/signature/profile and webhook secret, but lacks approved bot/chat bindings and may lack the endpoint URLs. It is a starting configuration, not permission to infer a destination. Communication-service bindings in that file are ignored.
 
@@ -51,6 +52,75 @@ INTEGRATION_BINDINGS_FILE=/tmp/ta-integrator-v1-runtime/client-bindings.json \
 All missing required settings fail preflight before HTTP calls. Exit code `0` means complete smoke pass, `1` means failed/incomplete evidence, and `2` means configuration blocked. Output is JSON Lines: ingress acknowledgement, changed polling states, final sanitized evidence. Save stdout to an owner-approved private evidence location when needed. Keep gateway/CP/communication/runner revisions and deployment references beside the transcript; public evidence must omit machine addresses and bindings.
 
 The harness never calls `setWebhook`, `sendMessage`, `getUpdates`, CP `/start`, `/resume`, `/recover`, or KV. Gateway reconciliation owns outbound messages, and every observed delivery must target exactly the configured test chat/thread. `/cron` reconciles the sandbox's entire outbox, so the isolated deployment must contain only approved test destinations and no unrelated pending tasks. Start with a fresh/idle conversation: an existing awaiting-input conversation may treat the text as a continuation rather than a new task. Timeout or lost ingress response is a failure, never authorization to create another task or rerun an external action; inspect the original task/update before replaying.
+
+## Autonomous acceptance mode
+
+Use this mode only after the parent authorizes the isolated DO owner and natural
+scheduled delivery. It does not deploy or unpause anything. This source change
+does not repeat or replace the parent's completed live positive cases; its tests
+are offline fixtures, not new live acceptance evidence.
+
+Before any HTTP, reserve explicit update/message IDs and message date for a
+fresh idle owner-approved conversation. Create **new** private bindings/update
+paths for that case; never edit the active approved bindings or earlier intent
+files. The following preparation is offline. The parent must supply reserved
+IDs/date and exact approved text; missing values fail preflight:
+
+```sh
+SOURCE_BINDINGS_FILE=/absolute/private/approved-bindings.json \
+AUTONOMOUS_BINDINGS_FILE=/absolute/private/new-autonomous-bindings.json \
+AUTONOMOUS_UPDATE_FILE=/absolute/private/new-autonomous-update.json \
+SMOKE_UPDATE_ID="$RESERVED_UPDATE_ID" SMOKE_MESSAGE_ID="$RESERVED_MESSAGE_ID" \
+SMOKE_MESSAGE_DATE="$PINNED_MESSAGE_DATE" SMOKE_TEXT="$APPROVED_TEXT" \
+node --input-type=module <<'JS'
+import { writeFile } from 'node:fs/promises';
+import { loadBindings, readLiveConfig, serializeUpdate } from './scripts/integration/telegram-v1-smoke.mjs';
+const bindings = await loadBindings({ INTEGRATION_BINDINGS_FILE: process.env.SOURCE_BINDINGS_FILE });
+if (!process.env.SMOKE_TEXT?.trim()) throw new Error('Explicit approved text required');
+delete bindings.savedUpdateBody;
+Object.assign(bindings, {
+  SMOKE_UPDATE_ID: process.env.SMOKE_UPDATE_ID,
+  SMOKE_MESSAGE_ID: process.env.SMOKE_MESSAGE_ID,
+  SMOKE_MESSAGE_DATE: process.env.SMOKE_MESSAGE_DATE,
+  SMOKE_TEXT: process.env.SMOKE_TEXT,
+  SMOKE_RECONCILIATION_MODE: 'manual',
+  INTEGRATION_UPDATE_FILE: process.env.AUTONOMOUS_UPDATE_FILE,
+});
+const body = serializeUpdate(readLiveConfig(bindings));
+await writeFile(bindings.INTEGRATION_UPDATE_FILE, body, { flag: 'wx', mode: 0o600 });
+bindings.SMOKE_RECONCILIATION_MODE = 'autonomous';
+await writeFile(process.env.AUTONOMOUS_BINDINGS_FILE, JSON.stringify(bindings), { flag: 'wx', mode: 0o600 });
+JS
+```
+
+Keep the saved files and private operator checkpoint as immutable intent after
+preparation. Use an overall budget long enough for natural cron/discovery ticks
+(maximum `SMOKE_TIMEOUT_MS=900000`), while requests remain capped at 60000ms and
+the remaining budget. After explicit live clearance, use the prepared file:
+
+```sh
+INTEGRATION_BINDINGS_FILE=/absolute/private/new-autonomous-bindings.json \
+  node scripts/integration/telegram-v1-smoke.mjs
+```
+
+Autonomous mode makes gateway health reads, the original ingress and intentional
+exact-body duplicate check, signed CP status reads and authenticated DO-backed
+delivery-summary reads. It makes **zero `/cron`/manual-drain calls and zero
+direct provider calls**, including `getMe` when a token exists. It does not
+synthesize a sent record, final answer or model run to turn a pending case green.
+PASS still requires real stored terminal provider acceptance, matching owner
+destination/thread and generation, valid task/run identities, and unchanged
+readback. Evidence says `botIdentity=gateway_health_only`,
+`reconciliationReplay=not_invoked` and `deliveryReadback=unchanged`; the last
+field proves only the observed readback window, not exactly-once delivery under
+all future races/crashes. Deployed DO/source provenance remains parent evidence.
+
+An unknown ingress acknowledgement stops the invocation; there is no automatic
+retry or fresh ID/date. Preserve the prepared bytes and original failure output,
+derive/reconcile the same CP task as described below, and read its delivery
+state without `/cron`. Do not simply rerun this CLI after an unknown outcome:
+another ingress is allowed only after explicit same-case reconciliation and
+parent authorization. Never reset the prepared files or replace a task.
 
 ## Unknown acknowledgement recovery
 
@@ -104,6 +174,7 @@ Run identity evidence distinguishes CP orchestration from Runner execution. `orc
 | CP `done`, `result=ready` | Final answer persisted; this is not delivery. |
 | Matching terminal `sent` with `providerMessageId` | Bot API accepted final delivery to the configured chat/thread. |
 | Second reconciliation leaves summaries and task/runs unchanged | Replay does not resend stored delivery or restart the completed task during this observation. |
+| Autonomous `deliveryReadback=unchanged`, `reconciliationReplay=not_invoked` | Same stored provider/task/run evidence on a second read, without manual reconciliation or provider probes; only the observed window is established. |
 | `humanReading=unknown` | No reading/read-receipt claim. |
 
 Concurrent ingress races, crash between Telegram acceptance and KV persistence, answer-text equality at the provider, long-message splitting, files, credentials continuation, real user inbound Telegram, Google Sheet effects, and broader #140 scenarios need separate evidence. This smoke cannot claim exactly-once delivery across those failure windows. The summaries intentionally omit answer text; acceptance is tied to the parent's terminal outbox record and its delivery implementation.
