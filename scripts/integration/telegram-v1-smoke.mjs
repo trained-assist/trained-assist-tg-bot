@@ -89,6 +89,16 @@ export function readConfig(bindings) {
   requireCondition(threadId === null || chatType === 'supergroup', 'TEST_THREAD_ID requires a supergroup', 'blocked');
   const text = String(bindings.SMOKE_TEXT ?? 'Каково состояние системы?');
   requireCondition(text.trim().length > 0 && text.length <= 4096, 'Invalid SMOKE_TEXT', 'blocked');
+  const reconciliationMode = String(bindings.SMOKE_RECONCILIATION_MODE ?? 'manual');
+  requireCondition(['manual', 'autonomous'].includes(reconciliationMode), 'Invalid SMOKE_RECONCILIATION_MODE', 'blocked');
+  if (reconciliationMode === 'autonomous') {
+    required(bindings, 'SMOKE_UPDATE_ID');
+    required(bindings, 'SMOKE_MESSAGE_ID');
+    required(bindings, 'SMOKE_MESSAGE_DATE');
+    required(bindings, 'INTEGRATION_UPDATE_FILE');
+    requireCondition(typeof bindings.savedUpdateBody === 'string' && bindings.savedUpdateBody.length > 0,
+      'Autonomous mode requires a prepared private saved update', 'blocked');
+  }
   return {
     gatewayUrl: baseUrl(bindings, 'GATEWAY_URL'),
     controlPlaneUrl: baseUrl(bindings, 'CONTROL_PLANE_URL'),
@@ -107,6 +117,7 @@ export function readConfig(bindings) {
     messageId: integer(bindings, 'SMOKE_MESSAGE_ID', randomInt(1, 2147483647), 1, 2147483647),
     messageDate: bindings.SMOKE_MESSAGE_DATE == null ? null : integer(bindings, 'SMOKE_MESSAGE_DATE', undefined, 1, 2147483647),
     savedUpdateBody: bindings.savedUpdateBody,
+    reconciliationMode,
     text,
     timeoutMs: integer(bindings, 'SMOKE_TIMEOUT_MS', 120000, 1000, 900000),
     requestTimeoutMs: integer(bindings, 'SMOKE_REQUEST_TIMEOUT_MS', 60000, 100, 60000),
@@ -205,6 +216,8 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
     outcome: 'running', ingress: 'authorized_injected_update', updateId: config.updateId, messageId: config.messageId,
     duplicate: false, receipt: 'unverified', result: 'unverified', delivery: 'unverified', humanReading: 'unknown',
   };
+  const reconciliationMode = config.reconciliationMode ?? 'manual';
+  evidence.reconciliationMode = reconciliationMode;
   const secrets = [config.secret, config.signature, config.botToken, config.apiKey].filter(Boolean);
   const output = value => {
     const serialized = JSON.stringify(value);
@@ -229,11 +242,17 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
   const gateway = (path, method = 'GET', body) => request('Gateway', `${config.gatewayUrl}${path}`, method, gatewayHeaders, body);
   const status = taskId => request('CP status', `${config.controlPlaneUrl}/status`, 'POST', cpHeaders, JSON.stringify({ taskId }));
   try {
+    requireCondition(['manual', 'autonomous'].includes(reconciliationMode), 'Invalid SMOKE_RECONCILIATION_MODE', 'blocked');
+    if (reconciliationMode === 'autonomous') {
+      requireCondition(typeof config.savedUpdateBody === 'string' && config.savedUpdateBody.length > 0
+        && Number.isSafeInteger(config.messageDate) && config.messageDate > 0,
+      'Autonomous mode requires a prepared private saved update and pinned date', 'blocked');
+    }
     const updateBody = serializeUpdate(config, Math.floor(startedAt / 1000));
     const health = await request('Gateway health', `${config.gatewayUrl}/health`, 'GET', {}, undefined);
     requireCondition(health.status === 'ok' && health.bot === config.username && health.mode === 'direct',
       'Gateway health must identify the configured direct-mode sandbox');
-    if (config.botToken) {
+    if (config.botToken && reconciliationMode === 'manual') {
       const identity = await request('Telegram getMe', `https://api.telegram.org/bot${config.botToken}/getMe`, 'GET', {}, undefined);
       requireCondition(identity.ok === true && identity.result?.is_bot === true && identity.result.username === config.username,
         'Telegram getMe sandbox identity mismatch');
@@ -256,7 +275,7 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
       evidence.runIds = snapshot.runIds;
       evidence.orchestrationAttemptIds = snapshot.orchestrationAttemptIds;
       evidence.result = snapshot.status === 'done' && snapshot.hasAnswer ? 'ready' : 'unverified';
-      await gateway('/cron');
+      if (reconciliationMode === 'manual') await gateway('/cron');
       const records = deliveryRecords(await gateway(`/deliveries/${encodeURIComponent(taskId)}`), config, taskId);
       const receipts = records.filter(record => record.deliveryId.startsWith('receipt:') || record.deliveryId === taskId);
       const terminal = records.find(record => record.deliveryId === `terminal:${taskId}:g${snapshot.generation}`);
@@ -266,7 +285,7 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
       requireCondition(terminal?.status !== 'dead', 'Terminal delivery exhausted retries');
       if (snapshot.status === 'done') requireCondition(snapshot.hasAnswer, 'CP done has no final answer');
       if (evidence.result === 'ready' && terminal?.status === 'sent') {
-        await gateway('/cron');
+        if (reconciliationMode === 'manual') await gateway('/cron');
         const replay = deliveryRecords(await gateway(`/deliveries/${encodeURIComponent(taskId)}`), config, taskId);
         requireCondition(JSON.stringify(replay) === JSON.stringify(records), 'Reconciliation replay changed delivery evidence');
         const final = taskSnapshot(await status(taskId), config, taskId);
@@ -276,7 +295,8 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
         evidence.providerMessageId = terminal.providerMessageId;
         evidence.receipts = receipts;
         evidence.terminal = terminal;
-        evidence.reconciliationReplay = 'unchanged';
+        evidence.reconciliationReplay = reconciliationMode === 'manual' ? 'unchanged' : 'not_invoked';
+        evidence.deliveryReadback = 'unchanged';
         evidence.elapsedMs = Date.now() - startedAt;
         output(evidence);
         return evidence;
