@@ -83,6 +83,66 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it.each(['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'])
+  ('explicit false refuses %s without changing durable stop intent or input', async path => {
+    const { owner, storage } = fixture();
+    owner.env.TG_SLICE_STOP_ENABLED = 'false';
+    await storage.put('buf', items);
+    await storage.put('cpStopWindow', { pending: true, intentId: 'preserved-intent' });
+    await storage.put('stopLaunch', { mode: 'supp', at: 1700000000000 });
+    const before = await storage.list();
+    const response = await owner._fetch(rpc(path, {}));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'control_plane_stop_disabled' });
+    expect(await storage.list()).toEqual(before);
+    expect(stopTargets).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('disabled pending stop still delivers terminal with routingKnown=%s after cold restart', async routingKnown => {
+    const { owner, storage, env } = fixture();
+    await accept(owner);
+    env.TG_SLICE_STOP_ENABLED = 'false';
+    const accepted = await storage.get(`cp-acceptance:${receipt.requestId}`);
+    if (routingKnown) await storage.put(`cp-acceptance:${receipt.requestId}`, { ...accepted,
+      routingOutcome: { known: true, publicationComplete: true, degraded: false } });
+    const pending = { pending: true, intentId: 'preserved-intent', username: 'test-profile', chatId: 42, threadId: null };
+    const restart = { mode: 'supp', route: { sessionId: 'same-session' }, at: 1700000000000 };
+    await storage.put('cpStopWindow', pending);
+    await storage.put('stopLaunch', restart);
+    await storage.put('stopped', 1700000000000);
+    await storage.put('buf', items);
+    const restarted = new IntakeBuffer({ storage }, env);
+    await restarted.alarm();
+    expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ deliveryId: `terminal:${receipt.userTaskId}:g1`, userTaskId: receipt.userTaskId });
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpStopWindow')).toEqual(pending);
+    expect(await storage.get('stopLaunch')).toEqual(restart);
+    expect(await storage.get('stopped')).toBe(1700000000000);
+    expect(await storage.get('buf')).toEqual(items);
+    expect(stopTargets).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    await restarted.alarm();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(await storage.get('cpStopWindow')).toEqual(pending);
+    expect(await storage.get('stopLaunch')).toEqual(restart);
+  });
+
+  it('disabled stop consumption cannot delete a retained launch intent', async () => {
+    const { owner, storage } = fixture();
+    owner.env.TG_SLICE_STOP_ENABLED = 'false';
+    await storage.put('stopLaunch', { mode: 'supp' });
+    const before = await storage.list();
+    expect(await owner._consumeStopLaunch()).toBe(false);
+    await expect(owner._driveControlPlaneStop({})).rejects.toMatchObject({ code: 'CONTROL_PLANE_STOP_DISABLED' });
+    expect(await storage.list()).toEqual(before);
+    expect(stopTargets).not.toHaveBeenCalled();
+  });
+
   async function stopFixture(threadId = null) {
     const value = fixture();
     const session = JSON.stringify({ username: 'test-profile' });

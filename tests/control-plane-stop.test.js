@@ -34,6 +34,22 @@ beforeEach(() => {
 });
 
 describe('CP-backed Telegram stop', () => {
+  it('explicit false refuses stop before any Intake or CP mutation', async () => {
+    const current = fixture();
+    current.env.TG_SLICE_STOP_ENABLED = 'false';
+    await expect(stopTask(current.env, { username: 'fixture', chatId: 7 }))
+      .rejects.toMatchObject({ code: 'CONTROL_PLANE_STOP_DISABLED', stopConfirmed: false });
+    expect(current.calls).toEqual([]);
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
+  it('explicit true preserves the existing stop path', async () => {
+    const current = fixture();
+    current.env.TG_SLICE_STOP_ENABLED = 'true';
+    expect(await stopTask(current.env, { username: 'fixture', chatId: 7 })).toMatchObject({ killed: 1, stopConfirmed: true });
+    expect(current.calls.map(call => call.path)).toEqual(['/stop', '/cp-stop-targets']);
+  });
+
   it('persists the local hold first and accepts only the CP durable stop confirmation', async () => {
     const current = fixture();
     expect(await stopTask(current.env, { username: 'fixture', chatId: 7 })).toEqual({ killed: 1,
