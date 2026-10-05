@@ -187,9 +187,12 @@ function taskSnapshot(payload, config, taskId) {
   if (row.profile_id != null) requireCondition(row.profile_id === config.profile, 'CP status profile mismatch');
   requireCondition(typeof row.status === 'string' && Number.isSafeInteger(row.generation), 'Invalid CP task state');
   requireCondition(Array.isArray(payload.runs), 'CP status must contain runs[]');
-  const runIds = payload.runs.map(run => identifier(run.id, 'runId')).sort();
+  const orchestrationAttemptIds = payload.runs.map(run => identifier(run.id, 'orchestrationAttemptId')).sort();
+  const runIds = payload.runs.filter(run => run.session_id != null)
+    .map(run => identifier(run.session_id, 'Runner runId')).sort();
   const answer = typeof row.result === 'string' ? row.result : row.result?.answer;
-  return { status: row.status, generation: row.generation, runIds, hasAnswer: typeof answer === 'string' && !!answer.trim() };
+  return { status: row.status, generation: row.generation, runIds, orchestrationAttemptIds,
+    hasAnswer: typeof answer === 'string' && !!answer.trim() };
 }
 
 export async function runSmoke(config, { fetchImpl = fetch, emit = value => console.log(JSON.stringify(value)) } = {}) {
@@ -251,6 +254,7 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
       evidence.taskStatus = snapshot.status;
       evidence.generation = snapshot.generation;
       evidence.runIds = snapshot.runIds;
+      evidence.orchestrationAttemptIds = snapshot.orchestrationAttemptIds;
       evidence.result = snapshot.status === 'done' && snapshot.hasAnswer ? 'ready' : 'unverified';
       await gateway('/cron');
       const records = deliveryRecords(await gateway(`/deliveries/${encodeURIComponent(taskId)}`), config, taskId);

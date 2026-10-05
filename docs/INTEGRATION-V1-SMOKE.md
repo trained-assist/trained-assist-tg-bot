@@ -95,6 +95,8 @@ CP is queried using raw `POST /status {"taskId":"..."}` with signed principal he
 
 ## Evidence and limits
 
+Run identity evidence distinguishes CP orchestration from Runner execution. `orchestrationAttemptIds` projects raw `runs[].id` (including synthetic `routing-run:<task>:<generation>` IDs). `runIds` projects only attached, non-null `runs[].session_id`, preserved verbatim, with no fallback to the attempt ID. Missing attachments produce an empty `runIds` list; quick replies may have no attempts at all. Neither field proves the selected native engine or native launch time. CP `TaskStore.attachRunnerRun` stores Runner correlation in `executions.session_id`; raw `/status` returns these execution rows. Replay compares both identity lists. Historical reports that put attempt IDs into `runIds` remain historical evidence and are not rewritten.
+
 | Evidence | What it establishes |
 | --- | --- |
 | Webhook returns stable task ID on identical update | Sequential ingress dedup at the real gateway handler. |
