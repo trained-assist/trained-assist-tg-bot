@@ -34,7 +34,7 @@ service = "trained-assist-cp-v1-sandbox"
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"
 TG_SLICE_ROUTER_ENABLED = "true"
-TG_SLICE_DELIVERY_PAUSED = "true"
+TG_SLICE_DELIVERY_PAUSED = "false"
 
 # Secrets (set via `wrangler secret put` — never in repo):
 #   TG_SANDBOX_BOT_TOKEN        — test bot token only
