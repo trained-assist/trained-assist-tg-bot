@@ -160,6 +160,7 @@ export class ConversationSession {
         text,
         inputItemCount: (inputItems ?? [{ text }]).length,
         createdAt: receipt.acceptedAt,
+        providerAcceptedAt: receipt.providerAcceptedAt ?? null,
       });
       await this.store.save(index);
     }

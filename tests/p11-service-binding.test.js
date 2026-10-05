@@ -66,6 +66,7 @@ describe('P11 Worker control-plane service binding', () => {
     const callsBeforeSchedule = controlFetch.mock.calls.length;
     await worker.scheduled({}, env);
     expect(controlFetch.mock.calls.length).toBeGreaterThan(callsBeforeSchedule);
+    await worker.scheduled({}, env);
     expect(telegram.messagesTo(1001).filter(item => item.message.text === 'bound final answer')).toHaveLength(1);
     expect(fake.tasks).toHaveLength(1);
     expect(receipt.userTaskId).toBe(fake.tasks[0].user_task_id);

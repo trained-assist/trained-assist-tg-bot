@@ -5,6 +5,7 @@ import { TelegramApi } from '../src/sandbox-tg/telegram.js';
 import { TelegramEmulator } from '../src/sandbox-tg/telegram-emulator.js';
 import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
 import { TgDeliveryOutbox } from '../src/sandbox-tg/delivery.js';
+import { TgDeliveryOwnerClient } from '../src/sandbox-tg/delivery-owner.js';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
 
 describe('P11 exported Worker composition', () => {
@@ -91,7 +92,7 @@ describe('P11 exported Worker composition', () => {
     expect(logs).not.toContain(env.TELEGRAM_WEBHOOK_SECRET);
   });
 
-  it('scheduled cold start drains all KV pages and preserves bounded retries', async () => {
+  it('scheduled cold start never imports or resends previous KV records', async () => {
     const outbox = new TgDeliveryOutbox(env.TG_SLICE, null);
     for (const taskId of ['task-1', 'task-2']) {
       await outbox.enqueue({ userTaskId: taskId, requestId: taskId, destination: { chatId: 1001 }, type: 'message', text: taskId });
@@ -99,14 +100,14 @@ describe('P11 exported Worker composition', () => {
     env.TG_SLICE_DELIVERY_MAX_ATTEMPTS = '2';
     emulator.failNext({ status: 500 });
     await worker.scheduled({}, env);
-    expect((await outbox.load('task-1')).status).toBe('retrying');
-    expect((await outbox.load('task-2')).status).toBe('sent');
+    expect((await outbox.load('task-1')).status).toBe('pending');
+    expect((await outbox.load('task-2')).status).toBe('pending');
     emulator.failNext({ status: 500 });
     await worker.scheduled({}, env);
-    expect((await outbox.load('task-1')).status).toBe('dead');
+    expect((await outbox.load('task-1')).status).toBe('pending');
     await worker.scheduled({}, env);
-    expect((await outbox.load('task-1')).attempts).toBe(2);
-    expect(emulator.messagesTo(1001)).toHaveLength(1);
+    expect((await outbox.load('task-1')).attempts).toBe(0);
+    expect(emulator.messagesTo(1001)).toHaveLength(0);
   });
 
   it('delivers the final answer after a sent receipt to the original chat and thread, once', async () => {
@@ -125,7 +126,7 @@ describe('P11 exported Worker composition', () => {
     expect(fake.runs(fake.tasks[0].user_task_id)).toHaveLength(1);
   });
 
-  it('continues KV pagination through an empty incomplete page', async () => {
+  it('does not use KV delivery pagination as send authority', async () => {
     const outbox = new TgDeliveryOutbox(env.TG_SLICE, null);
     await outbox.enqueue({ userTaskId: 'late-task', destination: { chatId: 1001 }, type: 'message', text: 'later page' });
     const list = env.TG_SLICE.list.bind(env.TG_SLICE);
@@ -136,7 +137,8 @@ describe('P11 exported Worker composition', () => {
       return list({ ...options, cursor: options.cursor === 'empty-page' ? '' : options.cursor });
     });
     await worker.scheduled({}, env);
-    expect(emulator.messagesTo(1001).map(item => item.message.text)).toEqual(['later page']);
+    expect(emulator.messagesTo(1001)).toHaveLength(0);
+    expect(env.TG_SLICE.list).not.toHaveBeenCalledWith(expect.objectContaining({ prefix: 'delivery:' }));
   });
 
   it('deleteMessage sends the supplied chat and message IDs through the Bot API', async () => {
@@ -159,8 +161,9 @@ describe('P11 exported Worker composition', () => {
   });
 
   it('protects the HTTP reconciliation route and uses the same composition when authorized', async () => {
-    const outbox = new TgDeliveryOutbox(env.TG_SLICE, null);
-    await outbox.enqueue({ userTaskId: 'cron-task', destination: { chatId: 1001 }, type: 'message', text: 'cron reply' });
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.open();
+    await outbox.enqueue({ userTaskId: 'cron-task', destination: { chatId: 1001 }, type: 'message', text: 'cron reply', taskAcceptedAt: Date.now() });
     expect((await worker.fetch(new Request('https://sandbox.test/cron'), env)).status).toBe(401);
     expect(fetchSpy).not.toHaveBeenCalled();
     const response = await worker.fetch(new Request('https://sandbox.test/cron', {
@@ -171,26 +174,23 @@ describe('P11 exported Worker composition', () => {
     expect(emulator.messagesTo(1001).map(item => item.message.text)).toEqual(['cron reply']);
   });
 
-  it('preserves terminal delivery history and reaches the retry cap without rerunning the task', async () => {
+  it('ambiguous terminal delivery is unknown without retrying or rerunning the task', async () => {
     env.TG_SLICE_DELIVERY_MAX_ATTEMPTS = '2';
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'question' }));
     await worker.scheduled({}, env);
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'actual answer' }));
     const taskId = fake.tasks[0].user_task_id;
-    const outbox = new TgDeliveryOutbox(env.TG_SLICE, null);
-    const deliveryOutbox = new TgDeliveryOutbox(env.TG_SLICE, new TelegramApi(readTgSliceConfig(env)));
-    await deliveryOutbox.drain();
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.drain();
     const deliveryId = `terminal:${taskId}:g1`;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      emulator.failNext({ status: 500 });
-      await worker.scheduled({}, env);
-      const record = await outbox.load(deliveryId);
-      expect(record.attempts).toBe(attempt);
-      expect(record.history).toHaveLength(attempt);
-    }
+    emulator.failNext({ status: 500 });
     await worker.scheduled({}, env);
-    expect((await outbox.load(deliveryId)).status).toBe('dead');
-    expect((await outbox.load(deliveryId)).attempts).toBe(2);
+    const record = await outbox.load(deliveryId);
+    expect(record.attempts).toBe(1);
+    expect(record.status).toBe('unknown');
+    await worker.scheduled({}, env);
+    expect((await outbox.load(deliveryId)).status).toBe('unknown');
+    expect((await outbox.load(deliveryId)).attempts).toBe(1);
     expect(fake.runs(taskId)).toHaveLength(1);
     expect(emulator.messagesTo(1001).some(item => item.message.text === 'actual answer')).toBe(false);
   });
@@ -221,6 +221,7 @@ describe('P11 exported Worker composition', () => {
     expect(emulator.messagesTo(1001).filter(item => item.message.text.includes('Исход задачи неизвестен'))).toHaveLength(1);
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'recovered result' }));
     await worker.scheduled({}, env);
+    await worker.scheduled({}, env);
     expect(emulator.messagesTo(1001).filter(item => item.message.text === 'recovered result')).toHaveLength(1);
   });
 
@@ -230,21 +231,24 @@ describe('P11 exported Worker composition', () => {
     expect(readTgSliceConfig(makeEnv({ CONTROL_PLANE_PRINCIPAL_SIGNATURE: '   ' })).principalSignature).toBeNull();
   });
 
-  it('retains the final reply across a transient delivery failure and sends it once on the next schedule', async () => {
+  it('retains the final reply across an explicit 429 rejection and respects its retry delay', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(10000);
+    env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify({ ...JSON.parse(env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST), cutoverAt: 10000 });
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'question' }));
     await worker.scheduled({}, env);
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'retry this result' }));
-    const outbox = new TgDeliveryOutbox(env.TG_SLICE, new TelegramApi(readTgSliceConfig(env)));
+    const outbox = new TgDeliveryOwnerClient(env);
     await outbox.drain();
-    emulator.failNext({ status: 500 });
+    emulator.failNext({ status: 429, retryAfterSec: 1 });
     await worker.scheduled({}, env);
     await worker.scheduled({}, env);
+    Date.now.mockReturnValue(11000);
     await worker.scheduled({}, env);
     expect(emulator.messagesTo(1001).filter(item => item.message.text === 'retry this result')).toHaveLength(1);
     const record = await outbox.load(`terminal:${fake.tasks[0].user_task_id}:g1`);
     expect(record.status).toBe('sent');
     expect(record.attempts).toBe(2);
-    expect(record.history).toHaveLength(1);
+    expect(record.reason).toBe('provider_accepted');
   });
 
   it('tracks launched batches for final delivery through the exported callback and scheduled handlers', async () => {

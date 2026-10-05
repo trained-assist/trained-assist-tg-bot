@@ -96,6 +96,11 @@ Set in repo Settings → Secrets → Actions:
 
 ### Isolated Telegram sandbox (P11)
 
+Sandbox outgoing delivery now requires the [SQLite delivery owner and explicit
+cutover manifest](docs/sandbox-delivery-owner-v1.md). Enqueue/drain/read use strong
+owner storage, not KV. Ambiguous sends remain unknown without retry; legacy
+deliveries quarantine. Delivery and cron start paused pending operator review.
+
 `wrangler.sandbox-tg.toml` selects `src/sandbox-tg/index.js` and a separate
 `TG_SLICE` KV namespace. Configure the required `TG_SANDBOX_BOT_TOKEN`,
 `TG_SANDBOX_BOT_USERNAME`, control-plane URL/principal/profile, and chat allowlist.

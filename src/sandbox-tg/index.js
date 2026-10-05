@@ -1,13 +1,11 @@
 import { Hono } from 'hono';
 import { readTgSliceConfig, TgSliceConfigError } from './config.js';
 import { ControlPlaneClient } from './control-plane-client.js';
-import { TelegramApi } from './telegram.js';
-import { TgDeliveryOutbox } from './delivery.js';
+import { TgDeliveryOwnerClient } from './delivery-owner.js';
 import { KvConversationStore } from './conversation.js';
 import { KvBatchStore } from './batch.js';
 import { TgSliceController, MODE } from './worker.js';
 import { profileForUpdate } from './profile.js';
-import { kvEntries } from './kv.js';
 
 const app = new Hono();
 
@@ -19,6 +17,7 @@ app.use('*', async (c, next) => {
   try {
     const config = readTgSliceConfig(c.env);
     c.env = { ...c.env, _sliceConfig: config, _sliceCtrl: createController(c.env, config) };
+    await c.env._sliceCtrl.outbox.open();
   } catch (error) {
     if (error instanceof TgSliceConfigError) return c.json({ error: 'sandbox not configured', binding: error.variable }, 503);
     throw error;
@@ -29,6 +28,8 @@ app.use('*', async (c, next) => {
 app.get('/health', c => {
   const required = ['TG_SANDBOX_BOT_TOKEN', 'CONTROL_PLANE_URL', 'CONTROL_PLANE_PRINCIPAL', 'CONTROL_PLANE_PROFILE', 'TELEGRAM_WEBHOOK_SECRET', 'TG_SLICE_ALLOWED_CHATS'];
   const missing = required.filter(name => !String(c.env[name] ?? '').trim());
+  if (!c.env.TG_DELIVERY_OWNER?.idFromName || !c.env.TG_DELIVERY_OWNER?.get) missing.push('TG_DELIVERY_OWNER');
+  if (!String(c.env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST ?? '').trim()) missing.push('TG_SLICE_DELIVERY_CUTOVER_MANIFEST');
   return c.json({ status: 'ok', readiness: missing.length ? 'not_configured' : 'configured', missingBindings: missing, bot: c.env.TG_SANDBOX_BOT_USERNAME, mode: c.env.TG_SLICE_MODE ?? MODE.direct });
 });
 
@@ -52,37 +53,16 @@ app.post('/webhook', async c => {
 app.get('/deliveries/:taskId', async c => {
   const taskId = c.req.param('taskId');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return c.json({ error: 'invalid task id' }, 400);
-  const outbox = new TgDeliveryOutbox(c.env.TG_SLICE, null);
-  const generationOf = record => record ? record.generation ?? Number(record.deliveryId?.match(/:g(\d+)$/)?.[1] ?? 0) : 0;
-  let terminal = await outbox.load(`terminal:${taskId}`);
-  for await (const entry of kvEntries(c.env.TG_SLICE, `delivery:terminal:${taskId}:g`)) {
-    const record = JSON.parse(entry.value);
-    if (record.userTaskId !== taskId) continue;
-    if (!terminal || generationOf(record) >= generationOf(terminal)) terminal = record;
-  }
-  const receiptId = await c.env.TG_SLICE.get(`delivery-receipt:${taskId}`);
-  const records = [await outbox.load(receiptId ?? taskId), terminal];
-  const config = c.env._sliceConfig;
-  if (records.some(record => record && !config.allowedChats.includes(String(record.destination?.chatId)))) {
-    return c.json({ error: 'chat not allowed' }, 403);
-  }
-  const summary = record => record ? {
-    deliveryId: record.deliveryId,
-    userTaskId: record.userTaskId,
-    status: record.status,
-    attempts: record.attempts,
-    providerMessageId: record.telegramMessageId ?? null,
-    generation: generationOf(record),
-    chatId: record.destination.chatId,
-    threadId: record.destination.threadId ?? null,
-  } : null;
-  return c.json({ receipt: summary(records[0]), terminal: summary(records[1]) });
+  try { return c.json(await c.env._sliceCtrl.outbox.read(taskId)); }
+  catch (error) { return c.json({ error: 'delivery owner refused' }, error.status === 403 ? 403 : 503); }
 });
 
 app.get('/cron', async c => {
   const result = await c.env._sliceCtrl.reconcile();
   return c.json({ reconciled: true, ...result });
 });
+
+app.get('/delivery-cutover', async c => c.json(await c.env._sliceCtrl.outbox.open()));
 
 const webhook = app;
 
@@ -91,12 +71,7 @@ function createController(env, config = readTgSliceConfig(env)) {
     fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
     logSink: line => console.log(line),
   });
-  const api = new TelegramApi(config);
-  const outbox = new TgDeliveryOutbox(
-    env.TG_SLICE,
-    api,
-    { deliveryMaxAttempts: config.deliveryMaxAttempts, retryBaseMs: config.deliveryRetryBaseMs, logSink: line => console.log(line) },
-  );
+  const outbox = new TgDeliveryOwnerClient(env, config);
   const store = new KvConversationStore(env.TG_SLICE);
   return new TgSliceController(client, store, {
     batchStore: new KvBatchStore(env.TG_SLICE),
@@ -113,6 +88,10 @@ export default {
     return webhook.fetch(request, env);
   },
   async scheduled(ctrl, env) {
-    await createController(env).reconcile();
+    const controller = createController(env);
+    await controller.outbox.open();
+    await controller.reconcile();
   },
 };
+
+export { TgDeliveryOwner } from './delivery-owner.js';
