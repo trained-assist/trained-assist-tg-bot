@@ -128,8 +128,11 @@ export function verifyExistingUxDelivery(status, deliveries, config, receipt) {
     && task.profile_id === config.profileId && task.generation === 1, 'CP_TASK_SCOPE_MISMATCH');
   requireProof(task.status === 'done' && task.stage === 'finished', 'CP_SUCCESS_REQUIRED');
   requireProof(Array.isArray(status.runs) && status.runs.length === config.expectedRunCount, 'ENGINE_ATTEMPT_COUNT_MISMATCH');
-  for (const run of status.runs) requireProof(run.generation === 1 && run.status === 'done'
-    && reference(run.id) && reference(run.session_id), 'CANONICAL_RUN_REQUIRED');
+  if (config.expectedRunCount === 1) requireProof(reference(task.result?.runId)
+    && task.result.ownerGeneration === 1, 'CANONICAL_RUN_REQUIRED');
+  for (const run of status.runs) requireProof(run.generation === 1 && run.status === 'success'
+    && run.task_id === config.taskId && reference(run.id)
+    && run.session_id === task.result.runId, 'CANONICAL_RUN_REQUIRED');
   const answer = typeof task.result === 'string' ? task.result : task.result?.answer;
   requireProof(typeof answer === 'string' && answer.trim().length > 0, 'PERSISTED_ANSWER_REQUIRED');
   requireProof(config.expectedAnswerSubstring === undefined || answer.includes(config.expectedAnswerSubstring), 'GOAL_RESULT_MISMATCH');
@@ -141,6 +144,7 @@ export function verifyExistingUxDelivery(status, deliveries, config, receipt) {
   'SINGLE_SCOPED_TERMINAL_DELIVERY_REQUIRED');
   return { taskId: config.taskId, generation: 1, attemptCount: status.runs.length,
     answerHash: hash(answer), terminalAttempts: 1, providerMessageId: terminal.providerMessageId,
+    ...(config.expectedRunCount === 1 ? { canonicalRunId: task.result.runId } : {}),
     ...(config.expectedAnswerSubstring === undefined ? {} : { goalResultMatched: true }) };
 }
 

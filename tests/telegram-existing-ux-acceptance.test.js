@@ -25,8 +25,10 @@ async function fixture(expectedRunCount = 1) {
     collectorDelivery: null, stopped: null, debounceExpiresAt: Date.now() + 180000 };
   const receipt = { userTaskId: config.taskId, requestId: config.requestId, profileId: config.profileId, durable: true };
   const status = { taskStore: { id: config.taskId, profile_id: config.profileId,
-    generation: 1, status: 'done', stage: 'finished', result: { answer: 'Offline fixture output.' } },
-  runs: expectedRunCount ? [{ id: 'attempt-offline', session_id: 'run-offline-canonical', generation: 1, status: 'done' }] : [] };
+    generation: 1, status: 'done', stage: 'finished', result: { answer: 'Offline fixture output.',
+      ...(expectedRunCount ? { runId: 'run-offline-canonical', ownerGeneration: 1 } : {}) } },
+  runs: expectedRunCount ? [{ id: 'attempt-offline', task_id: config.taskId,
+    session_id: 'run-offline-canonical', generation: 1, status: 'success' }] : [] };
   const deliveries = { receipt: null, terminal: { userTaskId: config.taskId, deliveryId: `terminal:${config.taskId}:g1`,
     generation: 1, status: 'sent', attempts: 1, providerMessageId: 1400, chatId: config.chatId,
     threadId: null, legacyStatus: null } };
@@ -96,6 +98,25 @@ async function ready(data) {
 }
 
 describe('NEW existing-UX operator harness, offline fixtures only', () => {
+  it('requires the successful Task Store attempt bound to the canonical native run', async () => {
+    const data = await fixture();
+    try {
+      expect(verifyExistingUxDelivery(data.status, data.deliveries, data.config, data.receipt).canonicalRunId)
+        .toBe('run-offline-canonical');
+      for (const field of [{ status: 'done' }, { status: 'running' }, { session_id: 'run-unrelated' },
+        { task_id: 'ut-unrelated' }, { generation: 2 }]) {
+        const altered = structuredClone(data.status);
+        Object.assign(altered.runs[0], field);
+        expect(() => verifyExistingUxDelivery(altered, data.deliveries, data.config, data.receipt))
+          .toThrow('CANONICAL_RUN_REQUIRED');
+      }
+      const altered = structuredClone(data.status);
+      altered.taskStore.result.ownerGeneration = 2;
+      expect(() => verifyExistingUxDelivery(altered, data.deliveries, data.config, data.receipt))
+        .toThrow('CANONICAL_RUN_REQUIRED');
+    } finally { await data.cleanup(); }
+  });
+
   it('requires the frozen user goal result rather than any nonempty answer', async () => {
     const data = await fixture();
     try {
