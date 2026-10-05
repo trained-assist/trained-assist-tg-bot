@@ -9,9 +9,10 @@
 import { ControlPlaneClient } from './control-plane-client.js';
 import { profileForUpdate, extractMessage, extractCallbackQuery } from './profile.js';
 import { BatchCollector, KvBatchStore, MemoryBatchStore, BATCH_STATUS, tooLargeMessage, isTooLarge, attachmentOf, launchButton } from './batch.js';
-import { ConversationSession, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
-import { TgDeliveryOutbox, DELIVERY_STATUS } from './delivery.js';
+import { ConversationSession, ConversationIndex, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
+import { TgDeliveryOutbox } from './delivery.js';
 import { logTg } from './log.js';
+import { hasUnknownOutcome, isTerminalTaskStatus } from './contract.js';
 
 export const MODE = { direct: 'direct', batch: 'batch' };
 
@@ -51,7 +52,7 @@ export class TgSliceController {
       : await this.handleMessage(profile, message, update);
 
     await this.store.save({
-      id: dedupKey,
+      conversationId: dedupKey,
       status: 'processed',
       updateId: update.update_id,
       userTaskId: effects.find(e => e.userTaskId)?.userTaskId ?? null,
@@ -72,6 +73,7 @@ export class TgSliceController {
     const data = callback.data;
     if (!data?.startsWith('tg-launch:')) return [];
     const conversationId = data.slice('tg-launch:'.length);
+    if (conversationId !== profile.conversationId) return [];
     const batch = await this.batchStore.load(conversationId);
     if (!batch || batch.status !== BATCH_STATUS.collecting) return [];
     batch.status = BATCH_STATUS.launched;
@@ -86,7 +88,26 @@ export class TgSliceController {
       inputItems,
     });
     await this.client.start(receipt.userTaskId);
+    const index = await this.store.load(conversationId) ?? new ConversationIndex(conversationId, profile.profileId);
+    index.destination = profile.destination;
+    index.requestingBot = profile.requestingBot;
+    if (!index.turns.some(turn => turn.requestId === requestId)) {
+      index.turns.push({
+        seq: index.turns.length + 1,
+        conversationId,
+        kind: 'new',
+        requestId,
+        userTaskId: receipt.userTaskId,
+        text: `batch:${batch.items.length} items`,
+        inputItemCount: inputItems.length,
+        createdAt: receipt.acceptedAt,
+        providerAcceptedAt: receipt.providerAcceptedAt ?? null,
+      });
+    }
+    await this.store.save(index);
     await this.outbox?.enqueue({
+      deliveryId: `receipt:${requestId}`,
+      taskAcceptedAt: receipt.providerAcceptedAt,
       conversationId,
       userTaskId: receipt.userTaskId,
       destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
@@ -99,10 +120,10 @@ export class TgSliceController {
 
   async handleMessage(profile, message, update) {
     if (this.mode === MODE.batch) return this.handleBatch(profile, message);
-    return this.handleDirect(profile, message);
+    return this.handleDirect(profile, message, update);
   }
 
-  async handleDirect(profile, message) {
+  async handleDirect(profile, message, update) {
     const session = new ConversationSession(this.client, {
       conversationId: profile.conversationId,
       profileId: profile.profileId,
@@ -119,12 +140,17 @@ export class TgSliceController {
       } else throw e;
     }
     const awaiting = view.awaiting;
+    session.index.destination = profile.destination;
+    session.index.requestingBot = profile.requestingBot;
+    await this.store.save(session.index);
     const text = typeof message.text === 'string' ? message.text : null;
     if (awaiting && text != null) {
       const answer = await session.answer(text);
       const effects = [{ type: 'answer', userTaskId: answer.userTaskId, seq: answer.seq, duplicate: answer.duplicate }];
       if (!answer.duplicate) {
         await this.outbox?.enqueue({
+          deliveryId: `receipt:${answer.requestId}`,
+          taskAcceptedAt: session.index.turns.find(turn => turn.userTaskId === answer.userTaskId && turn.kind === 'new')?.providerAcceptedAt,
           conversationId: profile.conversationId,
           userTaskId: answer.userTaskId,
           destination: profile.destination,
@@ -135,10 +161,13 @@ export class TgSliceController {
       }
       return effects;
     }
-    const send = await session.sendMessage(text ?? '[no text]');
+    const requestId = `${profile.ingressRef}:u${update.update_id}`;
+    const send = await session.sendMessage(text ?? '[no text]', null, null, requestId);
     const effects = [{ type: 'new', userTaskId: send.userTaskId, seq: send.seq, duplicate: send.duplicate }];
     if (!send.duplicate) {
       await this.outbox?.enqueue({
+        deliveryId: `receipt:${send.requestId}`,
+        taskAcceptedAt: session.index.turns.find(turn => turn.userTaskId === send.userTaskId && turn.kind === 'new')?.providerAcceptedAt,
         conversationId: profile.conversationId,
         userTaskId: send.userTaskId,
         destination: profile.destination,
@@ -183,41 +212,61 @@ export class TgSliceController {
 
   /** Background reconciliation: retry deliveries + push terminal results. */
   async reconcile() {
-    const drained = await this.outbox?.drain() ?? 0;
     const pushed = [];
-    const iter = this.store.kv?.list?.({ prefix: 'conv:' });
-    if (iter) {
-      for await (const item of iter) {
-        try {
-          const index = JSON.parse(item.value);
-          const session = new ConversationSession(this.client, {
-            conversationId: index.conversationId,
-            profileId: index.profileId,
-            store: this.store,
-            logSink: this.logSink,
-            maxTurns: this.maxTurns,
-          });
-          const view = await session.open();
-          for (const turn of view.turns) {
-            if (!turn.unknownOutcome && !turn.terminal) continue;
-            const delivery = await this.outbox?.load(turn.userTaskId);
-            if (delivery?.status === DELIVERY_STATUS.sent) continue;
-            const label = turn.terminal === 'done' ? 'Готово.' : turn.terminal === 'failed' ? 'Ошибка исполнителя.' : 'Отменено.';
-            await this.outbox?.enqueue({
-              conversationId: index.conversationId,
-              userTaskId: turn.userTaskId,
-              destination: { chatId: profile?.destination?.chatId ?? index.profileId, threadId: null },
-              requestId: `terminal:${turn.userTaskId}`,
-              type: 'message',
-              text: label,
-            });
-            pushed.push({ userTaskId: turn.userTaskId, terminal: turn.terminal });
-          }
-        } catch {
-          // ignore malformed entries
+    let drained = await this.outbox?.drain() ?? 0;
+    const deadline = performance.now() + 10000;
+    const bounded = async operation => {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error('discovery_deadline');
+      let timer;
+      try {
+        return await Promise.race([operation(), new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('discovery_deadline')), remaining);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
+    for (let step = 0; this.store.kv && step < 6 && performance.now() < deadline; step += 1) {
+      try {
+        const cursor = await bounded(() => this.outbox.discovery());
+        if (cursor.conversationKey === null) {
+          const page = await bounded(() => this.store.kv.list({ prefix: 'conv:tg-', cursor: cursor.pageCursor ?? undefined, limit: 1 }));
+          const nextPageCursor = page.list_complete ? null : page.cursor;
+          if (!page.list_complete && (!nextPageCursor || nextPageCursor === cursor.pageCursor)) throw new Error('discovery_pagination');
+          await bounded(() => this.outbox.advanceDiscovery(cursor.revision, {
+            pageCursor: page.keys.length ? cursor.pageCursor : nextPageCursor,
+            conversationKey: page.keys[0]?.name ?? null, nextPageCursor: page.keys.length ? nextPageCursor : null, turnIndex: 0,
+          }));
+          if (!page.keys.length && page.list_complete) break;
+          continue;
         }
+        const raw = await bounded(() => this.store.kv.get(cursor.conversationKey));
+        let index;
+        try { index = JSON.parse(raw); } catch { index = null; }
+        const valid = Array.isArray(index?.turns) && index.destination &&
+          this.profile.allowedChats.includes(String(index.destination.chatId)) && index.requestingBot === this.profile.botUsername &&
+          index.profileId === (this.profile.chatProfiles[String(index.destination.chatId)] ?? this.profile.profileId);
+        const entry = valid ? index.turns[cursor.turnIndex] : null;
+        const next = { pageCursor: cursor.nextPageCursor, conversationKey: null, nextPageCursor: null,
+          turnIndex: entry && cursor.turnIndex + 1 < index.turns.length ? cursor.turnIndex + 1 : 0 };
+        if (!await bounded(() => this.outbox.advanceDiscovery(cursor.revision, next)) || !entry || entry.kind !== 'new') continue;
+        const status = await bounded(() => this.client.status(entry.userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
+        if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
+        const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
+        if (!terminal && !hasUnknownOutcome(status)) continue;
+        const deliveryId = `${terminal ? 'terminal' : 'unknown'}:${entry.userTaskId}:g${status.generation}`;
+        if (await bounded(() => this.outbox.load(deliveryId))) continue;
+        const answer = typeof status.result === 'string' ? status.result : status.result?.answer;
+        const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? 'Ошибка исполнителя.' : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
+        await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
+          conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
+          requestId: deliveryId, type: 'message', text: terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label }));
+        pushed.push({ userTaskId: entry.userTaskId, terminal });
+      } catch {
+        this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable' });
+        break;
       }
     }
+    if (drained === 0 && performance.now() < deadline) drained = await this.outbox?.drain() ?? 0;
     return { drained, pushed };
   }
 }

@@ -87,6 +87,7 @@ export class ControlPlaneClient {
   headers() {
     const headers = new Headers({ 'content-type': 'application/json' });
     headers.set('x-principal', this.config.principalId);
+    if (this.config.principalSignature) headers.set('x-principal-sig', this.config.principalSignature);
     if (this.config.apiKey) headers.set('authorization', `Bearer ${this.config.apiKey}`);
     return headers;
   }
@@ -116,7 +117,7 @@ export class ControlPlaneClient {
       requestId: input.requestId,
       profileId: this.config.profileId,
       conversationRef: input.conversationId ?? null,
-      sessionId: this.config.sessionId,
+      sessionId: Object.hasOwn(input, 'sessionId') ? input.sessionId : this.config.sessionId,
       inputItems: input.inputItems ?? [{ text: input.text, artifactRefs: input.artifactRefs ?? [] }],
       waitTimeoutSec: input.waitTimeoutSec ?? null,
     };
@@ -130,6 +131,7 @@ export class ControlPlaneClient {
       userTaskId: String(value.userTaskId ?? ''),
       profileId: String(value.profileId ?? this.config.profileId),
       acceptedAt: numOrNull(value.acceptedAt) ?? Date.now(),
+      providerAcceptedAt: Number.isSafeInteger(value.acceptedAt) && value.acceptedAt > 0 ? value.acceptedAt : null,
       durable: true,
       duplicate: value.duplicate === true || status === 200,
     };
@@ -161,7 +163,7 @@ export class ControlPlaneClient {
       body: {
         taskId: userTaskId,
         profileId: this.config.profileId,
-        goal: userTaskId,
+        goal: opts.goal ?? userTaskId,
         question: opts.question ?? null,
         waitTimeoutSec: opts.waitTimeoutSec ?? null,
         crashRunOnce: opts.crashRunOnce ?? false,
@@ -184,6 +186,24 @@ export class ControlPlaneClient {
       generation: ack.generation,
     });
     return ack;
+  }
+
+  async route(userTaskId) {
+    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true } });
+    return value;
+  }
+
+  async cancel(userTaskId, options = {}) {
+    const { value } = await this.request('POST', '/cancel', { body: {
+      taskId: userTaskId, ...(options.reason ? { reason: options.reason } : {}),
+    } });
+    return {
+      cancelled: value?.cancelled === true,
+      stopConfirmed: value?.stopConfirmed === true,
+      status: str(value?.status) ?? 'unknown',
+      generation: numOrNull(value?.generation),
+      nativeStops: Array.isArray(value?.nativeStops) ? value.nativeStops : [],
+    };
   }
 
   /** Signal (human answer in an open awaiting). The idempotency key is mandatory. */
@@ -215,8 +235,8 @@ export class ControlPlaneClient {
   }
 
   /** Status — read only (P05): no step, no rerun. */
-  async status(userTaskId) {
-    const { value } = await this.request('POST', '/status', { body: { taskId: userTaskId } });
+  async status(userTaskId, options = {}) {
+    const { value } = await this.request('POST', '/status', { body: { taskId: userTaskId }, signal: options.signal });
     const row = asObject(value.taskStore);
     const runs = Array.isArray(value.runs) ? value.runs : [];
     return {
