@@ -30,6 +30,18 @@ it('real local workerd SQLite owner commits once across concurrent durable-objec
       return response.json();
     };
     await call('open');
+    const cursor = await call('discovery');
+    const next = { pageCursor: null, conversationKey: 'conv:synthetic', nextPageCursor: null, turnIndex: 0 };
+    const claims = await Promise.all([
+      call('advance-discovery', { revision: cursor.revision, next }),
+      call('advance-discovery', { revision: cursor.revision, next }),
+    ]);
+    expect(claims.map(result => result.advanced).sort()).toEqual([false, true]);
+    expect(await call('discovery')).toEqual({ ...next, revision: cursor.revision + 1 });
+    expect((await call('advance-discovery', { revision: cursor.revision + 1,
+      next: { pageCursor: null, conversationKey: null, nextPageCursor: null, turnIndex: 5 } })).advanced).toBe(true);
+    expect((await call('advance-discovery', { revision: cursor.revision + 2, next })).advanced).toBe(true);
+    expect(await call('discovery')).toEqual({ ...next, turnIndex: 5, revision: cursor.revision + 3 });
     await call('enqueue', { userTaskId: 'task', deliveryId: 'terminal:task:g1', destination: { chatId: 1001 }, type: 'message', text: 'synthetic', taskAcceptedAt: Date.now() });
     const first = call('drain');
     await Promise.race([entered, first.then(() => { throw new Error('mock provider was not observed'); })]);

@@ -222,8 +222,8 @@ export class ControlPlaneClient {
   }
 
   /** Status — read only (P05): no step, no rerun. */
-  async status(userTaskId) {
-    const { value } = await this.request('POST', '/status', { body: { taskId: userTaskId } });
+  async status(userTaskId, options = {}) {
+    const { value } = await this.request('POST', '/status', { body: { taskId: userTaskId }, signal: options.signal });
     const row = asObject(value.taskStore);
     const runs = Array.isArray(value.runs) ? value.runs : [];
     return {
