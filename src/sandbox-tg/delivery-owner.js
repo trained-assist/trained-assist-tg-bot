@@ -95,18 +95,24 @@ export class TgDeliveryOwner {
             quarantinedDeliveryCount: marker.quarantinedDeliveryCount, paused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false' });
         }
         if (route === '/enqueue') return Response.json(await this.enqueue(body, config));
-        if (route === '/discovery') return Response.json(await this.state.storage.get('discovery') ??
-          { revision: 0, pageCursor: null, conversationKey: null, nextPageCursor: null, turnIndex: 0 });
+        if (route === '/discovery') {
+          const current = await this.state.storage.get('discovery');
+          return Response.json(current?.prefix === 'conv:tg-' ? {
+            revision: current.revision, pageCursor: current.pageCursor, conversationKey: current.conversationKey,
+            nextPageCursor: current.nextPageCursor, turnIndex: current.turnIndex,
+          } : { revision: current?.revision ?? 0, pageCursor: null, conversationKey: null, nextPageCursor: null, turnIndex: 0 });
+        }
         if (route === '/advance-discovery') {
           const next = body.next;
           if (!Number.isSafeInteger(body.revision) || body.revision < 0 || !next ||
               Object.keys(next).sort().join(',') !== 'conversationKey,nextPageCursor,pageCursor,turnIndex' ||
               !Number.isSafeInteger(next.turnIndex) || next.turnIndex < 0 ||
               ![next.pageCursor, next.nextPageCursor].every(value => value === null || typeof value === 'string' && value.length <= 2048) ||
-              !(next.conversationKey === null || typeof next.conversationKey === 'string' && next.conversationKey.startsWith('conv:') && next.conversationKey.length <= 512)) throw new Error();
+              !(next.conversationKey === null || typeof next.conversationKey === 'string' && next.conversationKey.startsWith('conv:tg-') && next.conversationKey.length <= 512)) throw new Error();
           const advanced = await this.state.storage.transaction(async storage => {
-            const current = await storage.get('discovery');
-            if ((current?.revision ?? 0) !== body.revision) return false;
+            const stored = await storage.get('discovery');
+            if ((stored?.revision ?? 0) !== body.revision) return false;
+            const current = stored?.prefix === 'conv:tg-' ? stored : null;
             let turnIndex = next.turnIndex;
             if (current?.conversationKey && next.conversationKey === null) {
               await storage.put(`discovery-turn:${current.conversationKey}`, turnIndex);
@@ -114,7 +120,7 @@ export class TgDeliveryOwner {
             } else if (!current?.conversationKey && next.conversationKey) {
               turnIndex = await storage.get(`discovery-turn:${next.conversationKey}`) ?? 0;
             }
-            await storage.put('discovery', { ...next, turnIndex, revision: body.revision + 1 });
+            await storage.put('discovery', { ...next, turnIndex, revision: body.revision + 1, prefix: 'conv:tg-' });
             return true;
           });
           return Response.json({ advanced });

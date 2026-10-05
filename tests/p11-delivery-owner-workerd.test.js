@@ -31,7 +31,7 @@ it('real local workerd SQLite owner commits once across concurrent durable-objec
     };
     await call('open');
     const cursor = await call('discovery');
-    const next = { pageCursor: null, conversationKey: 'conv:synthetic', nextPageCursor: null, turnIndex: 0 };
+    const next = { pageCursor: null, conversationKey: 'conv:tg-1001', nextPageCursor: null, turnIndex: 0 };
     const claims = await Promise.all([
       call('advance-discovery', { revision: cursor.revision, next }),
       call('advance-discovery', { revision: cursor.revision, next }),
