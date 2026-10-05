@@ -30,6 +30,66 @@ describe('Telegram integration smoke request deadline', () => {
   });
 });
 
+describe('Telegram integration smoke Runner identity evidence', () => {
+  const taskId = 'ut-offline-native';
+  const attemptId = `routing-run:${taskId}:1`;
+  const runnerId = '026cf629-219c-445f-92b1-063212bcf893';
+
+  async function smoke(runs, replayRuns = runs) {
+    const config = readConfig(bindings);
+    let ingressCalls = 0;
+    let statusCalls = 0;
+    return runSmoke(config, {
+      emit: () => {},
+      fetchImpl: async url => {
+        let payload;
+        if (url.endsWith('/health')) payload = { status: 'ok', bot: config.username, mode: 'direct' };
+        else if (url.endsWith('/webhook')) payload = { ok: true, userTaskId: taskId, duplicate: ++ingressCalls > 1 };
+        else if (url.endsWith('/status')) payload = {
+          taskStore: { id: taskId, profile_id: config.profile, status: 'done', generation: 1, result: { answer: 'offline answer' } },
+          runs: ++statusCalls > 1 ? replayRuns : runs,
+        };
+        else if (url.includes('/deliveries/')) payload = { deliveries: [
+          { deliveryId: 'receipt:offline', userTaskId: taskId, chatId: config.chatId, threadId: null,
+            status: 'sent', attempts: 1, providerMessageId: 1 },
+          { deliveryId: `terminal:${taskId}:g1`, userTaskId: taskId, chatId: config.chatId, threadId: null,
+            status: 'sent', attempts: 1, providerMessageId: 2 },
+        ] };
+        else if (url.endsWith('/cron')) payload = { reconciled: true };
+        else throw new Error('Unexpected offline request');
+        return { ok: true, json: async () => payload };
+      },
+    });
+  }
+
+  it.each([runnerId, `run_${runnerId}`])('reports attached Runner ID verbatim: %s', async sessionId => {
+    const result = await smoke([{ id: attemptId, session_id: sessionId }]);
+    expect(result).toMatchObject({ outcome: 'pass', runIds: [sessionId], orchestrationAttemptIds: [attemptId] });
+  });
+
+  it.each([null, undefined])('does not invent Runner IDs for unattached attempts: %s', async sessionId => {
+    const result = await smoke([{ id: attemptId, session_id: sessionId }]);
+    expect(result).toMatchObject({ outcome: 'pass', runIds: [], orchestrationAttemptIds: [attemptId] });
+  });
+
+  it('does not infer Runner identity from a UUID-shaped attempt ID', async () => {
+    expect(await smoke([{ id: runnerId }])).toMatchObject({ outcome: 'pass', runIds: [], orchestrationAttemptIds: [runnerId] });
+  });
+
+  it('preserves quick replies with no attempts', async () => {
+    expect(await smoke([])).toMatchObject({ outcome: 'pass', runIds: [], orchestrationAttemptIds: [] });
+  });
+
+  it.each(['', 'unsafe/value', 12])('refuses malformed attached Runner identity: %s', async sessionId => {
+    expect(await smoke([{ id: attemptId, session_id: sessionId }])).toMatchObject({ outcome: 'fail', reason: 'Invalid Runner runId' });
+  });
+
+  it('fails replay if the attached Runner changes with the same attempt ID', async () => {
+    const result = await smoke([{ id: attemptId, session_id: runnerId }], [{ id: attemptId, session_id: `run_${runnerId}` }]);
+    expect(result).toMatchObject({ outcome: 'fail', reason: 'Reconciliation replay changed task or runs' });
+  });
+});
+
 describe('Telegram integration smoke stable live identity', () => {
   const stableBindings = { ...bindings, SMOKE_UPDATE_ID: 901010061, SMOKE_MESSAGE_ID: 901010061, SMOKE_MESSAGE_DATE: 1791180000 };
 
