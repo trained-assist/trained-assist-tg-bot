@@ -1,6 +1,8 @@
 # Telegram integration v1 live ingress smoke
 
-Scope: [architecture #140](https://github.com/trained-assist/trained-agent-architecture/issues/140), [P11 #50](https://github.com/trained-assist/trained-agent-architecture/issues/50), existing [gateway PR #351](https://github.com/trained-assist/trained-assist-tg-bot/pull/351). Harness and documentation belong to `integration/first-working-version-20261005`; gateway source changes belong to the parent integrator.
+Scope: [architecture #140](https://github.com/trained-assist/trained-agent-architecture/issues/140), [P11 #50](https://github.com/trained-assist/trained-agent-architecture/issues/50), existing [gateway PR #351](https://github.com/trained-assist/trained-assist-tg-bot/pull/351). Harness hardening is isolated in `integration/tg-smoke-stable-ids-20261005`; gateway source changes belong to the parent integrator.
+
+**Live ingress and reconciliation are paused pending delivery-owner review and deployment.** Independent readback observed different Bot API message IDs for the same caps receipt and terminal delivery. A sequential harness PASS does not establish single-writer delivery safety or clear that failure. Keep the original timeout and duplicate-delivery evidence; do not rerun either case to replace it.
 
 This harness posts an authorized Telegram-shaped update to the deployed sandbox's real `/webhook` handler, repeats the **identical serialized body**, checks the same `userTaskId`, polls signed CP `/status`, and drives protected gateway `/cron`. It requires a stored terminal delivery with `status=sent` and `providerMessageId`. A second reconciliation must preserve delivery IDs, provider message IDs, attempts, task generation, and run IDs.
 
@@ -28,16 +30,16 @@ The harness reads only environment variables and an optional flat private JSON o
 | `TEST_CHAT_TYPE` | Optional `private`, `group`, or `supergroup`; defaults to private for positive chat IDs, supergroup for negative IDs. |
 | `TEST_THREAD_ID` | Optional positive forum topic ID; requires supergroup. Delivery must match this thread. |
 | `SMOKE_TEXT` | Optional exact task text, default `Каково состояние системы?`; use an approved request with no unrelated external effects. |
-| `SMOKE_UPDATE_ID`, `SMOKE_MESSAGE_ID` | Optional positive 32-bit IDs; random defaults, reported as evidence. Reserve IDs against real Telegram traffic. Reuse an update ID only to replay that same logical update. |
+| `SMOKE_UPDATE_ID`, `SMOKE_MESSAGE_ID` | Required explicit positive 32-bit IDs for the live CLI; no random live defaults. Reserve and persist both IDs before dispatch, along with the exact update context. Reuse only for the same logical update, never a replacement after an unknown outcome. Library `readConfig` retains its optional defaults for compatibility; CLI uses `readLiveConfig`. |
 | `SMOKE_TIMEOUT_MS` | Overall network/poll/replay deadline, default 120000, maximum 900000. |
-| `SMOKE_REQUEST_TIMEOUT_MS` | Per-request deadline, default 15000, maximum 60000; capped by remaining overall time, including response-body parsing. |
+| `SMOKE_REQUEST_TIMEOUT_MS` | Per-request deadline, default 60000, maximum 60000; capped by remaining overall time, including response-body parsing. The synchronous ingress may include selector/writer latency; timeout does not authorize a fresh update or task. |
 | `SMOKE_POLL_INTERVAL_MS` | Default 2000, range 100–30000. |
 
 The private `/tmp/ta-integrator-v1-runtime/client-bindings.json` currently contains principal/signature/profile and webhook secret, but lacks approved bot/chat bindings and may lack the endpoint URLs. It is a starting configuration, not permission to infer a destination. Communication-service bindings in that file are ignored.
 
 ## Run
 
-After the owner completes bot/chat rotation and the parent provisions the bindings and deploys the delivery route, run:
+Only after the parent explicitly clears the delivery pause, completes bot/chat authorization, and deploys the reviewed delivery owner, run with reserved IDs in the private bindings file:
 
 ```sh
 INTEGRATION_BINDINGS_FILE=/tmp/ta-integrator-v1-runtime/client-bindings.json \
@@ -47,6 +49,16 @@ INTEGRATION_BINDINGS_FILE=/tmp/ta-integrator-v1-runtime/client-bindings.json \
 All missing required settings fail preflight before HTTP calls. Exit code `0` means complete smoke pass, `1` means failed/incomplete evidence, and `2` means configuration blocked. Output is JSON Lines: ingress acknowledgement, changed polling states, final sanitized evidence. Save stdout to an owner-approved private evidence location when needed. Keep gateway/CP/communication/runner revisions and deployment references beside the transcript; public evidence must omit machine addresses and bindings.
 
 The harness never calls `setWebhook`, `sendMessage`, `getUpdates`, CP `/start`, `/resume`, `/recover`, or KV. Gateway reconciliation owns outbound messages, and every observed delivery must target exactly the configured test chat/thread. `/cron` reconciles the sandbox's entire outbox, so the isolated deployment must contain only approved test destinations and no unrelated pending tasks. Start with a fresh/idle conversation: an existing awaiting-input conversation may treat the text as a continuation rather than a new task. Timeout or lost ingress response is a failure, never authorization to create another task or rerun an external action; inspect the original task/update before replaying.
+
+## Unknown acknowledgement recovery
+
+Before dispatch, save a private checkpoint containing the reserved update/message IDs, bot identity, exact destination/thread, mapped profile, text and serialized update. Preserve the original response or timeout evidence. A 15-second ingress timeout previously hid an already completed quick task; the 60-second request default reduces premature timeout but does not make unknown outcomes safe to retry automatically.
+
+Reconcile read-only first: the gateway dedup key is `conv:u:<updateId>`. A processed entry supplies the original task ID; inspect that task's signed CP `/status` and protected gateway `/deliveries/:taskId` without calling `/cron` or posting another update. These reads may themselves lag when backed by KV; an absent record is not proof of nonacceptance.
+
+For a fresh direct-mode message, the original sources construct `requestId = tg:<bot>:<chat>[:<thread>]:<messageId>:u<updateId>` (`src/sandbox-tg/profile.js`, `src/sandbox-tg/worker.js`). CP `src/intake/intake-service.ts` derives `userTaskId = "ut-" + hex(SHA-256(profileId + NUL + requestId)[0:10])`. Use the actual deployed chat-profile mapping, not an assumed default profile. This formula is not valid for an awaiting-input continuation or batch launch; those require their original stored request/task identity. Compute and retain private identity fields locally; do not print chat IDs or the full request ID.
+
+If the original task and deliveries are already complete, no ingress replay or CP reroute is necessary. Only after source/index reconciliation proves a repair is needed and the parent authorizes it may the exact same stable update be replayed. Keep its task, generation and provider IDs unchanged. Never use a new ID, text, task, or model job to supersede an unknown acknowledgement. Concurrent writers and the provider-acceptance/persistence crash gap still require delivery-owner protections; stable CLI IDs alone do not provide exactly-once outgoing delivery.
 
 ## Parent gateway contract
 
@@ -92,7 +104,7 @@ CP is queried using raw `POST /status {"taskId":"..."}` with signed principal he
 
 Concurrent ingress races, crash between Telegram acceptance and KV persistence, answer-text equality at the provider, long-message splitting, files, credentials continuation, real user inbound Telegram, Google Sheet effects, and broader #140 scenarios need separate evidence. This smoke cannot claim exactly-once delivery across those failure windows. The summaries intentionally omit answer text; acceptance is tied to the parent's terminal outbox record and its delivery implementation.
 
-Current live status: **blocked pending owner-approved chat/bot rotation and configuration**. No live success is claimed by implementing or locally checking this harness. Contract fixtures can verify harness behavior but must be labelled as fixtures, never live Telegram evidence.
+Current live status: **paused after observed duplicate outgoing delivery; acceptance not cleared**. Owner-approved bot/chat configuration does not override this pause. Local harness tests are fixtures, not live Telegram evidence, and do not prove the delivery-owner fix.
 
 Syntax/whitespace checks:
 

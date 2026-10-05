@@ -92,7 +92,7 @@ export function readConfig(bindings) {
     messageId: integer(bindings, 'SMOKE_MESSAGE_ID', randomInt(1, 2147483647), 1, 2147483647),
     text,
     timeoutMs: integer(bindings, 'SMOKE_TIMEOUT_MS', 120000, 1000, 900000),
-    requestTimeoutMs: integer(bindings, 'SMOKE_REQUEST_TIMEOUT_MS', 15000, 100, 60000),
+    requestTimeoutMs: integer(bindings, 'SMOKE_REQUEST_TIMEOUT_MS', 60000, 100, 60000),
     pollIntervalMs: integer(bindings, 'SMOKE_POLL_INTERVAL_MS', 2000, 100, 30000),
   };
 }
@@ -100,6 +100,12 @@ export function readConfig(bindings) {
 function identifier(value, label) {
   requireCondition(typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value), `Invalid ${label}`);
   return value;
+}
+
+export function readLiveConfig(bindings) {
+  required(bindings, 'SMOKE_UPDATE_ID');
+  required(bindings, 'SMOKE_MESSAGE_ID');
+  return readConfig(bindings);
 }
 
 function deliveryRecords(payload, config, taskId) {
@@ -260,7 +266,7 @@ async function main() {
   }
   try {
     requireCondition(process.argv.length === 2, 'Unknown command-line arguments', 'blocked');
-    const config = readConfig(await loadBindings());
+    const config = readLiveConfig(await loadBindings());
     const evidence = await runSmoke(config);
     process.exitCode = evidence.outcome === 'pass' ? 0 : evidence.outcome === 'blocked' ? 2 : 1;
   } catch (error) {
