@@ -32,7 +32,7 @@ it('real local workerd SQLite owner commits once across concurrent durable-objec
     await call('open');
     await call('enqueue', { userTaskId: 'task', deliveryId: 'terminal:task:g1', destination: { chatId: 1001 }, type: 'message', text: 'synthetic', taskAcceptedAt: Date.now() });
     const first = call('drain');
-    await entered;
+    await Promise.race([entered, first.then(() => { throw new Error('mock provider was not observed'); })]);
     expect((await call('read', { taskId: 'task' })).terminal.status).toBe('sending');
     const results = await Promise.all([first, call('drain')]);
     expect(results.map(result => result.drained).sort()).toEqual([0, 1]);

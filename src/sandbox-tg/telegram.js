@@ -49,10 +49,15 @@ export class TelegramApi {
     try {
       res = await this.fetchImpl(this.botUrl(method), {
         method: 'POST',
+        redirect: 'manual',
         headers,
         body,
         signal: controller.signal,
       });
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel();
+        throw new Error('telegram redirect refused');
+      }
       text = await res.text();
       if (text.length > 65536) throw new Error('telegram response too large');
     } finally {

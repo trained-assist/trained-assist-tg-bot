@@ -25,6 +25,10 @@ lost provider acknowledgement. There is no unknown-to-pending repair endpoint.
 Only an explicit Telegram `ok:false` / HTTP429 / error_code429 rejection permits
 retry after a bounded delay (at most one hour), up to the configured attempt cap.
 Other rejections conservatively remain unknown. No delivery failure reruns CP.
+Provider fetch rejects redirects: HTTP307/308 must not replay a POST or turn a
+redirected 429 response into safe retry authority. Redirects remain unknown.
+The transport uses `redirect:"manual"` and rejects 3xx before parsing responses;
+workerd does not support `redirect:"error"`. There is no follow or retry fallback.
 
 ## Mandatory operator cutover manifest
 
