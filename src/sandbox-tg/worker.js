@@ -101,11 +101,13 @@ export class TgSliceController {
         text: `batch:${batch.items.length} items`,
         inputItemCount: inputItems.length,
         createdAt: receipt.acceptedAt,
+        providerAcceptedAt: receipt.providerAcceptedAt ?? null,
       });
     }
     await this.store.save(index);
     await this.outbox?.enqueue({
       deliveryId: `receipt:${requestId}`,
+      taskAcceptedAt: receipt.providerAcceptedAt,
       conversationId,
       userTaskId: receipt.userTaskId,
       destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
@@ -148,6 +150,7 @@ export class TgSliceController {
       if (!answer.duplicate) {
         await this.outbox?.enqueue({
           deliveryId: `receipt:${answer.requestId}`,
+          taskAcceptedAt: session.index.turns.find(turn => turn.userTaskId === answer.userTaskId && turn.kind === 'new')?.providerAcceptedAt,
           conversationId: profile.conversationId,
           userTaskId: answer.userTaskId,
           destination: profile.destination,
@@ -164,6 +167,7 @@ export class TgSliceController {
     if (!send.duplicate) {
       await this.outbox?.enqueue({
         deliveryId: `receipt:${send.requestId}`,
+        taskAcceptedAt: session.index.turns.find(turn => turn.userTaskId === send.userTaskId && turn.kind === 'new')?.providerAcceptedAt,
         conversationId: profile.conversationId,
         userTaskId: send.userTaskId,
         destination: profile.destination,
@@ -233,6 +237,7 @@ export class TgSliceController {
             const label = turn.terminal === 'done' ? 'Готово. Текст результата отсутствует.' : turn.terminal === 'failed' ? 'Ошибка исполнителя.' : turn.terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
             await this.outbox?.enqueue({
               deliveryId,
+              taskAcceptedAt: index.turns.find(item => item.userTaskId === turn.userTaskId && item.kind === 'new')?.providerAcceptedAt,
               conversationId: index.conversationId,
               userTaskId: turn.userTaskId,
               destination: index.destination,

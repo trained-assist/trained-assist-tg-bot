@@ -131,6 +131,7 @@ export class ControlPlaneClient {
       userTaskId: String(value.userTaskId ?? ''),
       profileId: String(value.profileId ?? this.config.profileId),
       acceptedAt: numOrNull(value.acceptedAt) ?? Date.now(),
+      providerAcceptedAt: Number.isSafeInteger(value.acceptedAt) && value.acceptedAt > 0 ? value.acceptedAt : null,
       durable: true,
       duplicate: value.duplicate === true || status === 200,
     };

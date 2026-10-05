@@ -87,7 +87,8 @@ describe('independent v1 retry review', () => {
     expect((await request(`/deliveries/${receipt.userTaskId}`, null, 'wrong-secret')).status).toBe(401);
     const response = await request(`/deliveries/${receipt.userTaskId}`);
     expect(response.status).toBe(200);
-    const evidence = await response.json();
+    await worker.scheduled({}, env);
+    const evidence = await (await request(`/deliveries/${receipt.userTaskId}`)).json();
     expect(evidence.terminal).toMatchObject({ deliveryId: `terminal:${receipt.userTaskId}:g1`, generation: fake.tasks[0].generation, status: 'sent', chatId: 1001, threadId: 7 });
     expect(evidence.terminal.providerMessageId).toBeTruthy();
     expect(JSON.stringify(evidence)).not.toContain('Verified healthy');
@@ -98,6 +99,7 @@ describe('independent v1 retry review', () => {
   it('reports the receipt written under its ingress request ID', async () => {
     const { env, request, update } = fixture();
     const receipt = await (await request('/webhook', update)).json();
+    await worker.scheduled({}, env);
     await worker.scheduled({}, env);
     const evidence = await (await request(`/deliveries/${receipt.userTaskId}`)).json();
     expect(evidence.receipt).toMatchObject({ userTaskId: receipt.userTaskId, status: 'sent' });
@@ -110,6 +112,7 @@ describe('independent v1 retry review', () => {
     task.generation = 2;
     await worker.scheduled({}, env);
     task.generation = 10;
+    await worker.scheduled({}, env);
     await worker.scheduled({}, env);
     const evidence = await (await request(`/deliveries/${receipt.userTaskId}`)).json();
     expect(evidence.terminal).toMatchObject({ deliveryId: `terminal:${receipt.userTaskId}:g10`, generation: task.generation, status: 'sent' });

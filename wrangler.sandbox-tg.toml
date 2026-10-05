@@ -8,7 +8,15 @@ enabled = true
 
 # Reconciliation alarm — retries failed deliveries and pushes terminal results.
 [triggers]
-crons = ["* * * * *"]
+crons = []
+
+[[durable_objects.bindings]]
+name = "TG_DELIVERY_OWNER"
+class_name = "TgDeliveryOwner"
+
+[[migrations]]
+tag = "sandbox-delivery-owner-v1"
+new_sqlite_classes = ["TgDeliveryOwner"]
 
 # Sandbox-only bindings — separate from the production worker:
 # TG_SLICE  — KV namespace for the slice durable state (ingress dedup,
@@ -26,6 +34,7 @@ service = "trained-assist-cp-v1-sandbox"
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"
 TG_SLICE_ROUTER_ENABLED = "true"
+TG_SLICE_DELIVERY_PAUSED = "true"
 
 # Secrets (set via `wrangler secret put` — never in repo):
 #   TG_SANDBOX_BOT_TOKEN        — test bot token only

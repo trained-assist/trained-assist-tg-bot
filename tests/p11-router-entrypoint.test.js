@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/sandbox-tg/index.js';
 import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
 import { TgDeliveryOutbox } from '../src/sandbox-tg/delivery.js';
+import { TgDeliveryOwnerClient } from '../src/sandbox-tg/delivery-owner.js';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
 
 afterEach(() => {
@@ -42,12 +43,14 @@ describe('v1 Telegram routing and delivery evidence', () => {
 
   it('exposes actual provider acceptance separately from a queued receipt without leaking content', async () => {
     const env = makeEnv({ TG_SLICE: new MemKV() });
-    const outbox = new TgDeliveryOutbox(env.TG_SLICE, null);
-    await outbox.enqueue({ userTaskId: 'task-1', deliveryId: 'terminal:task-1', destination: { chatId: 1001, threadId: 7 }, type: 'message', text: 'private answer' });
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.open();
+    await outbox.enqueue({ userTaskId: 'task-1', deliveryId: 'terminal:task-1', destination: { chatId: 1001, threadId: 7 }, type: 'message', text: 'private answer', taskAcceptedAt: Date.now() });
     const record = await outbox.load('terminal:task-1');
     record.status = 'sent';
     record.telegramMessageId = 901;
-    await outbox.save(record);
+    const owner = [...env.TG_DELIVERY_OWNER.owners.values()][0];
+    await owner.state.storage.put('delivery:terminal:task-1', record);
     const response = await request(env, '/deliveries/task-1');
     expect(response.status).toBe(200);
     const data = await response.json();
@@ -58,9 +61,12 @@ describe('v1 Telegram routing and delivery evidence', () => {
     expect(unsigned.status).toBe(401);
   });
 
-  it('refuses delivery records addressed outside the configured test chats', async () => {
+  it('refuses owner enqueue outside configured test chats and does not project stale KV', async () => {
     const env = makeEnv({ TG_SLICE: new MemKV() });
     await new TgDeliveryOutbox(env.TG_SLICE, null).enqueue({ userTaskId: 'task-2', destination: { chatId: 9999 }, type: 'message', text: 'other chat' });
-    expect((await request(env, '/deliveries/task-2')).status).toBe(403);
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.open();
+    await expect(outbox.enqueue({ userTaskId: 'task-2', destination: { chatId: 9999 }, type: 'message', text: 'other chat', taskAcceptedAt: Date.now() })).rejects.toThrow();
+    expect(await (await request(env, '/deliveries/task-2')).json()).toEqual({ receipt: null, terminal: null });
   });
 });
