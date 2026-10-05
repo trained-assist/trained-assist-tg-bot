@@ -96,7 +96,8 @@ route is internal-operator authenticated by the existing public gate, not a new
 credential authority. DO endpoints are reachable only through the sandbox's
 namespace binding; no public DO forwarding route exists.
 
-Source defaults remain `TG_SLICE_DELIVERY_PAUSED = "true"` and `crons = []`.
+The reviewed activated sandbox configuration retains `TG_SLICE_DELIVERY_PAUSED = "false"`
+and enables `crons = ["* * * * *"]` only in `wrangler.sandbox-tg.toml`.
 The pause flag exists only in sandbox `[vars]`; do not provision a secret with
 the same name. The manifest is a separate secret binding, never a checked-in
 variable. `TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret.
@@ -104,6 +105,36 @@ Parent alone owns explicit activation after review/inventory. No new runtime
 binding, manifest, webhook operation or deployment is performed by this patch.
 Preserve parent's pause commit and unrelated integration history when composing;
 do not force-push or replace that branch with this older source base.
+
+## Autonomous scheduled reconciliation
+
+The sandbox's exported `scheduled` handler opens the existing durable owner,
+validates the immutable manifest, refreshes discovered conversation statuses,
+enqueues missing terminal notifications, and invokes one drain. No new controller,
+timer loop, model polling, or task recovery/start call is introduced. The schedule
+does not change allowed chats, namespace, manifest, tombstones, or retry policy.
+Delivery pause still prevents provider dispatch; missing/conflicting manifests
+fail closed before reconciliation. Old/unknown records never become retryable.
+
+One scheduled invocation claims at most one eligible delivery, with the existing
+bounded provider request timeout and explicit-429 attempt cap. Thus pending
+receipt and terminal deliveries may take separate ticks; overlapping scheduled
+invocations still use transactional durable claims. The cadence is one minute,
+not a delivery SLA. Conversation discovery and CP event/status refresh retain
+their existing scan behavior; this patch does not impose a whole-tick deadline
+or guarantee progress during CP/provider outages or eventual KV discovery lag.
+
+Parent-only live acceptance: after isolation/review, deploy this sandbox config,
+submit one reserved quick-answer task and one native task, then let genuine
+scheduled events deliver their receipt/result without calling `/cron`, running
+the mutating smoke harness, or polling Telegram's provider API to drive progress.
+Correlate scheduled-event evidence with authoritative read-only DO summaries,
+CP terminal/canonical Runner proof, and independent owner-observed Telegram IDs.
+Repeat read-only snapshots after parent redeploy to prove retained IDs/attempts,
+manifest digest and quarantines. Never count the offline handler fixture as a
+live scheduled-trigger/provider acceptance proof. Keep historical failures.
+For an operator stop, disable this sandbox trigger and/or set its existing plain
+pause variable to `true`; do not delete owner state or replace the manifest.
 
 ## Verification
 

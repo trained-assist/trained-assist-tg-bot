@@ -8,7 +8,7 @@ enabled = true
 
 # Reconciliation alarm — retries failed deliveries and pushes terminal results.
 [triggers]
-crons = []
+crons = ["* * * * *"]
 
 [[durable_objects.bindings]]
 name = "TG_DELIVERY_OWNER"

@@ -7,6 +7,7 @@ import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
 import { TgDeliveryOutbox } from '../src/sandbox-tg/delivery.js';
 import { TgDeliveryOwnerClient } from '../src/sandbox-tg/delivery-owner.js';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
+import { readFile } from 'node:fs/promises';
 
 describe('P11 exported Worker composition', () => {
   let env, fake, emulator, fetchSpy;
@@ -45,6 +46,83 @@ describe('P11 exported Worker composition', () => {
       method: 'POST', headers, body: JSON.stringify(update),
     }), env);
   }
+
+  it('enables only the sandbox Worker one-minute autonomous schedule', async () => {
+    const source = await readFile(new URL('../wrangler.sandbox-tg.toml', import.meta.url), 'utf8');
+    expect(source).toMatch(/^name = "trained-assist-tg-sandbox"$/m);
+    expect(source).toMatch(/^main = "src\/sandbox-tg\/index.js"$/m);
+    expect(source).toMatch(/\[triggers\]\s*crons = \["\* \* \* \* \*"\]/);
+    expect(source).toContain('new_sqlite_classes = ["TgDeliveryOwner"]');
+  });
+
+  it('actual scheduled handler dispatches at most one pending record per tick', async () => {
+    const outbox = new TgDeliveryOwnerClient(env);
+    for (let recordIndex = 0; recordIndex < 3; recordIndex += 1) {
+      await outbox.enqueue({ deliveryId: `receipt:scheduled-${recordIndex}`, userTaskId: `scheduled-${recordIndex}`,
+        taskAcceptedAt: Date.now(), destination: { chatId: 1001 }, type: 'message', text: 'scheduled fixture' });
+    }
+    const event = { cron: '* * * * *', scheduledTime: Date.now() };
+    await worker.scheduled(event, env);
+    expect(emulator.messagesTo(1001)).toHaveLength(1);
+    expect((await outbox.load('receipt:scheduled-1')).status).toBe('pending');
+    await worker.scheduled(event, env);
+    expect(emulator.messagesTo(1001)).toHaveLength(2);
+    await worker.scheduled(event, env);
+    expect(emulator.messagesTo(1001)).toHaveLength(3);
+    await worker.scheduled(event, env);
+    expect(emulator.messagesTo(1001)).toHaveLength(3);
+    for (let recordIndex = 0; recordIndex < 3; recordIndex += 1) {
+      expect(await outbox.load(`receipt:scheduled-${recordIndex}`)).toMatchObject({ status: 'sent', attempts: 1 });
+    }
+  });
+
+  it('scheduled ticks preserve unknown outcomes and do not resend them', async () => {
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.enqueue({ deliveryId: 'terminal:scheduled-unknown:g1', userTaskId: 'scheduled-unknown',
+      taskAcceptedAt: Date.now(), destination: { chatId: 1001 }, type: 'message', text: 'scheduled fixture' });
+    emulator.failNext({ status: 500 });
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    const evidence = await outbox.load('terminal:scheduled-unknown:g1');
+    expect(evidence).toMatchObject({ status: 'unknown', attempts: 1 });
+    fetchSpy.mockClear();
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await outbox.load('terminal:scheduled-unknown:g1')).toEqual(evidence);
+  });
+
+  it('scheduled ticks retain pause and mandatory manifest gates before provider calls', async () => {
+    const outbox = new TgDeliveryOwnerClient(env);
+    await outbox.enqueue({ deliveryId: 'receipt:scheduled-paused', userTaskId: 'scheduled-paused',
+      taskAcceptedAt: Date.now(), destination: { chatId: 1001 }, type: 'message', text: 'scheduled fixture' });
+    env.TG_SLICE_DELIVERY_PAUSED = 'true';
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await outbox.load('receipt:scheduled-paused')).toMatchObject({ status: 'pending', attempts: 0 });
+    env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = '';
+    await expect(worker.scheduled({ cron: '* * * * *' }, env)).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('scheduled ticks retain original quarantined evidence and old-task tombstones', async () => {
+    const manifest = JSON.parse(env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST);
+    manifest.oldTaskIds = ['scheduled-old'];
+    manifest.deliveries = [{ deliveryId: 'receipt:scheduled-original', userTaskId: 'scheduled-old',
+      destination: { chatId: 1001, threadId: null }, priorStatus: 'sent', providerMessageId: 77, attempts: 1 }];
+    env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify(manifest);
+    const outbox = new TgDeliveryOwnerClient(env);
+    const before = await outbox.open();
+    await outbox.enqueue({ deliveryId: 'terminal:scheduled-old:g2', userTaskId: 'scheduled-old',
+      taskAcceptedAt: Date.now(), destination: { chatId: 1001 }, type: 'message', text: 'fresh-looking old task' });
+    const original = await outbox.load('receipt:scheduled-original');
+    expect(original).toMatchObject({ status: 'quarantined', telegramMessageId: 77, attempts: 1 });
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    await worker.scheduled({ cron: '* * * * *' }, env);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await outbox.load('receipt:scheduled-original')).toEqual(original);
+    expect(await outbox.load('terminal:scheduled-old:g2')).toMatchObject({ status: 'quarantined', attempts: 0 });
+    expect((await outbox.open()).manifestDigest).toBe(before.manifestDigest);
+  });
 
   it.each([null, '', 'wrong-secret'])('rejects unsigned or invalid webhook (%s) before side effects', async secret => {
     const response = await webhook(emulator.pushMessage({ chatId: 1001, text: 'hello' }), secret);
