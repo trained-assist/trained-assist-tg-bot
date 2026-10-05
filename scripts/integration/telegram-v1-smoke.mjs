@@ -1,6 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { PRODUCTION_BOT_USERNAMES } from '../../src/sandbox-tg/config.js';
 
 class SmokeError extends Error {
@@ -53,7 +54,21 @@ export async function loadBindings(environment = process.env) {
       throw new SmokeError('Cannot read private INTEGRATION_BINDINGS_FILE JSON', 'blocked');
     }
   }
-  return { ...fileBindings, ...environment };
+  const bindings = { ...fileBindings, ...environment };
+  let savedUpdateBody;
+  if (bindings.INTEGRATION_UPDATE_FILE) {
+    try {
+      const metadata = await stat(bindings.INTEGRATION_UPDATE_FILE);
+      requireCondition(metadata.isFile() && (metadata.mode & 0o077) === 0 && metadata.size <= 65536,
+        'INTEGRATION_UPDATE_FILE must be private and at most 65536 bytes', 'blocked');
+      savedUpdateBody = await readFile(bindings.INTEGRATION_UPDATE_FILE, 'utf8');
+      JSON.parse(savedUpdateBody);
+    } catch (error) {
+      if (error instanceof SmokeError) throw error;
+      throw new SmokeError('Cannot read private INTEGRATION_UPDATE_FILE JSON', 'blocked');
+    }
+  }
+  return { ...bindings, savedUpdateBody };
 }
 
 export function readConfig(bindings) {
@@ -90,6 +105,8 @@ export function readConfig(bindings) {
     userId: integer(bindings, 'TEST_USER_ID', undefined, 1, Number.MAX_SAFE_INTEGER),
     updateId: integer(bindings, 'SMOKE_UPDATE_ID', randomInt(1, 2147483647), 1, 2147483647),
     messageId: integer(bindings, 'SMOKE_MESSAGE_ID', randomInt(1, 2147483647), 1, 2147483647),
+    messageDate: bindings.SMOKE_MESSAGE_DATE == null ? null : integer(bindings, 'SMOKE_MESSAGE_DATE', undefined, 1, 2147483647),
+    savedUpdateBody: bindings.savedUpdateBody,
     text,
     timeoutMs: integer(bindings, 'SMOKE_TIMEOUT_MS', 120000, 1000, 900000),
     requestTimeoutMs: integer(bindings, 'SMOKE_REQUEST_TIMEOUT_MS', 60000, 100, 60000),
@@ -105,7 +122,34 @@ function identifier(value, label) {
 export function readLiveConfig(bindings) {
   required(bindings, 'SMOKE_UPDATE_ID');
   required(bindings, 'SMOKE_MESSAGE_ID');
-  return readConfig(bindings);
+  required(bindings, 'SMOKE_MESSAGE_DATE');
+  const config = readConfig(bindings);
+  serializeUpdate(config);
+  return config;
+}
+
+export function serializeUpdate(config, fallbackDate = Math.floor(Date.now() / 1000)) {
+  const update = {
+    update_id: config.updateId,
+    message: {
+      message_id: config.messageId, date: config.messageDate ?? fallbackDate,
+      from: { id: config.userId, is_bot: false, first_name: 'Integration smoke' },
+      chat: { id: config.chatId, type: config.chatType },
+      ...(config.threadId === null ? {} : { message_thread_id: config.threadId, is_topic_message: true }),
+      text: config.text,
+    },
+  };
+  if (config.savedUpdateBody !== undefined) {
+    let saved;
+    try {
+      saved = JSON.parse(config.savedUpdateBody);
+    } catch {
+      throw new SmokeError('Saved update must contain JSON', 'blocked');
+    }
+    requireCondition(isDeepStrictEqual(saved, update), 'Saved update does not match pinned smoke bindings', 'blocked');
+    return config.savedUpdateBody;
+  }
+  return JSON.stringify(update);
 }
 
 function deliveryRecords(payload, config, taskId) {
@@ -182,6 +226,7 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
   const gateway = (path, method = 'GET', body) => request('Gateway', `${config.gatewayUrl}${path}`, method, gatewayHeaders, body);
   const status = taskId => request('CP status', `${config.controlPlaneUrl}/status`, 'POST', cpHeaders, JSON.stringify({ taskId }));
   try {
+    const updateBody = serializeUpdate(config, Math.floor(startedAt / 1000));
     const health = await request('Gateway health', `${config.gatewayUrl}/health`, 'GET', {}, undefined);
     requireCondition(health.status === 'ok' && health.bot === config.username && health.mode === 'direct',
       'Gateway health must identify the configured direct-mode sandbox');
@@ -191,16 +236,6 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
         'Telegram getMe sandbox identity mismatch');
       evidence.botIdentity = 'getMe_verified';
     } else evidence.botIdentity = 'gateway_health_only';
-    const updateBody = JSON.stringify({
-      update_id: config.updateId,
-      message: {
-        message_id: config.messageId, date: Math.floor(startedAt / 1000),
-        from: { id: config.userId, is_bot: false, first_name: 'Integration smoke' },
-        chat: { id: config.chatId, type: config.chatType },
-        ...(config.threadId === null ? {} : { message_thread_id: config.threadId, is_topic_message: true }),
-        text: config.text,
-      },
-    });
     const accepted = await gateway('/webhook', 'POST', updateBody);
     requireCondition(accepted.ok === true, 'Gateway refused ingress');
     const taskId = identifier(accepted.userTaskId, 'userTaskId');
