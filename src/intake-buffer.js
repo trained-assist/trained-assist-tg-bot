@@ -4,6 +4,7 @@ import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
+import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -28,7 +29,7 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
 import { coalesceBuffer, coalesceItem } from './intake-routing.js';
-import { threadExtra, threadIdOf } from './conversation-context.js';
+import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { pruneHistory } from './group-history.js';
 
 // Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
@@ -74,6 +75,15 @@ const BUSY_POLL_MS = 60_000;     // while busy, the alarm ticks this often and a
                                  // push. The hold is released on the first idle tick,
                                  // so a dropped push costs ~1 min, not BUSY_MAX_MS.
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
+// Граница ожидания пакета ДЛЯ НАРУЖНОГО НАБЛЮДЕНИЯ (arch#132 R9). Это не таймер
+// запуска: пользователь законно может дописывать пачку минутами. Значение —
+// заведомо больше сборки медиа и тишины пользователя, но меньше BUSY_MAX_MS, чтобы
+// «у пользователя всё ещё открыт редактор» никогда не выглядело как потерянный ввод.
+const PENDING_BATCH_DEADLINE_MS = 30 * 60_000;
+// Ключ пакета ЛОКАЛЕН для инстанса DO: сам Durable Object и есть «чат», поэтому
+// ключ не зависит от chatId — иначе /clear (у которого чата в теле нет) не мог бы
+// закрыть пакет.
+const BATCH_KEY = 'pendingBatch';
 // How long the agent's /tasks/running answer stays untrusted for a window whose
 // dispatch went through the outbox. Two owners release that hold before this (the
 // outbox on permanent reject and on prolonged agent downtime); this only covers a
@@ -221,6 +231,84 @@ export class IntakeBuffer {
     this.historyMutation = new Promise(resolve => { release = resolve; });
     await previous;
     try { return await fn(); } finally { release(); }
+  }
+
+  /**
+   * Идентичность пакета накопителя для внешнего наблюдения (arch#132 R9).
+   *
+   * batchId стабилен, пока пакет жив, и МЕНЯЕТСЯ после запуска: следующая пачка —
+   * другой вход с другим «первым сообщением». Время первого сообщения хранится
+   * отдельно и не перебивается, иначе активный чат подменял бы возраст самого
+   * старого непродвинувшегося ввода свежими.
+   */
+  async _batchIdLocked(chatId, threadId) {
+    const store = this.state.storage;
+    let batch = await store.get(BATCH_KEY);
+    if (!batch?.batchId) {
+      const ck = conversationKey(chatId, threadId);
+      batch = { batchId: `${ck}#1`, seq: 1, conversationKey: ck, firstMessageAt: Date.now() };
+      await store.put(BATCH_KEY, batch);
+    }
+    return batch;
+  }
+
+  /**
+   * Следующая пачка: предыдущая ушла в задачу/отменена, время стартуем заново.
+   * Возвращает ПРЕДЫДУЩИЙ batchId — его и надо закрыть наружу; новый появляется
+   * только когда в него реально придёт сообщение.
+   */
+  async _nextBatchLocked(chatId, threadId) {
+    const store = this.state.storage;
+    const prev = await store.get(BATCH_KEY);
+    // conversationKey нужен только как метка; если чата нет (/clear), берём её из
+    // предыдущего пакета, иначе метка была бы 'null'.
+    const ck = (chatId == null && prev?.conversationKey) || conversationKey(chatId, threadId);
+    await store.put(BATCH_KEY, {
+      batchId: `${ck}#${(prev?.seq ?? 0) + 1}`, seq: (prev?.seq ?? 0) + 1,
+      conversationKey: ck, firstMessageAt: Date.now(),
+    });
+    return prev?.batchId ?? null;
+  }
+
+  /**
+   * Сообщить control plane о накопленном пакете. BEST-EFFORT: сбой уходит в лог
+   * и не имеет права ломать приём сообщения — иначе детектор, который мы строим,
+   * сам станет причиной тишины.
+   */
+  async _announcePending(env, batch, { profileId, destinationId, prepState, deadlineMs } = {}) {
+    if (!batch) return;
+    // Сторожевой канал ОБЯЗАН быть безвредным. Здесь он зовётся из приёма и из
+    // запуска; необработанное исключение из него превратилось бы в «сбой запуска»
+    // (catch в _dispatch снимает busy) или в «приём не состоялся». Поэтому
+    // весь вызов под футпринтом: наблюдаемость не имеет права влиять на приём
+    // и запуск — ради этого её и делали.
+    try {
+      await this._registerPending(env, batch, { profileId, destinationId, prepState, deadlineMs });
+    } catch (e) {
+      console.warn(`[pending-intake] announce ${batch.batchId} threw: ${e.message}`);
+    }
+  }
+
+  /** Закрытие пакета наружу — тоже под футпринтом, по тем же причинам. */
+  async _closePending(env, batchId, reason, userTaskId = null) {
+    try {
+      await closePendingBatch(env, batchId, reason, userTaskId);
+    } catch (e) {
+      console.warn(`[pending-intake] close ${batchId} threw: ${e.message}`);
+    }
+  }
+
+  async _registerPending(env, batch, { profileId, destinationId, prepState, deadlineMs } = {}) {
+    if (!batch) return;
+    await registerPendingBatch(env, {
+      batchId: batch.batchId,
+      profileId,
+      destinationId: destinationId ?? null,
+      conversationId: batch.conversationKey ?? null,
+      firstMessageAt: batch.firstMessageAt,
+      prepState,
+      deadlineMs,
+    });
   }
 
   async _exclusive(fn) {
@@ -405,6 +493,7 @@ export class IntakeBuffer {
     // and never re-offering a launch). Never launches anything.
     if (url.pathname === '/clear' && request.method === 'POST') {
       if (await this.state.storage.get('busy')) return json({ busy: true, cleared: false });
+      let clearedBatchId = null;
       const result = await this._exclusive(async () => {
         const buf = (await this.state.storage.get('buf')) || [];
         const retry = (await this.state.storage.get('retryBatch')) || [];
@@ -428,8 +517,12 @@ export class IntakeBuffer {
         await this.state.storage.delete('parkedAt');
         await this.state.storage.delete('parkReoffers');
         await this.state.storage.deleteAlarm();
+        clearedBatchId = await this._nextBatchLocked(null, null);
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
+      // Решение пользователя/оператора — это НЕ «зависший ввод» (arch#132 R9):
+      // иначе детектор через 30 минут напомнил бы про пакет, который сняли.
+      await this._closePending(this.env, clearedBatchId, 'cleared');
       return json(result);
     }
 
@@ -631,6 +724,17 @@ export class IntakeBuffer {
       }
       const stillFreshest = await this._exclusive(async () => (await this.state.storage.get('armSeq')) === claim.seq);
       if (stillFreshest) await this._armAutoDispatch(msg.chat.id, claim.items, msg.message_id, threadIdOf(msg));
+      // Наружу: «у меня накоплено вот это» (arch#132 R9). Время первого сообщения
+      // пакета НЕ перебивается новыми — иначе возраст самого старого ввода
+      // подменялся бы свежими.
+      const batch = await this._exclusive(async () => this._batchIdLocked(msg.chat.id, threadIdOf(msg)));
+      const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg)).catch(() => null);
+      await this._announcePending(this.env, batch, {
+        profileId: session?.username ?? null,
+        destinationId: String(msg.chat.id),
+        prepState: 'collecting',
+        deadlineMs: PENDING_BATCH_DEADLINE_MS,
+      });
       return json({ buffered: claim.items.length });
     }
 
@@ -964,6 +1068,15 @@ export class IntakeBuffer {
     if (!accepted) return json({ duplicate: true });
     await enqueueMedia(msg, this.env, session).catch(() => {}); // watchdog retries
     await this._scheduleReceipt();
+    // Медиа в пакете — тоже наблюдаемый вход (arch#132 R9): снаружи видно, что
+    // шлюз ждёт расшифровку, и это НЕ то же самое, что «ввод потерялся».
+    const batch = await this._exclusive(async () => this._batchIdLocked(msg.chat.id, threadIdOf(msg)));
+    await this._announcePending(this.env, batch, {
+      profileId: session?.username ?? null,
+      destinationId: String(msg.chat.id),
+      prepState: 'preparing',
+      deadlineMs: PENDING_BATCH_DEADLINE_MS,
+    });
     return json({ queued: true, id });
   }
 
@@ -1376,6 +1489,12 @@ export class IntakeBuffer {
         },
       });
       if (runAck) {
+        // Пакет стал задачей: снимаем ожидание наружу и СВЯЗЫВАЕМ его с taskId
+        // (arch#132 R9). Связь берётся из ack'а запуска, поэтому гонять batchId
+        // через конверт приёма не нужно. Пакет при этом УЖЕ взят из буфера, так
+        // что следующая пачка получит новый batchId.
+        const launchedBatchId = await this._exclusive(async () => this._nextBatchLocked(chatId, threadIdOf(base)));
+        await this._closePending(this.env, launchedBatchId, 'launched', runAck.taskId ?? null);
         // requestId is what the agent echoes back in run-finished. The outbox
         // ack has no requestId field — its taskId IS the dispatch requestId.
         const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
