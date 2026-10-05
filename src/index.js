@@ -20,8 +20,34 @@ import { openProjectChoice } from './lib/project-choice.js';
 import { chatConfigCommandFromPhrase } from './lib/project-command.js';
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
+import { resolveAudience } from './lib/audience.js';
 
 const app = new Hono();
+
+// Audience is load-bearing: it scopes sessions/projects per bot, so two bots
+// serving the same human must send distinct values or they mix each other's
+// sessions (the #1290 cross-bot leak). resolveAudience() silently falls back to
+// 'default' when SESSION_NAMESPACE is unset — which means a misconfigured env
+// does not fail here, it fails later as "sessions in the wrong audience", with
+// nothing in the logs to say why. So: say it, loudly, once per isolate.
+// (Not at module scope: Hono's app.env is not guaranteed, and a false warning
+// on every correctly-configured bot would train everyone to ignore it.)
+let audienceLogged = false;
+function logAudience(env) {
+  if (audienceLogged) return;
+  audienceLogged = true;
+  const ns = env?.SESSION_NAMESPACE;
+  const audience = resolveAudience(env);
+  if (audience === 'default') {
+    console.warn(
+      `[boot] audience=default — SESSION_NAMESPACE is unset. ` +
+      `This worker will share sessions with the general-purpose bot. ` +
+      `Set SESSION_NAMESPACE to this bot's audience (see infra/env-manifest.json).`
+    );
+  } else {
+    console.log(`[boot] audience=${audience} (SESSION_NAMESPACE=${ns})`);
+  }
+}
 
 // Preview deployments have no Telegram credentials or webhook ownership.
 // Reject ingress before touching even the dedicated staging KV bindings.
@@ -203,6 +229,23 @@ app.get('/debug/whoami', async (c) => {
   }
 });
 
+// Debug: which audience this worker actually dispatches to. The audience scopes
+// sessions/projects per bot, so a wrong value does not fail — it silently mixes
+// two bots' sessions (the #1290 cross-bot leak). resolveAudience() falls back to
+// 'default' when SESSION_NAMESPACE is unset, so a misconfigured env surfaces here
+// as "audience=default" on a worker that was supposed to be scoped. Gated on
+// AGENT_SECRET: the resolved audience is not secret, but the raw env dump is.
+app.get('/debug/audience', async (c) => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const ns = c.env.SESSION_NAMESPACE;
+  return c.json({
+    ok: true,
+    session_namespace: ns || null,
+    audience: resolveAudience(c.env),
+    bot_username: c.env.BOT_USERNAME || null,
+  });
+});
+
 // Debug: dump a chat's IntakeBuffer Durable Object state (buf/retryBatch/busy).
 // Diagnoses "stuck forever" batches — a preparation failure that keeps
 // re-throwing on every retry (non-transient cause) leaves its batch in
@@ -331,6 +374,7 @@ async function dispatch(update, env) {
 
 export async function dispatchInner(update, env) {
   env = applySessionNamespace(env);
+  logAudience(env);
   // Test mode init point #1 — every webhook update lands here before any send
   // (lib/telegram.js reads the module cache; see DESIGN §2.2).
   initTestMode(env);

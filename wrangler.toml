@@ -240,6 +240,13 @@ class_name = "RetryQueue"
 # решение владельца №3).
 [env.sales]
 name = "trained-assist-tg-bot-sales"
+# Telegram's webhook DNS resolver could not resolve the fresh *.workers.dev
+# subdomain (main/recruiter work, this one failed with "Temporary failure in name
+# resolution"). Bind a stable custom domain on the account zone instead —
+# setWebhook targets it, not workers.dev. Same reasoning as the freelance env.
+routes = [
+  { pattern = "tg-sales.trainedassist.store", custom_domain = true }
+]
 
 [env.sales.vars]
 MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter/freelance).
