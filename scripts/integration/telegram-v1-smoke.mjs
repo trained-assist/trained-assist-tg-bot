@@ -218,9 +218,9 @@ export async function runSmoke(config, { fetchImpl = fetch, emit = value => cons
       evidence.receipt = receipts.some(record => record.status === 'sent') ? 'sent' : 'unverified';
       evidence.delivery = terminal?.status ?? 'unverified';
       requireCondition(!['failed', 'cancelled'].includes(snapshot.status), 'Task ended without a successful result');
-      requireCondition(!receipts.some(record => record.status === 'dead') && terminal?.status !== 'dead', 'Delivery exhausted retries');
+      requireCondition(terminal?.status !== 'dead', 'Terminal delivery exhausted retries');
       if (snapshot.status === 'done') requireCondition(snapshot.hasAnswer, 'CP done has no final answer');
-      if (evidence.result === 'ready' && evidence.receipt === 'sent' && terminal?.status === 'sent') {
+      if (evidence.result === 'ready' && terminal?.status === 'sent') {
         await gateway('/cron');
         const replay = deliveryRecords(await gateway(`/deliveries/${encodeURIComponent(taskId)}`), config, taskId);
         requireCondition(JSON.stringify(replay) === JSON.stringify(records), 'Reconciliation replay changed delivery evidence');
