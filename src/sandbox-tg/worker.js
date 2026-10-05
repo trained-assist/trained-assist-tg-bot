@@ -118,10 +118,10 @@ export class TgSliceController {
 
   async handleMessage(profile, message, update) {
     if (this.mode === MODE.batch) return this.handleBatch(profile, message);
-    return this.handleDirect(profile, message);
+    return this.handleDirect(profile, message, update);
   }
 
-  async handleDirect(profile, message) {
+  async handleDirect(profile, message, update) {
     const session = new ConversationSession(this.client, {
       conversationId: profile.conversationId,
       profileId: profile.profileId,
@@ -158,7 +158,8 @@ export class TgSliceController {
       }
       return effects;
     }
-    const send = await session.sendMessage(text ?? '[no text]');
+    const requestId = `${profile.ingressRef}:u${update.update_id}`;
+    const send = await session.sendMessage(text ?? '[no text]', null, null, requestId);
     const effects = [{ type: 'new', userTaskId: send.userTaskId, seq: send.seq, duplicate: send.duplicate }];
     if (!send.duplicate) {
       await this.outbox?.enqueue({

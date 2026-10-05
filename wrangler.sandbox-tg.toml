@@ -16,11 +16,12 @@ crons = ["* * * * *"]
 #             production KV; the production worker never reads it.
 [[kv_namespaces]]
 binding = "TG_SLICE"
-id = "00000000000000000000000000000032"
+id = "915ffeedb74440538009bdc1bd00d381"
 
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"
+TG_SLICE_ROUTER_ENABLED = "true"
 
 # Secrets (set via `wrangler secret put` — never in repo):
 #   TG_SANDBOX_BOT_TOKEN        — test bot token only

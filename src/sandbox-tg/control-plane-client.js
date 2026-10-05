@@ -162,7 +162,7 @@ export class ControlPlaneClient {
       body: {
         taskId: userTaskId,
         profileId: this.config.profileId,
-        goal: userTaskId,
+        goal: opts.goal ?? userTaskId,
         question: opts.question ?? null,
         waitTimeoutSec: opts.waitTimeoutSec ?? null,
         crashRunOnce: opts.crashRunOnce ?? false,
@@ -185,6 +185,11 @@ export class ControlPlaneClient {
       generation: ack.generation,
     });
     return ack;
+  }
+
+  async route(userTaskId) {
+    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true } });
+    return value;
   }
 
   /** Signal (human answer in an open awaiting). The idempotency key is mandatory. */

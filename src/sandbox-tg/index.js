@@ -7,6 +7,7 @@ import { KvConversationStore } from './conversation.js';
 import { KvBatchStore } from './batch.js';
 import { TgSliceController, MODE } from './worker.js';
 import { profileForUpdate } from './profile.js';
+import { kvEntries } from './kv.js';
 
 const app = new Hono();
 
@@ -38,7 +39,35 @@ app.post('/webhook', async c => {
   const result = await c.env._sliceCtrl.handleUpdate(update);
   const first = result.effects?.[0];
   const text = first?.type === 'refused' ? first.text : 'ok';
-  return c.json({ ok: true, duplicate: result.duplicate ?? false, userTaskId: first?.userTaskId ?? null, text });
+  return c.json({ ok: true, duplicate: result.duplicate ?? false, userTaskId: result.userTaskId ?? first?.userTaskId ?? null, text });
+});
+
+app.get('/deliveries/:taskId', async c => {
+  const taskId = c.req.param('taskId');
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return c.json({ error: 'invalid task id' }, 400);
+  const outbox = new TgDeliveryOutbox(c.env.TG_SLICE, null);
+  let terminal = await outbox.load(`terminal:${taskId}`);
+  for await (const entry of kvEntries(c.env.TG_SLICE, `delivery:terminal:${taskId}:g`)) {
+    const record = JSON.parse(entry.value);
+    if (record.userTaskId !== taskId) continue;
+    if (!terminal || Number(record.generation ?? 0) >= Number(terminal.generation ?? 0)) terminal = record;
+  }
+  const records = [await outbox.load(taskId), terminal];
+  const config = c.env._sliceConfig;
+  if (records.some(record => record && !config.allowedChats.includes(String(record.destination?.chatId)))) {
+    return c.json({ error: 'chat not allowed' }, 403);
+  }
+  const summary = record => record ? {
+    deliveryId: record.deliveryId,
+    userTaskId: record.userTaskId,
+    status: record.status,
+    attempts: record.attempts,
+    providerMessageId: record.telegramMessageId ?? null,
+    generation: record.generation ?? null,
+    chatId: record.destination.chatId,
+    threadId: record.destination.threadId ?? null,
+  } : null;
+  return c.json({ receipt: summary(records[0]), terminal: summary(records[1]) });
 });
 
 app.get('/cron', async c => {

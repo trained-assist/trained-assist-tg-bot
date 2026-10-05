@@ -135,12 +135,14 @@ export class ConversationSession {
    * New user message: intake (C01) + start of the accepted task. A repeat of the
    * same seq returns the same receipt and never starts a second run.
    */
-  async sendMessage(text, seq = null, inputItems = null) {
+  async sendMessage(text, seq = null, inputItems = null, ingressRequestId = null) {
     const index = await this.requireIndex();
-    const target = seq ?? index.turns.length + 1;
-    if (target > this.maxTurns) throw new Error(`conversation ${index.conversationId} reached maxTurns=${this.maxTurns}`);
-    const existing = index.turns.find(turn => turn.seq === target);
-    const requestId = existing?.requestId ?? messageKey(index.conversationId, target);
+    const existing = ingressRequestId
+      ? index.turns.find(turn => turn.requestId === ingressRequestId)
+      : index.turns.find(turn => turn.seq === seq);
+    const target = existing?.seq ?? seq ?? index.turns.length + 1;
+    if (target > this.maxTurns && !this.client.config?.routeBeforeStart) throw new Error(`conversation ${index.conversationId} reached maxTurns=${this.maxTurns}`);
+    const requestId = ingressRequestId ?? existing?.requestId ?? messageKey(index.conversationId, target);
     const receipt = await this.client.intake({
       requestId,
       text,
@@ -309,7 +311,12 @@ export class ConversationSession {
 
   async startOrKeepTerminal(userTaskId, goal) {
     try {
-      const ack = await this.client.start(userTaskId, { question: `Уточнение по задаче: ${String(goal).slice(0, 120)}` });
+      if (this.client.config?.routeBeforeStart) {
+        const routed = await this.client.route(userTaskId);
+        this.log({ event: 'tg.conversation.routed', userTaskId, reason: routed.reasonCode ?? routed.route });
+        return routed.continuation?.issued === true || routed.execution?.agentStarted === true;
+      }
+      const ack = await this.client.start(userTaskId, { goal, question: `Уточнение по задаче: ${String(goal).slice(0, 120)}` });
       return ack.instanceCreated || ack.runId !== null;
     } catch (e) {
       // A terminal task is restarted only by an explicit new message.

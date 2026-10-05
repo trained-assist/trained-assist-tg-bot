@@ -73,6 +73,7 @@ export function readTgSliceConfig(env) {
     controlPlaneUrl: stripTrailingSlash(requireVar(env, 'CONTROL_PLANE_URL')),
     principalId: requireVar(env, 'CONTROL_PLANE_PRINCIPAL'),
     principalSignature: String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
+    routeBeforeStart: env.TG_SLICE_ROUTER_ENABLED === 'true',
     profileId: requireVar(env, 'CONTROL_PLANE_PROFILE'),
     apiKey: String(env['CONTROL_PLANE_API_KEY'] ?? '').trim() || null,
     sessionId: String(env['CONTROL_PLANE_SESSION_ID'] ?? '').trim() || null,
