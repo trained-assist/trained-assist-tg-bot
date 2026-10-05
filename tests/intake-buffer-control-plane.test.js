@@ -1,8 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, send, edit, publishRoutingDegradation } = vi.hoisted(() => ({
+const { handleMessage, checkCompleteness, route, request, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
   handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), send: vi.fn(), edit: vi.fn(),
   publishRoutingDegradation: vi.fn(),
+  enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
+}));
+
+vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
+  TgDeliveryOwnerClient: class {
+    enqueue(record) { return enqueue(record); }
+    drain() { return drain(); }
+    load(deliveryId) { return loadDelivery(deliveryId); }
+  },
 }));
 
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
@@ -39,7 +48,7 @@ function fixture() {
 }
 
 const items = [{ text: 'first', msg: { message_id: 1, chat: { id: 42 }, text: 'first' } }];
-const receipt = { userTaskId: 'ut-test', requestId: 'scoped-request', profileId: 'test-profile', durable: true };
+const receipt = { userTaskId: 'ut-test', requestId: 'scoped-request', profileId: 'test-profile', durable: true, providerAcceptedAt: 1700000000000 };
 const rpc = (path, body) => new Request(`https://intake${path}`, body === undefined ? undefined
   : { method: 'POST', body: JSON.stringify(body) });
 
@@ -60,7 +69,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   route.mockResolvedValue({});
   publishRoutingDegradation.mockResolvedValue(undefined);
-  request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done' } } });
+  request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done', generation: 1 } } });
+  enqueue.mockImplementation(async record => ({ record: { ...record, status: 'pending' }, duplicate: false }));
+  drain.mockResolvedValue(1);
+  loadDelivery.mockImplementation(async deliveryId => ({ deliveryId, status: 'sent' }));
   send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   edit.mockResolvedValue({ ok: true });
   handleMessage.mockResolvedValue(undefined);
@@ -341,12 +353,108 @@ describe('existing collector control-plane ownership', () => {
   it.each(['done', 'failed', 'cancelled'])('releases only matching authoritative terminal %s', async status => {
     const { owner, storage } = fixture();
     await accept(owner);
-    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status } } });
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status, generation: 1 } } });
     expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
     expect(await storage.get('busy')).toBeUndefined();
     expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).toBe(true);
     await accept(owner);
     expect(await storage.get('busy')).toBeUndefined();
+  });
+
+  it.each([
+    ['done', 'actual answer', 'actual answer'],
+    ['done', { answer: 'native answer' }, 'native answer'],
+    ['done', '   ', 'Готово. Текст результата отсутствует.'],
+    ['failed', { answer: 'not a successful answer' }, 'Ошибка исполнителя.'],
+    ['cancelled', null, 'Отменено.'],
+  ])('uses the controller terminal identity and payload for %s with result %j', async (status, result, text) => {
+    const { owner, storage } = fixture();
+    const sourceItems = [{ ...items[0], msg: { ...items[0].msg,
+      is_topic_message: true, message_thread_id: 7 } }];
+    await snapshot(owner, receipt, sourceItems);
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    request.mockResolvedValue({ value: { taskStore: {
+      id: receipt.userTaskId, profile_id: receipt.profileId, status, generation: 2, result,
+    } } });
+    enqueue.mockImplementation(async record => {
+      expect(await storage.get('busy')).toBe(true);
+      expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).not.toBe(true);
+      return { record: { ...record, status: 'pending' }, duplicate: false };
+    });
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    const deliveryId = `terminal:${receipt.userTaskId}:g2`;
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith({ deliveryId,
+      taskAcceptedAt: receipt.providerAcceptedAt,
+      conversationId: `tg-42-ssaved-b${receipt.requestId.slice(-24)}`,
+      userTaskId: receipt.userTaskId, destination: { chatId: 42, threadId: 7 },
+      requestId: deliveryId, type: 'message', text });
+    expect(drain).toHaveBeenCalledTimes(1);
+    expect(loadDelivery).toHaveBeenCalledTimes(1);
+    expect(loadDelivery).toHaveBeenCalledWith(deliveryId);
+    expect(send).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(['enqueue', 'drain'])('keeps terminal ownership after %s ACK loss and retries the identical owner record after restart', async boundary => {
+    const { owner, storage, env } = fixture();
+    await accept(owner);
+    (boundary === 'enqueue' ? enqueue : drain).mockRejectedValueOnce(new Error('ACK lost'));
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).not.toBe(true);
+    const first = structuredClone(enqueue.mock.calls[0][0]);
+    const restarted = new IntakeBuffer({ storage }, env);
+    expect(await restarted._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(enqueue.mock.calls[1][0]).toEqual(first);
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('continues owner drain on busy alarms when another queued delivery was drained first', async () => {
+    const { owner, storage, env } = fixture();
+    await accept(owner);
+    loadDelivery.mockResolvedValueOnce({ deliveryId: `terminal:${receipt.userTaskId}:g1`, status: 'pending' });
+    await owner.alarm();
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    const restarted = new IntakeBuffer({ storage }, env);
+    await restarted.alarm();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(enqueue.mock.calls[1][0]).toEqual(enqueue.mock.calls[0][0]);
+    expect(drain).toHaveBeenCalledTimes(2);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(['unknown', 'sending', 'retrying', 'quarantined'])('does not release terminal ownership or bypass the owner on %s delivery', async status => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    enqueue.mockImplementation(async record => ({ record: { ...record, status }, duplicate: true }));
+    loadDelivery.mockImplementation(async deliveryId => ({ deliveryId, status }));
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+    if (status === 'quarantined') expect(drain).not.toHaveBeenCalled();
+  });
+
+  it.each([null, '1700000000000', 0])('rejects unproven provider acceptance timestamp %j before enqueue', async providerAcceptedAt => {
+    const { owner, storage } = fixture();
+    await accept(owner, { ...receipt, providerAcceptedAt });
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 0, '1'])('rejects unproven terminal generation %j before enqueue', async generation => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    request.mockResolvedValue({ value: { taskStore: {
+      id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done', generation,
+    } } });
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it.each([

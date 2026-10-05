@@ -7,6 +7,7 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
 import { controlPlaneClient, publishRoutingDegradation } from './lib/control-plane-execution.js';
 import { isTerminalTaskStatus } from './sandbox-tg/contract.js';
+import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -2113,6 +2114,29 @@ export class IntakeBuffer {
         const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId || !isTerminalTaskStatus(row.status)) return false;
+        if (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
+            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0) return false;
+        const snapshot = await this._readSnapshot(requestId);
+        const envelope = snapshot?.body?.controlPlaneEnvelope;
+        const message = snapshot?.items?.at(-1)?.msg;
+        if (envelope?.requestId !== requestId || envelope.profileId !== profileId ||
+            typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
+            !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
+        const deliveryId = `terminal:${receipt.userTaskId}:g${row.generation}`;
+        const answer = typeof row.result === 'string' ? row.result : row.result?.answer;
+        const label = row.status === 'done' ? 'Готово. Текст результата отсутствует.'
+          : row.status === 'failed' ? 'Ошибка исполнителя.' : 'Отменено.';
+        const outbox = new TgDeliveryOwnerClient(this.env);
+        const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
+          conversationId: `${envelope.conversationRef}-b${requestId.slice(-24)}`,
+          userTaskId: receipt.userTaskId,
+          destination: { chatId: message.chat.id, threadId: threadIdOf(message) },
+          requestId: deliveryId, type: 'message',
+          text: row.status === 'done' && typeof answer === 'string' && answer.trim() ? answer : label });
+        if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return false;
+        await outbox.drain();
+        const delivered = await outbox.load(deliveryId);
+        if (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent') return false;
         terminal.push(requestId);
       }
       const released = await this._exclusive(async () => {

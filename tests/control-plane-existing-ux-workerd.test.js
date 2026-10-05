@@ -164,6 +164,22 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
     expect(observed.sqliteWitness).toBe(1);
     return new Map(observed.entries);
   };
+  const terminalProof = async () => {
+    const terminalMessages = providerMessages.filter(item => item.text === 'Offline engine fixture completed.');
+    expect(terminalMessages).toHaveLength(1);
+    expect(terminalMessages[0].chat_id).toBe(42);
+    const providerMessageId = 501 + providerMessages.indexOf(terminalMessages[0]);
+    const response = await runtime.dispatchFetch('https://worker.test/deliveries/ut-workerd-scenario', {
+      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
+    });
+    expect(response.status).toBe(200);
+    const delivery = await response.json();
+    expect(delivery.receipt).toBeNull();
+    expect(delivery.terminal).toMatchObject({ deliveryId: 'terminal:ut-workerd-scenario:g1',
+      userTaskId: 'ut-workerd-scenario', generation: 1, status: 'sent', attempts: 1,
+      providerMessageId, chatId: 42, threadId: null });
+    return delivery.terminal;
+  };
   try {
     runtime = new Miniflare(runtimeOptions);
     expect((await webhook(message(100, 'Unsigned'), false)).status).toBe(401);
@@ -216,12 +232,7 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
       });
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
-      expect(providerMessages.filter(item => item.text === 'Offline engine fixture completed.')).toHaveLength(1);
-      const delivered = await runtime.dispatchFetch('https://worker.test/deliveries/ut-workerd-scenario', {
-        headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      });
-      expect(delivered.status).toBe(200);
-      expect((await delivered.json()).terminal).toMatchObject({ status: 'sent', attempts: 1, providerMessageId: 502 });
+      await terminalProof();
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;
@@ -266,13 +277,20 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
     completedTasks.add('ut-workerd-scenario');
     await state(true);
     expect((await state()).get('busy')).toBeUndefined();
+    await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
+    const terminalBeforeFollowup = await terminalProof();
     expect((await webhook(message(106, 'Continue with the same input and session'))).status).toBe(200);
     const followupDue = (await state()).get('receiptDue');
     expect(followupDue).toBeTypeOf('number');
     await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, followupDue - Date.now()) + 50));
     await state(true);
-    expect(providerMessages).toHaveLength(2 + unknownNotices.length);
-    const followupCollectorId = 500 + providerMessages.length;
+    const allCollectors = providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
+      .some(button => button.callback_data === 'intake_run'));
+    expect(allCollectors).toHaveLength(2);
+    expect(providerMessages.filter(item => item.text.includes('Подтверждение не получено'))).toEqual(unknownNotices);
+    expect(providerMessages).toHaveLength(allCollectors.length + unknownNotices.length + 1);
+    expect(await terminalProof()).toEqual(terminalBeforeFollowup);
+    const followupCollectorId = 501 + providerMessages.indexOf(allCollectors[1]);
     const followupLaunch = { update_id: 107, callback_query: { id: 'workerd-followup-launch',
       from: { id: 43, is_bot: false }, data: 'intake_run',
       message: { message_id: followupCollectorId, chat: { id: 42, type: 'private' } } } };
@@ -287,6 +305,10 @@ it.each(['vertical', 'route', 'intake'])('real signed workerd SQLite existing UX
     expect((await webhook(followupLaunch)).status).toBe(200);
     expect(admittedTasks.size).toBe(2);
     expect(dispatchCount).toBe(2);
+    expect(await terminalProof()).toEqual(terminalBeforeFollowup);
+    expect(providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
+      .some(button => button.callback_data === 'intake_run'))).toHaveLength(2);
+    expect(providerMessages).toHaveLength(3 + unknownNotices.length);
     expect(legacyRequests).toEqual([]);
     expect(unexpectedRequests).toEqual([]);
   } finally {
