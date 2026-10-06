@@ -2,6 +2,7 @@
 //
 // It repeats the calls of the web slice (web/control-plane-client.ts) one to one:
 //   POST /intake        (C01, idempotent by requestId)
+//   POST /route         (classify the accepted task; Output owns continuation)
 //   GET  /receipt       (durable acceptance receipt)
 //   POST /start         (start the accepted task; repeat = same instance)
 //   POST /signal        (answer in an open awaiting; idempotent by key)
