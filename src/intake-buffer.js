@@ -2536,37 +2536,6 @@ export class IntakeBuffer {
         const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
         const receipt = record?.receipt;
         if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId || receipt.durable !== true) return false;
-        let routed;
-        const routingKnown = record.routingOutcome?.known === true && record.routingOutcome.publicationComplete === true;
-        const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
-        if (!routingKnown && !routingDeferred) {
-          if (stopPending) return false;
-          routed = await client.route(receipt.userTaskId);
-          if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return false;
-        }
-        if (!routingKnown && !routingDeferred && routed?.degraded === true) {
-          const snapshot = await this._readSnapshot(requestId);
-          const envelope = snapshot?.body?.controlPlaneEnvelope;
-          const message = snapshot?.items?.at(-1)?.msg;
-          if (envelope?.requestId !== requestId || envelope.profileId !== profileId ||
-              typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
-              !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
-          await publishRoutingDegradation(this.env, receipt, routed,
-            { chatId: message.chat.id, threadId: threadIdOf(message) },
-            `${envelope.conversationRef}-b${requestId.slice(-24)}`);
-        }
-        if (!routingKnown && !routingDeferred) {
-          await this._exclusive(async () => this.state.storage.transaction(async tx => {
-            const key = `cp-acceptance:${requestId}`;
-            const current = await tx.get(key);
-            if (current?.receipt?.userTaskId !== receipt.userTaskId || current.receipt.profileId !== profileId ||
-                current.receipt.requestId !== requestId) throw new Error('Routing receipt changed');
-            await tx.put(key, { ...current, routingOutcome: {
-              known: true, publicationComplete: true, degraded: routed.degraded === true,
-              continuationIssued: routed.continuation?.issued === true,
-            } });
-          }));
-        }
         const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
@@ -2575,13 +2544,46 @@ export class IntakeBuffer {
         const outcomeUnknown = (row.status === 'unknown' ||
           (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
           value?.awaiting?.status !== 'open';
-        if (!isTerminalTaskStatus(row.status) && !outcomeUnknown) return false;
-        if (!outcomeUnknown && (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
-            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0)) return false;
         if (outcomeUnknown) {
           unresolved.push(requestId);
           continue;
         }
+        if (!isTerminalTaskStatus(row.status)) {
+          let routed;
+          const routingKnown = record.routingOutcome?.known === true && record.routingOutcome.publicationComplete === true;
+          const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
+          if (!routingKnown && !routingDeferred) {
+            if (stopPending) return false;
+            routed = await client.route(receipt.userTaskId);
+            if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return false;
+          }
+          if (!routingKnown && !routingDeferred && routed?.degraded === true) {
+            const snapshot = await this._readSnapshot(requestId);
+            const envelope = snapshot?.body?.controlPlaneEnvelope;
+            const message = snapshot?.items?.at(-1)?.msg;
+            if (envelope?.requestId !== requestId || envelope.profileId !== profileId ||
+                typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
+                !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
+            await publishRoutingDegradation(this.env, receipt, routed,
+              { chatId: message.chat.id, threadId: threadIdOf(message) },
+              `${envelope.conversationRef}-b${requestId.slice(-24)}`);
+          }
+          if (!routingKnown && !routingDeferred) {
+            await this._exclusive(async () => this.state.storage.transaction(async tx => {
+              const key = `cp-acceptance:${requestId}`;
+              const current = await tx.get(key);
+              if (current?.receipt?.userTaskId !== receipt.userTaskId || current.receipt.profileId !== profileId ||
+                  current.receipt.requestId !== requestId) throw new Error('Routing receipt changed');
+              await tx.put(key, { ...current, routingOutcome: {
+                known: true, publicationComplete: true, degraded: routed.degraded === true,
+                continuationIssued: routed.continuation?.issued === true,
+              } });
+            }));
+          }
+          return false;
+        }
+        if (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
+            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0) return false;
         const snapshot = await this._readSnapshot(requestId);
         const envelope = snapshot?.body?.controlPlaneEnvelope;
         const message = snapshot?.items?.at(-1)?.msg;

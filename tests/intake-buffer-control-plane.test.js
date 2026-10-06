@@ -626,9 +626,10 @@ describe('existing collector control-plane ownership', () => {
     const topicItems = [{ ...items[0], msg: { ...items[0].msg, message_thread_id: 17, is_topic_message: true } }];
     await snapshot(owner, receipt, topicItems);
     await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
     const routed = { degraded: true, continuation: { issued } };
     route.mockResolvedValue(routed);
-    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
     expect(publishRoutingDegradation).toHaveBeenCalledWith(owner.env, receipt, routed,
       { chatId: 42, threadId: 17 }, `tg-42-ssaved-b${receipt.requestId.slice(-24)}`);
   });
@@ -636,14 +637,16 @@ describe('existing collector control-plane ownership', () => {
   it('keeps ownership if degradation publication fails and retries the same cached route', async () => {
     const { owner, storage } = fixture();
     await accept(owner);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
     route.mockResolvedValue({ degraded: true, continuation: { issued: false } });
     publishRoutingDegradation.mockRejectedValueOnce(new Error('owner unavailable'));
     expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
     expect(await storage.get('busy')).toBe(true);
-    expect(request).not.toHaveBeenCalled();
-    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
     expect(route.mock.calls).toEqual([[receipt.userTaskId], [receipt.userTaskId]]);
     expect(publishRoutingDegradation).toHaveBeenCalledTimes(2);
+    expect(await storage.get('busy')).toBe(true);
   });
 
   it('uses a neutral CP launch label without changing legacy labels or actions', async () => {
@@ -790,7 +793,7 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ outcomeUnknown: true });
     expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ terminal: false });
     expect(enqueue).not.toHaveBeenCalled();
-    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).not.toHaveBeenCalled();
   });
 
   it('keeps the busy hold while any parallel executor attempt is still active', async () => {
@@ -866,7 +869,7 @@ describe('existing collector control-plane ownership', () => {
     const restarted = new IntakeBuffer({ storage }, env);
     expect(await restarted._pollRunFinishedIfIdle(0)).toBe(true);
     expect(enqueue.mock.calls[1][0]).toEqual(first);
-    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -943,37 +946,27 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('busy')).toBe(true);
   });
 
-  it('retains terminal task ownership after route read failure until cached degradation is published', async () => {
-    const { owner, storage, env } = fixture();
+  it('releases a terminal task even when route acknowledgement was never persisted', async () => {
+    const { owner, storage } = fixture();
     await accept(owner);
-    route.mockRejectedValueOnce(new Error('ack lost'));
-    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
-    expect(await storage.get('busy')).toBe(true);
-    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).routingOutcome).toBeUndefined();
-    expect(request).not.toHaveBeenCalled();
-    const restarted = new IntakeBuffer({ storage }, env);
-    route.mockResolvedValue({ degraded: true, continuation: { issued: true } });
-    expect(await restarted._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
     expect(await storage.get('busy')).toBeUndefined();
-    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).routingOutcome).toEqual({
-      known: true, publicationComplete: true, degraded: true, continuationIssued: true,
-    });
-    expect(route.mock.calls).toEqual([[receipt.userTaskId], [receipt.userTaskId]]);
-    expect(publishRoutingDegradation).toHaveBeenCalledTimes(1);
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).toBe(true);
+    expect(route).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(send).not.toHaveBeenCalled();
   });
 
   it('retains persisted routing outcome across restart without repeating notice enqueue', async () => {
     const { owner, storage, env } = fixture();
     await accept(owner);
     route.mockResolvedValue({ degraded: true, continuation: { issued: false } });
-    request.mockResolvedValueOnce({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
     expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
     expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).routingOutcome.publicationComplete).toBe(true);
     route.mockRejectedValue(new Error('later route transport outage'));
     const restarted = new IntakeBuffer({ storage }, env);
-    expect(await restarted._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(await restarted._pollRunFinishedIfIdle(0)).toBe(false);
     expect(route).toHaveBeenCalledTimes(1);
     expect(publishRoutingDegradation).toHaveBeenCalledTimes(1);
     expect(handleMessage).not.toHaveBeenCalled();
