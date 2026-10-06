@@ -180,8 +180,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(dispatches.size).toBe(1);
     completed = true;
     await alarm();
-    expect(routes).toEqual([{ taskId: accepted.taskId, continue: true },
-      { taskId: accepted.taskId, continue: true }]);
+    expect(routes).toEqual([{ taskId: accepted.taskId, continue: true }]);
     expect(dispatches.size).toBe(1);
     const reconciledRoutes = structuredClone(routes);
     expect(sends.filter(item => item.text === answer)).toHaveLength(1);

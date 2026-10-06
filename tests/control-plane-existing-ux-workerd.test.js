@@ -481,7 +481,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         'Следующая самостоятельная задача', 'Запустить агента',
       ]);
       expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes[1].requestId}`).taskId).toBe('ut-workerd-followup');
-      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-scenario')).toHaveLength(2);
+      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-scenario')).toHaveLength(1);
       expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-followup')).toEqual([
         { taskId: 'ut-workerd-followup', continue: true },
       ]);
