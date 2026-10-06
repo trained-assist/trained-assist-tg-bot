@@ -42,13 +42,15 @@ Check that a harmless ingress test did not call CP admission or start a task.
 Do not clear a pending/unknown launch as part of the test: preserve that state
 until its owner has reviewed the evidence.
 
-## Regression for a stuck pending launch
+## Regression for a stuck pending launch/stop window
 
 Run this only against the sandbox chat while its admission/stop window is known
 to be unresolved. Send one normal text message from Telegram. Passing behavior:
 
 - the message is visibly stored in the held input (once);
-- the bot acknowledges that it is held and says it did not start another task;
+- the bot says the stop is still unconfirmed, acknowledges that it retained the
+  text, and says it did not start another task;
+- the collector exposes no launch action while the stop remains unresolved;
 - no second CP admission or parallel task is created;
 - the unresolved launch/stop evidence remains intact.
 
