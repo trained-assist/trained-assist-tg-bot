@@ -11,7 +11,7 @@
 // A standalone launch word flushes the buffer immediately; otherwise launch is
 // by the ▶️ button. Must be a whole-string match — a broad regex used to fire on
 // prose like «давай сделаем…» / «…го…» (the «стартует сразу» bug, #530).
-export const FORCE_RUN_RE = /^\s*(запускай|запусти|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
+export const FORCE_RUN_RE = /^\s*(запускай|запусти|запустить(?:\s+агента)?|поехали|го|go|run|начинай)\s*[!.]*\s*$/i;
 
 // Only explicit execution instructions bypass the quiet period (owner 2026-09-24).
 // Acknowledgments and '?' are no longer launch authorization.
