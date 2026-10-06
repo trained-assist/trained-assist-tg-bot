@@ -83,6 +83,28 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('keeps a visible receipt scheduled when a stop-launch hold blocks auto-dispatch', async () => {
+    const { owner, storage } = fixture();
+    owner.env.BOT_TOKEN = 'test-bot-token';
+    owner.env.TG_SLICE_STOP_ENABLED = 'false';
+    await storage.put('stopLaunch', { mode: 'new', at: Date.now() });
+    const response = await owner.fetch(rpc('/append', {
+      text: 'ping', msg: { chat: { id: 42 }, message_id: 17, text: 'ping' }, telegramUpdateId: 117,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ buffered: 1 });
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
+    expect(await storage.getAlarm()).toBe(await storage.get('receiptDue'));
+
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][2]).toContain('1 сообщ.');
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
   it.each(['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'])
   ('explicit false refuses %s without changing durable stop intent or input', async path => {
     const { owner, storage } = fixture();
