@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { readTgSliceConfig } from './config.js';
 import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
-export { IntakeBuffer };
 import { TgDeliveryOwner } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
 import { getSession, setSession } from '../lib/kv.js';
