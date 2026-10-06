@@ -739,7 +739,8 @@ export class IntakeBuffer {
               const admissionRequestIds = [...new Set(await store.get('cpBusyRequests') || [])].sort();
               await store.put('cpStopWindow', { intentId: crypto.randomUUID(), restart: previous?.stopConfirmed === true,
                 username, chatId: reqChatId, threadId: reqThreadId, profileId,
-                previousGroups: previous?.groups || [], admissionRequestIds, groups: [], tasks: [],
+                previousGroups: previous?.groups || [], admissionRequestIds,
+                admissionLaunchKeys: [...(await store.get('cpUnresolvedLaunches') || [])], groups: [], tasks: [],
                 pending: true, unresolved: true, stopConfirmed: false,
                 createdAt: Date.now() });
             }
@@ -1162,18 +1163,21 @@ export class IntakeBuffer {
       const { mode = 'new', route = null } = source;
       const res = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return null;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' &&
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode !== 'new' &&
             (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return null;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return null;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && mode !== 'new') return null;
         const store = this.state.storage;
         if (await store.get('stopLaunch')) return { already: true };
         const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
         if (!items.length) return { nothing: true };
-        if (await store.get('busy')) {
+        if (await store.get('busy') && !(mode === 'new' && this.env.EXECUTION_BACKEND === 'control-plane'
+            && (await store.get('cpStopWindow'))?.pending)) {
           await store.put('stopLaunch', { mode: mode === 'supp' ? 'supp' : 'new', route, at: Date.now() });
           return { waiting: true, count: items.length };
         }
         await this._prepareStopLaunchLocked({ mode: mode === 'supp' ? 'supp' : 'new', route }, items);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode === 'new'
+            && ((await store.get('cpStopWindow'))?.pending || await store.get('busy'))) await store.put('launchParallel', true);
         return { launching: true, count: items.length };
       });
       if (res === null) return new Response('Callback ownership mismatch', { status: 409 });
@@ -1208,15 +1212,16 @@ export class IntakeBuffer {
   // the choice stays remembered and the next tick tries again.
   async _consumeStopLaunch() {
     if (controlPlaneStopDisabled(this.env)) return false;
-    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return false;
     const spec = await this.state.storage.get('stopLaunch');
     if (!spec) return false;
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && spec.mode !== 'new') return false;
     // The window still belongs to the run being stopped: launching NOW would lose
     // the bookkeeping (_dispatch refuses a non-empty busy window) and, worse, take
     // the batch out of the launch position while nobody may launch it. Wait for
     // the release — run-finished, the self-heal poll or BUSY_MAX — which always
     // ends in _afterBusyRelease and comes back here.
-    if (await this.state.storage.get('busy')) return false;
+    if (await this.state.storage.get('busy') && !(this.env.EXECUTION_BACKEND === 'control-plane'
+        && spec.mode === 'new' && (await this.state.storage.get('cpStopWindow'))?.pending)) return false;
     const items = [...((await this.state.storage.get('retryBatch')) || []),
       ...((await this.state.storage.get('buf')) || [])];
     if (!items.length) {
@@ -1236,6 +1241,8 @@ export class IntakeBuffer {
       if (!current) return false;
       await this.state.storage.delete('stopLaunch');
       await this._prepareStopLaunchLocked(current, items);
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && current.mode === 'new'
+          && ((await this.state.storage.get('cpStopWindow'))?.pending || await this.state.storage.get('busy'))) await this.state.storage.put('launchParallel', true);
       return true;
     });
     if (!taken) return false;
@@ -1698,7 +1705,7 @@ export class IntakeBuffer {
   async _dispatch(expectedBuffer, expectedRetryBatch) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
     const buf = await this._exclusive(async () => {
-      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return [];
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return [];
       // A parallel dispatch (RC-03) is allowed to start while the window is
       // open — it JOINS it; every other dispatch still waits for the release.
       if ((await this.state.storage.get('busy')) && !parallel) return [];
@@ -2012,10 +2019,11 @@ export class IntakeBuffer {
       intentId: crypto.randomUUID(), restart: false, groups: [], tasks: [], pending: true,
       username: source.username, chatId: source.chatId, threadId, profileId,
     };
-    const ids = [...new Set([...(await this.state.storage.get('cpBusyRequests') || []),
-      ...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
-    const admissionBarrierComplete = this.cpDispatches === 0
-      && ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length === 0;
+    const ids = [...new Set([...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
+    const unresolvedAtStop = new Set(intent.admissionLaunchKeys || []);
+    const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+    const admissionBarrierComplete = ![...unresolvedAtStop].some(key => unresolvedLaunches.includes(key))
+      && !(this.cpDispatches > 0 && unresolvedAtStop.size > 0);
     let unresolved = !admissionBarrierComplete;
     if (await this.state.storage.get('busy') && !ids.length) unresolved = true;
     const grouped = new Map();
@@ -2132,6 +2140,11 @@ export class IntakeBuffer {
       const ids = (await tx.get('cpBusyRequests')) || [];
       await tx.put('cpBusyRequests', [...new Set([...ids, ack.requestId])]);
       const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+      const stopWindow = await tx.get('cpStopWindow');
+      if (stopWindow?.pending && (stopWindow.admissionLaunchKeys || []).includes(launchKey)) {
+        await tx.put('cpStopWindow', { ...stopWindow,
+          admissionRequestIds: [...new Set([...(stopWindow.admissionRequestIds || []), ack.requestId])].sort() });
+      }
       const unresolved = (await tx.get('cpUnresolvedLaunches')) || [];
       await tx.put('cpUnresolvedLaunches', unresolved.filter(key => key !== launchKey));
       await tx.delete(`cp-launch:${launchKey}`);
@@ -2141,11 +2154,11 @@ export class IntakeBuffer {
   async _recoverControlPlaneLaunch() {
     const checkpoint = await this._exclusive(async () => {
       if (this.cpDispatches) return null;
-      if ((await this.state.storage.get('cpStopWindow'))?.pending) return null;
       const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
       if (!unresolved.length) return null;
       const saved = await this.state.storage.get(`cp-launch:${unresolved[0]}`);
       if (!saved) return null;
+      if ((await this.state.storage.get('cpStopWindow'))?.pending && !saved.parallel) return null;
       const client = controlPlaneClient(this.env);
       if (saved.profileId !== client.config.profileId || saved.botUsername !== client.config.botUsername) return null;
       this.cpDispatches++;
