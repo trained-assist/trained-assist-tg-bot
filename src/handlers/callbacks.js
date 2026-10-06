@@ -764,11 +764,11 @@ export async function handleCallbackQuery(cq, env) {
     // queued delivery and kill the chain. Supplement launches remain gated on
     // confirmation; stop-new is an explicit independent task if stopping fails.
     const result = await stopChat(env, { username: session.username, chatId, threadId, ...callbackSource(cq, env, session) });
-    if (result.error && !result.killed && !(mode === 'new' && env.EXECUTION_BACKEND === 'control-plane')) {
+    if (result.error && !(mode === 'new' && env.EXECUTION_BACKEND === 'control-plane')) {
       console.warn('[stop-launch] stop not confirmed:', result.error.message);
-      await close(env.EXECUTION_BACKEND === 'control-plane'
-        ? '⚠️ Остановка не подтверждена — порцию не запускал.'
-        : '⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача продолжает работать.');
+      await close(result.killed
+        ? '⚠️ Агент не подтвердил завершение задачи — добавку не запускал, чтобы не задвоить работу.'
+        : '⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача может продолжать работу.');
       return;
     }
     const stopUnconfirmed = !!(result.error && mode === 'new' && env.EXECUTION_BACKEND === 'control-plane');
@@ -1079,14 +1079,34 @@ export async function handleCallbackQuery(cq, env) {
       await closeBubble(`${why} — задача продолжает работать. Написанное вернул во входящие: запустить его можно кнопкой «▶️ Запустить агента».`);
       return;
     }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
-    await closeBubble('➕ Останавливаю задачу и перезапускаю с дополнением…');
-    await stopTask(env, { username: session.username, chatId, threadId }).catch(() => {});
-    // Through handleMessage (not a bare runTask) so voice is transcribed and files
-    // are uploaded exactly like any intake batch; the pinned intakeRoute keeps the
-    // task's session, so no project picker and no new dialog.
+    await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Проверяю остановку…');
+    await closeBubble('➕ Проверяю остановку перед перезапуском…');
+    let stopped;
+    try {
+      stopped = await stopTask(env, { username: session.username, chatId, threadId });
+    } catch (error) {
+      await releaseToIntake(env, chatId, threadId, draft.items);
+      await closeBubble('⚠️ Не удалось подтвердить остановку. Дополнение вернул во входящие — новый запуск не выполнял, повторно нажимать не нужно.');
+      await answerCallbackQuery(env.BOT_TOKEN, id, 'Остановка не подтверждена');
+      console.error('[supplement] stop failed:', error.message);
+      return;
+    }
+    if (stopped?.confirmed !== true && stopped?.stopConfirmed !== true) {
+      await releaseToIntake(env, chatId, threadId, draft.items);
+      await closeBubble('⚠️ Остановка не подтверждена — дополнение вернул во входящие, новый запуск не выполнял.');
+      await answerCallbackQuery(env.BOT_TOKEN, id, 'Остановка не подтверждена');
+      return;
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, id, stopped?.stopped === false
+      ? 'Предыдущая задача уже завершилась — запускаю продолжение'
+      : 'Остановка подтверждена — запускаю дополнение');
+    await closeBubble(stopped?.stopped === false
+      ? '✅ Предыдущая задача уже завершилась. Запускаю дополнение как продолжение в том же диалоге — повторно нажимать не нужно.'
+      : '✅ Остановка подтверждена. Запускаю дополнение в том же диалоге — повторно нажимать не нужно.');
+    // Preserve voice and file messages through the ordinary intake handler. The
+    // stop response is checked first, so an unconfirmed old run cannot overlap.
     const base = draft.items.at(-1).msg;
-    const note = '[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]';
+    const note = '[Дополнение к задаче — продолжай с учётом этих сообщений:]';
     const header = { text: note, msg: { chat: base.chat, text: note } };
     const { handleMessage } = await import('./message.js');
     return handleMessage({ ...base, intakeItems: [header, ...draft.items],
@@ -1094,7 +1114,7 @@ export async function handleCallbackQuery(cq, env) {
         projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } },
     env, { mode: 'deep', forceClaude: true, initialMsgId: msgId || null, initiatedAt,
       requestId: `sup-${draft.taskId}-${msgId || id}` })
-      .catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
+      .catch(err => sendT(env, chatId, threadId, `❌ Ошибка запуска дополнения: ${err.message}`));
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, id);

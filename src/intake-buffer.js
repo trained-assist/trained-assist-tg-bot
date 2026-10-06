@@ -152,7 +152,7 @@ const heldText = n => `✓ Получил ещё ${n} сообщений, пок
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 // ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
 // NEW message sent after the stop re-arms launching.
-const stoppedText = n => `⛔ Остановлено. ${n} сообщений ждут и сами не запустятся. «▶️ Запустить агента» — передам их агенту; новое сообщение вернёт обычный режим (они войдут в него же).`;
+const stoppedText = n => `⏸ ${n} сообщений отложены и сами не запустятся. Статус остановки текущей задачи проверяется отдельно.`;
 // RC-04/RC-05 — a chosen «стоп + запуск» is in flight. The batch WILL start on its
 // own here (that is what was chosen), so the text must not promise a button and
 // must not re-ask the question; the only thing left is to take it back.
@@ -774,7 +774,7 @@ export class IntakeBuffer {
         // The old collector may sit off-screen with ▶️/↩️ on it: neutralise it and
         // post a fresh one right under the stop, where the user is looking.
         if (res.prevCollector && chatId) {
-          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⛔ Остановлено — порция отложена, см. ниже.',
+          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⏸ Порция отложена — статус остановки проверяется, см. ниже.',
             { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         }
         await this._showCollector(chatId, res.held, replyTo || res.last?.message_id, threadId);

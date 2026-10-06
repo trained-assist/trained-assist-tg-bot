@@ -50,7 +50,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 'failed-task'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirmed-new', 'unknown-run', 'failed-task'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -61,9 +61,12 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
       botUsername: 'probability_cat_bot', profileId: 'workerd-profile', cutoverId: 'offline-empty-inventory',
       cutoverAt: 1791190000000, oldTaskIds: [], deliveries: [] }),
     EXECUTION_BACKEND: 'control-plane', AGENT_URL: 'https://legacy.test',
-    AGENT_SECRET: 'offline-legacy-secret', CONTROL_PLANE_SESSION_ID: 'workerd-source-session' });
+    AGENT_SECRET: 'offline-legacy-secret', CONTROL_PLANE_SESSION_ID: 'workerd-source-session',
+    TG_SLICE_STOP_ENABLED: 'true', TEST_CHAT_IDS: '', CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'test-signature',
+    SESSION_NAMESPACE: 'integrator-existing-ux-v1' });
   const providerMessages = [];
   const providerEdits = [];
+  const telegramTimeline = [];
   const cpIntakes = [];
   const cpRoutes = [];
   const cpStopRequests = [];
@@ -84,10 +87,13 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
     if (url.hostname === 'api.telegram.org') {
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/sendMessage`) {
         providerMessages.push(body);
-        return reply({ ok: true, result: { message_id: 500 + providerMessages.length } });
+        const messageId = 500 + providerMessages.length;
+        telegramTimeline.push({ method: 'send', messageId, body });
+        return reply({ ok: true, result: { message_id: messageId, date: 1791190800 } });
       }
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/editMessageText`) {
         providerEdits.push(body);
+        telegramTimeline.push({ method: 'edit', messageId: body.message_id, body });
         return reply({ ok: true, result: { message_id: body.message_id } });
       }
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/answerCallbackQuery`) return reply({ ok: true });
@@ -109,7 +115,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
       }
       return reply({ receiptId: `receipt-${task.taskId}`, requestId: envelope.requestId,
         userTaskId: task.taskId, profileId: envelope.profileId,
-        acceptedAt: 1791190800000, durable: true, duplicate }, duplicate ? 200 : 201);
+        acceptedAt: Date.now(), durable: true, duplicate }, duplicate ? 200 : 201);
     }
     if (url.hostname === 'cp.test' && url.pathname === '/route') {
       cpRoutes.push(body);
@@ -124,15 +130,26 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
       return reply({ decisionId: 'workerd-decision', route: 'agent', mode: 'agent', needsExecutor: true,
         continuation: { owner: 'output', requested: true, issued: true, runId: `run-${task.taskId}` } });
     }
-    if (url.hostname === 'cp.test' && url.pathname === '/cp-stop-targets') {
+    if (url.hostname === 'cp.test' && (url.pathname === '/cp-stop-targets' || url.pathname === '/control-plane/cp-stop-targets')) {
       cpStopRequests.push(body);
       const tasks = body.admissionRequestIds.map(requestId => {
         const entry = [...admittedTasks.values()].find(value => value.envelope.requestId === requestId);
         return { requestId, userTaskId: entry?.taskId, profileId: body.profileId, receiptId: `receipt-${entry?.taskId}` };
       });
       return reply({ snapshotId: `stop-${cpStopRequests.length}`, profileId: body.profileId,
-        conversationId: body.conversationId, tasks, unresolved: false, stopConfirmed: true, reason: null });
+        conversationId: body.conversationId, tasks,
+        unresolved: boundary === 'stop-unconfirmed-new',
+        stopConfirmed: boundary !== 'stop-unconfirmed-new',
+        reason: boundary === 'stop-unconfirmed-new' ? 'native_stop_unknown' : null });
     }
+    if (url.hostname === 'cp.test' && url.pathname === '/stop-targets') return reply({
+      snapshotId: 'workerd-stop-unconfirmed', profileId: body.profileId,
+      conversationId: body.conversationId,
+      tasks: body.admissionRequestIds.map(requestId => ({ requestId,
+        userTaskId: 'ut-workerd-scenario', profileId: body.profileId })),
+      unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown',
+    });
+    if (url.hostname === 'cp.test' && url.pathname === '/stop') return reply({ killed: 0 });
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
         status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
@@ -152,7 +169,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
   const runtimeOptions = { name: 'existing-ux-scenario', modules: true, script, compatibilityDate: '2024-01-01',
     compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS'],
     kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
-    bindings: Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string')),
+    bindings: Object.fromEntries(Object.entries({ ...env, TEST_CHAT_IDS: '' })
+      .filter(([, value]) => typeof value === 'string')),
     durableObjects: { INTAKE: { className: 'IntakeBuffer', useSQLite: true },
       TG_DELIVERY_OWNER: { className: 'TgDeliveryOwner', useSQLite: true } },
   };
@@ -165,6 +183,18 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
   const message = (messageId, text, senderId = 43) => ({ update_id: messageId,
     message: { message_id: messageId, date: 1791190800, chat: { id: 42, type: 'private' },
       from: { id: senderId, is_bot: false }, text } });
+  const visibleTelegramMessages = () => {
+    const messages = new Map();
+    for (const entry of telegramTimeline) {
+      const previous = messages.get(entry.messageId) || {};
+      messages.set(entry.messageId, { ...previous, ...entry.body,
+        reply_markup: entry.body.reply_markup ?? previous.reply_markup });
+    }
+    return [...messages].map(([messageId, body]) => ({ messageId, body }));
+  };
+  const latestTelegramButton = callbackData => visibleTelegramMessages().reverse()
+    .find(entry => entry.body.reply_markup?.inline_keyboard?.flat()
+      .some(button => button.callback_data === callbackData));
   const collector = async () => {
     const namespace = await runtime.getDurableObjectNamespace('INTAKE');
     return namespace.get(namespace.idFromName('42'));
@@ -284,6 +314,52 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 
         deliveryId: 'terminal:ut-workerd-followup:g1', userTaskId: 'ut-workerd-followup', status: 'sent', chatId: 42,
       });
       expect(dispatchCount).toBe(2);
+      expect(legacyRequests).toEqual([]);
+      expect(unexpectedRequests).toEqual([]);
+      return;
+    }
+    if (boundary === 'stop-unconfirmed-new') {
+      expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
+      expect((await webhook(message(106, 'Independent task B'))).status).toBe(200);
+      const due = (await state()).get('receiptDue');
+      if (due) await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, due - Date.now()) + 50));
+      await state(true);
+      const stopNewButton = latestTelegramButton('intake_stopnew');
+      expect(stopNewButton).toBeDefined();
+      const stopResponse = await webhook({ update_id: 107, callback_query: { id: 'workerd-stop-new',
+        from: { id: 43, is_bot: false }, data: 'intake_stopnew',
+        message: { message_id: stopNewButton.messageId, chat: { id: 42, type: 'private' } } } });
+      expect(stopResponse.status).toBe(200);
+      expect(await stopResponse.json()).toEqual({ ok: true });
+      const confirmationButton = latestTelegramButton('intake_stopyes|new');
+      expect(confirmationButton).toBeDefined();
+      expect(confirmationButton.body.text).toContain('НОВОЙ задачей');
+      const confirmCallback = { update_id: 108, callback_query: { id: 'workerd-stop-confirm',
+        from: { id: 43, is_bot: false }, data: 'intake_stopyes|new',
+        message: { message_id: confirmationButton.messageId, chat: { id: 42, type: 'private' } } } };
+      expect((await webhook(confirmCallback)).status).toBe(200);
+      expect(latestTelegramButton('intake_stopyes|new')).toBeUndefined();
+      expect(latestTelegramButton('intake_stopnew')).toBeUndefined();
+      expect(visibleTelegramMessages().some(entry => entry.messageId === confirmationButton.messageId
+        && entry.body.text.includes('старая может продолжить работу'))).toBe(true);
+      expect(cpStopRequests.length).toBeGreaterThanOrEqual(1);
+      for (const stopRequest of cpStopRequests) expect(stopRequest.admissionRequestIds).toEqual([admitted.requestId]);
+      expect(cpIntakes).toHaveLength(2);
+      const independent = cpIntakes[1];
+      expect(independent.requestId).not.toBe(admitted.requestId);
+      expect(independent.inputItems.map(item => item.text)).toEqual(['Independent task B']);
+      expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${independent.requestId}`).taskId).toBe('ut-workerd-followup');
+      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-scenario').length).toBeGreaterThanOrEqual(1);
+      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-followup')).toEqual([
+        { taskId: 'ut-workerd-followup', continue: true },
+      ]);
+      expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true,
+        stopConfirmed: false, admissionRequestIds: [admitted.requestId] });
+      expect((await webhook({ ...confirmCallback, update_id: 109,
+        callback_query: { ...confirmCallback.callback_query, id: 'workerd-stop-confirm-replay' } })).status).toBe(200);
+      expect(cpIntakes).toHaveLength(2);
+      expect(dispatchCount).toBe(2);
+      expect(providerEdits.some(item => item.text.includes('старая может продолжить работу'))).toBe(true);
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;

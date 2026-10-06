@@ -1243,7 +1243,7 @@ describe('queued launch has an «↩️ Отменить передачу аге
 describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
   const stopReq = () => new Request('https://intake/stop', { method: 'POST', body: JSON.stringify({ replyTo: 7 }) });
 
-  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector «Остановлено»', async () => {
+  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector does not claim task stopped yet', async () => {
     const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     await io.fetch(appendReq('сделай отчёт'));
     await state.storage.delete('receiptDue');
@@ -1258,7 +1258,8 @@ describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(await state.storage.get('stopped')).toBeTruthy();
     const texts = [...sendMessageWithKeyboard.mock.calls.map(c => c[2]), ...editMessage.mock.calls.map(c => c[3])];
-    expect(texts.some(t => /Остановлено\. 1 сообщений ждут/.test(t))).toBe(true);
+    expect(texts.some(t => /1 сообщений отложены/.test(t))).toBe(true);
+    expect(texts.some(t => /статус остановки текущей задачи проверяется отдельно/i.test(t))).toBe(true);
   });
 
   it('while busy: keeps the busy safety poll, drops launchAfterRelease; run-finished releases without launching', async () => {

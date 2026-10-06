@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // tests exercise the REAL Durable Object classes and the real stopChat entry
 // point; only the agent /tasks/stop call is faked.
 
-vi.mock('../src/lib/agent-client.js', () => ({ stopTask: vi.fn(async () => ({ killed: 0 })) }));
+vi.mock('../src/lib/agent-client.js', () => ({ stopTask: vi.fn(async () => ({ killed: 0, confirmed: true })) }));
 
 import { RunOutbox } from '../src/run-outbox.js';
 import { RetryQueue } from '../src/retry-queue.js';
@@ -56,7 +56,7 @@ function fakeKv() {
 }
 
 afterEach(() => vi.unstubAllGlobals());
-beforeEach(() => { stopTask.mockClear(); stopTask.mockResolvedValue({ killed: 0 }); });
+beforeEach(() => { stopTask.mockClear(); stopTask.mockResolvedValue({ killed: 0, confirmed: true }); });
 
 describe('stop cancels the durable outbox (#325)', () => {
   it('removes only the stopped chat’s job, its chunks, and tombstones the requestId', async () => {
@@ -157,5 +157,12 @@ describe('stopChat wiring (#325)', () => {
   it('a stop with nothing queued keeps the old wording', () => {
     expect(stopReplyText({ killed: 0, held: 0, cancelled: 0, hadIntent: false, error: null }, { button: true }))
       .toContain('Нет активной задачи');
+  });
+
+  it('never reports stopped when the agent signalled a process but did not confirm exit', async () => {
+    stopTask.mockResolvedValueOnce({ killed: 1, confirmed: false });
+    const result = await stopChat({ AGENT_URL: 'https://agent', AGENT_SECRET: 's' }, { username: 'owner', chatId: 42 });
+    expect(result.stopConfirmed).toBe(false);
+    expect(stopReplyText(result)).toContain('завершение задачи не подтверждено');
   });
 });
