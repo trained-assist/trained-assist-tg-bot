@@ -85,8 +85,10 @@ const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: pas
 const ARM_WATCHDOG_MS = 60_000;
 
 const RECEIPT_MS = 1500;
-const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
-  { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
+const LAUNCH_BTN = [[{ text: 'Изучи и задай вопросы', callback_data: 'intake_run|explore' },
+  { text: 'Дай полный ответ', callback_data: 'intake_run|answer' }],
+  [{ text: 'На твоё усмотрение', callback_data: 'intake_run|auto' },
+  { text: '🧹 Очистить весь ввод', callback_data: 'intake_clear' }]];
 // Shown INSTEAD of LAUNCH_BTN under the statuses that mean "THIS batch is
 // already taken": the tap happened, a ▶️ still sitting there is read as «нажата
 // она или нет?» — the ambiguity the owner asked to remove (29.09). The mask follows
@@ -670,7 +672,7 @@ export class IntakeBuffer {
       // `parallel: true` — the user's explicit «⚡ Параллельно» (RC-03): launch
       // this batch NOW as a second run of the same busy window instead of
       // queueing it after the current one. Legacy callers send no body.
-      const { parallel = false } = await request.json().catch(() => ({}));
+      const { parallel = false, workStyle = null } = await request.json().catch(() => ({}));
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
       await this._exclusive(async () => {
         await this.state.storage.delete('stopped');
@@ -712,7 +714,7 @@ export class IntakeBuffer {
             }
             // Take the batch right now — _dispatch joins the open window (its
             // ack appends this run's requestId; the hold drops after the LAST one).
-            await this._dispatch();
+            await this._dispatch(undefined, workStyle);
             return json({ busy: true, parallel: true });
           }
           await this.state.storage.put('launchAfterRelease', true);
@@ -748,7 +750,7 @@ export class IntakeBuffer {
         return json({ preparing: true, queued: true });
       }
       if (parallel) await this.state.storage.put('launchParallel', true);
-      await this._dispatch();
+      await this._dispatch(undefined, workStyle);
       return json(parallel ? { flushed: true, parallel: true } : { flushed: true });
     }
 
@@ -1292,7 +1294,7 @@ export class IntakeBuffer {
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a fresh button afterwards).
-  async _dispatch(expectedBuffer) {
+  async _dispatch(expectedBuffer, workStyle = null) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
     const buf = await this._exclusive(async () => {
       // A parallel dispatch (RC-03) is allowed to start while the window is
@@ -1362,7 +1364,7 @@ export class IntakeBuffer {
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', ...(parallel ? { parallel: true } : {}), initialMsgId,
+      await handleMessage(msg, this.env, { mode: 'deep', workStyle, ...(parallel ? { parallel: true } : {}), initialMsgId,
         onRunAccepted: (ack) => { runAck = ack || null; },
         onIntakePrepared: async (index, prepared) => {
           buf[index] = { ...buf[index], msg: prepared };

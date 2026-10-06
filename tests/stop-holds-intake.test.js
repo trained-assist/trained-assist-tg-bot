@@ -78,7 +78,7 @@ const tap = (data, messageId = 200) => handleCallbackQuery({ id: `cb-${data}-${M
 const stopCmd = (cmd = '/stop') => handleCommand(text(cmd), env);
 const drain = async () => { for (let i = 0; i < 6; i++) await new Promise(r => setTimeout(r, 0)); };
 const runFinished = requestId => io().fetch(new Request('https://intake/run-finished', { method: 'POST', body: JSON.stringify({ requestId }) }));
-const lastCollector = () => tg.filter(e => e.buttons.includes('intake_run') || e.buttons.includes('intake_cancel')).at(-1);
+const lastCollector = () => tg.filter(e => e.buttons.some(b => b.startsWith('intake_run') || b === 'intake_cancel')).at(-1);
 
 // Fire the DO alarm as the runtime would at time `at` (ms since epoch).
 async function fireAlarmAt(at) {
@@ -144,7 +144,7 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     // The collector says so and offers ▶️ (not ↩️) — and no misleading «🤷 нет задач».
     const c = lastCollector();
     expect(c.text).toMatch(/Остановлено\. 2 сообщений ждут/);
-    expect(c.buttons).toContain('intake_run');
+     expect(c.buttons.some(b => b.startsWith('intake_run'))).toBe(true);
     expect(c.buttons).not.toContain('intake_cancel');
     expect(tg.some(e => /Нет активных задач/.test(e.text || ''))).toBe(false);
 

@@ -255,7 +255,7 @@ describe('PR1 — счёт сообщений бота на запуск (charac
     await finishRun(env, runBodies[0].requestId);
     // После релиза удержанная порция получает кнопку — правкой СВОЕГО пузыря.
     expect(sends().length, 'завершение не плодит сообщений — коллектор переиспользуется').toBe(2);
-    expect(tg.some(t => t.method === 'editMessageText' && t.buttons?.includes('intake_run')),
+    expect(tg.some(t => t.method === 'editMessageText' && t.buttons?.some(b => b.startsWith('intake_run'))),
       '▶️ возвращается правкой пузыря удержания').toBe(true);
   });
 

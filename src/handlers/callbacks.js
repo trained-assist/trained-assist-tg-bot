@@ -616,13 +616,17 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  if (data === 'intake_run' || data === 'intake_parallel' || data?.startsWith('workrun|')) {
-    const parallel = data === 'intake_parallel';
+  const isIntakeRun = data === 'intake_run' || data.startsWith('intake_run|');
+  const isIntakeParallel = data === 'intake_parallel';
+  const workStyle = data.startsWith('intake_run|') ? data.slice('intake_run|'.length) : null;
+
+  if (isIntakeRun || isIntakeParallel || data?.startsWith('workrun|')) {
+    const parallel = isIntakeParallel;
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
     await answerCallbackQuery(env.BOT_TOKEN, id, parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…');
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-      const r = await stub.fetch('https://intake/flush', { method: 'POST', body: JSON.stringify({ parallel }) })
+      const r = await stub.fetch('https://intake/flush', { method: 'POST', body: JSON.stringify({ parallel, workStyle }) })
         .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
       // RC-03: an accepted parallel launch says so — it is a DIFFERENT claim
       // from «запущу после текущей» and must not reuse that wording.
@@ -643,6 +647,23 @@ export async function handleCallbackQuery(cq, env) {
       // as one state (owner 29.09: «кнопка в любом случае будет и кейс более чёткий»).
       if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё — жать ещё раз не нужно. Передумал — отменяй кнопкой «↩️ Отменить передачу агенту».');
 
+    }
+    return;
+  }
+
+  // ── Clear all accumulated input (SC-START-01) ──────────────────
+  if (data === 'intake_clear') {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🧹 Очищаю ввод…');
+    if (env.INTAKE) {
+      const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+      const r = await stub.fetch('https://intake/clear', { method: 'POST' })
+        .then(x => x.json()).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
+      if (r?.cleared) {
+        await sendT(env, chatId, threadId, `🧹 Ввод очищен: снято ${r.cleared} сообщ.`);
+      } else {
+        await sendT(env, chatId, threadId, '🧹 Нечего очищать — ввод уже пуст.');
+      }
     }
     return;
   }

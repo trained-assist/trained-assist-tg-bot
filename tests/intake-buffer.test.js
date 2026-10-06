@@ -119,7 +119,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: null, initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
     // Epic #1527 PR1 (red-first F1): the run is in flight — busy must OUTLIVE
@@ -330,7 +330,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: null, initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });
@@ -391,8 +391,8 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
 
     await io.fetch(appendReq('start the task'));
     await receipt(io); // idle collector, with the launch button
-    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
-    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('▶️ Запустить агента');
+     expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
+     expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('Изучи и задай вопросы');
 
     const taken = counts();
     await io.fetch(flushReq()); await drain();
@@ -1377,7 +1377,36 @@ describe('IntakeBuffer — инвариант: непустой буфер вс�
     await state.storage.put('buf', [{ text: 'часть', msg: { chat: { id: 42 }, text: 'часть', message_id: 5 } }]);
     await state.storage.put('stopped', true);
     await state.storage.deleteAlarm();
-    await io.alarm();
-    expect(handleMessage).not.toHaveBeenCalled();
-  });
-});
+     await io.alarm();
+     expect(handleMessage).not.toHaveBeenCalled();
+   });
+ });
+
+ // ── SC-START-01: start/pre-ready state keyboard contract ──────
+ describe('SC-START-01: start keyboard buttons', () => {
+   it('idle collector shows exactly 4 buttons in order, no «Посмотреть input»', async () => {
+     const state = makeState();
+     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+     await io.fetch(appendReq('сделай отчёт'));
+     await receipt(io);
+     const kb = sendMessageWithKeyboard.mock.calls.at(-1)?.[3];
+     expect(kb).toBeDefined();
+     // Exactly 2 rows of 2 buttons = 4 buttons total
+     expect(kb.length).toBe(2);
+     expect(kb[0].length).toBe(2);
+     expect(kb[1].length).toBe(2);
+     // Order: «Изучи и задай вопросы», «Дай полный ответ», «На твоё усмотрение», «🧹 Очистить весь ввод»
+     expect(kb[0][0].text).toBe('Изучи и задай вопросы');
+     expect(kb[0][1].text).toBe('Дай полный ответ');
+     expect(kb[1][0].text).toBe('На твоё усмотрение');
+     expect(kb[1][1].text).toBe('🧹 Очистить весь ввод');
+     // No «Посмотреть input» anywhere on the start state
+     const allText = kb.flat().map(b => b.text).join(' ');
+     expect(allText).not.toContain('Посмотреть input');
+     // Callback data carries workStyle
+     expect(kb[0][0].callback_data).toBe('intake_run|explore');
+     expect(kb[0][1].callback_data).toBe('intake_run|answer');
+     expect(kb[1][0].callback_data).toBe('intake_run|auto');
+     expect(kb[1][1].callback_data).toBe('intake_clear');
+   });
+ });
