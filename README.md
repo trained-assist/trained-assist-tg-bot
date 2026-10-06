@@ -1,98 +1,25 @@
 # trained-assist-tg-bot
 
-Telegram webhook receiver for trained-assist — runs as a Cloudflare Worker.
+Telegram gateway Trained Assist на Cloudflare Worker. Отвечает за webhook, identity/audience, буферизацию текста и медиа, durable intake, команды/формы и доставку в исходный чат/тред. Не владеет agent runtime или бизнес-логикой доменных инструментов.
 
-## Architecture
+Документы содержат действующие требования, контракты и инструкции. Планы выполнения, статусы, ревью прошлых версий и evidence ведутся в GitHub issues/PR/Project. Целевая модель не является утверждением о текущем deployment; его готовность проверяется по конкретным SHA и приёмке.
 
-```
-User (Telegram)
-      │
-      ▼
-trained-assist-tg-bot  (Cloudflare Worker — always-on, stateless)
-      │
-      ├── simple commands → handled locally (auth, /sessions, /skills, /ping…)
-      │
-      ├── voice message → Deepgram STR → text → forward as task
-      │
-      └── task (text/voice) ──────────────────────────────────────────┐
-                                                                       │
-                  ┌────────────────────────────────────────────────────┘
-                  │  smart routing: probe RU VM /capabilities
-                  │
-                  ├─── has nalog/gosuslugi token on RU VM?
-                  │         YES → POST /run → trained-assist-agent (regional VM)
-                  │         NO  → POST /run → trained-assist-agent (primary VM)
-                  │
-                  └─── agent runs Claude Code, streams output → Telegram API directly
-```
+## Контракт поведения
 
-**tg-bot** is stateless — all persistent state lives in Cloudflare KV.
-**trained-assist-agent** manages sessions, user files, and Claude Code process lifecycle.
+- Сохранять requestId, principal/profile, bot, chat/thread и destination до передачи задачи. Квитанция приёма не означает запуска/завершения.
+- Durable Objects/KV используются согласно конкретному owner/storage contract; память Worker не является единственным источником состояния.
+- Простые команды, registered forms и choices выполняются host handler без обязательного Agent Run. Отправка credentials не превращается в generic задачу.
+- Один ответ принадлежит одному delivery owner. Unknown send не повторяется вслепую; receipt и terminal delivery имеют разные IDs.
+- Буфер/медиа/дополнения не теряются при retry, stop и смене процесса. Parallel launch — явный выбор, а не снятие session ownership.
+- Region/engine policy проверяется host/CP; GCP fail-open отсутствует в целевой модели.
 
-### Session routing flow
+## Код и локальные контракты
 
-When a user sends a message, the bot resolves which Claude session to use:
+`src/index.js` — основной вход; `src/handlers/` — сообщения/команды/callbacks; `src/lib/agent-client.js` — совместимый backend adapter; `src/sandbox-tg/` — изолированная CP композиция. Наличие обоих путей не означает автоматического cutover; используемый binding выбирается доверенной конфигурацией.
 
-1. **New-session signal** in text ("другая задача", "new task", …) → create new session
-2. **User chose session explicitly** via `/sessions` keyboard → use that session
-3. **No history** → new session
-4. **Recent session < 2h** → auto-continue, no friction
-5. **Old session** → fetch last 5 sessions from agent, ask Claude Haiku to classify the message → route automatically if confident, show session-picker keyboard if ambiguous
+[Backend boundary](docs/backend-boundary.md), [batch input](docs/BATCH-INPUT.md), [media](docs/MEDIA-R2.md), [scenario matrix](docs/INTAKE-SCENARIO-MATRIX.md), [test mode](docs/test-mode/DESIGN.md) — локальные источники правил.
 
-### Bot → Agent auth
-
-All agent API calls carry `Authorization: Bearer AGENT_SECRET` (shared secret, set as wrangler secret + GCP Secret Manager secret).
-
-## Repos
-
-| Repo | Description |
-|------|-------------|
-| [trained-assist-tg-bot](https://github.com/trained-assist/trained-assist-tg-bot) | This repo — Cloudflare Worker |
-| [trained-assist-agent](https://github.com/trained-assist/trained-assist-agent) | GCP VM agent — Claude Code runner |
-
-## Setup
-
-### 1. Cloudflare KV namespaces
-
-Create two KV namespaces in the Cloudflare dashboard:
-- `SESSIONS` — chat_id → session data (active session, pinned message, etc.)
-- `USERS` — username → scrypt-hashed password + display name
-
-Update the binding IDs in `wrangler.toml`.
-
-### 2. Wrangler secrets
-
-```bash
-wrangler secret put BOT_TOKEN        # Telegram bot token
-wrangler secret put BOT_USERNAME     # bot username without @  (e.g. trained_assist_bot)
-wrangler secret put BOT_SECRET       # shared secret for Chrome extension auth
-wrangler secret put AGENT_URL        # HTTPS URL of your trained-assist-agent API
-wrangler secret put AGENT_RU_URL     # (optional) HTTPS URL of a secondary/regional agent
-wrangler secret put AGENT_SECRET     # shared secret for bot↔agent auth
-wrangler secret put RELAY_URL        # HTTPS URL of the token-relay / pairing service
-wrangler secret put ADMIN_GROUP_ID   # Telegram group ID for admin commands
-wrangler secret put DEEPGRAM_API_KEY # voice transcription
-```
-
-### 3. Set Telegram webhook
-
-```bash
-curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://trained-assist-tg-bot.<CF_SUBDOMAIN>.workers.dev/webhook"
-```
-
-### 4. GitHub Actions secrets
-
-Set in repo Settings → Secrets → Actions:
-
-| Secret | Description |
-|--------|-------------|
-| `CF_API_TOKEN` | Cloudflare API token (Workers:Edit permission) |
-| `CF_ACCOUNT_ID` | Cloudflare account ID |
-| `GH_PAT` | Personal Access Token (`repo` scope) — needed for auto-merge to trigger CI |
-
-> **Why GH_PAT?** GitHub suppresses workflow triggers from pushes made by `GITHUB_TOKEN` (loop-prevention). The auto-merge workflow uses `GH_PAT` so that the squash-merge commit on `main` fires the `CI + Deploy` workflow and the worker gets deployed automatically.
-
-## Development
+## Изолированная проверка
 
 ### Isolated Telegram sandbox (P11)
 
@@ -134,57 +61,16 @@ and fake control plane with the Cloudflare KV listing shape. They do not prove l
 Telegram delivery, concurrent ingress safety, or cloud deployment readiness.
 
 ```bash
-npm install
-npm run dev    # local dev via wrangler
-npm run deploy # deploy to Cloudflare
-npm run check  # syntax check
-npm test       # unit tests
+npm ci
+npm run check
+npm test
+npm run dev
 ```
 
-## Development workflow
+Deployment/webhook изменяет только владелец соответствующего контура. Credentials задаются bindings/secrets; токены не появляются в URL, issue или test output.
 
-All changes go through PRs — no direct pushes to `main`.
+## Совместная разработка
 
-```bash
-git checkout -b fix/description   # or feat/description
-# make changes, commit
-git push origin fix/description
-gh pr create --fill               # CI runs, auto-merges on green (requires GH_PAT secret)
-```
+Ветка и PR обязательны; проверяйте `.githooks/` через `scripts/install-git-hooks.sh`. Открытые PR не изменяются чужой сессией. Status/evidence — в [Integrator #140](https://github.com/trained-assist/trained-agent-architecture/issues/140) и issue задачи; общий контракт — [архитектура](https://github.com/trained-assist/trained-agent-architecture/blob/main/ARCHITECTURE.md).
 
-CI runs on every PR (`npm run check` + `npm test`). On merge to `main` the worker deploys to Cloudflare and a smoke test verifies `/health` + a fake webhook round-trip.
-
-## Claude Code Instructions
-
-### Architecture rules
-- Worker is **stateless** — no in-memory state, all state in KV
-- Simple commands (auth, `/sessions`, `/skills`, `/ping`) handled in worker, no agent call
-- Claude Code tasks → forwarded to agent via `POST AGENT_URL/run` with `AGENT_SECRET`
-- **RU routing**: before forwarding, probe `AGENT_RU_URL/capabilities?userId=…` (2.5s timeout, fail-open to GCP). If the user has a `nalog` or `gosuslugi` capability and the task matches those keywords → route to RU VM
-- Passwords hashed with SubtleCrypto PBKDF2 (100k iterations, SHA-256) in KV
-- Admin commands only work in `ADMIN_GROUP_ID` chat
-
-### Env vars available in worker
-- `env.BOT_TOKEN` — Telegram bot token
-- `env.BOT_USERNAME` — bot username (without @)
-- `env.BOT_SECRET` — Chrome extension shared secret
-- `env.AGENT_URL` — GCP agent base URL
-- `env.AGENT_RU_URL` — RU VM agent base URL (optional)
-- `env.AGENT_SECRET` — bot↔agent shared secret
-- `env.ADMIN_GROUP_ID` — admin Telegram group ID (string)
-- `env.SESSIONS` — KV namespace binding
-- `env.USERS` — KV namespace binding
-- `env.DEEPGRAM_API_KEY` — voice transcription key
-
-### Key source files
-| File | Role |
-|------|------|
-| `src/index.js` | Hono router — webhook dispatch, /health |
-| `src/handlers/message.js` | Message handling, session routing, voice transcription |
-| `src/handlers/commands.js` | /start, /login, /logout, /sessions, /ping, /skills |
-| `src/handlers/callbacks.js` | Inline keyboard callback handling (session picker) |
-| `src/handlers/user-mgmt.js` | Admin-group user create/delete/list |
-| `src/lib/agent-client.js` | All HTTP calls to trained-assist-agent |
-| `src/lib/kv.js` | KV read/write helpers for sessions and users |
-| `src/lib/telegram.js` | Telegram API helpers (sendMessage, pinMessage, …) |
-| `src/lib/auth.js` | PBKDF2 password hashing and verification |
+Retiring GCP VM is not a development or fallback target. Use the own Agent Run API and serverless by default; a necessary persistent service belongs on the existing French VM. Other Google services remain allowed. Exit coordination: https://github.com/trained-assist/trained-agent-architecture/issues/145.
