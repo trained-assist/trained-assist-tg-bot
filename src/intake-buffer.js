@@ -1006,10 +1006,20 @@ export class IntakeBuffer {
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
       let heldBehindPendingUnsupportedLaunch = false;
+      const hasUnsupportedUnresolvedLaunch = async () => {
+        if (!cpMode || mediaEnabled(this.env)) return false;
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        for (const launchKey of unresolved) {
+          const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+          const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+          if (items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) return true;
+        }
+        return false;
+      };
       const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
-          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef) || await hasUnsupportedUnresolvedLaunch();
       // Reconcile an orphaned admission checkpoint whenever the user sends a
       // fresh text. It may outlive `launching` after a cold restart, so tying
       // recovery only to a visible unsupported-media draft can wedge the chat.
@@ -1059,9 +1069,10 @@ export class IntakeBuffer {
         if (reset.state === 'pending') {
           const launching = (await this.state.storage.get('launching')) || [];
           const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+          const unsupportedLaunchPending = await hasUnsupportedUnresolvedLaunch();
           heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported
             && !!(await this.state.storage.get('busy')) && unresolved.length > 0
-            && launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+            && (unsupportedLaunchPending || launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef));
           if (heldBehindPendingUnsupportedLaunch) {
             // The original admission is still uncertain. Keep its evidence and
             // accept fresh text as held input; never make the user resend it or
