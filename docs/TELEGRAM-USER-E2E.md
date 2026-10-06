@@ -77,3 +77,14 @@ seen by the user. This confirms the failure on the actual user route; a separate
 synthetic webhook or health check would not have exposed that user-visible
 failure. The test input was affected by the desktop's Russian keyboard layout,
 so this run is evidence of the refusal/route, not a content-integrity check.
+
+### 2026-10-06 post-fix verification
+
+After deploying sandbox version `1ec2e525-f8ef-4119-8c29-4c34c62fad20`, a new
+harmless text was sent from the same Telegram Desktop user session. `wrangler
+tail` recorded `POST /webhook` and `POST /intake/append` as `Ok`. The bot replied:
+“Остановка задачи ещё не подтверждена. Текст сохранил в отложенной порции; новый
+запуск не выполнял.” The desktop's Russian keyboard layout transformed the
+Latin test marker, so this run verifies the pending-stop flow and visible
+acknowledgement, not exact input text. The signed Workerd/SQLite regression
+checks the exact stored text, once-only admission, no debounce and no CP launch.
