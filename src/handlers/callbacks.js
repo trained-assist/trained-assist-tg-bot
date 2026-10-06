@@ -770,7 +770,8 @@ export async function handleCallbackQuery(cq, env) {
     // Same honest stop as /stop and the ⛔ button: hold the intake queue, cancel
     // queued delivery and kill the chain. Supplement launches remain gated on
     // confirmation; stop-new is an explicit independent task if stopping fails.
-    const result = await stopChat(env, { username: session.username, chatId, threadId, ...callbackSource(cq, env, session) });
+    const result = await stopChat(env, { username: session.username, chatId, threadId,
+      preserveDraft: true, ...callbackSource(cq, env, session) });
     if (result.error && !(mode === 'new' && env.EXECUTION_BACKEND === 'control-plane')) {
       console.warn('[stop-launch] stop not confirmed:', result.error.message);
       await close(result.killed
@@ -831,18 +832,18 @@ export async function handleCallbackQuery(cq, env) {
 
   if (/^intake_discard\|\d+$/.test(data || '')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '🗑 Сбрасываю эту порцию…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🧹 Очищаю весь ввод…');
     if (!env.INTAKE) return;
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const response = await stub.fetch('https://intake/discard', { method: 'POST',
       body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
     if (!response?.ok) {
-      await sendT(env, chatId, threadId, '⌛ Не получилось безопасно сбросить порцию: запуск уже проверяется или принят. Текущая задача не затронута.');
+      await sendT(env, chatId, threadId, '⌛ Не получилось безопасно очистить ввод: запуск или загрузка файла ещё проверяется. Текущая задача не затронута.');
       return;
     }
     const result = await response.json().catch(() => ({}));
     if (result.discarded) await sendT(env, chatId, threadId,
-      `🗑 Порция сброшена (${result.count} сообщ.). Текущая задача не затронута — можно отправить новую.`);
+      `🧹 Весь незапущенный ввод очищен (${result.count} блоков/файлов). Текущая задача не затронута — можно начать заново.`);
     return;
   }
 

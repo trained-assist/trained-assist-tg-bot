@@ -163,8 +163,13 @@ export class MediaJob {
           id: job.id, messageId: job.msg.message_id, username: job.username,
           ...(job.stage === 'notify-failure' ? { error: job.error } : { fileRef: job.fileRef, transcript: job.transcript, transcriptRef: job.transcriptRef }),
         }) });
-        if (!response.ok) throw new Error('Intake did not accept media result');
-        job.stage = job.stage === 'notify-failure' ? 'failed' : 'done';
+        if (response.status === 410) {
+          job.stage = 'failed';
+          job.error = 'intake_reservation_cleared';
+        } else {
+          if (!response.ok) throw new Error('Intake did not accept media result');
+          job.stage = job.stage === 'notify-failure' ? 'failed' : 'done';
+        }
       }
       job.attempts = 0;
     } catch (error) {
