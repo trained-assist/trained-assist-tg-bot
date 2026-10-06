@@ -142,6 +142,38 @@ app.post('/deliver', async c => {
   return c.json({ providerMessageId, kind, deliveryId });
 });
 
+// CP browser bootstrap has its own credential and the bot identity from the
+// verified update. The legacy Agent credential cannot send login links.
+app.post('/deliver/connected-app', async c => {
+  const key = c.env.CONNECTED_APP_DELIVERY_SECRET;
+  if (typeof key !== 'string' || key.length < 32 || c.req.header('Authorization') !== `Bearer ${key}`) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  const body = await c.req.json().catch(() => null);
+  const botId = body?.botId;
+  const chatId = body?.destinationId;
+  if (typeof botId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(botId) ||
+      typeof body?.deliveryId !== 'string' || !/^login-[a-f0-9]{64}$/.test(body.deliveryId) ||
+      body?.channel !== 'telegram' || !Number.isSafeInteger(chatId) || chatId <= 0 ||
+      body?.message?.kind !== 'text' || typeof body.message.text !== 'string' ||
+      !body.message.text || body.message.text.length > 4000) {
+    return c.json({ error: 'invalid login delivery' }, 400);
+  }
+  let bot;
+  try {
+    bot = botId === c.env.CONNECTED_APP_BOOTSTRAP_BOT_ID
+      ? resolveBotContext(c.env) : c.env.BOTS ? resolveBotContext(c.env, { pathBotId: botId }) : null;
+  } catch { return c.json({ error: 'bot registry unavailable' }, 503); }
+  if (!bot?.token) return c.json({ error: 'unknown bot' }, 404);
+  const result = await sendMessage(bot.token, chatId, body.message.text).catch(() => null);
+  const providerMessageId = result?.result?.message_id;
+  if (!Number.isSafeInteger(providerMessageId) || providerMessageId <= 0) {
+    return c.json({ error: 'channel did not accept' }, 502);
+  }
+  await recordGatewaySent(envForBot(c.env, bot), chatId, providerMessageId);
+  return c.json({ providerMessageId, kind: 'text', deliveryId: body.deliveryId });
+});
+
 // Agent → gateway: messages the user sent AFTER the current run started (live inbox,
 // owner 2026-09-29). Backs the agent's MCP tool get_new_messages. Same auth and
 // chat/thread validation as /internal/run-finished; `requestId` scopes the read to

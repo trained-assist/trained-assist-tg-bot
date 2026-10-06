@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/lib/telegram.js', async importOriginal => {
   const original = await importOriginal();
@@ -94,5 +94,48 @@ describe('signed Telegram /connect first-party bootstrap ingress', () => {
     expect(sendMessage).toHaveBeenCalledWith('unused-bot-token', 12345,
       'Ссылка пока недоступна. Попробуйте /connect ещё раз.');
     expect(JSON.stringify(sendMessage.mock.calls)).not.toContain('http');
+  });
+});
+
+describe('dedicated Connected App link delivery', () => {
+  beforeEach(() => { sendMessage.mockResolvedValue({ ok: true, result: { message_id: 123 } }); });
+  const deliveryKey = 'connected-app-delivery-test-key-32-characters';
+  const payload = (botId = 'test_bot') => ({ deliveryId: `login-${'a'.repeat(64)}`,
+    botId, channel: 'telegram', destinationId: 12345,
+    message: { kind: 'text', text: 'Открыть веб-приложение: https://control.example.invalid/link' } });
+  async function deliver(state, body = payload(), key = deliveryKey) {
+    return worker.fetch(new Request('https://gateway.example.invalid/deliver/connected-app', {
+      method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), state);
+  }
+
+  it('requires its own key and sends through the matching legacy bot', async () => {
+    const state = { ...env(), AGENT_SECRET: 'agent-secret', CONNECTED_APP_DELIVERY_SECRET: deliveryKey };
+    expect((await deliver(state, payload(), 'agent-secret')).status).toBe(401);
+    expect(sendMessage).not.toHaveBeenCalled();
+    const response = await deliver(state);
+    expect(response.status).toBe(200);
+    expect((await response.json()).providerMessageId).toBe(123);
+    expect(sendMessage).toHaveBeenCalledWith('unused-bot-token', 12345, payload().message.text);
+  });
+
+  it('uses the registered bot token and rejects an unknown bot', async () => {
+    const state = { ...env(), CONNECTED_APP_DELIVERY_SECRET: deliveryKey,
+      BOTS: JSON.stringify([{ botId: 'recruiter', audience: 'recruiter', username: 'recruiter_bot',
+        tokenBinding: 'BOT_TOKEN_RECRUITER', webhookSecretBinding: 'WEBHOOK_SECRET_RECRUITER' }]),
+      BOT_TOKEN_RECRUITER: 'recruiter-token', WEBHOOK_SECRET_RECRUITER: 'recruiter-secret' };
+    expect((await deliver(state, payload('unknown'))).status).toBe(404);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect((await deliver(state, payload('recruiter'))).status).toBe(200);
+    expect(sendMessage).toHaveBeenCalledWith('recruiter-token', 12345, payload().message.text);
+  });
+
+  it('rejects group destinations and malformed login deliveries before Telegram', async () => {
+    const state = { ...env(), CONNECTED_APP_DELIVERY_SECRET: deliveryKey };
+    expect((await deliver(state, { ...payload(), destinationId: -100 })).status).toBe(400);
+    expect((await deliver(state, { ...payload(), deliveryId: 'task-1' })).status).toBe(400);
+    expect((await deliver(state, { ...payload(), botId: 'other_bot' })).status).toBe(404);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
