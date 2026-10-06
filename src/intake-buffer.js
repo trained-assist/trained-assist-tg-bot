@@ -1009,19 +1009,14 @@ export class IntakeBuffer {
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
           .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
-      let oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
-      if (oldUnsupported && !this.cpDispatches) {
-        const launching = (await this.state.storage.get('launching')) || [];
-        const launchKey = JSON.stringify(launching.map(item => item.msg?.message_id));
-        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
-        const strandedMediaLaunch = launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)
-          && unresolved.includes(launchKey);
-        // Reconcile an old media launch before refusing fresh text. The CP
-        // handler's INTAKE_PREPARATION_FAILED is raised before admission, so a
-        // rejected unsupported-media launch can be safely retired on recovery.
-        if (strandedMediaLaunch) await this._recoverControlPlaneLaunch().catch(() => false);
-        oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
+      // Reconcile an orphaned admission checkpoint whenever the user sends a
+      // fresh text. It may outlive `launching` after a cold restart, so tying
+      // recovery only to a visible unsupported-media draft can wedge the chat.
+      if (cpMode && !mediaOf(msg) && !this.cpDispatches &&
+          ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length) {
+        await this._recoverControlPlaneLaunch().catch(() => false);
       }
+      let oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
       if (unsupportedMedia || oldUnsupported) {
         const reset = await this._exclusive(async () => {
           const busy = !!(await this.state.storage.get('busy'));
@@ -2128,7 +2123,10 @@ export class IntakeBuffer {
     const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
     const unsupportedMediaRejectedBeforeAdmission = refusedMedia && !acceptance?.receipt?.durable
       && !busyRequests.includes(snapshotRequestId);
-    if (error?.code === 'INTAKE_PREPARATION_FAILED' && (!snapshotRequestId || unsupportedMediaRejectedBeforeAdmission)) {
+    const knownNoAdmission = error?.code === 'CONTROL_PLANE_NO_ADMISSION';
+    const confirmedNoAdmission = knownNoAdmission && !acceptance?.receipt?.durable
+      && !busyRequests.includes(snapshotRequestId);
+    if (confirmedNoAdmission || (error?.code === 'INTAKE_PREPARATION_FAILED' && (!snapshotRequestId || unsupportedMediaRejectedBeforeAdmission))) {
       const released = await this._exclusive(async () => {
         if (refusedMedia) {
           // This batch cannot be prepared in the active CP profile. Do not put it
@@ -2150,7 +2148,9 @@ export class IntakeBuffer {
       });
       await sendTracked(this.env, base?.chat?.id, refusedMedia
         ? '⚠️ Вложения пока не поддерживаются в этом тестовом режиме. Задачу не запускал, неподдерживаемую порцию сбросил. Отправь запрос текстом или начни новую порцию.'
-        : '⚠️ Вложения сохранены. Передача новому исполнителю ещё не подключена; задача не запущена. Пачку можно запустить повторно после подключения вложений.',
+        : knownNoAdmission
+          ? '⚠️ Подтверждение запуска не получено до передачи задачи. Запуск не создавал; сообщения сохранены для повтора.'
+          : '⚠️ Вложения сохранены. Передача новому исполнителю ещё не подключена; задача не запущена. Пачку можно запустить повторно после подключения вложений.',
         {}, threadIdOf(base)).catch(() => null);
       if (released) await this._afterBusyRelease();
       return;
@@ -2337,7 +2337,16 @@ export class IntakeBuffer {
         collectorStatusHandled: true,
         onRunAccepted: value => { ack = value; },
       });
-      if (!ack) return false;
+      if (!ack) {
+        // handleMessage only returns without an ACK on paths that finish before
+        // runTask/CP admission (for example an oversized or unsupported item).
+        // Retire this exact checkpoint so the busy window cannot wedge forever.
+        await this._handleControlPlaneLaunchFailure(
+          Object.assign(new Error('Launch returned without a durable acceptance receipt'), { code: 'CONTROL_PLANE_NO_ADMISSION' }),
+          checkpoint.msg.intakeItems,
+        );
+        return false;
+      }
       await this._recordControlPlaneAck(ack, checkpoint.msg.intakeItems);
       const batchId = await this._exclusive(async () => this._nextBatchLocked(
         checkpoint.msg.chat.id, threadIdOf(checkpoint.msg)));
