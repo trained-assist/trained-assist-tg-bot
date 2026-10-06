@@ -2235,8 +2235,11 @@ export class IntakeBuffer {
   async _ensureControlPlaneCollectorCleanupAlarm() {
     if (this.env.EXECUTION_BACKEND !== 'control-plane'
         || !((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) return;
+    await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+  }
+
+  async _ensureAlarmBy(retryAt) {
     const now = Date.now();
-    const retryAt = now + BUSY_POLL_MS;
     const alarmAt = await this.state.storage.getAlarm();
     if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
   }
@@ -2333,7 +2336,7 @@ export class IntakeBuffer {
       if (released) await this._afterBusyRelease();
       await this._ensureControlPlaneCollectorCleanupAlarm();
       if (controlPlaneStopDisabled(this.env) && (await this.state.storage.get('cpStopWindow'))?.pending) {
-        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       }
       return released;
     } catch {
@@ -2400,7 +2403,7 @@ export class IntakeBuffer {
       await this._recoverControlPlaneCollectorCleanup();
       const stopWindow = await this.state.storage.get('cpStopWindow');
       if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
-        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       } else if (stopWindow?.pending) {
         try {
           const result = await this._driveControlPlaneStop({ username: stopWindow.username,
@@ -2565,7 +2568,7 @@ export class IntakeBuffer {
     if ((await this.state.storage.get('busy')) === true) {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
         const released = await this._pollControlPlaneTasks();
-        if (!released) await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
         return;
       }
       const since = (await this.state.storage.get('busySince')) || 0;

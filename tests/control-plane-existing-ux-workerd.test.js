@@ -28,10 +28,12 @@ function existingUxWorkerdBundle() {
           const path = new URL(request.url).pathname;
           if (path === '/scenario-cleanup-prepare') {
             if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
-            const { intent, alarmAt } = await request.json();
+            const { intent, alarmAt, busy, stopWindow } = await request.json();
             await this.state.storage.put('cpCollectorCleanupRequests', [intent.requestId]);
             await this.state.storage.put('cp-collector-cleanup:' + intent.requestId, intent);
             await this.state.storage.put('input-message:' + intent.messageId, intent.requestId);
+            if (busy) await this.state.storage.put('busy', true);
+            if (stopWindow) await this.state.storage.put('cpStopWindow', stopWindow);
             await this.state.storage.setAlarm(alarmAt);
             return Response.json({ alarmAt: await this.state.storage.getAlarm() });
           }
@@ -59,9 +61,10 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it('cold SQLite cleanup preserves a real earlier Durable Object alarm through recovery and alarm processing', async () => {
+it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real earlier Durable Object alarm through the %s branch', async branch => {
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-cleanup-alarm-workerd-'));
-  const env = makeEnv({ EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_URL: 'https://cp.test' });
+  const env = makeEnv({ EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_URL: 'https://cp.test',
+    TG_SLICE_STOP_ENABLED: 'false' });
   const edits = [];
   const options = { modules: true, script: existingUxWorkerdBundle(), compatibilityDate: '2024-01-01',
     compatibilityFlags: ['nodejs_compat'], kvNamespaces: ['TG_SLICE', 'SESSIONS'],
@@ -91,7 +94,8 @@ it('cold SQLite cleanup preserves a real earlier Durable Object alarm through re
     const alarmAt = Date.now() + 30000;
     const intent = { requestId: 'cleanup-earlier-alarm', profileId: env.CONTROL_PLANE_PROFILE,
       state: 'pending', messageId: 99, chatId: 42, text: 'Terminal collector status' };
-    expect(await probe('scenario-cleanup-prepare', { intent, alarmAt })).toEqual({ alarmAt });
+    const stopWindow = branch === 'stop-disabled' ? { pending: true, intentId: 'deferred-stop' } : null;
+    expect(await probe('scenario-cleanup-prepare', { intent, alarmAt, busy: branch === 'busy', stopWindow })).toEqual({ alarmAt });
     await runtime.dispose();
     runtime = new Miniflare(options);
     expect((await probe('scenario-state')).alarmAt).toBe(alarmAt);
@@ -101,6 +105,8 @@ it('cold SQLite cleanup preserves a real earlier Durable Object alarm through re
     expect(after.alarmAt).toBe(alarmAt);
     expect(new Map(after.entries).get('cp-collector-cleanup:' + intent.requestId)).toEqual(intent);
     expect(new Map(after.entries).get('cpCollectorCleanupRequests')).toEqual([intent.requestId]);
+    if (stopWindow) expect(new Map(after.entries).get('cpStopWindow')).toEqual(stopWindow);
+    if (branch === 'busy') expect(new Map(after.entries).get('busy')).toBe(true);
   } finally {
     await runtime.dispose();
     await rm(persistRoot, { recursive: true, force: true });

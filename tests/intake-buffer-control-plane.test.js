@@ -83,6 +83,20 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it.each(['stop-disabled', 'busy'])('real %s scheduling preserves an earlier alarm even without cleanup entries', async branch => {
+    const { storage, env } = fixture();
+    env.TG_SLICE_STOP_ENABLED = 'false';
+    const earlier = Date.now() + 1000;
+    await storage.setAlarm(earlier);
+    if (branch === 'busy') await storage.put('busy', true);
+    else await storage.put('cpStopWindow', { pending: true, intentId: 'deferred-stop' });
+    await new IntakeBuffer({ storage }, env).alarm();
+    expect(await storage.getAlarm()).toBe(earlier);
+    expect(request).not.toHaveBeenCalled();
+    expect(stopTargets).not.toHaveBeenCalled();
+    expect(edit).not.toHaveBeenCalled();
+  });
+
   it.each([null, -1000, 120000, 1000])('real cleanup preserves an earlier alarm and replaces absent/expired/later alarms: %s', async offset => {
     const { storage, env } = fixture();
     const before = Date.now();
