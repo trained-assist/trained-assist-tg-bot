@@ -18,7 +18,7 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile' }, route, request, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, stopTargets }),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -936,7 +936,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('busyChatId', 42);
     await storage.put('cpUnresolvedLaunches', [launchKey]);
     await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
-      snapshotRequestId: staleReceipt.requestId, profileId: 'test-profile', botUsername: undefined });
+      snapshotRequestId: staleReceipt.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
     handleMessage.mockRejectedValueOnce(Object.assign(new Error('attachments unsupported'), { code: 'INTAKE_PREPARATION_FAILED' }));
 
     const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
@@ -947,6 +947,57 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('launching')).toBeUndefined();
     expect(await storage.get('busy')).toBeUndefined();
     expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+  });
+
+  it('self-recovers an orphaned unsupported-media checkpoint when the handler returns without CP admission', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    // A cold restart can leave the durable launch checkpoint without the
+    // transient `launching` key. Recovery must still find and retire it.
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      profileId: 'test-profile', botUsername: 'test-bot' });
+    handleMessage.mockResolvedValueOnce(undefined); // pre-admission early return: no durable ACK
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect((await response.json()).buffered).toBe(1);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect(await storage.get('cp-launch:' + launchKey)).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('порцию сбросил'))).toBe(true);
+  });
+
+  it('does not retire a no-ACK recovery when the same checkpoint already has durable admission', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    const accepted = { ...receipt, requestId: 'accepted-media-request' };
+    await snapshot(owner, accepted, media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('launching', media);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put('cpBusyRequests', [accepted.requestId]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: accepted.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
+    handleMessage.mockResolvedValueOnce(undefined);
+
+    const response = await owner.fetch(rpc('/append', { text: 'не добавлять', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'не добавлять' }, telegramUpdateId: 108 }));
+
+    expect((await response.json()).reason).toBe('launch_pending');
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('cpBusyRequests')).toEqual([accepted.requestId]);
+    expect(await storage.get('launching')).toEqual(media);
+    expect(await storage.get('buf')).toBeUndefined();
   });
 
   it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
