@@ -682,6 +682,11 @@ export class IntakeBuffer {
         ? (await this.state.storage.get('cpBusyRequests')) || [] : [];
       const cpStopWindow = this.env.EXECUTION_BACKEND === 'control-plane'
         ? await this.state.storage.get('cpStopWindow') : null;
+      const unresolvedCheckpointMedia = await Promise.all(cpUnresolvedLaunches.map(async launchKey => {
+        const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+        const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+        return items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+      }));
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
@@ -707,6 +712,12 @@ export class IntakeBuffer {
         cpStopRequestIds: cpStopWindow?.admissionRequestIds || [],
         cpStopTaskIds: (cpStopWindow?.tasks || []).map(task => task.taskId).filter(Boolean),
         stopped: (await this.state.storage.get('stopped')) || null,
+        controlPlaneBarrier: this.env.EXECUTION_BACKEND === 'control-plane' ? {
+          unresolvedLaunchCount: cpUnresolvedLaunches.length,
+          unresolvedCheckpointHasUnsupportedMedia: unresolvedCheckpointMedia.some(Boolean),
+          busyRequestCount: cpBusyRequests.length,
+          stopPending: cpStopWindow?.pending === true,
+        } : null,
         collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
           ? (await this.state.storage.get(`cp-collector-send:${(await this.state.storage.get(BATCH_KEY))?.batchId}`)) || null
           : null,
@@ -1018,12 +1029,24 @@ export class IntakeBuffer {
       const diverted = await this._divertToSupplement(msg, '/append');
       if (diverted) return diverted;
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
+      const pendingStopWindow = cpMode && (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      const heldBehindPendingStop = pendingStopWindow && !mediaOf(msg);
       const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
       let heldBehindPendingUnsupportedLaunch = false;
+      const hasUnsupportedUnresolvedLaunch = async () => {
+        if (!cpMode || mediaEnabled(this.env)) return false;
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        for (const launchKey of unresolved) {
+          const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+          const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+          if (items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) return true;
+        }
+        return false;
+      };
       const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
-          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef) || await hasUnsupportedUnresolvedLaunch();
       // Reconcile an orphaned admission checkpoint whenever the user sends a
       // fresh text. It may outlive `launching` after a cold restart, so tying
       // recovery only to a visible unsupported-media draft can wedge the chat.
@@ -1071,11 +1094,7 @@ export class IntakeBuffer {
           return json({ buffered: 0, refused: true, unsupported: 'media' });
         }
         if (reset.state === 'pending') {
-          const launching = (await this.state.storage.get('launching')) || [];
-          const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
-          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported
-            && !!(await this.state.storage.get('busy')) && unresolved.length > 0
-            && launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported;
           if (heldBehindPendingUnsupportedLaunch) {
             // The original admission is still uncertain. Keep its evidence and
             // accept fresh text as held input; never make the user resend it or
@@ -1133,13 +1152,15 @@ export class IntakeBuffer {
       });
       if (buf === null) return json({ duplicate: true });
 
-      if ((await this.state.storage.get('busy')) === true) {
-        // A run is in flight — hold new messages (never auto-run), but ACK them so
-        // the user isn't met with silence. A fresh launch button is offered once
-        // the run finishes; here we only confirm receipt.
+      if ((await this.state.storage.get('busy')) === true || heldBehindPendingUnsupportedLaunch || heldBehindPendingStop) {
+        // A run or another launch barrier is still active. Hold new messages,
+        // never auto-run them, and ACK them so the user isn't met with silence.
         await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
-        if (heldBehindPendingUnsupportedLaunch) await sendTracked(this.env, msg.chat?.id,
-          '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
+        if (heldBehindPendingStop) await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+        if (heldBehindPendingUnsupportedLaunch || heldBehindPendingStop) await sendTracked(this.env, msg.chat?.id,
+          heldBehindPendingStop
+            ? '⏳ Остановка задачи ещё не подтверждена. Текст сохранил в отложенной порции; новый запуск не выполнял.'
+            : '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
           {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
       }
@@ -1804,7 +1825,8 @@ export class IntakeBuffer {
       // release) describes input that has already left for the agent.
       // busy deliberately does NOT mask ▶️ — held input is a batch of its own, and
       // killing the button here left the chat with no way to launch it (issue #303).
-      const keyboard = (queued || stopLaunch) ? CANCEL_BTN
+      const keyboard = stopPending ? STATUS_BTN
+        : (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : busy ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode

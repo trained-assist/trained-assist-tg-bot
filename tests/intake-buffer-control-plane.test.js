@@ -1001,6 +1001,82 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
   });
 
+  it('holds text when a cold DO has only the durable unsupported launch checkpoint', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    const accepted = { ...receipt, requestId: 'accepted-media-request' };
+    await snapshot(owner, accepted, media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put('cpBusyRequests', [accepted.requestId]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: accepted.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
+    // `launching` is transient and is absent after a Durable Object restart.
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('launching')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('holds text when a busy unsupported launch remains but its unresolved index is empty', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    await storage.put('launching', media);
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('launching')).toEqual(media);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('holds text behind a pending unsupported launch even if the busy flag was lost', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    await storage.put('launching', media);
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('launching')).toEqual(media);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('holds ordinary text while a stop window is pending even when no launch or busy flag remains', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('Остановка задачи ещё не подтверждена'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
   it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
     const { owner, storage } = fixture();
     const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
