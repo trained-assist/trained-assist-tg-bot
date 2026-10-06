@@ -22,7 +22,7 @@ vi.mock('../src/handlers/commands.js', () => ({ handleCommand: vi.fn(), isAdminF
 vi.mock('../src/handlers/user-mgmt.js', () => ({ handleUserMgmt: vi.fn(), isUserMgmtCommand: () => false }));
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(),
-  stopTask: vi.fn().mockResolvedValue({ killed: 1 }),
+  stopTask: vi.fn().mockResolvedValue({ killed: 1, stopped: true, confirmed: true }),
   runTask: vi.fn().mockResolvedValue({}),
   getProjectDecision: vi.fn().mockResolvedValue({ action: 'auto', choices: [] }),
 }));
@@ -115,7 +115,7 @@ describe('➕ Дополнить through the real routeText + IntakeBuffer', () 
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
-  it('SS-10 + SS-07 (gateway half): a burst of text + voice becomes ONE draft; supok stops and relaunches once in the same session', async () => {
+  it('SS-10 + SS-07: one confirmation stops and relaunches a burst of text + voice once in the same session', async () => {
     await tap('sup|task-abc');
     await routeText(text('первое'), env, chatId);
     await routeText(text('второе'), env, chatId);
@@ -141,9 +141,58 @@ describe('➕ Дополнить through the real routeText + IntakeBuffer', () 
       expect.stringContaining('[Дополнение к задаче'), 'первое', 'второе', null]);
     expect(msg.intakeItems[3].msg.voice).toBeTruthy();       // voice kept → transcribed by handleMessage
     expect(opts).toMatchObject({ mode: 'deep', forceClaude: true, initialMsgId: 777 });
+    expect(tg.some(event => /повторно нажимать не нужно/i.test(event.text || ''))).toBe(true);
     // The draft is consumed: the next message is an ordinary one again.
     await routeText(text('новая тема'), env, chatId);
     expect((await store().get('buf'))?.map(i => i.text)).toEqual(['новая тема']);
+  });
+
+  it('SS-03: an unconfirmed stop launches nothing and returns the complete draft to ordinary intake', async () => {
+    await tap('sup|task-abc');
+    await routeText(text('добавка, которую нельзя потерять'), env, chatId);
+    stopTask.mockResolvedValueOnce({ killed: 1, stopped: true, confirmed: false });
+
+    await tap('supok|task-abc', 779);
+    await tap('supok|task-abc', 779);
+    await drain();
+
+    expect(stopTask).toHaveBeenCalledTimes(1);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect((await store().get('buf'))?.map(item => item.text)).toContain('добавка, которую нельзя потерять');
+    expect(tg.some(e => /Остановка не подтверждена/.test(e.text || ''))).toBe(true);
+  });
+
+  it('SS-03: missing stop evidence fails closed; an agent transport error also never starts a run', async () => {
+    await tap('sup|task-abc');
+    await routeText(text('добавка должна сохраниться'), env, chatId);
+    stopTask.mockResolvedValueOnce({ killed: 1 });
+
+    await tap('supok|task-abc', 781);
+    await drain();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect((await store().get('buf'))?.map(item => item.text)).toContain('добавка должна сохраниться');
+
+    await tap('sup|task-abc');
+    await routeText(text('ещё одно дополнение'), env, chatId);
+    stopTask.mockRejectedValueOnce(new Error('agent unreachable'));
+    await tap('supok|task-abc', 782);
+    await drain();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect((await store().get('buf'))?.map(item => item.text)).toContain('ещё одно дополнение');
+  });
+
+  it('SS-08: if the old task has already finished, the same confirmation launches one continuation', async () => {
+    await tap('sup|task-abc');
+    await routeText(text('продолжение после завершения'), env, chatId);
+    stopTask.mockResolvedValueOnce({ killed: 0, stopped: false, confirmed: true });
+
+    await tap('supok|task-abc', 780);
+    await drain();
+
+    expect(stopTask).toHaveBeenCalledTimes(1);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].intakeRoute).toMatchObject({ sessionId: 's-1', forceNew: false });
+    expect(tg.some(e => /уже завершилась/.test(e.text || ''))).toBe(true);
   });
 
   it('SS-09: ↩️ Вернуться drops the draft, leaves the task alone and returns the text to the intake flow', async () => {

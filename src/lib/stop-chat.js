@@ -76,22 +76,29 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
     : await cancelOutbox(env, { username, chatId, threadId }) + await cancelRecovery(env, { chatId, threadId });
   let killed = 0;
   let error = null;
+  let stopConfirmed = false;
   try {
     const result = await stopTask(env, { username, chatId, threadId });
     killed = result?.killed || 0;
+    stopConfirmed = result?.confirmed === true || result?.stopConfirmed === true;
+    if (!stopConfirmed) {
+      error = new Error('agent did not confirm that the task stopped');
+    }
   } catch (e) {
     error = e;
   }
   const held = intake?.held || 0;
   console.log(`[stop] chat=${chatId} thread=${threadId ?? '-'} killed=${killed} held=${held} cancelled=${cancelled} intent=${!!intake?.hadIntent}${error ? ` error=${error.message}` : ''}`);
-  return { killed, held, cancelled, hadIntent: !!intake?.hadIntent, intake: !!intake, error };
+  return { killed, held, cancelled, hadIntent: !!intake?.hadIntent, intake: !!intake, stopConfirmed, error };
 }
 
 // One wording for both entry points. `null` = the DO's own «⛔ Остановлено. N
 // ждут» collector already says everything — no second bubble.
 export function stopReplyText({ killed, held, cancelled = 0, hadIntent, error }, { button = false } = {}) {
+  if (error) return killed > 0
+    ? '⚠️ Сигнал отправлен, но завершение задачи не подтверждено. Исход неизвестен.'
+    : '⚠️ Не удалось подтвердить остановку. Исход неизвестен.';
   if (killed > 0) return button ? '⛔ Задача остановлена.' : '🛑 Задача остановлена.';
-  if (error && !held && !hadIntent && !cancelled) return `❌ Ошибка: ${error.message}`;
   // A cancelled queued delivery must be stated plainly — never «отправлю
   // автоматически»: the whole point of the stop is that nothing runs later.
   if (cancelled) return button ? '⛔ Остановлено — очередь не запустится сама.' : '⛔ Остановлено — задача снята с очереди и сама не запустится.';

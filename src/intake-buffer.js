@@ -152,7 +152,7 @@ const heldText = n => `✓ Получил ещё ${n} сообщений, пок
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 // ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
 // NEW message sent after the stop re-arms launching.
-const stoppedText = n => `⛔ Остановлено. ${n} сообщений ждут и сами не запустятся. «▶️ Запустить агента» — передам их агенту; новое сообщение вернёт обычный режим (они войдут в него же).`;
+const stoppedText = n => `⏸ ${n} сообщений отложены и сами не запустятся. Статус остановки текущей задачи проверяется отдельно.`;
 // RC-04/RC-05 — a chosen «стоп + запуск» is in flight. The batch WILL start on its
 // own here (that is what was chosen), so the text must not promise a button and
 // must not re-ask the question; the only thing left is to take it back.
@@ -739,7 +739,8 @@ export class IntakeBuffer {
               const admissionRequestIds = [...new Set(await store.get('cpBusyRequests') || [])].sort();
               await store.put('cpStopWindow', { intentId: crypto.randomUUID(), restart: previous?.stopConfirmed === true,
                 username, chatId: reqChatId, threadId: reqThreadId, profileId,
-                previousGroups: previous?.groups || [], admissionRequestIds, groups: [], tasks: [],
+                previousGroups: previous?.groups || [], admissionRequestIds,
+                admissionLaunchKeys: [...(await store.get('cpUnresolvedLaunches') || [])], groups: [], tasks: [],
                 pending: true, unresolved: true, stopConfirmed: false,
                 createdAt: Date.now() });
             }
@@ -773,7 +774,7 @@ export class IntakeBuffer {
         // The old collector may sit off-screen with ▶️/↩️ on it: neutralise it and
         // post a fresh one right under the stop, where the user is looking.
         if (res.prevCollector && chatId) {
-          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⛔ Остановлено — порция отложена, см. ниже.',
+          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⏸ Порция отложена — статус остановки проверяется, см. ниже.',
             { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         }
         await this._showCollector(chatId, res.held, replyTo || res.last?.message_id, threadId);
@@ -1162,18 +1163,21 @@ export class IntakeBuffer {
       const { mode = 'new', route = null } = source;
       const res = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return null;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' &&
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode !== 'new' &&
             (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return null;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return null;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && mode !== 'new') return null;
         const store = this.state.storage;
         if (await store.get('stopLaunch')) return { already: true };
         const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
         if (!items.length) return { nothing: true };
-        if (await store.get('busy')) {
+        if (await store.get('busy') && !(mode === 'new' && this.env.EXECUTION_BACKEND === 'control-plane'
+            && (await store.get('cpStopWindow'))?.pending)) {
           await store.put('stopLaunch', { mode: mode === 'supp' ? 'supp' : 'new', route, at: Date.now() });
           return { waiting: true, count: items.length };
         }
         await this._prepareStopLaunchLocked({ mode: mode === 'supp' ? 'supp' : 'new', route }, items);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode === 'new'
+            && ((await store.get('cpStopWindow'))?.pending || await store.get('busy'))) await store.put('launchParallel', true);
         return { launching: true, count: items.length };
       });
       if (res === null) return new Response('Callback ownership mismatch', { status: 409 });
@@ -1208,15 +1212,16 @@ export class IntakeBuffer {
   // the choice stays remembered and the next tick tries again.
   async _consumeStopLaunch() {
     if (controlPlaneStopDisabled(this.env)) return false;
-    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return false;
     const spec = await this.state.storage.get('stopLaunch');
     if (!spec) return false;
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && spec.mode !== 'new') return false;
     // The window still belongs to the run being stopped: launching NOW would lose
     // the bookkeeping (_dispatch refuses a non-empty busy window) and, worse, take
     // the batch out of the launch position while nobody may launch it. Wait for
     // the release — run-finished, the self-heal poll or BUSY_MAX — which always
     // ends in _afterBusyRelease and comes back here.
-    if (await this.state.storage.get('busy')) return false;
+    if (await this.state.storage.get('busy') && !(this.env.EXECUTION_BACKEND === 'control-plane'
+        && spec.mode === 'new' && (await this.state.storage.get('cpStopWindow'))?.pending)) return false;
     const items = [...((await this.state.storage.get('retryBatch')) || []),
       ...((await this.state.storage.get('buf')) || [])];
     if (!items.length) {
@@ -1236,6 +1241,8 @@ export class IntakeBuffer {
       if (!current) return false;
       await this.state.storage.delete('stopLaunch');
       await this._prepareStopLaunchLocked(current, items);
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && current.mode === 'new'
+          && ((await this.state.storage.get('cpStopWindow'))?.pending || await this.state.storage.get('busy'))) await this.state.storage.put('launchParallel', true);
       return true;
     });
     if (!taken) return false;
@@ -1698,7 +1705,7 @@ export class IntakeBuffer {
   async _dispatch(expectedBuffer, expectedRetryBatch) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
     const buf = await this._exclusive(async () => {
-      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return [];
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return [];
       // A parallel dispatch (RC-03) is allowed to start while the window is
       // open — it JOINS it; every other dispatch still waits for the release.
       if ((await this.state.storage.get('busy')) && !parallel) return [];
@@ -2012,10 +2019,11 @@ export class IntakeBuffer {
       intentId: crypto.randomUUID(), restart: false, groups: [], tasks: [], pending: true,
       username: source.username, chatId: source.chatId, threadId, profileId,
     };
-    const ids = [...new Set([...(await this.state.storage.get('cpBusyRequests') || []),
-      ...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
-    const admissionBarrierComplete = this.cpDispatches === 0
-      && ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length === 0;
+    const ids = [...new Set([...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
+    const unresolvedAtStop = new Set(intent.admissionLaunchKeys || []);
+    const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+    const admissionBarrierComplete = ![...unresolvedAtStop].some(key => unresolvedLaunches.includes(key))
+      && !(this.cpDispatches > 0 && unresolvedAtStop.size > 0);
     let unresolved = !admissionBarrierComplete;
     if (await this.state.storage.get('busy') && !ids.length) unresolved = true;
     const grouped = new Map();
@@ -2132,6 +2140,11 @@ export class IntakeBuffer {
       const ids = (await tx.get('cpBusyRequests')) || [];
       await tx.put('cpBusyRequests', [...new Set([...ids, ack.requestId])]);
       const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+      const stopWindow = await tx.get('cpStopWindow');
+      if (stopWindow?.pending && (stopWindow.admissionLaunchKeys || []).includes(launchKey)) {
+        await tx.put('cpStopWindow', { ...stopWindow,
+          admissionRequestIds: [...new Set([...(stopWindow.admissionRequestIds || []), ack.requestId])].sort() });
+      }
       const unresolved = (await tx.get('cpUnresolvedLaunches')) || [];
       await tx.put('cpUnresolvedLaunches', unresolved.filter(key => key !== launchKey));
       await tx.delete(`cp-launch:${launchKey}`);
@@ -2141,11 +2154,11 @@ export class IntakeBuffer {
   async _recoverControlPlaneLaunch() {
     const checkpoint = await this._exclusive(async () => {
       if (this.cpDispatches) return null;
-      if ((await this.state.storage.get('cpStopWindow'))?.pending) return null;
       const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
       if (!unresolved.length) return null;
       const saved = await this.state.storage.get(`cp-launch:${unresolved[0]}`);
       if (!saved) return null;
+      if ((await this.state.storage.get('cpStopWindow'))?.pending && !saved.parallel) return null;
       const client = controlPlaneClient(this.env);
       if (saved.profileId !== client.config.profileId || saved.botUsername !== client.config.botUsername) return null;
       this.cpDispatches++;
@@ -2190,6 +2203,7 @@ export class IntakeBuffer {
       const client = controlPlaneClient(this.env);
       const profileId = client.config.profileId;
       const terminal = [];
+      const unresolved = [];
       const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
       for (const requestId of ids) {
         const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
@@ -2228,9 +2242,19 @@ export class IntakeBuffer {
         }
         const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
         const row = value?.taskStore;
-        if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId || !isTerminalTaskStatus(row.status)) return false;
-        if (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
-            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0) return false;
+        if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
+        const runs = Array.isArray(value?.runs) ? value.runs : [];
+        const settledRuns = runs.every(run => ['done', 'failed', 'cancelled', 'unknown'].includes(run?.status));
+        const outcomeUnknown = (row.status === 'unknown' ||
+          (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
+          value?.awaiting?.status !== 'open';
+        if (!isTerminalTaskStatus(row.status) && !outcomeUnknown) return false;
+        if (!outcomeUnknown && (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
+            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0)) return false;
+        if (outcomeUnknown) {
+          unresolved.push(requestId);
+          continue;
+        }
         const snapshot = await this._readSnapshot(requestId);
         const envelope = snapshot?.body?.controlPlaneEnvelope;
         const message = snapshot?.items?.at(-1)?.msg;
@@ -2249,9 +2273,10 @@ export class IntakeBuffer {
           requestId: deliveryId, type: 'message',
           text: row.status === 'done' && typeof answer === 'string' && answer.trim() ? answer : label });
         if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return false;
-        await outbox.drain();
-        const delivered = await outbox.load(deliveryId);
-        if (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent') return false;
+        const deliveryIndependent = row.status === 'failed' || row.status === 'cancelled';
+        try { await outbox.drain(); } catch { if (!deliveryIndependent) return false; }
+        const delivered = await outbox.load(deliveryId).catch(() => null);
+        if (!deliveryIndependent && (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent')) return false;
         terminal.push(requestId);
       }
       const released = await this._exclusive(async () => {
@@ -2262,6 +2287,11 @@ export class IntakeBuffer {
             const key = `cp-acceptance:${requestId}`;
             const record = await tx.get(key);
             await tx.put(key, { ...record, terminal: true });
+          }
+          for (const requestId of unresolved) {
+            const key = `cp-acceptance:${requestId}`;
+            const record = await tx.get(key);
+            await tx.put(key, { ...record, outcomeUnknown: true });
           }
         });
         await this._releaseBusyLocked();
@@ -2324,6 +2354,12 @@ export class IntakeBuffer {
     }
   }
 
+  async _ensureAlarmBy(retryAt) {
+    const now = Date.now();
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+  }
+
   async alarm() {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
       const stopWindow = await this.state.storage.get('cpStopWindow');
@@ -2353,21 +2389,21 @@ export class IntakeBuffer {
     if (await this._consumeStopLaunch()) return;
     const receiptDue = await this.state.storage.get('receiptDue');
     if (receiptDue) {
-      if (Date.now() < receiptDue && !((await this.state.storage.get('debounceExpiresAt')) <= Date.now())) { await this.state.storage.setAlarm(receiptDue); return; }
-      await this.state.storage.delete('receiptDue');
-      const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
-      if (items.length) {
-        const last = items.at(-1).msg;
-        const busy = await this.state.storage.get('busy');
-        // A queued tap owns the render (queuedText + ↩️): passing heldText here
-        // would re-paint «▶️ Запустить агента — запущу сразу после неё» over an
-        // already-tapped launch, i.e. put the button back before its undo.
-        const queued = busy && !!(await this.state.storage.get('launchQueued'));
-        const stopped = !!(await this.state.storage.get('stopped'));
-        await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          queued || stopped ? null : (busy ? heldText(items.length) : null));
-        // Settled burst, run idle: let the judge set the real delay + say why (29.09).
-        if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+      const receiptExpired = Date.now() >= receiptDue || (await this.state.storage.get('debounceExpiresAt')) <= Date.now();
+      const cpBusy = this.env.EXECUTION_BACKEND === 'control-plane' && await this.state.storage.get('busy');
+      if (!receiptExpired && !cpBusy) { await this.state.storage.setAlarm(receiptDue); return; }
+      if (receiptExpired) {
+        await this.state.storage.delete('receiptDue');
+        const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+        if (items.length) {
+          const last = items.at(-1).msg;
+          const busy = await this.state.storage.get('busy');
+          const queued = busy && !!(await this.state.storage.get('launchQueued'));
+          const stopped = !!(await this.state.storage.get('stopped'));
+          await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+            queued || stopped ? null : (busy ? heldText(items.length) : null));
+          if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+        }
       }
     }
     await this._recoverMedia();
@@ -2493,7 +2529,8 @@ export class IntakeBuffer {
     if ((await this.state.storage.get('busy')) === true) {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
         const released = await this._pollControlPlaneTasks();
-        if (!released) await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+        else if (receiptDue) await this._ensureAlarmBy(receiptDue);
         return;
       }
       const since = (await this.state.storage.get('busySince')) || 0;

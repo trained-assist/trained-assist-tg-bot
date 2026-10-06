@@ -202,8 +202,15 @@ describe('existing collector control-plane ownership', () => {
 
   it.each(['inflight', 'unknown-launch', 'busy-no-receipt', 'missing-snapshot', 'wrong-receipt-profile'])('cannot produce empty stop proof for %s', async kind => {
     const { owner, storage, source } = await stopFixture();
-    if (kind === 'inflight') owner.cpDispatches = 1;
-    if (kind === 'unknown-launch') await storage.put('cpUnresolvedLaunches', ['unknown-batch']);
+    if (kind === 'inflight') {
+      owner.cpDispatches = 1;
+      await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), admissionLaunchKeys: ['unknown-batch'] });
+      await storage.put('cpUnresolvedLaunches', ['unknown-batch']);
+    }
+    if (kind === 'unknown-launch') {
+      await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), admissionLaunchKeys: ['unknown-batch'] });
+      await storage.put('cpUnresolvedLaunches', ['unknown-batch']);
+    }
     if (kind === 'busy-no-receipt') await storage.delete('cpBusyRequests');
     if (kind === 'missing-snapshot') await storage.delete(`input:${receipt.requestId}`);
     if (kind === 'wrong-receipt-profile') await storage.put(`cp-acceptance:${receipt.requestId}`, { receipt: { ...receipt, profileId: 'foreign' } });
@@ -220,6 +227,7 @@ describe('existing collector control-plane ownership', () => {
     env.SESSIONS = owner.env.SESSIONS;
     const launchKey = JSON.stringify([2]);
     const pendingItems = [{ text: 'unconfirmed', msg: { chat: { id: 42 }, message_id: 2, text: 'unconfirmed' } }];
+    await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), admissionLaunchKeys: [launchKey] });
     await storage.put('cpUnresolvedLaunches', [launchKey]);
     await storage.put(`cp-launch:${launchKey}`, { msg: { ...pendingItems[0].msg, intakeItems: pendingItems },
       initialMsgId: null, profileId: receipt.profileId, botUsername: undefined });
@@ -284,13 +292,46 @@ describe('existing collector control-plane ownership', () => {
     expect((await storage.get('cpStopWindow')).pending).toBe(false);
   });
 
+  it('launches stop-new as an independent task while the old stop is unconfirmed', async () => {
+    const { owner, storage, env, source } = await stopFixture();
+    env.SESSIONS = owner.env.SESSIONS;
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    const currentTuple = await owner._callbackTuple();
+    await storage.put('cp-confirmation:150', { username: 'test-profile', mode: 'new', tuple: currentTuple });
+    await storage.put('buf', [{ text: 'independent', msg: { chat: { id: 42 }, message_id: 2, text: 'independent' } }]);
+    await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), pending: true, unresolved: true, stopConfirmed: false });
+    const result = await owner.fetch(rpc('/stop-launch', { mode: 'new', ...source,
+      messageId: 150, callbackData: 'intake_stopyes|new' }));
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ launching: true, count: 1 });
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('independent');
+    expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true });
+    const independent = { ...receipt, requestId: `tg-${'e'.repeat(64)}`, userTaskId: 'ut-independent' };
+    const independentItems = handleMessage.mock.calls[0][0].intakeItems;
+    await snapshot(owner, independent, independentItems);
+    await accept(owner, independent);
+    await owner._recordControlPlaneAck({ controlPlane: true, durable: true, requestId: independent.requestId,
+      userTaskId: independent.userTaskId, taskId: independent.userTaskId }, independentItems);
+    const preparedStop = await owner._readControlPlaneStopTargets(source);
+    expect(preparedStop.tasks.map(task => task.userTaskId)).toEqual([receipt.userTaskId]);
+    expect((await storage.get('cpStopWindow'))).toMatchObject({ pending: true, stopConfirmed: false,
+      admissionRequestIds: [receipt.requestId] });
+  });
+
   it('retries the same immutable CP stop window after an unknown admission barrier and updates the collector on confirmation', async () => {
     const { owner, storage, source } = await stopFixture();
     owner.cpDispatches = 1;
+    await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), admissionLaunchKeys: ['inflight-launch'] });
+    await storage.put('cpUnresolvedLaunches', ['inflight-launch']);
     const unresolved = await (await owner.fetch(rpc('/cp-stop-targets', source))).json();
     expect(unresolved).toMatchObject({ unresolved: true, stopConfirmed: false });
     expect(stopTargets).not.toHaveBeenCalled();
     owner.cpDispatches = 0;
+    await storage.put('cpUnresolvedLaunches', []);
     stopTargets.mockResolvedValueOnce({ snapshotId: null, profileId: receipt.profileId,
       conversationId: 'tg-42-ssaved', tasks: [], unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown' });
     const firstPoll = await (await owner.fetch(rpc('/cp-stop-targets', source))).json();
@@ -468,9 +509,10 @@ describe('existing collector control-plane ownership', () => {
     expect((await accept(owner, { ...receipt, profileId: 'foreign-profile' })).status).toBe(409);
   });
 
-  it.each(['running', 'awaiting', 'unknown', undefined])('holds nonterminal %s beyond legacy lifetime', async status => {
+  it.each(['running', 'awaiting', undefined])('holds nonterminal %s beyond legacy lifetime', async status => {
     const { owner, storage } = fixture();
     await accept(owner);
+    await storage.put('busy', true);
     await storage.put('busySince', Date.now() - 90 * 60_000);
     await storage.put('launching', items);
     request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status } } });
@@ -480,6 +522,38 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
     expect(route).toHaveBeenCalledWith(receipt.userTaskId);
     expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
+  });
+
+  it('releases intake after an unknown executor outcome without retrying or terminalizing the task', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'running', generation: 1 }, runs: [{ id: 'run-lost', status: 'unknown', generation: 1 }] } });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ outcomeUnknown: true });
+    expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ terminal: false });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(route).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the busy hold while any parallel executor attempt is still active', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'running', generation: 2 }, runs: [
+      { id: 'run-lost', status: 'unknown', generation: 1 },
+      { id: 'run-live', status: 'running', generation: 2 },
+    ] } });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('cp-acceptance:scoped-request')).not.toHaveProperty('outcomeUnknown');
   });
 
   it.each(['done', 'failed', 'cancelled'])('releases only matching authoritative terminal %s', async status => {
