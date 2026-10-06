@@ -52,6 +52,7 @@ describe('P11 exported Worker composition', () => {
     const source = await readFile(new URL('../wrangler.sandbox-tg.toml', import.meta.url), 'utf8');
     expect(source).toMatch(/^name = "trained-assist-tg-sandbox"$/m);
     expect(source).toMatch(/^main = "src\/sandbox-tg\/index.js"$/m);
+    expect(source).toMatch(/^TG_SLICE_MODE = "batch"$/m);
     expect(source).toMatch(/\[triggers\]\s*crons = \["\* \* \* \* \*"\]/);
     expect(source).toContain('new_sqlite_classes = ["TgDeliveryOwner"]');
   });
