@@ -468,9 +468,10 @@ describe('existing collector control-plane ownership', () => {
     expect((await accept(owner, { ...receipt, profileId: 'foreign-profile' })).status).toBe(409);
   });
 
-  it.each(['running', 'awaiting', 'unknown', undefined])('holds nonterminal %s beyond legacy lifetime', async status => {
+  it.each(['running', 'awaiting', undefined])('holds nonterminal %s beyond legacy lifetime', async status => {
     const { owner, storage } = fixture();
     await accept(owner);
+    await storage.put('busy', true);
     await storage.put('busySince', Date.now() - 90 * 60_000);
     await storage.put('launching', items);
     request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status } } });
@@ -480,6 +481,38 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
     expect(route).toHaveBeenCalledWith(receipt.userTaskId);
     expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
+  });
+
+  it('releases intake after an unknown executor outcome without retrying or terminalizing the task', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'running', generation: 1 }, runs: [{ id: 'run-lost', status: 'unknown', generation: 1 }] } });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ outcomeUnknown: true });
+    expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ terminal: false });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(route).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the busy hold while any parallel executor attempt is still active', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'running', generation: 2 }, runs: [
+      { id: 'run-lost', status: 'unknown', generation: 1 },
+      { id: 'run-live', status: 'running', generation: 2 },
+    ] } });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('cp-acceptance:scoped-request')).not.toHaveProperty('outcomeUnknown');
   });
 
   it.each(['done', 'failed', 'cancelled'])('releases only matching authoritative terminal %s', async status => {

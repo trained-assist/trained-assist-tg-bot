@@ -50,7 +50,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'unknown-run', 'failed-task'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -71,6 +71,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
   const admittedTasks = new Map();
   const dispatchedTasks = new Set();
   const completedTasks = new Set();
+  const unknownTasks = new Set();
+  const failedTasks = new Set();
   let admitted = null;
   let dispatchCount = 0;
   let lostAck = true;
@@ -133,10 +135,12 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
     }
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
-        status: completedTasks.has(body.taskId) ? 'done' : 'active', generation: 1,
+        status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
+          : failedTasks.has(body.taskId) ? 'failed' : 'active', generation: 1,
         result: completedTasks.has(body.taskId) ? { answer: 'Offline engine fixture completed.' } : null },
       runs: dispatchedTasks.has(body.taskId) ? [{ id: `run-${body.taskId}`,
-        status: completedTasks.has(body.taskId) ? 'done' : 'running', generation: 1 }] : [],
+        status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'unknown'
+          : failedTasks.has(body.taskId) ? 'failed' : 'running', generation: 1 }] : [],
     });
     if (url.hostname === 'legacy.test') {
       legacyRequests.push(url.pathname);
@@ -243,6 +247,43 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
       await terminalProof();
+      expect(legacyRequests).toEqual([]);
+      expect(unexpectedRequests).toEqual([]);
+      return;
+    }
+    if (boundary === 'unknown-run' || boundary === 'failed-task') {
+      if (boundary === 'unknown-run') unknownTasks.add('ut-workerd-scenario');
+      else failedTasks.add('ut-workerd-scenario');
+      expect((await webhook(message(106, 'Следующая самостоятельная задача'))).status).toBe(200);
+      expect((await state()).get('buf')).toHaveLength(1);
+      await state(true);
+      await state(true);
+      const afterWeirdStatus = await state();
+      expect(afterWeirdStatus.get('busy')).toBeUndefined();
+      expect((await state()).get(`cp-acceptance:${admitted.requestId}`)).toMatchObject(boundary === 'unknown-run'
+        ? { outcomeUnknown: true, terminal: false } : { terminal: true });
+      expect(cpIntakes).toHaveLength(1);
+      expect((await webhook(message(107, 'Запустить агента'))).status).toBe(200);
+      expect(cpIntakes).toHaveLength(2);
+      expect(cpIntakes[1].inputItems.map(item => item.text)).toEqual([
+        'Следующая самостоятельная задача', 'Запустить агента',
+      ]);
+      expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes[1].requestId}`).taskId).toBe('ut-workerd-followup');
+      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-scenario')).toHaveLength(2);
+      expect(cpRoutes.filter(route => route.taskId === 'ut-workerd-followup')).toEqual([
+        { taskId: 'ut-workerd-followup', continue: true },
+      ]);
+      completedTasks.add('ut-workerd-followup');
+      await state(true);
+      await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
+      const deliveredTask = await runtime.dispatchFetch('https://worker.test/deliveries/ut-workerd-followup', {
+        headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
+      });
+      expect(deliveredTask.status).toBe(200);
+      expect((await deliveredTask.json()).terminal).toMatchObject({
+        deliveryId: 'terminal:ut-workerd-followup:g1', userTaskId: 'ut-workerd-followup', status: 'sent', chatId: 42,
+      });
+      expect(dispatchCount).toBe(2);
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;

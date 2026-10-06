@@ -2190,6 +2190,7 @@ export class IntakeBuffer {
       const client = controlPlaneClient(this.env);
       const profileId = client.config.profileId;
       const terminal = [];
+      const unresolved = [];
       const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
       for (const requestId of ids) {
         const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
@@ -2228,9 +2229,19 @@ export class IntakeBuffer {
         }
         const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
         const row = value?.taskStore;
-        if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId || !isTerminalTaskStatus(row.status)) return false;
-        if (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
-            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0) return false;
+        if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
+        const runs = Array.isArray(value?.runs) ? value.runs : [];
+        const settledRuns = runs.every(run => ['done', 'failed', 'cancelled', 'unknown'].includes(run?.status));
+        const outcomeUnknown = (row.status === 'unknown' ||
+          (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
+          value?.awaiting?.status !== 'open';
+        if (!isTerminalTaskStatus(row.status) && !outcomeUnknown) return false;
+        if (!outcomeUnknown && (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
+            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0)) return false;
+        if (outcomeUnknown) {
+          unresolved.push(requestId);
+          continue;
+        }
         const snapshot = await this._readSnapshot(requestId);
         const envelope = snapshot?.body?.controlPlaneEnvelope;
         const message = snapshot?.items?.at(-1)?.msg;
@@ -2249,9 +2260,10 @@ export class IntakeBuffer {
           requestId: deliveryId, type: 'message',
           text: row.status === 'done' && typeof answer === 'string' && answer.trim() ? answer : label });
         if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return false;
-        await outbox.drain();
-        const delivered = await outbox.load(deliveryId);
-        if (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent') return false;
+        const deliveryIndependent = row.status === 'failed' || row.status === 'cancelled';
+        try { await outbox.drain(); } catch { if (!deliveryIndependent) return false; }
+        const delivered = await outbox.load(deliveryId).catch(() => null);
+        if (!deliveryIndependent && (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent')) return false;
         terminal.push(requestId);
       }
       const released = await this._exclusive(async () => {
@@ -2262,6 +2274,11 @@ export class IntakeBuffer {
             const key = `cp-acceptance:${requestId}`;
             const record = await tx.get(key);
             await tx.put(key, { ...record, terminal: true });
+          }
+          for (const requestId of unresolved) {
+            const key = `cp-acceptance:${requestId}`;
+            const record = await tx.get(key);
+            await tx.put(key, { ...record, outcomeUnknown: true });
           }
         });
         await this._releaseBusyLocked();
@@ -2324,6 +2341,12 @@ export class IntakeBuffer {
     }
   }
 
+  async _ensureAlarmBy(retryAt) {
+    const now = Date.now();
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+  }
+
   async alarm() {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
       const stopWindow = await this.state.storage.get('cpStopWindow');
@@ -2353,21 +2376,21 @@ export class IntakeBuffer {
     if (await this._consumeStopLaunch()) return;
     const receiptDue = await this.state.storage.get('receiptDue');
     if (receiptDue) {
-      if (Date.now() < receiptDue && !((await this.state.storage.get('debounceExpiresAt')) <= Date.now())) { await this.state.storage.setAlarm(receiptDue); return; }
-      await this.state.storage.delete('receiptDue');
-      const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
-      if (items.length) {
-        const last = items.at(-1).msg;
-        const busy = await this.state.storage.get('busy');
-        // A queued tap owns the render (queuedText + ↩️): passing heldText here
-        // would re-paint «▶️ Запустить агента — запущу сразу после неё» over an
-        // already-tapped launch, i.e. put the button back before its undo.
-        const queued = busy && !!(await this.state.storage.get('launchQueued'));
-        const stopped = !!(await this.state.storage.get('stopped'));
-        await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          queued || stopped ? null : (busy ? heldText(items.length) : null));
-        // Settled burst, run idle: let the judge set the real delay + say why (29.09).
-        if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+      const receiptExpired = Date.now() >= receiptDue || (await this.state.storage.get('debounceExpiresAt')) <= Date.now();
+      const cpBusy = this.env.EXECUTION_BACKEND === 'control-plane' && await this.state.storage.get('busy');
+      if (!receiptExpired && !cpBusy) { await this.state.storage.setAlarm(receiptDue); return; }
+      if (receiptExpired) {
+        await this.state.storage.delete('receiptDue');
+        const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+        if (items.length) {
+          const last = items.at(-1).msg;
+          const busy = await this.state.storage.get('busy');
+          const queued = busy && !!(await this.state.storage.get('launchQueued'));
+          const stopped = !!(await this.state.storage.get('stopped'));
+          await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+            queued || stopped ? null : (busy ? heldText(items.length) : null));
+          if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+        }
       }
     }
     await this._recoverMedia();
@@ -2493,7 +2516,8 @@ export class IntakeBuffer {
     if ((await this.state.storage.get('busy')) === true) {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
         const released = await this._pollControlPlaneTasks();
-        if (!released) await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+        else if (receiptDue) await this._ensureAlarmBy(receiptDue);
         return;
       }
       const since = (await this.state.storage.get('busySince')) || 0;
