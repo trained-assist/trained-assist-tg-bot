@@ -925,6 +925,45 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('retryBatch')).toBeUndefined();
   });
 
+  it('retires a recovered unsupported-media launch with a stale snapshot and admits the next text', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const staleReceipt = { ...receipt, requestId: 'stale-media-request' };
+    await snapshot(owner, staleReceipt, media);
+    const launchKey = JSON.stringify([7]);
+    await storage.put('launching', media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: staleReceipt.requestId, profileId: 'test-profile', botUsername: undefined });
+    handleMessage.mockRejectedValueOnce(Object.assign(new Error('attachments unsupported'), { code: 'INTAKE_PREPARATION_FAILED' }));
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect((await response.json()).buffered).toBe(1);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect(await storage.get('launching')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+  });
+
+  it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('buf', media);
+    handleMessage.mockImplementationOnce(async message => {
+      await snapshot(owner, receipt, message.intakeItems);
+      await accept(owner, receipt);
+      throw Object.assign(new Error('late preparation error'), { code: 'INTAKE_PREPARATION_FAILED' });
+    });
+    await owner._dispatch();
+    expect(await storage.get('cpUnresolvedLaunches')).toHaveLength(1);
+    expect(await storage.get('cpBusyRequests')).toEqual([receipt.requestId]);
+    expect(await storage.get('launching')).toEqual(media);
+  });
+
   it('refuses an unsupported attachment before buffering it', async () => {
     const { owner, storage } = fixture();
     const voice = { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } };
