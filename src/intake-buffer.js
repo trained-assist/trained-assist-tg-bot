@@ -1005,9 +1005,23 @@ export class IntakeBuffer {
       if (diverted) return diverted;
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
-      const oldUnsupported = cpMode && !mediaOf(msg) && !mediaEnabled(this.env) &&
-        [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])]
+      const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
+        [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
+          ...((await this.state.storage.get('launching')) || [])]
           .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+      let oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
+      if (oldUnsupported && !this.cpDispatches) {
+        const launching = (await this.state.storage.get('launching')) || [];
+        const launchKey = JSON.stringify(launching.map(item => item.msg?.message_id));
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        const strandedMediaLaunch = launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)
+          && unresolved.includes(launchKey);
+        // Reconcile an old media launch before refusing fresh text. The CP
+        // handler's INTAKE_PREPARATION_FAILED is raised before admission, so a
+        // rejected unsupported-media launch can be safely retired on recovery.
+        if (strandedMediaLaunch) await this._recoverControlPlaneLaunch().catch(() => false);
+        oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
+      }
       if (unsupportedMedia || oldUnsupported) {
         const reset = await this._exclusive(async () => {
           const busy = !!(await this.state.storage.get('busy'));
@@ -2108,8 +2122,13 @@ export class IntakeBuffer {
     const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
     const base = items.at(-1)?.msg;
     const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
-    if (error?.code === 'INTAKE_PREPARATION_FAILED' && !checkpoint?.snapshotRequestId) {
-      const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg));
+    const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg));
+    const snapshotRequestId = checkpoint?.snapshotRequestId;
+    const acceptance = snapshotRequestId && await this.state.storage.get(`cp-acceptance:${snapshotRequestId}`);
+    const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
+    const unsupportedMediaRejectedBeforeAdmission = refusedMedia && !acceptance?.receipt?.durable
+      && !busyRequests.includes(snapshotRequestId);
+    if (error?.code === 'INTAKE_PREPARATION_FAILED' && (!snapshotRequestId || unsupportedMediaRejectedBeforeAdmission)) {
       const released = await this._exclusive(async () => {
         if (refusedMedia) {
           // This batch cannot be prepared in the active CP profile. Do not put it
