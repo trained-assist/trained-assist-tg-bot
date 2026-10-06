@@ -28,6 +28,16 @@ app.get('/cron', async context => {
   return context.json({ reconciled: true, ...await controller.reconcile() });
 });
 
+app.get('/delivery-cutover', async context => {
+  const config = readTgSliceConfig(context.env);
+  if (!config.webhookSecret || context.req.header('x-telegram-bot-api-secret-token') !== config.webhookSecret) return context.json({ error: 'unauthorized' }, 401);
+  try {
+    return context.json(await createController(context.env, config).outbox.open());
+  } catch {
+    return context.json({ error: 'delivery owner refused' }, 503);
+  }
+});
+
 app.get('/collector-state', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
