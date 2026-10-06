@@ -50,6 +50,14 @@ async function fixture(message=msg) {
 }
 afterEach(()=>vi.unstubAllGlobals());
 describe('durable R2 pipeline',()=>{
+ it('stores the original without transcribing audio in the Control Plane path',async()=>{
+  const f=await fixture();f.env.EXECUTION_BACKEND='control-plane';
+  await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');
+  await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');
+  expect(f.s.data.get('job').fileRef).toMatchObject({storage:'r2',mime:'audio/ogg',size:3});
+  expect(f.s.data.get('job').transcript).toBeUndefined();
+  expect(f.net.mock.calls.some(([url])=>String(url).endsWith('/action'))).toBe(false);
+ });
  it('ACKs before bytes; voice downloads once, survives restart, then delivers refs and transcript',async()=>{
   const f=await fixture();expect(f.net).not.toHaveBeenCalled();expect(f.intake.data.get('buf')[0].mediaPending).toBe(true);
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('transcribe');
