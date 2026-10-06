@@ -674,6 +674,14 @@ export class IntakeBuffer {
       // still scheduled for this chat, or is it asleep? A non-empty buffer with no
       // alarm and no busy IS the dead-end (#248, chat -1003814002203).
       const alarm = await this.state.storage.getAlarm();
+      const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+      const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
+      const stopWindow = await this.state.storage.get('cpStopWindow');
+      const unresolvedCheckpointMedia = await Promise.all(unresolvedLaunches.map(async key => {
+        const checkpoint = await this.state.storage.get(`cp-launch:${key}`);
+        const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+        return items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+      }));
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
@@ -693,6 +701,12 @@ export class IntakeBuffer {
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
         parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
         stopped: (await this.state.storage.get('stopped')) || null,
+        controlPlaneBarrier: this.env.EXECUTION_BACKEND === 'control-plane' ? {
+          unresolvedLaunchCount: unresolvedLaunches.length,
+          unresolvedCheckpointHasUnsupportedMedia: unresolvedCheckpointMedia.some(Boolean),
+          busyRequestCount: busyRequests.length,
+          stopPending: stopWindow?.pending === true,
+        } : null,
         collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
           ? (await this.state.storage.get(`cp-collector-send:${(await this.state.storage.get(BATCH_KEY))?.batchId}`)) || null
           : null,
@@ -1067,8 +1081,7 @@ export class IntakeBuffer {
           return json({ buffered: 0, refused: true, unsupported: 'media' });
         }
         if (reset.state === 'pending') {
-          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported
-            && !!(await this.state.storage.get('busy'));
+          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported;
           if (heldBehindPendingUnsupportedLaunch) {
             // The original admission is still uncertain. Keep its evidence and
             // accept fresh text as held input; never make the user resend it or
@@ -1126,10 +1139,9 @@ export class IntakeBuffer {
       });
       if (buf === null) return json({ duplicate: true });
 
-      if ((await this.state.storage.get('busy')) === true) {
-        // A run is in flight — hold new messages (never auto-run), but ACK them so
-        // the user isn't met with silence. A fresh launch button is offered once
-        // the run finishes; here we only confirm receipt.
+      if ((await this.state.storage.get('busy')) === true || heldBehindPendingUnsupportedLaunch) {
+        // A run or another launch barrier is still active. Hold new messages,
+        // never auto-run them, and ACK them so the user isn't met with silence.
         await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
         if (heldBehindPendingUnsupportedLaunch) await sendTracked(this.env, msg.chat?.id,
           '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
