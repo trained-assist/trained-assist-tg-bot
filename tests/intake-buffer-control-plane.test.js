@@ -974,7 +974,7 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.some(call => String(call[2]).includes('порцию сбросил'))).toBe(true);
   });
 
-  it('does not retire a no-ACK recovery when the same checkpoint already has durable admission', async () => {
+  it('preserves a durably admitted launch and holds new text behind it', async () => {
     const { owner, storage } = fixture();
     const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
     const launchKey = JSON.stringify([7]);
@@ -992,12 +992,13 @@ describe('existing collector control-plane ownership', () => {
     const response = await owner.fetch(rpc('/append', { text: 'не добавлять', msg: {
       message_id: 8, chat: { id: 42 }, text: 'не добавлять' }, telegramUpdateId: 108 }));
 
-    expect((await response.json()).reason).toBe('launch_pending');
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
     expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('cpBusyRequests')).toEqual([accepted.requestId]);
     expect(await storage.get('launching')).toEqual(media);
-    expect(await storage.get('buf')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['не добавлять']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
   });
 
   it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
