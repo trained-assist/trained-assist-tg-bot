@@ -1067,12 +1067,8 @@ export class IntakeBuffer {
           return json({ buffered: 0, refused: true, unsupported: 'media' });
         }
         if (reset.state === 'pending') {
-          const launching = (await this.state.storage.get('launching')) || [];
-          const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
-          const unsupportedLaunchPending = await hasUnsupportedUnresolvedLaunch();
           heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported
-            && !!(await this.state.storage.get('busy')) && unresolved.length > 0
-            && (unsupportedLaunchPending || launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef));
+            && !!(await this.state.storage.get('busy'));
           if (heldBehindPendingUnsupportedLaunch) {
             // The original admission is still uncertain. Keep its evidence and
             // accept fresh text as held input; never make the user resend it or

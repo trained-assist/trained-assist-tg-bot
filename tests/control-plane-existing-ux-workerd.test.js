@@ -48,6 +48,15 @@ function existingUxWorkerdBundle() {
               snapshotRequestId: 'accepted-voice-request', profileId: 'workerd-profile', botUsername: 'probability_cat_bot' });
             return Response.json({ seeded: true });
           }
+          if (path === '/scenario-seed-pending-launching') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            const item = { text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'offline-voice' } } };
+            await this.state.storage.put('busy', true);
+            await this.state.storage.put('busyChatId', 42);
+            await this.state.storage.put('cpStopWindow', { pending: true, intentId: 'scenario-stop-window' });
+            await this.state.storage.put('launching', [item]);
+            return Response.json({ seeded: true });
+          }
           return super.fetch(request);
         }
       }
@@ -65,7 +74,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -241,8 +250,10 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
   };
   try {
     runtime = new Miniflare(runtimeOptions);
-    if (boundary === 'pending-unsupported-cold') {
-      const seeded = await (await collector()).fetch('https://intake/scenario-seed-pending-unsupported', {
+    if (boundary === 'pending-unsupported-cold' || boundary === 'pending-unsupported-launching') {
+      const seedPath = boundary === 'pending-unsupported-cold'
+        ? 'scenario-seed-pending-unsupported' : 'scenario-seed-pending-launching';
+      const seeded = await (await collector()).fetch(`https://intake/${seedPath}`, {
         headers: { 'x-scenario-probe': 'offline-probe' },
       });
       expect(seeded.status).toBe(200);
@@ -253,9 +264,11 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
       expect(acceptedText.status).toBe(200);
       expect(await acceptedText.json()).toMatchObject({ ok: true, buffered: 1, held: true });
       const recoveredState = await state();
-      expect(recoveredState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
+      if (boundary === 'pending-unsupported-cold') expect(recoveredState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
+      else expect(recoveredState.get('cpUnresolvedLaunches')).toBeUndefined();
       expect(recoveredState.get('busy')).toBe(true);
-      expect(recoveredState.get('launching')).toBeUndefined();
+      if (boundary === 'pending-unsupported-cold') expect(recoveredState.get('launching')).toBeUndefined();
+      else expect(recoveredState.get('launching')).toHaveLength(1);
       expect(recoveredState.get('buf').map(item => item.text)).toEqual(['новый текст после голосового']);
       expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
       expect(providerMessages.some(item => item.text.includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
