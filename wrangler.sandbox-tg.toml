@@ -30,6 +30,10 @@ id = "915ffeedb74440538009bdc1bd00d381"
 binding = "CONTROL_PLANE_SERVICE"
 service = "trained-assist-cp-v1-sandbox"
 
+[[services]]
+binding = "INGRESS_BUFFER"
+service = "trained-assist-ingress-buffer-sandbox"
+
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"
@@ -48,5 +52,6 @@ TG_SLICE_DELIVERY_PAUSED = "false"
 #   TG_SLICE_CHAT_PROFILES      — chatId:profileId pairs
 #   TG_SLICE_EVENT_TRANSPORT    — auto | events-endpoint | status-history
 #   CONTROL_PLANE_SESSION_ID    — source session id (C01)
+#   INGRESS_BUFFER_TOKEN        — shared secret for the passive sandbox media buffer
 
 # Nothing here is a credential: tokens/keys are secrets.
