@@ -120,6 +120,16 @@ describe('durable R2 pipeline',()=>{
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');const calls=f.net.mock.calls.length;
   f.env.INTAKE=real;await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');expect(f.net).toHaveBeenCalledTimes(calls);
  });
+ it('a late media result cannot resurrect an intake reservation cleared by the user',async()=>{
+  const f=await fixture();
+  await f.job.alarm();await f.job.alarm();
+  await f.intake.storage.delete('buf');
+  await f.job.alarm();
+  expect(f.s.data.get('job').stage).toBe('failed');
+  expect(f.s.data.get('job').error).toBe('intake_reservation_cleared');
+  expect(f.intake.data.get('buf')).toBeUndefined();
+  expect(f.s.alarm).toBeNull();
+ });
  it('reconciliation rearms a stranded active job without repeating a completed phase',async()=>{
   const f=await fixture();await f.job.alarm();await f.s.storage.deleteAlarm();await f.io._recoverMedia();
   expect(f.s.alarm).toBeGreaterThan(0);expect(f.s.data.get('job').stage).toBe('transcribe');expect(f.b.put).toHaveBeenCalledTimes(1);
