@@ -20,6 +20,7 @@ import { openProjectChoice } from './lib/project-choice.js';
 import { chatConfigCommandFromPhrase } from './lib/project-command.js';
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
+import { isConnectCommand, dispatchConnect } from './lib/connected-app-bootstrap.js';
 
 const app = new Hono();
 
@@ -307,6 +308,17 @@ async function handleWebhook(c, pathBotId) {
     update = await c.req.json();
   } catch {
     return c.json({ error: 'invalid json' }, 400);
+  }
+
+  // The Telegram actor may be asserted only after this route's webhook secret gate.
+  if (isConnectCommand(update?.message, env.BOT_USERNAME)) {
+    if (env.CONNECTED_APP_TELEGRAM_CONNECT_ENABLED === 'true') {
+      const botId = bot.botId || env.CONNECTED_APP_BOOTSTRAP_BOT_ID;
+      c.executionCtx.waitUntil(dispatchConnect(update, env, botId));
+    } else if (update.message.chat?.type === 'private' && Number.isSafeInteger(update.message.chat.id)) {
+      c.executionCtx.waitUntil(sendMessage(env.BOT_TOKEN, update.message.chat.id, 'Веб-вход пока не включён.'));
+    }
+    return c.json({ ok: true });
   }
 
   // Fire-and-forget — Telegram expects 200 within 5s

@@ -1,0 +1,9 @@
+# First-party browser login from Telegram (inactive)
+
+`/connect` is reserved in the signed production webhook before the legacy Agent command fallback. With `CONNECTED_APP_TELEGRAM_CONNECT_ENABLED` unset, the bot says the feature is unavailable and does not contact the old Agent or Control Plane. The feature does not change `/login`, task intake, existing chats or connected-app flags.
+
+When enabled, the handler accepts only a fresh provider-secret-verified private message with `message.from.id === message.chat.id`. It uses the registry's stable `botId`, or the explicit `CONNECTED_APP_BOOTSTRAP_BOT_ID` on a legacy per-bot webhook. A dedicated `CONNECTED_APP_TELEGRAM_GATEWAY_KEY` authenticates a single POST to the exact HTTPS `CONNECTED_APP_CONTROL_PLANE_URL/v1/connected-app-bootstrap/telegram/start`; no browser code, profile ID or token comes back to the gateway. Control Plane owns reviewed Telegram actor/profile binding, update dedup and the one-use link. It sends that link through the existing authenticated gateway `/deliver` route only after Telegram returns a provider message ID. A replay of the same update cannot create another link.
+
+Configure the CP issuer, D1 migration and reviewed actor mappings first. Both `CONNECTED_APP_TELEGRAM_CONNECT_ENABLED` and the CP bootstrap/identity flags remain off until a real signed private update proves the complete flow to Recruiting and CRM. Do not provision an actor mapping from a username, group chat, sandbox chat allowlist or old Agent KV record. Test signed and unsigned webhooks, two users/two profiles, stale/duplicate updates, group and mismatched actor, unknown delivery, browser preview/replay/CSRF/logout, and profile revocation before activation.
+
+The gateway does not log the returned body, browser link or keys. A CP error yields only a generic retry message. It does not automatically retry an ambiguous request because CP may have already sent the one-use link.
