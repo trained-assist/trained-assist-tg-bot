@@ -257,6 +257,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       parallel: !!opts.parallel,
       contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
+      workStyle: opts.workStyle || 'auto',
+      workStyleSource: opts.workStyleSource === 'explicit' ? 'explicit' : 'default',
       forceClaude: opts.forceClaude || undefined,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,

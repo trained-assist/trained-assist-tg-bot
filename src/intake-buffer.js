@@ -107,6 +107,18 @@ const ARM_WATCHDOG_MS = 60_000;
 const RECEIPT_MS = 1500;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
+const WORK_STYLES = ['explore', 'answer', 'auto'];
+function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) {
+  const labels = { explore: '🧭 Изучи и задай вопросы', answer: '📝 Дай полный ответ', auto: '✨ На твоё усмотрение' };
+  const styles = WORK_STYLES.map(style => [{ text: labels[style], callback_data: `ws|${style}|${revision}` }]);
+  if (busy) {
+    styles.push([{ text: '⚡ Параллельно', callback_data: 'intake_parallel' }]);
+    if (stopEnabled) styles.push([{ text: '🛑 Стоп и запуск с добавкой', callback_data: 'intake_stopsupp' },
+      { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
+  }
+  styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
+  return styles;
+}
 // Shown INSTEAD of LAUNCH_BTN under the statuses that mean "THIS batch is
 // already taken": the tap happened, a ▶️ still sitting there is read as «нажата
 // она или нет?» — the ambiguity the owner asked to remove (29.09). The mask follows
@@ -326,6 +338,13 @@ export class IntakeBuffer {
     try { return await fn(); } finally { release(); }
   }
 
+  async _bumpDraftRevisionLocked(store = this.state.storage) {
+    const previous = await store.get('draftRevision');
+    const revision = (Number.isSafeInteger(previous) && previous > 0 ? previous : 0) + 1;
+    await store.put('draftRevision', revision);
+    return revision;
+  }
+
   async _callbackTuple() {
     const keys = ['collectorMsgId', 'preparingMsgId', 'pendingBatch', 'busy', 'cpBusyRequests', 'cpUnresolvedLaunches', 'launchQueued'];
     const values = await Promise.all(keys.map(key => this.state.storage.get(key)));
@@ -349,6 +368,7 @@ export class IntakeBuffer {
     if (session?.username !== source.username) return false;
     const data = source.callbackData;
     if (typeof data !== 'string') return false;
+    const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(data);
     if (/^intake_stop(yes|no)\|(supp|new)$/.test(data || '')) {
       const confirmation = await this.state.storage.get(`cp-confirmation:${messageId}`);
       return !!confirmation && confirmation.username === source.username && confirmation.mode === data.split('|')[1]
@@ -370,7 +390,8 @@ export class IntakeBuffer {
     if (messageId !== collector || !items.length) return false;
     const queued = !!(await this.state.storage.get('launchQueued')) || !!(await this.state.storage.get('stopLaunch'));
     if (queued) return data === 'intake_cancel';
-    if (data === 'intake_run') return true;
+    if (styleLaunch) return Number(styleLaunch[2]) === await this.state.storage.get('draftRevision');
+      if (data === 'intake_run') return false; // CP collector buttons are revision-bound workStyle actions.
     if (['intake_parallel', 'intake_stopsupp', 'intake_stopnew'].includes(data)) return !!(await this.state.storage.get('busy'));
     return false;
   }
@@ -382,7 +403,8 @@ export class IntakeBuffer {
       const source = await request.clone().json().catch(() => ({}));
       const allowed = await this._exclusive(async () => {
         if (this.cpCallbackInFlight || !(await this._callbackOwned(source))) return false;
-        if (url.pathname === '/flush' && !['intake_run', 'intake_parallel'].includes(source.callbackData)) return false;
+        if (url.pathname === '/flush' && !['intake_parallel'].includes(source.callbackData) &&
+            !/^ws\|(explore|answer|auto)\|\d+$/.test(source.callbackData || '')) return false;
         if (url.pathname === '/cancel' && source.callbackData !== 'intake_cancel') return false;
         if (url.pathname === '/stop-launch' && source.callbackData !== `intake_stopyes|${source.mode}`) return false;
         this.cpCallbackInFlight = true;
@@ -748,7 +770,7 @@ export class IntakeBuffer {
         }
         const had = !!((await store.get('launchAfterRelease')) || (await store.get('launchWhenReady'))
           || (await store.get('launchQueued')) || (await store.get('debounceExpiresAt')));
-        for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'debounceExpiresAt',
+        for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchWorkStyle', 'launchWorkStyleSource', 'debounceExpiresAt',
           'gateLevel', 'shortDebounce', 'gateConsulted', 'gateErrAttempts', 'receiptDue', 'resumedHeld',
           'parkedAt', 'parkReoffers']) {
           await store.delete(k);
@@ -861,6 +883,7 @@ export class IntakeBuffer {
         if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
         items.push({ text: msg.text, msg, preparingAt: Date.now() });
         await this.state.storage.put('buf', items);
+        await this._bumpDraftRevisionLocked();
         return true;
       });
       if (!accepted) return json({ duplicate: true });
@@ -901,6 +924,7 @@ export class IntakeBuffer {
           else items[index] = { text: result.msg.text, msg: result.msg, intentText: msg.text || msg.caption || '' };
         }
         await this.state.storage.put('buf', items);
+        await this._bumpDraftRevisionLocked();
         const seen = (await this.state.storage.get('received')) || [];
         await this.state.storage.put('received', [...seen, msg.message_id].slice(-1000));
         const seq = ((await this.state.storage.get('armSeq')) || 0) + 1;
@@ -970,6 +994,7 @@ export class IntakeBuffer {
             await tx.put(messageKey, ownership);
             if (updateKey) await tx.put(updateKey, ownership);
             await tx.put('buf', [...items, { text, msg, telegramUpdateId }]);
+            await this._bumpDraftRevisionLocked(tx);
           });
           items.push({ text, msg, telegramUpdateId });
           if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
@@ -1018,12 +1043,20 @@ export class IntakeBuffer {
       // queueing it after the current one. Legacy callers send no body.
       const source = await request.json().catch(() => ({}));
       const { parallel = false } = source;
+      const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
       const authorized = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return false;
         if (this.env.EXECUTION_BACKEND === 'control-plane' &&
             (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return false;
         if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return false;
+        if (styleLaunch) {
+          await this.state.storage.put('launchWorkStyle', styleLaunch[1]);
+          await this.state.storage.put('launchWorkStyleSource', 'explicit');
+        } else if (parallel) {
+          await this.state.storage.put('launchWorkStyle', 'auto');
+          await this.state.storage.put('launchWorkStyleSource', 'default');
+        }
         await this.state.storage.delete('stopped');
         await this.state.storage.delete('resumedHeld');
         return this.env.EXECUTION_BACKEND === 'control-plane'
@@ -1127,6 +1160,8 @@ export class IntakeBuffer {
         await store.delete('launchAfterRelease');
         await store.delete('launchWhenReady');
         await store.delete('launchParallel');
+        await store.delete('launchWorkStyle');
+        await store.delete('launchWorkStyleSource');
         if (!controlPlaneStopDisabled(this.env)) await store.delete('stopLaunch');
         return { had, stopLaunchCancelled };
       });
@@ -1196,7 +1231,7 @@ export class IntakeBuffer {
     if (controlPlaneStopDisabled(this.env)) throw controlPlaneStopDisabledError();
     const store = this.state.storage;
     await store.delete('stopped'); // the explicit choice IS the lift of the ⛔ hold
-    for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+    for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel', 'launchWorkStyle', 'launchWorkStyleSource',
       'debounceExpiresAt', 'gateLevel', 'gateConsulted', 'gateErrAttempts', 'receiptDue']) {
       await store.delete(k);
     }
@@ -1318,6 +1353,7 @@ export class IntakeBuffer {
         items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username, mediaFirstSeenAt: Date.now(),
           ...(await tx.get('busy') ? { heldWhileBusy: true } : {}) });
         await tx.put('buf', items);
+        await this._bumpDraftRevisionLocked(tx);
         await tx.put('received', [...seen, msg.message_id].slice(-1000));
         await tx.setAlarm(Date.now() + 60000);
       });
@@ -1405,6 +1441,7 @@ export class IntakeBuffer {
             fileRef: result.fileRef, transcript: result.transcript, transcriptRef: result.transcriptRef } };
         }
         await tx.put('buf', items);
+        await this._bumpDraftRevisionLocked(tx);
         await tx.put(`media-delivered:${result.id}`, true);
         if (!items.some(i => i.mediaPending) && !(await tx.get('busy'))) await tx.deleteAlarm();
       });
@@ -1618,6 +1655,15 @@ export class IntakeBuffer {
       if (!chatId) return null;
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
+      const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
+      const draftRevision = cpMode ? await this._exclusive(async () => {
+        let revision = await this.state.storage.get('draftRevision');
+        if (!Number.isSafeInteger(revision) || revision < 1) {
+          revision = 1;
+          await this.state.storage.put('draftRevision', revision);
+        }
+        return revision;
+      }) : null;
       const queued = !!(await this.state.storage.get('launchQueued'));
       const stopped = !!(await this.state.storage.get('stopped'));
       const stopPending = this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending === true;
@@ -1630,7 +1676,7 @@ export class IntakeBuffer {
         : (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
         : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
-        : collectorText(n) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
+        : (cpMode ? `✓ Получил ${n} сообщений. Всё собрано в один input. Выбери, как начать.` : collectorText(n)) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
       // so «задачу забрал» can be walked back. Otherwise launch button under every
       // status that is not "the batch is taken" (issue #303).
@@ -1640,15 +1686,11 @@ export class IntakeBuffer {
       // killing the button here left the chat with no way to launch it (issue #303).
       const keyboard = (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
-        : busy ? (this.env.EXECUTION_BACKEND === 'control-plane' && this.env.TG_SLICE_STOP_ENABLED === 'false'
-          ? QUEUE_BTN.map(row => row.filter(button => !button.callback_data.startsWith('intake_stop'))).filter(row => row.length)
-          : QUEUE_BTN)
-        : this.env.EXECUTION_BACKEND === 'control-plane'
-          ? LAUNCH_BTN.map(row => row.map(button => button.callback_data === 'intake_run'
-            ? { ...button, text: '▶️ Запустить' } : button))
-          : LAUNCH_BTN;
+        : busy ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
+        : cpMode
+          ? workStyleKeyboard(draftRevision)
+        : LAUNCH_BTN;
       let prevId = await this.state.storage.get('collectorMsgId');
-      const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
       const claimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
       if (claimKey && !prevId) {
@@ -1704,6 +1746,8 @@ export class IntakeBuffer {
   // anything sent during the run is held (surfaced with a fresh button afterwards).
   async _dispatch(expectedBuffer, expectedRetryBatch) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
+    let launchWorkStyle = 'auto';
+    let launchWorkStyleSource = 'default';
     const buf = await this._exclusive(async () => {
       if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return [];
       // A parallel dispatch (RC-03) is allowed to start while the window is
@@ -1724,6 +1768,9 @@ export class IntakeBuffer {
       if (!items.length) return [];
       if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+      const selectedStyle = await this.state.storage.get('launchWorkStyle');
+      launchWorkStyle = WORK_STYLES.includes(selectedStyle) ? selectedStyle : 'auto';
+      launchWorkStyleSource = await this.state.storage.get('launchWorkStyleSource') === 'explicit' ? 'explicit' : 'default';
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
         const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
         const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
@@ -1732,7 +1779,8 @@ export class IntakeBuffer {
         const continuation = items.find(item => item.msg.intakeRoute)?.msg;
         await this.state.storage.put(`cp-launch:${launchKey}`, {
           msg: { ...base, text: coalesceBuffer(items), intakeItems: items, intakeRoute: continuation?.intakeRoute },
-          initialMsgId: null, parallel, profileId: client.config.profileId, botUsername: client.config.botUsername,
+          initialMsgId: null, parallel, workStyle: launchWorkStyle, workStyleSource: launchWorkStyleSource,
+          profileId: client.config.profileId, botUsername: client.config.botUsername,
         });
         await this.state.storage.put('cpUnresolvedLaunches', [...new Set([...unresolved, launchKey])]);
         this.cpDispatches++;
@@ -1754,6 +1802,8 @@ export class IntakeBuffer {
       await this.state.storage.delete('launchQueued');
       await this.state.storage.delete('resumedHeld');
       await this.state.storage.delete('launchParallel'); // consumed by THIS dispatch
+      await this.state.storage.delete('launchWorkStyle'); // consumed by THIS immutable launch snapshot
+      await this.state.storage.delete('launchWorkStyleSource');
       return items;
     });
     if (!buf.length) return;
@@ -1799,6 +1849,7 @@ export class IntakeBuffer {
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(msg, this.env, { mode: 'deep', ...(parallel ? { parallel: true } : {}), initialMsgId,
+        workStyle: launchWorkStyle, workStyleSource: launchWorkStyleSource,
         ...(this.env.EXECUTION_BACKEND === 'control-plane' ? { collectorStatusHandled: true } : {}),
         onRunAccepted: (ack) => { runAck = ack || null; },
         onIntakePrepared: async (index, prepared) => {
@@ -2170,6 +2221,8 @@ export class IntakeBuffer {
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(checkpoint.msg, this.env, {
         mode: 'deep', ...(checkpoint.parallel ? { parallel: true } : {}),
+        workStyle: WORK_STYLES.includes(checkpoint.workStyle) ? checkpoint.workStyle : 'auto',
+        workStyleSource: checkpoint.workStyleSource === 'explicit' ? 'explicit' : 'default',
         initialMsgId: checkpoint.initialMsgId,
         collectorStatusHandled: true,
         onRunAccepted: value => { ack = value; },

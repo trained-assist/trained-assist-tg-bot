@@ -34,6 +34,7 @@ async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
 
 function needsControlPlaneOwnership(data) {
   return ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
+    || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '')
     || ['workrun|', 'intake_stopyes|', 'intake_stopno|', 'stop|', 'stopok|', 'stopno|'].some(prefix => data?.startsWith(prefix));
 }
 
@@ -658,10 +659,15 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  if (data === 'intake_run' || data === 'intake_parallel' || data?.startsWith('workrun|')) {
+  if (data === 'intake_run' || data === 'intake_parallel' || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '') || data?.startsWith('workrun|')) {
     const parallel = data === 'intake_parallel';
+    const style = /^ws\|(explore|answer|auto)\|\d+$/.exec(data || '')?.[1] || null;
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…');
+    const launchAck = style === 'explore' ? '🧭 Изучу и задам вопросы…'
+      : style === 'answer' ? '📝 Готовлю полный ответ…'
+        : style === 'auto' ? '✨ Выбираю подходящий способ…'
+          : parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…';
+    await answerCallbackQuery(env.BOT_TOKEN, id, launchAck);
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const response = await stub.fetch('https://intake/flush', { method: 'POST', body: JSON.stringify({ parallel, ...callbackSource(cq, env, session) }) })
