@@ -8,7 +8,7 @@ workers_dev = true
 enabled = true
 
 [triggers]
-crons = []
+crons = ["* * * * *"]
 
 [[durable_objects.bindings]]
 name = "TG_DELIVERY_OWNER"
@@ -37,7 +37,7 @@ service = "trained-assist-cp-telegram-ux-v1-sandbox"
 [vars]
 TG_SANDBOX_BOT_USERNAME = "Shturman_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
-TG_SLICE_DELIVERY_PAUSED = "true"
+TG_SLICE_DELIVERY_PAUSED = "false"
 TG_SLICE_REQUEST_TIMEOUT_MS = "60000"
 TG_SLICE_STOP_ENABLED = "false"
 EXECUTION_BACKEND = "control-plane"
