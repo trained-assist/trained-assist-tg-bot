@@ -103,6 +103,4 @@ export default {
   },
 };
 
-export class IntakeBufferReset extends IntakeBuffer {}
-
-export { TgDeliveryOwner };
+export { IntakeBuffer, TgDeliveryOwner };
