@@ -66,6 +66,22 @@ describe('existing collector control-plane execution boundary', () => {
     expect(body.controlPlaneEnvelope.inputItems[0].text).toBe('работает?');
   });
 
+  it('freezes the selected work style with the complete source input across retries', async () => {
+    const state = fixture();
+    const selected = { ...state.input, workStyle: 'explore', workStyleSource: 'explicit' };
+    await runControlPlaneTask(state.env, selected);
+    await runControlPlaneTask(state.env, { ...selected, workStyle: 'answer', workStyleSource: 'explicit' });
+
+    const saved = [...state.snapshots.values()][0].body.controlPlaneEnvelope;
+    expect(saved.inputItems).toEqual([
+      { text: 'работает?', artifactRefs: [] },
+      { text: 'посчитай расходы', artifactRefs: [] },
+    ]);
+    expect(saved).toMatchObject({ workStyle: 'explore', workStyleSource: 'explicit' });
+    expect(state.calls.filter(call => call.pathname === '/intake')).toHaveLength(1);
+    expect(state.calls[0].body).toMatchObject({ workStyle: 'explore', workStyleSource: 'explicit' });
+  });
+
   it('keeps durable task identity when route acknowledgement is lost', async () => {
     const state = fixture();
     state.failRoute(true);

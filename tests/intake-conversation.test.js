@@ -163,7 +163,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     const [msg, , opts] = handleMessage.mock.calls[0];
     expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
     expect(opts).toEqual({
-      mode: 'deep', initialMsgId: expect.any(Number),
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });
@@ -201,7 +201,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(msg.text).toContain('собери участников выставки Rosupack');
     expect(msg.text).toContain('только российские производители упаковки');
     expect(opts).toEqual({
-      mode: 'deep', initialMsgId: expect.any(Number),
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });
@@ -265,7 +265,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(handleMessage.mock.calls[1][0].text)
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
     expect(handleMessage.mock.calls[1][2]).toEqual({
-      mode: 'deep', initialMsgId: expect.any(Number),
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });

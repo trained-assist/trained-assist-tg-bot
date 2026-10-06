@@ -119,7 +119,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
     // Epic #1527 PR1 (red-first F1): the run is in flight — busy must OUTLIVE
@@ -330,7 +330,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });

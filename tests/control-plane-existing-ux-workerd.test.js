@@ -249,15 +249,18 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
     await workerdWaitFor(() => providerEdits.some(edit => edit.message_id === collectorId));
     expect(providerMessages).toHaveLength(1);
     expect(cpIntakes).toHaveLength(0);
+    const launchRevision = (await state()).get('draftRevision');
     const launch = boundary === 'vertical' ? message(105, 'запускай')
       : { update_id: 105, callback_query: { id: 'workerd-launch', from: { id: 43, is_bot: false },
-        data: 'intake_run', message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
+        data: `ws|auto|${launchRevision}`, message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(launch)).status).toBe(200);
     expect(cpIntakes).toHaveLength(1);
     expect(admitted.inputItems.map(item => item.text)).toEqual([
       'category,amount\nfood,100\nfood,50', 'travel,275', 'Write outputs/category-results.csv',
       ...(boundary === 'vertical' ? ['запускай'] : []),
     ]);
+    expect(admitted).toMatchObject({ workStyle: boundary === 'vertical' ? 'auto' : 'auto',
+      workStyleSource: boundary === 'vertical' ? 'default' : 'explicit' });
     expect(admitted.sessionId).toBe('workerd-source-session');
     const snapshotResponse = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
     expect(snapshotResponse.status).toBe(200);
@@ -432,7 +435,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
     expect(cpIntakes).toHaveLength(boundary === 'intake' ? 2 : 1);
     for (const envelope of cpIntakes) expect(envelope).toEqual(admitted);
     const collectorMessages = providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data === 'intake_run'));
+      .some(button => button.callback_data?.startsWith('ws|')));
     expect(collectorMessages).toHaveLength(1);
     const unknownNotices = providerMessages.filter(item => item.text.includes('Подтверждение не получено'));
     expect(unknownNotices).toHaveLength(boundary === 'intake' ? 1 : 0);
@@ -466,14 +469,15 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
     await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, followupDue - Date.now()) + 50));
     await state(true);
     const allCollectors = providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data === 'intake_run'));
+      .some(button => button.callback_data?.startsWith('ws|')));
     expect(allCollectors).toHaveLength(2);
     expect(providerMessages.filter(item => item.text.includes('Подтверждение не получено'))).toEqual(unknownNotices);
     expect(providerMessages).toHaveLength(allCollectors.length + unknownNotices.length + 1);
     expect(await terminalProof()).toEqual(terminalBeforeFollowup);
     const followupCollectorId = 501 + providerMessages.indexOf(allCollectors[1]);
+    const followupRevision = (await state()).get('draftRevision');
     const followupLaunch = { update_id: 107, callback_query: { id: 'workerd-followup-launch',
-      from: { id: 43, is_bot: false }, data: 'intake_run',
+      from: { id: 43, is_bot: false }, data: `ws|explore|${followupRevision}`,
       message: { message_id: followupCollectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(followupLaunch)).status).toBe(200);
     expect(admittedTasks.size).toBe(2);
@@ -488,7 +492,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
     expect(dispatchCount).toBe(2);
     expect(await terminalProof()).toEqual(terminalBeforeFollowup);
     expect(providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data === 'intake_run'))).toHaveLength(2);
+      .some(button => button.callback_data?.startsWith('ws|')))).toHaveLength(2);
     expect(providerMessages).toHaveLength(3 + unknownNotices.length);
     expect(legacyRequests).toEqual([]);
     expect(unexpectedRequests).toEqual([]);
