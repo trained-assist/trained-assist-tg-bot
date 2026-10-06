@@ -94,6 +94,45 @@ Set in repo Settings → Secrets → Actions:
 
 ## Development
 
+### Isolated Telegram sandbox (P11)
+
+Sandbox outgoing delivery now requires the [SQLite delivery owner and explicit
+cutover manifest](docs/sandbox-delivery-owner-v1.md). Enqueue/drain/read use strong
+owner storage, not KV. Ambiguous sends remain unknown without retry; legacy
+deliveries quarantine. Delivery and cron start paused pending operator review.
+
+`wrangler.sandbox-tg.toml` selects `src/sandbox-tg/index.js` and a separate
+`TG_SLICE` KV namespace. Configure the required `TG_SANDBOX_BOT_TOKEN`,
+`TG_SANDBOX_BOT_USERNAME`, control-plane URL/principal/profile, and chat allowlist.
+The sandbox refuses production bot usernames and never falls back to `BOT_TOKEN`.
+Set `TELEGRAM_WEBHOOK_SECRET` and register the same value as Telegram's
+`setWebhook.secret_token`. Missing, empty, or mismatched webhook secrets return
+401; `/health` remains accessible without webhook or delivery credentials.
+The HTTP `/cron` route requires the same secret. Scheduled events build their
+own controller from bindings.
+
+Provision `CONTROL_PLANE_PRINCIPAL_SIGNATURE` with
+`wrangler secret put CONTROL_PLANE_PRINCIPAL_SIGNATURE --config wrangler.sandbox-tg.toml`.
+This optional binding is a precomputed hex HMAC-SHA256 signature of the exact
+`CONTROL_PLANE_PRINCIPAL`, using the control plane's principal secret. Provision
+it through a trusted operator; keep the root signing secret out of the gateway.
+The client sends the signature as `x-principal-sig`. Unsigned local fake-control-plane
+fixtures remain supported; a deployed control plane requires its configured auth.
+
+Reconciliation scans paginated KV keys, reads their values, and delivers stored
+receipts separately from terminal results. Direct and launched-batch indexes persist
+the original chat, thread, and requesting bot. Final replies use `result.answer`
+(or a string result), with explicit notices for failure, cancellation, unknown
+execution, or absent answer text. Old indexes without a destination are skipped
+rather than guessing a Telegram chat from a profile ID. Existing legacy
+`delivery:<userTaskId>` records still drain; new receipt and terminal IDs do not
+overwrite them. Retry attempts and dead records survive repeated reconciliation.
+
+Run the regression fixtures with `npx vitest run tests/p11*.test.js`.
+They exercise the exported HTTP and scheduled handlers against a Telegram emulator
+and fake control plane with the Cloudflare KV listing shape. They do not prove live
+Telegram delivery, concurrent ingress safety, or cloud deployment readiness.
+
 ```bash
 npm install
 npm run dev    # local dev via wrangler

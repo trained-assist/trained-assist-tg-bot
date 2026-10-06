@@ -9,7 +9,7 @@
 //  - the sandbox refuses to start if the configured bot identity is one of the
 //    production identities (a misconfigured sandbox must never touch prod);
 //  - no chat is served unless it is explicitly listed in TG_SLICE_ALLOWED_CHATS;
-//  - the webhook refuses updates without the secret token when one is set.
+//  - the webhook refuses updates without a configured and matching secret token.
 
 export const PRODUCTION_BOT_USERNAMES = [
   'super_personal_assistant_bot',
@@ -69,8 +69,11 @@ export function readTgSliceConfig(env) {
   }
   return {
     botUsername,
+    botToken: requireVar(env, 'TG_SANDBOX_BOT_TOKEN'),
     controlPlaneUrl: stripTrailingSlash(requireVar(env, 'CONTROL_PLANE_URL')),
     principalId: requireVar(env, 'CONTROL_PLANE_PRINCIPAL'),
+    principalSignature: String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
+    routeBeforeStart: env.TG_SLICE_ROUTER_ENABLED === 'true',
     profileId: requireVar(env, 'CONTROL_PLANE_PROFILE'),
     apiKey: String(env['CONTROL_PLANE_API_KEY'] ?? '').trim() || null,
     sessionId: String(env['CONTROL_PLANE_SESSION_ID'] ?? '').trim() || null,
@@ -91,6 +94,7 @@ export function readTgSliceConfig(env) {
 
 /** Which auth scheme the slice uses — for logs and reports (never the key itself). */
 export function authScheme(config) {
+  if (config.principalSignature) return 'x-principal+signature';
   return config.apiKey ? 'x-principal+bearer' : 'x-principal';
 }
 

@@ -1,5 +1,21 @@
 # Requirements Log — Alesa (trained-assist-tg-bot)
 
+## Telegram UX migration #144 — 2026-10-05
+
+- [active] New native acceptance fixtures freeze an explicit expected answer substring into their private identity and require its presence in the persisted result; a nonempty unrelated answer is not goal acceptance. Existing fixture identities remain unchanged when no goal assertion is supplied.
+- [active] The new control-plane contour hides stop/restart choices when its explicit stop gate is false; queue, parallel launch and input preview remain available. Legacy menus are unchanged. Re-enable only after observed cancellation provenance is accepted.
+- [validated] Busy collector regression covers both explicit gate values; entrypoint authorization continues to reject disabled stale stop callbacks.
+
+## Sandbox integration #140 — 2026-10-05
+
+- [active] Work in `ta-integrator-tg-v1` on `integration/first-working-version-20261005`; publish a draft PR, without merge or deployment.
+- [active] Disable automatic staging deployment/smoke only for this integration branch; keep code checks and the existing staging acceptance gate.
+- [active] Fix exported Worker composition, fail-closed webhook authentication, update dedup, Cloudflare KV pagination, deletion, and separate receipt/final delivery with preserved chat/thread and bounded attempts.
+- [active] Parent owns `control-plane-client.js` and `p11-principal-auth.test.js`; this slice only exposes the optional `CONTROL_PLANE_PRINCIPAL_SIGNATURE` binding and documents provisioning.
+- [active] Validate with P11 exported-entrypoint regression fixtures; emulator success does not constitute live Telegram or cloud acceptance. Destinationless legacy indexes require a separate migration decision.
+- [active] Launched batches retain a conversation index for final delivery; callbacks derive the destination from their message and may launch only that same chat/thread's batch.
+- [verified] All 65 P11 tests pass, including 20 exported-entrypoint regressions and the parent's three signature tests; `npm run check`, browser Worker bundling, and whitespace checks pass. Parent-owned files are absent from this slice's staged changes.
+
 ## Инфраструктура
 
 - [реализовано] Cloudflare Worker (Hono) — Telegram webhook handler, stateless, без состояния

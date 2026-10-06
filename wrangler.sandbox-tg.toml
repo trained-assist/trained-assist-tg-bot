@@ -10,22 +10,37 @@ enabled = true
 [triggers]
 crons = ["* * * * *"]
 
+[[durable_objects.bindings]]
+name = "TG_DELIVERY_OWNER"
+class_name = "TgDeliveryOwner"
+
+[[migrations]]
+tag = "sandbox-delivery-owner-v1"
+new_sqlite_classes = ["TgDeliveryOwner"]
+
 # Sandbox-only bindings — separate from the production worker:
 # TG_SLICE  — KV namespace for the slice durable state (ingress dedup,
 #             conversation index, delivery queue). Separate id from the
 #             production KV; the production worker never reads it.
 [[kv_namespaces]]
 binding = "TG_SLICE"
-id = "00000000000000000000000000000032"
+id = "915ffeedb74440538009bdc1bd00d381"
+
+[[services]]
+binding = "CONTROL_PLANE_SERVICE"
+service = "trained-assist-cp-v1-sandbox"
 
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_MODE = "direct"
+TG_SLICE_ROUTER_ENABLED = "true"
+TG_SLICE_DELIVERY_PAUSED = "false"
 
 # Secrets (set via `wrangler secret put` — never in repo):
 #   TG_SANDBOX_BOT_TOKEN        — test bot token only
 #   CONTROL_PLANE_URL           — new control plane sandbox URL
 #   CONTROL_PLANE_PRINCIPAL     — admission principal for the sandbox
+#   CONTROL_PLANE_PRINCIPAL_SIGNATURE — precomputed principal-scoped HMAC signature
 #   CONTROL_PLANE_PROFILE       — sandbox profile in Task Store
 #   CONTROL_PLANE_API_KEY       — optional bearer key
 #   TELEGRAM_WEBHOOK_SECRET     — fail-closed webhook verification

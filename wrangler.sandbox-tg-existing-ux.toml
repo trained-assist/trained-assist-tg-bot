@@ -1,0 +1,45 @@
+name = "trained-assist-tg-ux-sandbox"
+main = "src/sandbox-tg/existing-ux.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[durable_objects.bindings]]
+name = "TG_DELIVERY_OWNER"
+class_name = "TgDeliveryOwner"
+
+[[durable_objects.bindings]]
+name = "INTAKE"
+class_name = "IntakeBuffer"
+
+[[migrations]]
+tag = "sandbox-existing-ux-v1"
+new_sqlite_classes = ["TgDeliveryOwner", "IntakeBuffer"]
+
+[[kv_namespaces]]
+binding = "TG_SLICE"
+id = "915ffeedb74440538009bdc1bd00d381"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "915ffeedb74440538009bdc1bd00d381"
+
+[[services]]
+binding = "CONTROL_PLANE_SERVICE"
+service = "trained-assist-cp-telegram-ux-v1-sandbox"
+
+[vars]
+TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
+TG_SLICE_ROUTER_ENABLED = "true"
+TG_SLICE_DELIVERY_PAUSED = "false"
+TG_SLICE_REQUEST_TIMEOUT_MS = "60000"
+TG_SLICE_STOP_ENABLED = "true"
+EXECUTION_BACKEND = "control-plane"
+INTAKE_DEBOUNCE = "on"
+SESSION_NAMESPACE = "integrator-existing-ux-v1"
+MEDIA_PIPELINE = "off"

@@ -1,8 +1,46 @@
 // In-memory KV shim for tests. Implements the minimal
 // `get/put/delete/list` surface the slice uses.
+import { TgDeliveryOwner } from '../../src/sandbox-tg/delivery-owner.js';
+
+export class OwnerStorage {
+  constructor() { this.data = new Map(); this.transactions = Promise.resolve(); }
+  async get(name) { return structuredClone(this.data.get(name)); }
+  async put(name, value) { this.data.set(name, structuredClone(value)); }
+  async list({ prefix = '' } = {}) { return new Map([...this.data].filter(([name]) => name.startsWith(prefix)).map(([name, value]) => [name, structuredClone(value)])); }
+  async transaction(callback) {
+    const operation = this.transactions.then(async () => {
+      const transaction = new OwnerStorage();
+      transaction.data = structuredClone(this.data);
+      const result = await callback(transaction);
+      this.data = transaction.data;
+      return result;
+    });
+    this.transactions = operation.catch(() => {});
+    return operation;
+  }
+}
+
+export function ownerState(storage = new OwnerStorage()) {
+  let queue = Promise.resolve();
+  return { storage, blockConcurrencyWhile(callback) {
+    const result = queue.then(callback);
+    queue = result.catch(() => {});
+    return result;
+  } };
+}
+
+export function ownerNamespace(env) {
+  const owners = new Map();
+  return { owners, idFromName: name => name, get(name) {
+    if (!owners.has(name)) owners.set(name, new TgDeliveryOwner(ownerState(), env));
+    return { fetch: request => owners.get(name).fetch(request) };
+  } };
+}
+
 export class MemKV {
-  constructor() {
+  constructor(options = {}) {
     this.data = new Map();
+    this.pageSize = options.pageSize ?? 1000;
   }
 
   async get(key) {
@@ -17,17 +55,14 @@ export class MemKV {
     this.data.delete(key);
   }
 
-  list({ prefix = '' } = {}) {
-    const entries = [];
-    for (const [key, value] of this.data.entries()) {
-      if (!key.startsWith(prefix)) continue;
-      entries.push({ key, value });
-    }
-    entries.sort((a, b) => a.key.localeCompare(b.key));
+  async list({ prefix = '', cursor = '', limit = 1000 } = {}) {
+    const names = [...this.data.keys()].filter(name => name.startsWith(prefix)).sort();
+    const offset = Number(cursor || 0);
+    const next = offset + Math.min(limit, this.pageSize);
     return {
-      async *[Symbol.asyncIterator]() {
-        for (const entry of entries) yield entry;
-      },
+      keys: names.slice(offset, next).map(name => ({ name })),
+      list_complete: next >= names.length,
+      cursor: next >= names.length ? '' : String(next),
     };
   }
 }
@@ -41,15 +76,16 @@ export async function collectLogSink() {
 }
 
 export function makeEnv(overrides = {}) {
-  return {
+  const env = {
     TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
+    TG_SANDBOX_BOT_TOKEN: 'fixture-bot-token',
     CONTROL_PLANE_URL: 'http://127.0.0.1:19789',
     CONTROL_PLANE_PRINCIPAL: 'sandbox-local',
     CONTROL_PLANE_PROFILE: 'profile-1',
     CONTROL_PLANE_API_KEY: '',
     CONTROL_PLANE_SESSION_ID: '',
     TELEGRAM_API_BASE: 'http://127.0.0.1:19790',
-    TELEGRAM_WEBHOOK_SECRET: '',
+    TELEGRAM_WEBHOOK_SECRET: 'fixture-webhook-secret',
     TG_SLICE_ALLOWED_CHATS: '1001,1002',
     TG_SLICE_CHAT_PROFILES: '',
     TG_SLICE_EVENT_TRANSPORT: 'auto',
@@ -59,8 +95,15 @@ export function makeEnv(overrides = {}) {
     TG_SLICE_DELIVERY_RETRY_BASE_MS: '1000',
     TG_SLICE_MAX_TURNS: '32',
     TG_SLICE_MODE: 'direct',
+    TG_SLICE_DELIVERY_PAUSED: 'false',
     ...overrides,
   };
+  if (!Object.hasOwn(overrides, 'TG_SLICE_DELIVERY_CUTOVER_MANIFEST')) env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify({
+    version: 'tg-delivery-cutover-v1', botUsername: env.TG_SANDBOX_BOT_USERNAME, profileId: env.CONTROL_PLANE_PROFILE,
+    cutoverId: 'synthetic-empty-inventory', cutoverAt: Date.now(), oldTaskIds: [], deliveries: [],
+  });
+  env.TG_DELIVERY_OWNER ??= ownerNamespace(env);
+  return env;
 }
 
 export default { MemKV, collectLogSink, makeEnv };
