@@ -110,6 +110,29 @@ describe('existing collector control-plane execution boundary', () => {
     expect(state.calls).toEqual([]);
   });
 
+  it('passes a task-scoped media manifest with its caption into Control Plane intake', async () => {
+    const state = fixture();
+    const manifest = { contractVersion: 1, ref: 'artifact-ref-1', version: 'a'.repeat(64),
+      ownerProfileId: 'profile-1', mediaType: 'audio/ogg', name: 'voice.ogg', sizeBytes: 5, sha256: 'a'.repeat(64) };
+    await runControlPlaneTask(state.env, { ...state.input, inputItems: [{ msg: {
+      message_id: 17, caption: 'transcribe this', ingressArtifactManifest: manifest,
+      fileRef: { storage: 'ingress', id: manifest.ref, name: manifest.name, mime: manifest.mediaType },
+    } }] });
+    expect(state.calls.find(call => call.pathname === '/intake').body.inputItems).toEqual([
+      { text: 'transcribe this\nВложение 1: voice.ogg', artifacts: [manifest] },
+    ]);
+  });
+
+  it('refuses an ingress manifest owned by another profile', async () => {
+    const state = fixture();
+    const manifest = { contractVersion: 1, ref: 'artifact-ref-1', version: 'a'.repeat(64),
+      ownerProfileId: 'other-profile', mediaType: 'audio/ogg', name: 'voice.ogg', sizeBytes: 5, sha256: 'a'.repeat(64) };
+    await expect(runControlPlaneTask(state.env, { ...state.input, inputItems: [{ msg: {
+      message_id: 17, ingressArtifactManifest: manifest, fileRef: { storage: 'ingress', id: manifest.ref, name: manifest.name },
+    } }] })).rejects.toThrow('Вложения');
+    expect(state.calls).toEqual([]);
+  });
+
   it('fails closed for another profile or chat', async () => {
     const state = fixture();
     await expect(runControlPlaneTask(state.env, { ...state.input, userId: 9999 })).rejects.toThrow('chat_refused');

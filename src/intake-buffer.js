@@ -674,6 +674,14 @@ export class IntakeBuffer {
       // still scheduled for this chat, or is it asleep? A non-empty buffer with no
       // alarm and no busy IS the dead-end (#248, chat -1003814002203).
       const alarm = await this.state.storage.getAlarm();
+      const cpUnresolvedLaunches = this.env.EXECUTION_BACKEND === 'control-plane'
+        ? (await this.state.storage.get('cpUnresolvedLaunches')) || [] : [];
+      const cpLaunchCheckpoints = await Promise.all(cpUnresolvedLaunches.map(async launchKey =>
+        Boolean(await this.state.storage.get(`cp-launch:${launchKey}`))));
+      const cpBusyRequests = this.env.EXECUTION_BACKEND === 'control-plane'
+        ? (await this.state.storage.get('cpBusyRequests')) || [] : [];
+      const cpStopWindow = this.env.EXECUTION_BACKEND === 'control-plane'
+        ? await this.state.storage.get('cpStopWindow') : null;
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
@@ -692,6 +700,12 @@ export class IntakeBuffer {
         alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
         parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
+        cpUnresolvedLaunchCount: cpUnresolvedLaunches.length,
+        cpLaunchCheckpointCount: cpLaunchCheckpoints.filter(Boolean).length,
+        cpBusyRequestIds: cpBusyRequests,
+        cpStopPending: !!cpStopWindow?.pending,
+        cpStopRequestIds: cpStopWindow?.admissionRequestIds || [],
+        cpStopTaskIds: (cpStopWindow?.tasks || []).map(task => task.taskId).filter(Boolean),
         stopped: (await this.state.storage.get('stopped')) || null,
         collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
           ? (await this.state.storage.get(`cp-collector-send:${(await this.state.storage.get(BATCH_KEY))?.batchId}`)) || null

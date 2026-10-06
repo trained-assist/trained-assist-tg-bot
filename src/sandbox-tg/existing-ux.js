@@ -10,6 +10,9 @@ import { conversationKey, threadIdOf } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
 import { initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
+import { attachmentOf } from './batch.js';
+import { profileForUpdate } from './profile.js';
+import { prepareTelegramArtifact } from './media-intake.js';
 
 const app = new Hono();
 
@@ -77,10 +80,27 @@ app.post('/webhook', async context => {
     return context.json({ ok: true });
   }
   if (!hasIntakeContent(message)) return context.json({ ok: true, unsupported: true });
+  const attachment = attachmentOf(message);
+  let collectorMessage = message;
+  if (!['empty', 'text'].includes(attachment.type)) {
+    if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER || !env.INGRESS_BUFFER_TOKEN) {
+      return context.json({ error: 'media intake is not configured' }, 503);
+    }
+    let manifest;
+    try {
+      manifest = await prepareTelegramArtifact({ message, attachment, profile: profileForUpdate(config, update), config,
+        buffer: env.INGRESS_BUFFER, bufferToken: env.INGRESS_BUFFER_TOKEN });
+    } catch {
+      return context.json({ error: 'media could not be stored; no task was started' }, 503);
+    }
+    const { photo, voice, audio, document, video, ...textMessage } = message;
+    collectorMessage = { ...textMessage, ingressArtifactManifest: manifest,
+      fileRef: { storage: 'ingress', id: manifest.ref, name: manifest.name, mime: manifest.mediaType } };
+  }
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(message.chat.id, threadId)));
-  const flush = FORCE_RUN_RE.test(message.text ?? '') || AUTO_LAUNCH_RE.test(message.text ?? '');
+  const flush = FORCE_RUN_RE.test(collectorMessage.text ?? '') || AUTO_LAUNCH_RE.test(collectorMessage.text ?? '');
   const response = await stub.fetch('https://intake/append', {
-    method: 'POST', body: JSON.stringify({ text: message.text ?? message.caption, msg: message, flush, telegramUpdateId: update.update_id }),
+    method: 'POST', body: JSON.stringify({ text: collectorMessage.text ?? collectorMessage.caption, msg: collectorMessage, flush, telegramUpdateId: update.update_id }),
   });
   if (!response.ok) return context.json({ error: 'collector admission failed' }, 503);
   return context.json({ ok: true, ...(await response.json()) });

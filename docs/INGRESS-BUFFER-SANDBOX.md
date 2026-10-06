@@ -16,8 +16,10 @@ Set the same randomly generated `INGRESS_BUFFER_TOKEN` secret on the buffer Work
 npx wrangler secret put INGRESS_BUFFER_TOKEN --config wrangler.ingress-buffer-sandbox.toml
 npx wrangler deploy --config wrangler.ingress-buffer-sandbox.toml
 npx wrangler secret put INGRESS_BUFFER_TOKEN --config wrangler.sandbox-tg.toml
+npx wrangler secret put INGRESS_BUFFER_TOKEN --config wrangler.sandbox-tg-existing-ux.toml
+npx wrangler deploy --config wrangler.sandbox-tg-existing-ux.toml
 ```
 
-CP's matching secret and service binding must be deployed separately. Do not expose the buffer via `workers_dev`, point it at a production bucket, or enable the production `MEDIA_PIPELINE` while Runner materialization is incomplete. Worker deployment alone does not enable Telegram media collection; verify the sandbox bindings and test `/v1/manifests/verify` before enabling it there.
+CP's matching secret and service binding must be deployed separately. The existing-UX sandbox config binds the buffer privately but keeps `MEDIA_PIPELINE=off` by default. Enable it there only after the VM worker has a working Control Plane ingress resolver and the signed task-manifest/materialization path passes end-to-end; production remains off until its own rollout is approved. Never expose the buffer via `workers_dev` or point it at a production bucket.
 
 The buffer accepts immutable artifacts up to 20 MiB, keyed by profile, opaque ref, and SHA-256 version. Its only routes are authenticated upload, manifest verification, and task-independent content retrieval; ingress must remain private through service bindings.

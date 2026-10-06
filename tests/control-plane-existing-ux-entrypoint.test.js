@@ -7,6 +7,7 @@ vi.mock('../src/lib/telegram.js', () => ({ answerCallbackQuery: vi.fn(), sendMes
 import worker from '../src/sandbox-tg/existing-ux.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { answerCallbackQuery } from '../src/lib/telegram.js';
+import { sha256Hex } from '../src/ingress-buffer/worker.js';
 
 function fixture() {
   const collectorCalls = [];
@@ -55,6 +56,51 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
     expect(await state.env.SESSIONS.get('1001')).toBeNull();
     expect(JSON.parse(await state.env.SESSIONS.get('isolated-ux:1001')).controlPlaneProfile).toBe('profile-1');
+  });
+
+  it('stores Telegram file bytes in ingress and appends only the immutable manifest', async () => {
+    const state = fixture();
+    const bytes = new TextEncoder().encode('sample audio');
+    const digest = await sha256Hex(bytes);
+    let bufferRequest;
+    state.env.MEDIA_PIPELINE = 'ingress-buffer';
+    state.env.INGRESS_BUFFER_TOKEN = 'buffer-secret';
+    state.env.INGRESS_BUFFER = { async fetch(url, options) {
+      bufferRequest = { url, options };
+      return Response.json({ manifest: { contractVersion: 1, ref: options.headers['x-artifact-ref'], version: digest,
+        ownerProfileId: options.headers['x-artifact-owner-profile-id'], mediaType: options.headers['content-type'],
+        name: 'voice.ogg', sizeBytes: bytes.byteLength, sha256: digest } }, { status: 201 });
+    } };
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async url => String(url).includes('/getFile')
+      ? Response.json({ ok: true, result: { file_path: 'voice.ogg', file_size: bytes.byteLength } })
+      : new Response(bytes)));
+    const update = { update_id: 3, message: { message_id: 13, date: 1, chat: { id: 1001, type: 'private' },
+      from: { id: 7 }, caption: 'transcribe this', voice: { file_id: 'telegram-file-id', file_size: bytes.byteLength } } };
+    try {
+      expect((await state.send(update)).status).toBe(200);
+    } finally {
+      vi.stubGlobal('fetch', originalFetch);
+    }
+    const appended = state.collectorCalls[0].body.msg;
+    expect(bufferRequest.url).toBe('https://ingress-buffer/v1/artifacts');
+    expect(new TextDecoder().decode(bufferRequest.options.body)).toBe('sample audio');
+    expect(appended).toMatchObject({ caption: 'transcribe this', fileRef: { storage: 'ingress', name: 'voice.ogg' },
+      ingressArtifactManifest: { ownerProfileId: 'profile-1', mediaType: 'audio/ogg', sha256: digest } });
+    expect(appended.voice).toBeUndefined();
+    expect(JSON.stringify(state.collectorCalls)).not.toContain('telegram-file-id');
+  });
+
+  it('fails closed when media storage is off or unavailable', async () => {
+    const state = fixture();
+    const update = { update_id: 4, message: { message_id: 14, date: 1, chat: { id: 1001, type: 'private' },
+      from: { id: 7 }, voice: { file_id: 'telegram-file-id' } } };
+    expect((await state.send(update)).status).toBe(503);
+    state.env.MEDIA_PIPELINE = 'ingress-buffer';
+    state.env.INGRESS_BUFFER_TOKEN = 'buffer-secret';
+    state.env.INGRESS_BUFFER = { fetch: async () => { throw new Error('unavailable'); } };
+    expect((await state.send({ ...update, update_id: 5 })).status).toBe(503);
+    expect(state.collectorCalls).toEqual([]);
   });
 
   it('refuses unsigned ingress before collector and session mutations', async () => {

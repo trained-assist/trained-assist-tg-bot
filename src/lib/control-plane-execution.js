@@ -34,20 +34,38 @@ export async function runControlPlaneTask(env, input) {
   if (!env.INTAKE || !env.TG_SLICE || !input.requestId || !input.sessionId) throw new Error('control_plane_execution_not_configured');
   if (!config.allowedChats.includes(String(input.userId))) throw new Error('control_plane_chat_refused');
   if (config.chatProfiles[String(input.userId)] && config.chatProfiles[String(input.userId)] !== config.profileId) throw new Error('control_plane_profile_refused');
-  if (input.fileRefs?.length || input.fileBase64 || input.inputItems?.some(item => item.msg?.fileRef || item.msg?.transcriptRef || item.msg?.photo || item.msg?.document || item.msg?.voice || item.msg?.audio || item.msg?.video)) {
+  const inputItems = input.inputItems?.length ? input.inputItems : [];
+  const ingressManifestFor = item => {
+    const manifest = item?.msg?.ingressArtifactManifest;
+    if (!manifest || manifest.contractVersion !== 1 || manifest.ownerProfileId !== config.profileId
+      || typeof manifest.ref !== 'string' || !manifest.ref || typeof manifest.sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(manifest.sha256) || manifest.version !== manifest.sha256
+      || !Number.isSafeInteger(manifest.sizeBytes) || manifest.sizeBytes < 0
+      || typeof manifest.name !== 'string' || typeof manifest.mediaType !== 'string') return null;
+    return manifest;
+  };
+  const hasUnsupportedFiles = input.fileRefs?.length || input.fileBase64 || inputItems.some(item => {
+    const message = item.msg ?? {};
+    const hasMedia = message.fileRef || message.transcriptRef || message.photo || message.document || message.voice || message.audio || message.video;
+    return hasMedia && !ingressManifestFor(item);
+  });
+  if (hasUnsupportedFiles) {
     throw Object.assign(new Error('Вложения сохранены в накопителе, но их передача новому исполнителю ещё не подключена.'), { code: 'INTAKE_PREPARATION_FAILED' });
   }
   const scope = `${config.botUsername}:${config.profileId}:${input.userId}:${input.threadId ?? ''}`;
   const requestId = `tgcp-${await digest(`${scope}:${input.requestId}`)}`;
   const conversationId = `tg-${input.userId}${input.threadId == null ? '' : `-t${input.threadId}`}-s${(await digest(`${scope}:${input.sessionId}`)).slice(0, 24)}`;
-  const inputItems = input.inputItems?.length
-    ? input.inputItems.map(item => ({ text: assembleInput([item], false).task, artifactRefs: [] }))
+  const cpInputItems = inputItems.length
+    ? inputItems.map(item => {
+      const manifest = ingressManifestFor(item);
+      return { text: assembleInput([item], false).task, ...(manifest ? { artifacts: [manifest] } : { artifactRefs: [] }) };
+    })
     : [{ text: input.task ?? '', artifactRefs: [] }];
-  if (!inputItems.some(item => item.text)) throw new Error('control_plane_empty_input');
+  if (!cpInputItems.some(item => item.text)) throw new Error('control_plane_empty_input');
   const envelope = {
     contractVersion: 1, requestId, profileId: config.profileId,
     conversationRef: conversationId, sessionId: config.sessionId,
-    inputItems, waitTimeoutSec: null,
+    inputItems: cpInputItems, waitTimeoutSec: null,
     workStyle: ['explore', 'answer', 'auto'].includes(input.workStyle) ? input.workStyle : 'auto',
     workStyleSource: input.workStyleSource === 'explicit' ? 'explicit' : 'default',
   };
