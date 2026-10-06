@@ -129,7 +129,7 @@ export class MediaJob {
           const name = (file.file_name || (job.msg.photo ? 'photo.jpg' : job.msg.video ? 'video.mp4' : job.msg.voice || job.msg.audio ? 'audio.ogg' : 'file')).replace(/[^a-zA-Z0-9._() -]/g, '_').slice(0, 200);
           job.fileRef = await saveObject(this.env, job.username, job.id, bytes, name, file.mime_type || (job.msg.photo ? 'image/jpeg' : job.msg.voice ? 'audio/ogg' : job.msg.video ? 'video/mp4' : 'application/octet-stream'));
         }
-        job.stage = needsTranscript(job.msg) ? 'transcribe' : 'deliver';
+        job.stage = needsTranscript(job.msg) && this.env.EXECUTION_BACKEND !== 'control-plane' ? 'transcribe' : 'deliver';
       } else if (job.stage === 'transcribe') {
         const transcriptId = await digest(new TextEncoder().encode(`${job.id}:transcript`));
         const saved = await this.env.MEDIA_BUCKET.get(objectKey(job.username, transcriptId));
