@@ -99,6 +99,9 @@ export class BatchCollector {
    */
   async add(conversationId, item) {
     const existing = await this.store.load(conversationId);
+    if (item.sourceRef && existing?.items?.some(entry => entry.sourceRef === item.sourceRef)) {
+      return { batch: existing, item: existing.items.find(entry => entry.sourceRef === item.sourceRef), reason: 'duplicate_source' };
+    }
     if (existing?.status === BATCH_STATUS.launched) return { batch: existing, item: null, reason: 'batch_already_launched' };
     const batch = existing ?? { conversationId, status: BATCH_STATUS.collecting, items: [], createdAt: this.clock() };
     if (batch.items.length >= this.maxItems) return { batch, item: null, reason: 'batch_full' };
@@ -128,21 +131,22 @@ export class BatchCollector {
   static toInputItems(batch) {
     return batch.items.map(item => ({
       text: item.summary,
-      artifactRefs: item.artifactRefs ?? [],
+      ...(item.artifactManifest ? { artifacts: [item.artifactManifest] } : { artifactRefs: [] }),
     }));
   }
 }
 
 /**
  * Normalize one inbound element. `summary` is what the executor sees (text plus
- * a faithful description of the attachment); `artifactRefs` carries the file id
- * so the plane can fetch the bytes through the agreed source.
+ * a faithful description of the attachment); artifact manifests point to the
+ * immutable bytes in the passive ingress buffer.
  */
 export function normalizeItem(item, seq) {
   const base = {
     seq,
     type: item.type,
     receivedAt: item.receivedAt,
+    ...(typeof item.sourceRef === 'string' ? { sourceRef: item.sourceRef } : {}),
   };
   if (item.type === 'text') {
     return { ...base, text: item.text, summary: item.text, artifactRefs: [] };
@@ -151,13 +155,14 @@ export function normalizeItem(item, seq) {
     return {
       ...base,
       text: null,
-      fileId: item.fileId,
       durationSec: item.durationSec ?? null,
       mimeType: item.mimeType ?? 'audio/ogg',
-      summary: item.tooLarge
-        ? item.summary
-        : `Голосовое сообщение (${item.durationSec ?? '?'} сек), file_id=${item.fileId}`,
-      artifactRefs: item.tooLarge ? [] : [`tg-file:${item.fileId}`],
+      fileName: item.fileName ?? null,
+      summary: item.summary ?? `Голосовое сообщение (${item.durationSec ?? '?'} сек)`,
+      artifactManifest: item.artifactManifest ?? null,
+      artifactRefs: [],
+      mediaPending: !item.artifactManifest,
+      mediaError: item.mediaError ?? null,
       tooLarge: Boolean(item.tooLarge),
     };
   }
@@ -165,12 +170,14 @@ export function normalizeItem(item, seq) {
     return {
       ...base,
       text: null,
-      fileId: item.fileId,
       fileName: item.fileName ?? null,
       fileSize: item.fileSize ?? null,
       mimeType: item.mimeType ?? null,
-      summary: item.tooLarge ? item.summary : fileSummary(item),
-      artifactRefs: item.tooLarge ? [] : [`tg-file:${item.fileId}`],
+      summary: item.summary ?? fileSummary(item),
+      artifactManifest: item.artifactManifest ?? null,
+      artifactRefs: [],
+      mediaPending: !item.artifactManifest,
+      mediaError: item.mediaError ?? null,
       tooLarge: Boolean(item.tooLarge),
     };
   }
@@ -180,7 +187,7 @@ export function normalizeItem(item, seq) {
 function fileSummary(item) {
   const name = item.fileName ? `«${item.fileName}» ` : '';
   const size = item.fileSize != null ? `, ${formatBytes(item.fileSize)}` : '';
-  return `Файл ${name}(${item.mimeType ?? 'файл'}${size}), file_id=${item.fileId}`;
+  return `Файл ${name}(${item.mimeType ?? 'файл'}${size})`;
 }
 
 /**

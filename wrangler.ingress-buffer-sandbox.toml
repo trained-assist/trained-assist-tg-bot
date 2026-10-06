@@ -1,0 +1,14 @@
+name = "trained-assist-ingress-buffer-sandbox"
+main = "src/ingress-buffer/worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = false
+
+[observability]
+enabled = true
+
+[[r2_buckets]]
+binding = "INGRESS_MEDIA_BUCKET"
+bucket_name = "trained-assist-ingress-buffer-sandbox"
+
+# Provision INGRESS_BUFFER_TOKEN as a Worker secret. This worker has no
+# Telegram, Task Store, Workflow, or Runner bindings and cannot launch runs.
