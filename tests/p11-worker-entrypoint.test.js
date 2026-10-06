@@ -355,4 +355,22 @@ describe('P11 exported Worker composition', () => {
     const accepted = fake.eventLog.find(event => event.kind === 'task_accepted');
     expect(accepted.payload.inputItems).toHaveLength(2);
   });
+
+  it('refuses a batch with Telegram file ids without launching or consuming the batch', async () => {
+    env.TG_SLICE_MODE = 'batch';
+    await webhook(emulator.pushMessage({ chatId: 1001, text: 'Посмотри аудио' }));
+    await webhook(emulator.pushMessage({ chatId: 1001, voice: {
+      file_id: 'telegram-secret-file-id', duration: 4, mime_type: 'audio/ogg', file_size: 128,
+    } }));
+
+    const response = await webhook(emulator.pushUpdate({ callback_query: {
+      id: 'launch-media', data: 'tg-launch:tg-1001', message: { message_id: 10, chat: { id: 1001 } },
+    } }));
+    expect(response.status).toBe(200);
+    await worker.scheduled({}, env);
+
+    expect(fake.tasks).toHaveLength(0);
+    expect(JSON.parse(await env.TG_SLICE.get('batch:tg-1001')).status).toBe('collecting');
+    expect(emulator.messagesTo(1001).some(item => item.message.text.includes('пачка сохранена, задача не запускалась'))).toBe(true);
+  });
 });

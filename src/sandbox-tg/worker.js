@@ -76,6 +76,23 @@ export class TgSliceController {
     if (conversationId !== profile.conversationId) return [];
     const batch = await this.batchStore.load(conversationId);
     if (!batch || batch.status !== BATCH_STATUS.collecting) return [];
+    const unmaterialized = batch.items.find(item =>
+      Array.isArray(item.artifactRefs) && item.artifactRefs.some(ref => typeof ref === 'string' && ref.startsWith('tg-file:')),
+    );
+    if (unmaterialized) {
+      const requestId = messageKey(conversationId, batch.items.length + 1);
+      await this.outbox?.enqueue({
+        deliveryId: `media-unavailable:${requestId}`,
+        taskAcceptedAt: Date.now(),
+        conversationId,
+        userTaskId: `tg-batch:${requestId}`,
+        destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
+        requestId,
+        type: 'message',
+        text: 'Не удалось подготовить вложение для задачи. Файл пока не сохранён в хранилище; пачка сохранена, задача не запускалась.',
+      });
+      return [{ type: 'refused', reason: 'unmaterialized_media', userTaskId: null, conversationId }];
+    }
     batch.status = BATCH_STATUS.launched;
     batch.launchedAt = Date.now();
     await this.batchStore.save(batch);
