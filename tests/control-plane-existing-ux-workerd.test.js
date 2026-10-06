@@ -230,7 +230,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
   };
   const latestTelegramButton = callbackData => visibleTelegramMessages().reverse()
     .find(entry => entry.body.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data === callbackData));
+      .some(button => callbackData.endsWith('|')
+        ? button.callback_data.startsWith(callbackData) : button.callback_data === callbackData));
   const collector = async () => {
     const namespace = await runtime.getDurableObjectNamespace('INTAKE');
     return namespace.get(namespace.idFromName('42'));
@@ -280,7 +281,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
       const testText = boundary === 'pending-stop-no-launch' ? 'обычный текст после остановки' : 'новый текст после голосового';
       const acceptedText = await webhook(message(8, testText));
       expect(acceptedText.status).toBe(200);
-      expect(await acceptedText.json()).toMatchObject({ ok: true, buffered: 1, held: true });
+      expect(await acceptedText.json()).toMatchObject({ ok: true, buffered: 1 });
       const recoveredState = await state();
       if (boundary === 'pending-unsupported-cold') expect(recoveredState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
       else expect(recoveredState.get('cpUnresolvedLaunches')).toBeUndefined();
@@ -291,7 +292,24 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
       expect(recoveredState.get('buf').map(item => item.text)).toEqual([testText]);
       if (boundary === 'pending-unsupported-cold') {
         expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
-      } else expect(providerMessages.some(item => item.text.includes('Остановка задачи ещё не подтверждена'))).toBe(true);
+      } else if (boundary === 'pending-stop-no-launch') {
+        expect(providerMessages.some(item => item.text.includes('Это отдельная новая задача'))).toBe(true);
+        const launchBubble = visibleTelegramMessages().find(entry => entry.body.text.includes('Это отдельная новая задача'));
+        expect(latestTelegramButton('ws|auto|')).toBeDefined();
+        const beforeLaunchCount = cpIntakes.length;
+        const runButton = latestTelegramButton('ws|auto|');
+        expect(runButton).toBeDefined();
+        const independentLaunch = await webhook({ update_id: 9, callback_query: { id: 'workerd-independent-launch',
+          from: { id: 43, is_bot: false }, data: runButton.body.reply_markup.inline_keyboard.flat()
+            .find(button => button.callback_data.startsWith('ws|auto|')).callback_data,
+          message: { message_id: runButton.messageId, chat: { id: 42, type: 'private' } } } });
+        expect(independentLaunch.status).toBe(200);
+        expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
+        expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText]);
+        expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'scenario-stop-window' });
+        expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
+        return;
+      } else expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
       expect(providerMessages.some(item => item.text.includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
       expect(cpIntakes).toEqual([]);
       expect(legacyRequests).toEqual([]);
@@ -414,7 +432,6 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
         message: { message_id: confirmationButton.messageId, chat: { id: 42, type: 'private' } } } };
       expect((await webhook(confirmCallback)).status).toBe(200);
       expect(latestTelegramButton('intake_stopyes|new')).toBeUndefined();
-      expect(latestTelegramButton('intake_stopnew')).toBeUndefined();
       expect(visibleTelegramMessages().some(entry => entry.messageId === confirmationButton.messageId
         && entry.body.text.includes('старая может продолжить работу'))).toBe(true);
       expect(cpStopRequests.length).toBeGreaterThanOrEqual(1);
