@@ -247,8 +247,11 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('busy', true);
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
-    const buttons = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data.split('|')[0]);
-    expect(buttons).toEqual(expect.arrayContaining(['intake_run', 'intake_parallel', 'input_draft']));
+    const keyboard = send.mock.calls.at(-1)[3].flat();
+    const buttons = keyboard.map(button => button.callback_data.split('|')[0]);
+    expect(keyboard.map(button => button.callback_data)).toEqual(expect.arrayContaining([
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_parallel', 'input_draft',
+    ]));
     expect(buttons.includes('intake_stopsupp')).toBe(stopEnabled === 'true');
     expect(buttons.includes('intake_stopnew')).toBe(stopEnabled === 'true');
   });
@@ -388,7 +391,9 @@ describe('existing collector control-plane ownership', () => {
     }));
     await owner._showCollector(42, 2, 3);
     request.mockResolvedValueOnce({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
-    const queued = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'), callbackData: 'intake_run', username: 'test-profile' }));
+    const revision = await storage.get('draftRevision');
+    const queued = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'),
+      callbackData: `ws|explore|${revision}`, username: 'test-profile' }));
     expect((await queued.json()).queued).toBe(true);
     expect(handleMessage).not.toHaveBeenCalled();
     const second = { ...receipt, userTaskId: 'ut-second', requestId: 'scoped-second' };
@@ -435,14 +440,52 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage } = fixture();
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
-    expect(send.mock.calls[0][3]).toEqual([[{ text: '▶️ Запустить', callback_data: 'intake_run' },
-      { text: '📋 Посмотреть input', callback_data: 'input_draft' }]]);
+    expect(send.mock.calls[0][3].flat().map(button => button.callback_data)).toEqual([
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'input_draft',
+    ]);
     send.mockClear();
     const legacy = new IntakeBuffer({ storage }, { BOT_TOKEN: 'legacy-token' });
     await storage.delete('collectorMsgId');
     await legacy._showCollector(42, 1, 1);
     expect(send.mock.calls[0][3]).toEqual([[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
       { text: '📋 Посмотреть input', callback_data: 'input_draft' }]]);
+  });
+
+  it('launches the selected style once from the exact current draft revision', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await owner.fetch(rpc('/append', { text: 'Сравни два варианта', msg: items[0].msg, telegramUpdateId: 100 }));
+    await owner._showCollector(42, 1, 1);
+    const revision = await storage.get('draftRevision');
+    const source = { sourceMessageId: await storage.get('collectorMsgId'), callbackData: `ws|explore|${revision}`, username: 'test-profile' };
+    handleMessage.mockImplementationOnce(async (message, _env, options) => {
+      expect(message.intakeItems.map(item => item.text)).toEqual(['Сравни два варианта']);
+      expect(options.workStyle).toBe('explore');
+      expect(options.workStyleSource).toBe('explicit');
+      await snapshot(owner, receipt, message.intakeItems);
+      await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+      options.onRunAccepted({ taskId: receipt.userTaskId, userTaskId: receipt.userTaskId,
+        requestId: receipt.requestId, durable: true, controlPlane: true });
+    });
+    expect((await owner.fetch(rpc('/flush', source))).status).toBe(200);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await storage.get('launchWorkStyle')).toBeUndefined();
+    expect((await owner.fetch(rpc('/flush', source))).status).toBe(409);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a style callback after any new input changes the draft revision', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
+    await owner._showCollector(42, 1, 1);
+    const oldRevision = await storage.get('draftRevision');
+    await owner.fetch(rpc('/append', { text: 'second', msg: { chat: { id: 42 }, message_id: 2, text: 'second' }, telegramUpdateId: 101 }));
+    const result = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'),
+      callbackData: `ws|answer|${oldRevision}`, username: 'test-profile' }));
+    expect(result.status).toBe(409);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('launches a durably appended force word while refusing source-less external flush', async () => {

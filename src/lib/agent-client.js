@@ -56,9 +56,9 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, workStyle, workStyleSource, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
   if (env.EXECUTION_BACKEND === 'control-plane') {
-    return runControlPlaneTask(env, { userId, username, task, sessionId, initialMsgId, fileBase64, fileRefs, inputItems, requestId, threadId });
+    return runControlPlaneTask(env, { userId, username, task, sessionId, initialMsgId, fileBase64, fileRefs, inputItems, requestId, threadId, workStyle, workStyleSource });
   }
   const audience = resolveAudience(env);
   // Send chatId alongside legacy userId — agent's /run now accepts either (P1-B of
