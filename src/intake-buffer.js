@@ -2456,6 +2456,70 @@ export class IntakeBuffer {
     }
   }
 
+  async _queueControlPlaneCollectorCleanup(requestId, receipt, row, snapshot) {
+    const messageId = snapshot.body.initialMsgId;
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
+    const message = snapshot.items.at(-1)?.msg;
+    const intent = { requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId,
+      generation: row.generation, messageId, chatId: message.chat.id,
+      text: row.status === 'done' ? '✅ Готово. Результат отправлен отдельным сообщением.'
+        : row.status === 'failed' ? '❌ Задача завершилась ошибкой. Подробности отправлены отдельным сообщением.'
+          : '⛔ Задача отменена. Статус отправлен отдельным сообщением.' };
+    await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      if (await tx.get(`input-message:${messageId}`) !== requestId) return;
+      const key = `cp-collector-cleanup:${requestId}`;
+      if ((await tx.get(key))?.state === 'done') return;
+      await tx.put(key, { ...intent, state: 'pending' });
+      const pending = (await tx.get('cpCollectorCleanupRequests')) || [];
+      await tx.put('cpCollectorCleanupRequests', [...new Set([...pending, requestId])]);
+    }));
+    await this._recoverControlPlaneCollectorCleanup();
+  }
+
+  async _recoverControlPlaneCollectorCleanup() {
+    const previous = this.uiMutation;
+    let release;
+    this.uiMutation = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      const selected = await this._exclusive(async () => this.state.storage.transaction(async tx => {
+        const pending = (await tx.get('cpCollectorCleanupRequests')) || [];
+        const batch = pending.slice(0, 8);
+        if (batch.length) await tx.put('cpCollectorCleanupRequests', [...pending.slice(8), ...batch]);
+        return batch;
+      }));
+      for (const requestId of selected) {
+        const key = `cp-collector-cleanup:${requestId}`;
+        const intent = await this.state.storage.get(key);
+        if (intent?.state !== 'pending' || intent.profileId !== controlPlaneClient(this.env).config.profileId
+            || await this.state.storage.get(`input-message:${intent.messageId}`) !== requestId) continue;
+        const result = await editMessage(this.env.BOT_TOKEN, intent.chatId, intent.messageId, intent.text,
+          { reply_markup: { inline_keyboard: STATUS_BTN } }).catch(() => null);
+        if (!result?.ok && !(result?.error_code === 400 && /message is not modified|message to edit not found/i.test(result.description || ''))) continue;
+        await this._exclusive(async () => this.state.storage.transaction(async tx => {
+          const current = await tx.get(key);
+          if (JSON.stringify(current) !== JSON.stringify(intent)) return;
+          await tx.put(key, { ...intent, state: 'done' });
+          await tx.put('cpCollectorCleanupRequests', ((await tx.get('cpCollectorCleanupRequests')) || []).filter(value => value !== requestId));
+          if (await tx.get('preparingMsgId') === intent.messageId) await tx.delete('preparingMsgId');
+        }));
+      }
+    } finally { release(); }
+    await this._ensureControlPlaneCollectorCleanupAlarm();
+  }
+
+  async _ensureControlPlaneCollectorCleanupAlarm() {
+    if (this.env.EXECUTION_BACKEND !== 'control-plane'
+        || !((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) return;
+    await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+  }
+
+  async _ensureAlarmBy(retryAt) {
+    const now = Date.now();
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+  }
+
   async _pollControlPlaneTasks({ launch = false } = {}) {
     if (this.cpDispatches) return false;
     try { await this._recoverControlPlaneLaunch(); } catch { return false; }
@@ -2540,6 +2604,7 @@ export class IntakeBuffer {
         try { await outbox.drain(); } catch { if (!deliveryIndependent) return false; }
         const delivered = await outbox.load(deliveryId).catch(() => null);
         if (!deliveryIndependent && (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent')) return false;
+        await this._queueControlPlaneCollectorCleanup(requestId, receipt, row, snapshot);
         terminal.push(requestId);
       }
       const released = await this._exclusive(async () => {
@@ -2562,8 +2627,9 @@ export class IntakeBuffer {
         return true;
       });
       if (released) await this._afterBusyRelease();
+      await this._ensureControlPlaneCollectorCleanupAlarm();
       if (controlPlaneStopDisabled(this.env) && (await this.state.storage.get('cpStopWindow'))?.pending) {
-        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       }
       return released;
     } catch {
@@ -2624,10 +2690,19 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    try {
+      await this._alarm();
+    } finally {
+      await this._ensureControlPlaneCollectorCleanupAlarm();
+    }
+  }
+
+  async _alarm() {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
+      await this._recoverControlPlaneCollectorCleanup();
       const stopWindow = await this.state.storage.get('cpStopWindow');
       if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
-        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       } else if (stopWindow?.pending) {
         try {
           const result = await this._driveControlPlaneStop({ username: stopWindow.username,

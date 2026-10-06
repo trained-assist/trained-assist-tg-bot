@@ -26,11 +26,22 @@ function existingUxWorkerdBundle() {
       export class IntakeBuffer extends RealIntakeBuffer {
         async fetch(request) {
           const path = new URL(request.url).pathname;
+          if (path === '/scenario-cleanup-prepare') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            const { intent, alarmAt, busy, stopWindow } = await request.json();
+            await this.state.storage.put('cpCollectorCleanupRequests', [intent.requestId]);
+            await this.state.storage.put('cp-collector-cleanup:' + intent.requestId, intent);
+            await this.state.storage.put('input-message:' + intent.messageId, intent.requestId);
+            if (busy) await this.state.storage.put('busy', true);
+            if (stopWindow) await this.state.storage.put('cpStopWindow', stopWindow);
+            await this.state.storage.setAlarm(alarmAt);
+            return Response.json({ alarmAt: await this.state.storage.getAlarm() });
+          }
           if (path === '/scenario-state' || path === '/scenario-alarm') {
             if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
             if (path === '/scenario-alarm') await this.alarm();
             const rows = [...this.state.storage.sql.exec('SELECT 1 AS sqliteWitness')];
-            return Response.json({ sqliteWitness: rows[0].sqliteWitness,
+            return Response.json({ sqliteWitness: rows[0].sqliteWitness, alarmAt: await this.state.storage.getAlarm(),
               entries: [...await this.state.storage.list()] });
           }
           if (path === '/scenario-seed-pending-unsupported') {
@@ -86,7 +97,59 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real earlier Durable Object alarm through the %s branch', async branch => {
+  const persistRoot = await mkdtemp(join(tmpdir(), 'tg-cleanup-alarm-workerd-'));
+  const env = makeEnv({ EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_URL: 'https://cp.test',
+    TG_SLICE_STOP_ENABLED: 'false' });
+  const edits = [];
+  const options = { modules: true, script: existingUxWorkerdBundle(), compatibilityDate: '2024-01-01',
+    compatibilityFlags: ['nodejs_compat'], kvNamespaces: ['TG_SLICE', 'SESSIONS'],
+    kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
+    bindings: Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string')),
+    durableObjects: { INTAKE: { className: 'IntakeBuffer', useSQLite: true },
+      TG_DELIVERY_OWNER: { className: 'TgDeliveryOwner', useSQLite: true } },
+    outboundService: async request => {
+      const url = new URL(request.url);
+      expect(url.hostname).toBe('api.telegram.org');
+      expect(url.pathname.endsWith('/editMessageText')).toBe(true);
+      edits.push(await request.json());
+      return Response.json({ ok: false, error_code: 503, description: 'Offline edit acknowledgement unavailable' }, { status: 503 });
+    },
+  };
+  let runtime = new Miniflare(options);
+  const probe = async (path, body) => {
+    const namespace = await runtime.getDurableObjectNamespace('INTAKE');
+    const response = await namespace.get(namespace.idFromName('42')).fetch('https://intake/' + path, {
+      method: body ? 'POST' : 'GET', headers: { 'x-scenario-probe': 'offline-probe' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    expect(response.status).toBe(200);
+    return response.json();
+  };
+  try {
+    const alarmAt = Date.now() + 30000;
+    const intent = { requestId: 'cleanup-earlier-alarm', profileId: env.CONTROL_PLANE_PROFILE,
+      state: 'pending', messageId: 99, chatId: 42, text: 'Terminal collector status' };
+    const stopWindow = branch === 'stop-disabled' ? { pending: true, intentId: 'deferred-stop' } : null;
+    expect(await probe('scenario-cleanup-prepare', { intent, alarmAt, busy: branch === 'busy', stopWindow })).toEqual({ alarmAt });
+    await runtime.dispose();
+    runtime = new Miniflare(options);
+    expect((await probe('scenario-state')).alarmAt).toBe(alarmAt);
+    const after = await probe('scenario-alarm');
+    expect(after.sqliteWitness).toBe(1);
+    expect(edits).toHaveLength(1);
+    expect(after.alarmAt).toBe(alarmAt);
+    expect(new Map(after.entries).get('cp-collector-cleanup:' + intent.requestId)).toEqual(intent);
+    expect(new Map(after.entries).get('cpCollectorCleanupRequests')).toEqual([intent.requestId]);
+    if (stopWindow) expect(new Map(after.entries).get('cpStopWindow')).toEqual(stopWindow);
+    if (branch === 'busy') expect(new Map(after.entries).get('busy')).toBe(true);
+  } finally {
+    await runtime.dispose();
+    await rm(persistRoot, { recursive: true, force: true });
+  }
+});
+
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -359,10 +422,16 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
     const before = await state();
     expect(before.get('busy')).toBe(true);
     const accepted = before.get(`cp-acceptance:${admitted.requestId}`);
-    if (boundary === 'vertical') {
+    if (boundary === 'vertical' || boundary === 'collector-cleanup') {
       expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
       expect(cpRoutes).toEqual([{ taskId: 'ut-workerd-scenario', continue: true }]);
       expect(dispatchCount).toBe(1);
+      if (boundary === 'collector-cleanup') {
+        expect(snapshot.body.initialMsgId).toBe(collectorId);
+        await runtime.dispose();
+        runtime = new Miniflare(runtimeOptions);
+        expect((await state()).get('busy')).toBe(true);
+      }
       completedTasks.add('ut-workerd-scenario');
       const reconciled = await runtime.dispatchFetch('https://worker.test/scenario-reconcile', {
         headers: { 'x-scenario-probe': 'offline-probe' },
@@ -370,6 +439,26 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'stop-unconfirm
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
       await terminalProof();
+      if (boundary === 'collector-cleanup') {
+        await state(true);
+        const finalized = providerEdits.filter(edit => edit.message_id === collectorId
+          && edit.text === '✅ Готово. Результат отправлен отдельным сообщением.');
+        expect(finalized).toHaveLength(1);
+        expect(finalized[0].reply_markup).toEqual({ inline_keyboard: [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] });
+        const terminal = await terminalProof();
+        await runtime.dispose();
+        runtime = new Miniflare(runtimeOptions);
+        await state(true);
+        expect((await webhook(launch)).status).toBe(200);
+        expect(await terminalProof()).toEqual(terminal);
+        expect(providerEdits.filter(edit => edit.message_id === collectorId
+          && edit.text === finalized[0].text)).toHaveLength(1);
+        expect(cpIntakes).toHaveLength(1);
+        expect(dispatchCount).toBe(1);
+        expect(providerMessages).toHaveLength(2);
+        const restored = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
+        expect(await restored.json()).toEqual(snapshot);
+      }
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;
