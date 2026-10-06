@@ -19,7 +19,7 @@ vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMe
 vi.mock('../src/intake-preflight.js', () => ({ preflight: (...a) => preflight(...a) }));
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(),
-  stopTask: vi.fn().mockResolvedValue({ killed: 0 }),
+  stopTask: vi.fn().mockResolvedValue({ killed: 0, confirmed: true }),
   runTask: vi.fn().mockResolvedValue({}),
   checkCompleteness: vi.fn().mockResolvedValue({ level: 'clear', complete: true }),
   getProjectDecision: vi.fn().mockResolvedValue({ action: 'auto', choices: [] }),
@@ -108,7 +108,7 @@ beforeEach(async () => {
   };
   await setSession(env.SESSIONS, chatId, { username: 'owner', activeSessionId: 's-1', lastSessionId: 's-1', lastMessageAt: Date.now() });
   preflight.mockImplementation(async msg => ({ msg }));
-  stopTask.mockResolvedValue({ killed: 0 });
+  stopTask.mockResolvedValue({ killed: 0, confirmed: true });
   let n = 0;
   handleMessage.mockImplementation(async (msg, _env, opts) => {
     opts?.onRunAccepted?.({ requestId: `req-${++n}`, durable: true, taskId: `task-${n}` });
@@ -143,7 +143,8 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     expect((await store().get('buf')).map(i => i.text)).toEqual(['найди отели в Казани', 'и ещё в Самаре']);
     // The collector says so and offers ▶️ (not ↩️) — and no misleading «🤷 нет задач».
     const c = lastCollector();
-    expect(c.text).toMatch(/Остановлено\. 2 сообщений ждут/);
+    expect(c.text).toMatch(/2 сообщений отложены/);
+    expect(c.text).toMatch(/статус остановки текущей задачи проверяется отдельно/i);
     expect(c.buttons).toContain('intake_run');
     expect(c.buttons).not.toContain('intake_cancel');
     expect(tg.some(e => /Нет активных задач/.test(e.text || ''))).toBe(false);
@@ -172,7 +173,7 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     await tap('intake_run');
     expect(await store().get('launchAfterRelease')).toBe(true);
 
-    stopTask.mockResolvedValueOnce({ killed: 1 });
+    stopTask.mockResolvedValueOnce({ killed: 1, confirmed: true });
     tg.length = 0;
     await stopCmd();
     await drain();
@@ -185,7 +186,7 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     expect(res.released).toBe(true);
     expect(handleMessage).toHaveBeenCalledTimes(1);          // no second run
     expect((await store().get('buf')).map(i => i.text)).toEqual(['ещё одно', 'и ещё']);
-    expect(lastCollector().text).toMatch(/Остановлено\. 2 сообщений ждут/);
+    expect(lastCollector().text).toMatch(/2 сообщений отложены/);
     await fireAlarmAt(Date.now() + 5 * 60_000);
     expect(handleMessage).toHaveBeenCalledTimes(1);
   });
@@ -212,7 +213,7 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     await drain();
     expect(stopTask).toHaveBeenCalledTimes(1);
     expect(tg.some(e => e.kind === 'edit' && e.msgId === 321 && /очередь не запустится/.test(e.text))).toBe(true);
-    expect(lastCollector().text).toMatch(/Остановлено\. 1 сообщений ждут/);
+    expect(lastCollector().text).toMatch(/1 сообщений отложены/);
     await runFinished('req-z');
     await fireAlarmAt(Date.now() + 10 * 60_000);
     expect(handleMessage).not.toHaveBeenCalled();
@@ -253,6 +254,6 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     expect(await store().get('debounceExpiresAt')).toBeUndefined();
     await fireAlarmAt(Date.now() + 5 * 60_000);
     expect(handleMessage).not.toHaveBeenCalled();
-    expect(lastCollector().text).toMatch(/Остановлено/);
+    expect(lastCollector().text).toMatch(/статус остановки текущей задачи проверяется отдельно/i);
   });
 });

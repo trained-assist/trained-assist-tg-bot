@@ -119,7 +119,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
     // Epic #1527 PR1 (red-first F1): the run is in flight — busy must OUTLIVE
@@ -330,7 +330,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });
@@ -1243,7 +1243,7 @@ describe('queued launch has an «↩️ Отменить передачу аге
 describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
   const stopReq = () => new Request('https://intake/stop', { method: 'POST', body: JSON.stringify({ replyTo: 7 }) });
 
-  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector «Остановлено»', async () => {
+  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector does not claim task stopped yet', async () => {
     const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     await io.fetch(appendReq('сделай отчёт'));
     await state.storage.delete('receiptDue');
@@ -1258,7 +1258,8 @@ describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(await state.storage.get('stopped')).toBeTruthy();
     const texts = [...sendMessageWithKeyboard.mock.calls.map(c => c[2]), ...editMessage.mock.calls.map(c => c[3])];
-    expect(texts.some(t => /Остановлено\. 1 сообщений ждут/.test(t))).toBe(true);
+    expect(texts.some(t => /1 сообщений отложены/.test(t))).toBe(true);
+    expect(texts.some(t => /статус остановки текущей задачи проверяется отдельно/i.test(t))).toBe(true);
   });
 
   it('while busy: keeps the busy safety poll, drops launchAfterRelease; run-finished releases without launching', async () => {

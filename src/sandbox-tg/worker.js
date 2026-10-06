@@ -13,6 +13,7 @@ import { ConversationSession, ConversationIndex, KvConversationStore, MemoryConv
 import { TgDeliveryOutbox } from './delivery.js';
 import { logTg } from './log.js';
 import { hasUnknownOutcome, isTerminalTaskStatus } from './contract.js';
+import { MediaIntakeError, prepareTelegramArtifact } from './media-intake.js';
 
 export const MODE = { direct: 'direct', batch: 'batch' };
 
@@ -26,6 +27,7 @@ export class TgSliceController {
     this.mode = options.mode ?? MODE.direct;
     this.maxTurns = options.maxTurns ?? 32;
     this.logSink = options.logSink;
+    this.mediaIntake = options.mediaIntake;
   }
 
   log(fields) {
@@ -76,6 +78,23 @@ export class TgSliceController {
     if (conversationId !== profile.conversationId) return [];
     const batch = await this.batchStore.load(conversationId);
     if (!batch || batch.status !== BATCH_STATUS.collecting) return [];
+    const unmaterialized = batch.items.find(item => item.mediaPending === true
+      || (['voice', 'document', 'photo'].includes(item.type) && !item.artifactManifest)
+      || (Array.isArray(item.artifactRefs) && item.artifactRefs.some(ref => typeof ref === 'string' && ref.startsWith('tg-file:'))));
+    if (unmaterialized) {
+      const requestId = messageKey(conversationId, batch.items.length + 1);
+      await this.outbox?.enqueue({
+        deliveryId: `media-unavailable:${requestId}`,
+        taskAcceptedAt: Date.now(),
+        conversationId,
+        userTaskId: `tg-batch:${requestId}`,
+        destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
+        requestId,
+        type: 'message',
+        text: 'Вложение ещё не сохранено в буфере. Черновик сохранён; задачу не запускал. Проверь доступность медиа и нажми запуск повторно.',
+      });
+      return [{ type: 'refused', reason: 'unmaterialized_media', userTaskId: null, conversationId }];
+    }
     batch.status = BATCH_STATUS.launched;
     batch.launchedAt = Date.now();
     await this.batchStore.save(batch);
@@ -119,7 +138,7 @@ export class TgSliceController {
   }
 
   async handleMessage(profile, message, update) {
-    if (this.mode === MODE.batch) return this.handleBatch(profile, message);
+    if (this.mode === MODE.batch) return this.handleBatch(profile, message, update);
     return this.handleDirect(profile, message, update);
   }
 
@@ -179,35 +198,57 @@ export class TgSliceController {
     return effects;
   }
 
-  async handleBatch(profile, message) {
+  async handleBatch(profile, message, update = {}) {
     const effects = [];
     const collector = new BatchCollector(this.batchStore, { maxItems: this.profile?.maxBatchItems ?? 20 });
-    const batch = (await collector.load(profile.conversationId)) ?? { conversationId: profile.conversationId, status: BATCH_STATUS.collecting, items: [], createdAt: Date.now() };
     const attachment = attachmentOf(message);
     if (attachment.type === 'text' && attachment.text) {
-      const result = await collector.add(profile.conversationId, { type: 'text', text: attachment.text, receivedAt: Date.now() });
+      const result = await collector.add(profile.conversationId, { type: 'text', text: attachment.text, sourceRef: profile.ingressRef, receivedAt: Date.now() });
       if (result.item) effects.push({ type: 'batch_item', item: result.item });
     } else if (attachment.type === 'voice' && attachment.fileId) {
       if (isTooLarge(attachment.fileSize)) {
         effects.push({ type: 'refused', text: tooLargeMessage(attachment.fileName, 5 * 1024 * 1024) });
         return effects;
       }
-      const result = await collector.add(profile.conversationId, { type: 'voice', fileId: attachment.fileId, durationSec: attachment.durationSec, receivedAt: Date.now() });
+      const media = await this.prepareMedia(profile, message, attachment);
+      const result = await collector.add(profile.conversationId, {
+        type: 'voice', sourceRef: profile.ingressRef, durationSec: attachment.durationSec,
+        fileName: attachment.fileName ?? 'voice.ogg', fileSize: attachment.fileSize, mimeType: attachment.mimeType,
+        artifactManifest: media.manifest, mediaError: media.error, receivedAt: Date.now(),
+      });
       if (result.item) effects.push({ type: 'batch_item', item: result.item });
+      if (media.error) effects.push({ type: 'media_pending', reason: media.error });
     } else if ((attachment.type === 'document' || attachment.type === 'photo') && attachment.fileId) {
       if (isTooLarge(attachment.fileSize)) {
         effects.push({ type: 'refused', text: tooLargeMessage(attachment.fileName) });
         return effects;
       }
-      const result = await collector.add(profile.conversationId, { type: attachment.type, fileId: attachment.fileId, fileName: attachment.fileName, fileSize: attachment.fileSize, mimeType: attachment.mimeType, receivedAt: Date.now() });
+      const media = await this.prepareMedia(profile, message, attachment);
+      const result = await collector.add(profile.conversationId, {
+        type: attachment.type, sourceRef: profile.ingressRef, fileName: attachment.fileName,
+        fileSize: attachment.fileSize, mimeType: attachment.mimeType,
+        artifactManifest: media.manifest, mediaError: media.error, receivedAt: Date.now(),
+      });
       if (result.item) effects.push({ type: 'batch_item', item: result.item });
+      if (media.error) effects.push({ type: 'media_pending', reason: media.error });
     } else {
       effects.push({ type: 'unsupported', reason: attachment.type });
     }
-    if (batch.status === BATCH_STATUS.collecting && batch.items.length > 0) {
-      effects.push({ type: 'collector', text: `Накоплено: ${batch.items.length} элементов`, markup: launchButton(batch) });
+    const currentBatch = await collector.load(profile.conversationId);
+    if (currentBatch?.status === BATCH_STATUS.collecting && currentBatch.items.length > 0) {
+      effects.push({ type: 'collector', text: `Накоплено: ${currentBatch.items.length} элементов`, markup: launchButton(currentBatch) });
     }
     return effects;
+  }
+
+  async prepareMedia(profile, message, attachment) {
+    if (typeof this.mediaIntake !== 'function') return { manifest: null, error: 'media_buffer_unavailable' };
+    try {
+      return { manifest: await this.mediaIntake({ profile, message, attachment }), error: null };
+    } catch (error) {
+      this.log({ event: 'tg.media.buffer_failed', profileId: profile.profileId, reason: error instanceof MediaIntakeError ? error.message : 'storage_unavailable' });
+      return { manifest: null, error: error instanceof MediaIntakeError ? error.message : 'storage_unavailable' };
+    }
   }
 
   /** Background reconciliation: retry deliveries + push terminal results. */

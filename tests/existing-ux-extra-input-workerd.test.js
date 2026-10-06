@@ -17,6 +17,10 @@ function bundle() {
     export { TgDeliveryOwner };
     export class IntakeBuffer extends RealIntakeBuffer {
       async fetch(request) {
+        if (new URL(request.url).pathname === '/offline-draft-revision') {
+          if (request.headers.get('x-offline-probe') !== 'fixture') return new Response(null, {status:401});
+          return Response.json({ draftRevision: await this.state.storage.get('draftRevision') });
+        }
         if (new URL(request.url).pathname === '/offline-alarm') {
           if (request.headers.get('x-offline-probe') !== 'fixture') return new Response(null, {status:401});
           await this.alarm();
@@ -108,6 +112,13 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(response.status).toBe(200);
     return response.json();
   };
+  const draftRevision = async () => {
+    const namespace = await runtime.getDurableObjectNamespace('INTAKE');
+    const response = await namespace.get(namespace.idFromName('42')).fetch('https://intake/offline-draft-revision', {
+      headers: { 'x-offline-probe': 'fixture' } });
+    expect(response.status).toBe(200);
+    return (await response.json()).draftRevision;
+  };
   const alarm = async () => {
     const namespace = await runtime.getDurableObjectNamespace('INTAKE');
     const response = await namespace.get(namespace.idFromName('42')).fetch('https://intake/offline-alarm', {
@@ -152,11 +163,11 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(collected.collectorDelivery).toMatchObject({ state: 'sent', messageId: 701 });
     expect(sends).toHaveLength(1);
     const buttons = sends[0].reply_markup.inline_keyboard.flat().map(button => button.callback_data);
-    expect(buttons).toContain('intake_run');
+    expect(buttons.filter(data => data.startsWith('ws|'))).toHaveLength(3);
     expect(buttons.some(data => data.startsWith('intake_stop'))).toBe(false);
     if (boundary === 'after-collector') expect(edits.some(edit => edit.message_id === 701)).toBe(true);
     const launch = { update_id: 202, callback_query: { id: 'offline-extra-input-launch',
-      from: { id: 43, is_bot: false }, data: 'intake_run',
+      from: { id: 43, is_bot: false }, data: `ws|answer|${await draftRevision()}`,
       message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
     await sendUpdate(launch);
     await sendUpdate(launch);

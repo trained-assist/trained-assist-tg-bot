@@ -48,6 +48,8 @@ export async function runControlPlaneTask(env, input) {
     contractVersion: 1, requestId, profileId: config.profileId,
     conversationRef: conversationId, sessionId: config.sessionId,
     inputItems, waitTimeoutSec: null,
+    workStyle: ['explore', 'answer', 'auto'].includes(input.workStyle) ? input.workStyle : 'auto',
+    workStyleSource: input.workStyleSource === 'explicit' ? 'explicit' : 'default',
   };
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(input.userId, input.threadId)));
   const response = await stub.fetch('https://intake/snapshot', {
@@ -65,7 +67,8 @@ export async function runControlPlaneTask(env, input) {
   let receipt = (await persisted.json()).receipt;
   if (!receipt) {
     receipt = await client.intake({ requestId: saved.requestId, conversationId: saved.conversationRef,
-      sessionId: saved.sessionId, inputItems: saved.inputItems, waitTimeoutSec: saved.waitTimeoutSec });
+      sessionId: saved.sessionId, inputItems: saved.inputItems, waitTimeoutSec: saved.waitTimeoutSec,
+      workStyle: saved.workStyle ?? 'auto', workStyleSource: saved.workStyleSource ?? 'default' });
     const accepted = await stub.fetch('https://intake/cp-acceptance', {
       method: 'POST', body: JSON.stringify({ requestId, receipt }),
     });

@@ -18,7 +18,7 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile' }, route, request, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, stopTargets }),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -83,6 +83,28 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('keeps a visible receipt scheduled when a stop-launch hold blocks auto-dispatch', async () => {
+    const { owner, storage } = fixture();
+    owner.env.BOT_TOKEN = 'test-bot-token';
+    owner.env.TG_SLICE_STOP_ENABLED = 'false';
+    await storage.put('stopLaunch', { mode: 'new', at: Date.now() });
+    const response = await owner.fetch(rpc('/append', {
+      text: 'ping', msg: { chat: { id: 42 }, message_id: 17, text: 'ping' }, telegramUpdateId: 117,
+    }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ buffered: 1 });
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
+    expect(await storage.getAlarm()).toBe(await storage.get('receiptDue'));
+
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][2]).toContain('1 сообщ.');
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
   it.each(['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'])
   ('explicit false refuses %s without changing durable stop intent or input', async path => {
     const { owner, storage } = fixture();
@@ -247,8 +269,11 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('busy', true);
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
-    const buttons = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data.split('|')[0]);
-    expect(buttons).toEqual(expect.arrayContaining(['intake_run', 'intake_parallel', 'input_draft']));
+    const keyboard = send.mock.calls.at(-1)[3].flat();
+    const buttons = keyboard.map(button => button.callback_data.split('|')[0]);
+    expect(keyboard.map(button => button.callback_data)).toEqual(expect.arrayContaining([
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_parallel', 'input_draft',
+    ]));
     expect(buttons.includes('intake_stopsupp')).toBe(stopEnabled === 'true');
     expect(buttons.includes('intake_stopnew')).toBe(stopEnabled === 'true');
   });
@@ -263,16 +288,17 @@ describe('existing collector control-plane ownership', () => {
     expect(buttons).toEqual(expect.arrayContaining(['intake_stopsupp', 'intake_stopnew']));
   });
 
-  it('shows unconfirmed stop even with held input rather than claiming the task stopped', async () => {
+  it('offers an independent launch while stop reconciliation is unresolved', async () => {
     const { owner, storage, source } = await stopFixture();
     await owner.fetch(rpc('/stop', source));
     await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
     await owner._showCollector(42, 1, 2, null, '⛔ Остановлено');
-    expect(send.mock.calls.at(-1)[2]).toBe('⏳ Остановка текущей задачи ещё не подтверждена. 1 сообщений сохранены; новый запуск не выполняется.');
+    expect(send.mock.calls.at(-1)[2]).toBe('⏳ Старая задача ещё сверяется. Этот независимый ввод можно запустить отдельно.');
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
-  it('retains stopped task identities across terminal polling and restart; pending stop blocks new input launch', async () => {
+  it('retains stopped task identities across terminal polling and restart; independent input launches without waiting', async () => {
     const { owner, storage, env, source } = await stopFixture();
     env.SESSIONS = owner.env.SESSIONS;
     expect((await owner.fetch(rpc('/stop', source))).status).toBe(200);
@@ -281,15 +307,31 @@ describe('existing collector control-plane ownership', () => {
     expect(route).not.toHaveBeenCalled();
     expect(await storage.get('cpBusyRequests')).toBeUndefined();
     const restarted = new IntakeBuffer({ storage }, env);
+    stopTargets.mockImplementationOnce(async input => ({ snapshotId: 'snapshot-test', profileId: receipt.profileId,
+      conversationId: input.conversationId, tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
+        profileId: receipt.profileId, receiptId: 'receipt:test' }], unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown' }));
     const targets = await (await restarted.fetch(rpc('/cp-stop-targets', source))).json();
     expect(targets.tasks).toEqual([{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
       profileId: receipt.profileId, receiptId: 'receipt:test' }]);
-    expect(targets.unresolved).toBe(false);
+    expect(targets.unresolved).toBe(true);
     await restarted.fetch(rpc('/append', { text: 'запускай', msg: { chat: { id: 42 }, message_id: 2, text: 'запускай' }, telegramUpdateId: 102, flush: true }));
     expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true });
     expect(await storage.get('stopped')).toBeUndefined();
     expect((await storage.get('buf')) || []).toEqual([]);
-    expect((await storage.get('cpStopWindow')).pending).toBe(false);
+    expect((await storage.get('cpStopWindow')).pending).toBe(true);
+  });
+
+  it('stop clears only the local unlaunched draft and keeps old task evidence for reconciliation', async () => {
+    const { owner, storage, source } = await stopFixture();
+    const draft = [{ text: 'discarded draft', msg: { chat: { id: 42 }, message_id: 3, text: 'discarded draft' } }];
+    await storage.put('buf', draft);
+    const beforeTasks = (await storage.get('cpStopWindow')).tasks;
+    const result = await (await owner.fetch(rpc('/stop', source))).json();
+    expect(result).toMatchObject({ stopped: true, held: 0, clearedDraftCount: 1 });
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, tasks: beforeTasks });
+    expect(await storage.get('busy')).toBe(true);
   });
 
   it('launches stop-new as an independent task while the old stop is unconfirmed', async () => {
@@ -299,8 +341,8 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('busyChatId', 42);
     await storage.put('collectorMsgId', 99);
     await storage.put('cpBusyRequests', [receipt.requestId]);
-    const currentTuple = await owner._callbackTuple();
-    await storage.put('cp-confirmation:150', { username: 'test-profile', mode: 'new', tuple: currentTuple });
+    await storage.put('cp-confirmation:150', { username: 'test-profile', mode: 'new',
+      requestIds: [receipt.requestId] });
     await storage.put('buf', [{ text: 'independent', msg: { chat: { id: 42 }, message_id: 2, text: 'independent' } }]);
     await storage.put('cpStopWindow', { ...(await storage.get('cpStopWindow')), pending: true, unresolved: true, stopConfirmed: false });
     const result = await owner.fetch(rpc('/stop-launch', { mode: 'new', ...source,
@@ -388,7 +430,9 @@ describe('existing collector control-plane ownership', () => {
     }));
     await owner._showCollector(42, 2, 3);
     request.mockResolvedValueOnce({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'running' } } });
-    const queued = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'), callbackData: 'intake_run', username: 'test-profile' }));
+    const revision = await storage.get('draftRevision');
+    const queued = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'),
+      callbackData: `ws|explore|${revision}`, username: 'test-profile' }));
     expect((await queued.json()).queued).toBe(true);
     expect(handleMessage).not.toHaveBeenCalled();
     const second = { ...receipt, userTaskId: 'ut-second', requestId: 'scoped-second' };
@@ -435,14 +479,52 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage } = fixture();
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
-    expect(send.mock.calls[0][3]).toEqual([[{ text: '▶️ Запустить', callback_data: 'intake_run' },
-      { text: '📋 Посмотреть input', callback_data: 'input_draft' }]]);
+    expect(send.mock.calls[0][3].flat().map(button => button.callback_data)).toEqual([
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'input_draft', 'intake_discard|1',
+    ]);
     send.mockClear();
     const legacy = new IntakeBuffer({ storage }, { BOT_TOKEN: 'legacy-token' });
     await storage.delete('collectorMsgId');
     await legacy._showCollector(42, 1, 1);
     expect(send.mock.calls[0][3]).toEqual([[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
       { text: '📋 Посмотреть input', callback_data: 'input_draft' }]]);
+  });
+
+  it('launches the selected style once from the exact current draft revision', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await owner.fetch(rpc('/append', { text: 'Сравни два варианта', msg: items[0].msg, telegramUpdateId: 100 }));
+    await owner._showCollector(42, 1, 1);
+    const revision = await storage.get('draftRevision');
+    const source = { sourceMessageId: await storage.get('collectorMsgId'), callbackData: `ws|explore|${revision}`, username: 'test-profile' };
+    handleMessage.mockImplementationOnce(async (message, _env, options) => {
+      expect(message.intakeItems.map(item => item.text)).toEqual(['Сравни два варианта']);
+      expect(options.workStyle).toBe('explore');
+      expect(options.workStyleSource).toBe('explicit');
+      await snapshot(owner, receipt, message.intakeItems);
+      await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+      options.onRunAccepted({ taskId: receipt.userTaskId, userTaskId: receipt.userTaskId,
+        requestId: receipt.requestId, durable: true, controlPlane: true });
+    });
+    expect((await owner.fetch(rpc('/flush', source))).status).toBe(200);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await storage.get('launchWorkStyle')).toBeUndefined();
+    expect((await owner.fetch(rpc('/flush', source))).status).toBe(409);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a style callback after any new input changes the draft revision', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
+    await owner._showCollector(42, 1, 1);
+    const oldRevision = await storage.get('draftRevision');
+    await owner.fetch(rpc('/append', { text: 'second', msg: { chat: { id: 42 }, message_id: 2, text: 'second' }, telegramUpdateId: 101 }));
+    const result = await owner.fetch(rpc('/flush', { sourceMessageId: await storage.get('collectorMsgId'),
+      callbackData: `ws|answer|${oldRevision}`, username: 'test-profile' }));
+    expect(result.status).toBe(409);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('launches a durably appended force word while refusing source-less external flush', async () => {
@@ -863,7 +945,7 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.filter(call => String(call[2]).includes('Подтверждение не получено'))).toHaveLength(1);
   });
 
-  it('restores unsupported media for explicit retry without periodic admission attempts', async () => {
+  it('refuses unsupported media and drops it instead of retrying the same failed batch', async () => {
     const { owner, storage } = fixture();
     const media = [{ msg: { message_id: 7, chat: { id: 42 }, document: { file_id: 'offline-file' } }, text: 'document' }];
     await storage.put('buf', media);
@@ -871,15 +953,239 @@ describe('existing collector control-plane ownership', () => {
     await owner._dispatch();
     expect(await storage.get('busy')).toBeUndefined();
     expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
-    expect((await storage.get('retryBatch'))[0].msg).toEqual(media[0].msg);
-    expect(send.mock.calls.some(call => String(call[2]).includes('задача не запущена'))).toBe(true);
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('порцию сбросил'))).toBe(true);
     await owner.alarm();
     await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(route).not.toHaveBeenCalled();
     await owner._dispatch();
-    expect(handleMessage).toHaveBeenCalledTimes(2);
-    expect((await storage.get('retryBatch'))[0].msg).toEqual(media[0].msg);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await storage.get('retryBatch')).toBeUndefined();
+  });
+
+  it('retires a recovered unsupported-media launch with a stale snapshot and admits the next text', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const staleReceipt = { ...receipt, requestId: 'stale-media-request' };
+    await snapshot(owner, staleReceipt, media);
+    const launchKey = JSON.stringify([7]);
+    await storage.put('launching', media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: staleReceipt.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
+    handleMessage.mockRejectedValueOnce(Object.assign(new Error('attachments unsupported'), { code: 'INTAKE_PREPARATION_FAILED' }));
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect((await response.json()).buffered).toBe(1);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect(await storage.get('launching')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+  });
+
+  it('self-recovers an orphaned unsupported-media checkpoint when the handler returns without CP admission', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    // A cold restart can leave the durable launch checkpoint without the
+    // transient `launching` key. Recovery must still find and retire it.
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      profileId: 'test-profile', botUsername: 'test-bot' });
+    handleMessage.mockResolvedValueOnce(undefined); // pre-admission early return: no durable ACK
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect((await response.json()).buffered).toBe(1);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect(await storage.get('cp-launch:' + launchKey)).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('порцию сбросил'))).toBe(true);
+  });
+
+  it('preserves a durably admitted launch and holds new text behind it', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    const accepted = { ...receipt, requestId: 'accepted-media-request' };
+    await snapshot(owner, accepted, media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('launching', media);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put('cpBusyRequests', [accepted.requestId]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: accepted.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
+    handleMessage.mockResolvedValueOnce(undefined);
+
+    const response = await owner.fetch(rpc('/append', { text: 'не добавлять', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'не добавлять' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1 });
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('cpBusyRequests')).toEqual([accepted.requestId]);
+    expect(await storage.get('launching')).toEqual(media);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['не добавлять']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+  });
+
+  it('holds text when a cold DO has only the durable unsupported launch checkpoint', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    const launchKey = JSON.stringify([7]);
+    const accepted = { ...receipt, requestId: 'accepted-media-request' };
+    await snapshot(owner, accepted, media);
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put('cpBusyRequests', [accepted.requestId]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...media[0].msg, intakeItems: media },
+      snapshotRequestId: accepted.requestId, profileId: 'test-profile', botUsername: 'test-bot' });
+    // `launching` is transient and is absent after a Durable Object restart.
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('launching')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('holds text when a busy unsupported launch remains but its unresolved index is empty', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('busy', true);
+    await storage.put('busyChatId', 42);
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    await storage.put('launching', media);
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('launching')).toEqual(media);
+    expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('holds text behind a pending unsupported launch even if the busy flag was lost', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    await storage.put('launching', media);
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('launching')).toEqual(media);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('keeps new input as an independent draft while a stop window is pending without busy state', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+
+    const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await response.json()).toMatchObject({ buffered: 1, held: true });
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('Это отдельная новая задача'))).toBe(true);
+    expect(send.mock.calls.some(call => call[3] && Array.isArray(call[3]) && call[3].flat()
+      .some(button => button.callback_data.startsWith('ws|answer|')))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
+    const { owner, storage } = fixture();
+    const media = [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }];
+    await storage.put('buf', media);
+    handleMessage.mockImplementationOnce(async message => {
+      await snapshot(owner, receipt, message.intakeItems);
+      await accept(owner, receipt);
+      throw Object.assign(new Error('late preparation error'), { code: 'INTAKE_PREPARATION_FAILED' });
+    });
+    await owner._dispatch();
+    expect(await storage.get('cpUnresolvedLaunches')).toHaveLength(1);
+    expect(await storage.get('cpBusyRequests')).toEqual([receipt.requestId]);
+    expect(await storage.get('launching')).toEqual(media);
+  });
+
+  it('refuses an unsupported attachment before buffering it', async () => {
+    const { owner, storage } = fixture();
+    const voice = { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } };
+    const response = await owner.fetch(rpc('/append', { text: '', msg: voice, telegramUpdateId: 107 }));
+    expect(await response.json()).toMatchObject({ refused: true, unsupported: 'media' });
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('вложения пока не поддерживаются'))).toBe(true);
+  });
+
+  it('drops a stranded unsupported attachment and starts a fresh batch with the next text', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }]);
+    const response = await owner.fetch(rpc('/append', { text: 'новая текстовая задача', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новая текстовая задача' }, telegramUpdateId: 108 }));
+    expect((await response.json()).buffered).toBe(1);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новая текстовая задача']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Сбросил старую порцию'))).toBe(true);
+  });
+
+  it('offers an owned revision-bound discard action and refuses to discard unresolved dispatch', async () => {
+    const { owner, storage, env } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('buf', items);
+    await owner._showCollector(42, 1, 1);
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    const revision = await storage.get('draftRevision');
+    expect(callbacks).toContain(`intake_discard|${revision}`);
+    expect(send.mock.calls.at(-1)[3].flat().find(button => button.callback_data === `intake_discard|${revision}`).text)
+      .toBe('🧹 Очистить весь ввод');
+    const body = { sourceMessageId: 99, callbackData: `intake_discard|${revision}`, username: 'test-profile' };
+    expect(await storage.get('collectorMsgId')).toBe(99);
+    expect(await owner._callbackOwned(body)).toBe(true);
+    expect(await (await owner.fetch(rpc('/callback-owner', body))).json()).toEqual({ owned: true });
+    await storage.put('cpUnresolvedLaunches', ['pending-launch']);
+    expect((await owner.fetch(rpc('/discard', body))).status).toBe(409);
+    expect(await storage.get('buf')).toEqual(items);
+    await storage.delete('cpUnresolvedLaunches');
+    const uploading = [{ ...items[0], mediaPending: true }];
+    await storage.put('buf', uploading);
+    expect((await owner.fetch(rpc('/discard', body))).status).toBe(409);
+    expect(await storage.get('buf')).toEqual(uploading);
+    await storage.put('buf', items);
+    await storage.put('retryBatch', items);
+    await storage.put('failed:old', { id: 'old', items });
+    await storage.put('media-failed:media-old', { msg: { message_id: 7 } });
+    await storage.put('cpStopWindow', { pending: true, tasks: [{ userTaskId: receipt.userTaskId }] });
+    expect((await owner.fetch(rpc('/discard', body))).status).toBe(200);
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect(await storage.get('failed:old')).toBeUndefined();
+    expect(await storage.get('media-failed:media-old')).toBeUndefined();
+    expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, tasks: [{ userTaskId: receipt.userTaskId }] });
   });
 
   it('keeps a preparation-labelled error unknown once a frozen admission snapshot exists', async () => {
@@ -992,7 +1298,7 @@ describe('existing collector control-plane ownership', () => {
     expect(await (await owner.fetch(rpc('/callback-owner', source))).json()).toEqual({ owned: false });
     await storage.put('cpBusyRequests', [receipt.requestId]);
     await storage.put('collectorMsgId', 100);
-    expect(await (await owner.fetch(rpc('/callback-owner', source))).json()).toEqual({ owned: false });
+    expect(await (await owner.fetch(rpc('/callback-owner', source))).json()).toEqual({ owned: true });
   });
 
   it('requires current preparing source, active task and its exact snapshot for status stop buttons', async () => {

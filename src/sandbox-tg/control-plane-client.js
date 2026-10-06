@@ -121,6 +121,8 @@ export class ControlPlaneClient {
       sessionId: Object.hasOwn(input, 'sessionId') ? input.sessionId : this.config.sessionId,
       inputItems: input.inputItems ?? [{ text: input.text, artifactRefs: input.artifactRefs ?? [] }],
       waitTimeoutSec: input.waitTimeoutSec ?? null,
+      workStyle: ['explore', 'answer', 'auto'].includes(input.workStyle) ? input.workStyle : 'auto',
+      workStyleSource: input.workStyleSource === 'explicit' ? 'explicit' : 'default',
     };
     const { status, value } = await this.request('POST', '/intake', { body });
     // A receipt without durable=true violates C01: the slice must not proceed on
