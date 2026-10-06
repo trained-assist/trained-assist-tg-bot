@@ -50,7 +50,7 @@ async function workerdWaitFor(predicate) {
   }
 }
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -215,14 +215,14 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
     await workerdWaitFor(() => providerEdits.some(edit => edit.message_id === collectorId));
     expect(providerMessages).toHaveLength(1);
     expect(cpIntakes).toHaveLength(0);
-    const launch = boundary === 'vertical' ? message(105, 'запускай')
+    const launch = ['vertical', 'collector-cleanup'].includes(boundary) ? message(105, 'запускай')
       : { update_id: 105, callback_query: { id: 'workerd-launch', from: { id: 43, is_bot: false },
         data: 'intake_run', message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(launch)).status).toBe(200);
     expect(cpIntakes).toHaveLength(1);
     expect(admitted.inputItems.map(item => item.text)).toEqual([
       'category,amount\nfood,100\nfood,50', 'travel,275', 'Write outputs/category-results.csv',
-      ...(boundary === 'vertical' ? ['запускай'] : []),
+      ...(['vertical', 'collector-cleanup'].includes(boundary) ? ['запускай'] : []),
     ]);
     expect(admitted.sessionId).toBe('workerd-source-session');
     const snapshotResponse = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
@@ -232,10 +232,16 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
     const before = await state();
     expect(before.get('busy')).toBe(true);
     const accepted = before.get(`cp-acceptance:${admitted.requestId}`);
-    if (boundary === 'vertical') {
+    if (boundary === 'vertical' || boundary === 'collector-cleanup') {
       expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
       expect(cpRoutes).toEqual([{ taskId: 'ut-workerd-scenario', continue: true }]);
       expect(dispatchCount).toBe(1);
+      if (boundary === 'collector-cleanup') {
+        expect(snapshot.body.initialMsgId).toBe(collectorId);
+        await runtime.dispose();
+        runtime = new Miniflare(runtimeOptions);
+        expect((await state()).get('busy')).toBe(true);
+      }
       completedTasks.add('ut-workerd-scenario');
       const reconciled = await runtime.dispatchFetch('https://worker.test/scenario-reconcile', {
         headers: { 'x-scenario-probe': 'offline-probe' },
@@ -243,6 +249,26 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled'])('real signed w
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
       await terminalProof();
+      if (boundary === 'collector-cleanup') {
+        await state(true);
+        const finalized = providerEdits.filter(edit => edit.message_id === collectorId
+          && edit.text === '✅ Готово. Результат отправлен отдельным сообщением.');
+        expect(finalized).toHaveLength(1);
+        expect(finalized[0].reply_markup).toEqual({ inline_keyboard: [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] });
+        const terminal = await terminalProof();
+        await runtime.dispose();
+        runtime = new Miniflare(runtimeOptions);
+        await state(true);
+        expect((await webhook(launch)).status).toBe(200);
+        expect(await terminalProof()).toEqual(terminal);
+        expect(providerEdits.filter(edit => edit.message_id === collectorId
+          && edit.text === finalized[0].text)).toHaveLength(1);
+        expect(cpIntakes).toHaveLength(1);
+        expect(dispatchCount).toBe(1);
+        expect(providerMessages).toHaveLength(2);
+        const restored = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
+        expect(await restored.json()).toEqual(snapshot);
+      }
       expect(legacyRequests).toEqual([]);
       expect(unexpectedRequests).toEqual([]);
       return;

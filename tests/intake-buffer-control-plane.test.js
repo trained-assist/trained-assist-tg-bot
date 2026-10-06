@@ -83,6 +83,101 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it.each(['invalid', 'failed'])('cold cleanup reaches later entries despite eight permanently %s entries', async kind => {
+    const { owner, storage, env } = fixture();
+    const blocked = Array.from({ length: 8 }, (_, index) => `blocked-${index}`);
+    await storage.put('cpCollectorCleanupRequests', [...blocked, 'later-request']);
+    for (const [index, requestId] of [...blocked, 'later-request'].entries()) {
+      await storage.put(`cp-collector-cleanup:${requestId}`, { requestId, state: 'pending',
+        profileId: kind === 'invalid' && index < 8 ? 'wrong-profile' : 'test-profile',
+        messageId: index + 1, chatId: 42, text: requestId });
+      await storage.put(`input-message:${index + 1}`, requestId);
+    }
+    edit.mockImplementation(async (_token, _chatId, messageId) => ({ ok: messageId === 9 }));
+    await owner._recoverControlPlaneCollectorCleanup();
+    expect(edit.mock.calls.some(call => call[2] === 9)).toBe(false);
+    const restarted = new IntakeBuffer({ storage }, env);
+    await restarted._recoverControlPlaneCollectorCleanup();
+    expect(edit.mock.calls.filter(call => call[2] === 9)).toHaveLength(1);
+    expect((await storage.get('cp-collector-cleanup:later-request')).state).toBe('done');
+    expect(new Set(await storage.get('cpCollectorCleanupRequests'))).toEqual(new Set(blocked));
+    for (const requestId of blocked) {
+      expect((await storage.get(`cp-collector-cleanup:${requestId}`)).state).toBe('pending');
+    }
+    expect(send).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['done', 'failed', 'cancelled'])('cold completion finalizes the original collector without copying terminal output: %s', async status => {
+    const { owner, storage, env } = fixture();
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
+      controlPlaneEnvelope: { requestId: receipt.requestId, profileId: receipt.profileId, conversationRef: 'tg-42-ssaved' } }, items }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status, generation: 1, result: { answer: 'Only the terminal delivery contains this answer.' } } } });
+    const restarted = new IntakeBuffer({ storage }, env);
+    const frozen = await restarted._readSnapshot(receipt.requestId);
+    expect(await restarted._pollRunFinishedIfIdle(0)).toBe(true);
+    const text = status === 'done' ? '✅ Готово. Результат отправлен отдельным сообщением.'
+      : status === 'failed' ? '❌ Задача завершилась ошибкой. Подробности отправлены отдельным сообщением.'
+        : '⛔ Задача отменена. Статус отправлен отдельным сообщением.';
+    expect(edit).toHaveBeenCalledWith(restarted.env.BOT_TOKEN, 42, 99, text,
+      { reply_markup: { inline_keyboard: [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] } });
+    expect(await restarted._readSnapshot(receipt.requestId)).toEqual(frozen);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    await restarted.alarm();
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('lost edit ACK releases the task and cold retry edits identical collector without terminal resend', async () => {
+    const { owner, storage, env } = fixture();
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
+      controlPlaneEnvelope: { requestId: receipt.requestId, profileId: receipt.profileId, conversationRef: 'tg-42-ssaved' } }, items }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    edit.mockRejectedValueOnce(new Error('lost edit acknowledgement'));
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([receipt.requestId]);
+    const originalEdit = edit.mock.calls[0];
+    edit.mockResolvedValueOnce({ ok: false, error_code: 400, description: 'Bad Request: message is not modified' });
+    const restarted = new IntakeBuffer({ storage }, env);
+    await restarted.alarm();
+    expect(edit.mock.calls[1]).toEqual(originalEdit);
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([]);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+    await restarted.alarm();
+    expect(edit).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleanup does not edit a newer collector or mutate retained next-batch input', async () => {
+    const { owner, storage } = fixture();
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
+      controlPlaneEnvelope: { requestId: receipt.requestId, profileId: receipt.profileId, conversationRef: 'tg-42-ssaved' } }, items }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    await storage.put('collectorMsgId', 100);
+    await storage.put('preparingMsgId', 100);
+    await storage.put('buf', items);
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(edit.mock.calls.some(call => call[2] === 99 && call[3].startsWith('✅'))).toBe(true);
+    expect(edit.mock.calls.some(call => call[2] === 100 && call[3].startsWith('✅'))).toBe(false);
+    expect(await storage.get('preparingMsgId')).toBe(100);
+    expect(await storage.get('buf')).toEqual(items);
+  });
+
+  it('unverified not-modified response retains cleanup pending instead of declaring success', async () => {
+    const { owner, storage } = fixture();
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
+      controlPlaneEnvelope: { requestId: receipt.requestId, profileId: receipt.profileId, conversationRef: 'tg-42-ssaved' } }, items }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    edit.mockResolvedValueOnce({ ok: false, error_code: 500, description: 'message is not modified' });
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([receipt.requestId]);
+    expect((await storage.get(`cp-collector-cleanup:${receipt.requestId}`)).state).toBe('pending');
+  });
+
   it.each(['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'])
   ('explicit false refuses %s without changing durable stop intent or input', async path => {
     const { owner, storage } = fixture();
