@@ -6,6 +6,7 @@ import { KvConversationStore } from './conversation.js';
 import { KvBatchStore } from './batch.js';
 import { TgSliceController, MODE } from './worker.js';
 import { profileForUpdate } from './profile.js';
+import { prepareTelegramArtifact } from './media-intake.js';
 
 const app = new Hono();
 
@@ -79,6 +80,11 @@ export function createController(env, config = readTgSliceConfig(env)) {
     profile: config,
     mode: env.TG_SLICE_MODE ?? MODE.direct,
     maxTurns: config.maxTurns,
+    mediaIntake: ({ profile, message, attachment }) => prepareTelegramArtifact({
+      message, attachment, profile, config,
+      buffer: env.INGRESS_BUFFER,
+      bufferToken: env.INGRESS_BUFFER_TOKEN,
+    }),
     logSink: line => console.log(line),
   });
 }
