@@ -1005,6 +1005,7 @@ export class IntakeBuffer {
       if (diverted) return diverted;
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
+      let heldBehindPendingUnsupportedLaunch = false;
       const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
@@ -1056,12 +1057,23 @@ export class IntakeBuffer {
           return json({ buffered: 0, refused: true, unsupported: 'media' });
         }
         if (reset.state === 'pending') {
+          const launching = (await this.state.storage.get('launching')) || [];
+          const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported
+            && !!(await this.state.storage.get('busy')) && unresolved.length > 0
+            && launching.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+          if (heldBehindPendingUnsupportedLaunch) {
+            // The original admission is still uncertain. Keep its evidence and
+            // accept fresh text as held input; never make the user resend it or
+            // risk a parallel launch. The normal busy path below stores it.
+          } else {
           await sendTracked(this.env, msg.chat.id,
             '⌛ Предыдущая порция ещё сверяется с запуском, поэтому текст пока не добавил. Текущий запуск не тронут; отправь сообщение ещё раз после его завершения.',
             {}, threadIdOf(msg)).catch(() => null);
           return json({ buffered: 0, refused: true, reason: 'launch_pending' });
+          }
         }
-        await sendTracked(this.env, msg.chat.id,
+        if (reset.state !== 'pending') await sendTracked(this.env, msg.chat.id,
           reset.state === 'held-cleaned'
             ? '⚠️ Удалил неподдерживаемое вложение из отложенной порции; остальные сообщения и текущую задачу сохранил. Это текстовое сообщение добавил к отложенной порции.'
             : '⚠️ В предыдущей порции было вложение, которое этот режим не может передать. Сбросил старую порцию; это текстовое сообщение начал как новую задачу.',
@@ -1112,6 +1124,9 @@ export class IntakeBuffer {
         // the user isn't met with silence. A fresh launch button is offered once
         // the run finishes; here we only confirm receipt.
         await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+        if (heldBehindPendingUnsupportedLaunch) await sendTracked(this.env, msg.chat?.id,
+          '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
+          {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
       }
       if (flush) {
