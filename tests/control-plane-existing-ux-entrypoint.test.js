@@ -27,6 +27,18 @@ function fixture() {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('protects delivery-owner readiness and reads it without reconciling deliveries', async () => {
+    const state = fixture();
+    expect((await worker.fetch(new Request('https://worker/delivery-cutover'), state.env)).status).toBe(401);
+    const response = await worker.fetch(new Request('https://worker/delivery-cutover', {
+      headers: { 'x-telegram-bot-api-secret-token': state.env.TELEGRAM_WEBHOOK_SECRET },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true });
+    expect(state.collectorCalls).toEqual([]);
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+  });
+
   it('protects operator reconciliation and reuses the scheduled controller', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/cron'), state.env)).status).toBe(401);
