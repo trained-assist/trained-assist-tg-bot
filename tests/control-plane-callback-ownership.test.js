@@ -175,6 +175,20 @@ describe('CP source-message ownership', () => {
     expect(editMessage.mock.calls.some(call => String(call[3]).includes('Задача продолжает работать'))).toBe(false);
   });
 
+  it('unconfirmed stop may launch stop-new input as a separate task', async () => {
+    const { env, fetch } = environment(true);
+    fetch.mockImplementation(async url => url.endsWith('/held')
+      ? Response.json({ items: [{}] })
+      : url.endsWith('/stop-launch') ? Response.json({ launching: true, count: 1 })
+        : Response.json({ owned: true }));
+    await handleCallbackQuery(callback('intake_stopyes|new'), env);
+    const launch = fetch.mock.calls.find(([url]) => url.endsWith('/stop-launch'));
+    expect(launch).toBeDefined();
+    expect(JSON.parse(launch[1].body)).toMatchObject({ mode: 'new', callbackData: 'intake_stopyes|new' });
+    expect(editMessage.mock.calls.some(call => String(call[3]).includes('старая может продолжить работу'))).toBe(true);
+    expect(editMessage.mock.calls.some(call => String(call[3]).includes('Задача остановлена'))).toBe(false);
+  });
+
   it('stop prompt registers exact returned confirmation ID against the original source', async () => {
     const { env, fetch } = environment(true);
     sendMessageWithKeyboard.mockResolvedValueOnce({ ok: true, result: { message_id: 84 } });

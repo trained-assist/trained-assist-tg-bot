@@ -761,16 +761,17 @@ export async function handleCallbackQuery(cq, env) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     await close('⛔ Останавливаю задачу…');
     // Same honest stop as /stop and the ⛔ button: hold the intake queue, cancel
-    // queued delivery, kill the chain. The launch happens after, never before —
-    // an unconfirmed stop must not be followed by a new run (F7 / SS-03).
+    // queued delivery and kill the chain. Supplement launches remain gated on
+    // confirmation; stop-new is an explicit independent task if stopping fails.
     const result = await stopChat(env, { username: session.username, chatId, threadId, ...callbackSource(cq, env, session) });
-    if (result.error && !result.killed) {
+    if (result.error && !result.killed && !(mode === 'new' && env.EXECUTION_BACKEND === 'control-plane')) {
       console.warn('[stop-launch] stop not confirmed:', result.error.message);
       await close(env.EXECUTION_BACKEND === 'control-plane'
         ? '⚠️ Остановка не подтверждена — порцию не запускал.'
         : '⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача продолжает работать.');
       return;
     }
+    const stopUnconfirmed = !!(result.error && mode === 'new' && env.EXECUTION_BACKEND === 'control-plane');
     const sessionId = session.activeSessionId || session.lastSessionId;
     const route = mode === 'supp' ? { sessionId, forceNew: false, projectId: session.projectId || null,
       projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } : null;
@@ -788,7 +789,9 @@ export async function handleCallbackQuery(cq, env) {
       return;
     }
     const what = mode === 'supp' ? 'продолжу её с твоими сообщениями' : 'запущу их новой задачей';
-    await close(r?.waiting
+    await close(stopUnconfirmed
+      ? '⚠️ Остановка старой задачи не подтверждена. Порция запускается отдельной задачей; старая может продолжить работу.'
+      : r?.waiting
       ? `⛔ Задача остановлена. Как только остановка подтвердится — ${what}.`
       : `⛔ Задача уже завершалась. ${mode === 'supp' ? 'Продолжаю её' : 'Запускаю'} с твоими сообщениями.`);
     return;
