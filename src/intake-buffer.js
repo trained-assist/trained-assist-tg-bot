@@ -1686,7 +1686,10 @@ export class IntakeBuffer {
   // a media item whose transcript just resolved) so the auto-dispatch gate is
   // never silently skipped for one of them.
   async _armAutoDispatch(chatId, remaining, replyToMessageId, threadId = null) {
-    if (await this._autoLaunchBlocked(remaining)) return; // RC-06: no silent start
+    if (await this._autoLaunchBlocked(remaining)) {
+      await this._scheduleReceipt();
+      return;
+    }
     await this.state.storage.delete('gateLevel');
     await this.state.storage.delete('shortDebounce');
     await this.state.storage.delete('gateConsulted');
