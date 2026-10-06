@@ -117,6 +117,7 @@ function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) 
       { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
   }
   styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
+  styles.push([{ text: '🗑 Сбросить эту порцию', callback_data: `intake_discard|${revision}` }]);
   return styles;
 }
 // Shown INSTEAD of LAUNCH_BTN under the statuses that mean "THIS batch is
@@ -390,6 +391,7 @@ export class IntakeBuffer {
     if (messageId !== collector || !items.length) return false;
     const queued = !!(await this.state.storage.get('launchQueued')) || !!(await this.state.storage.get('stopLaunch'));
     if (queued) return data === 'intake_cancel';
+    if (/^intake_discard\|\d+$/.test(data)) return Number(data.split('|')[1]) === await this.state.storage.get('draftRevision');
     if (styleLaunch) return Number(styleLaunch[2]) === await this.state.storage.get('draftRevision');
       if (data === 'intake_run') return false; // CP collector buttons are revision-bound workStyle actions.
     if (['intake_parallel', 'intake_stopsupp', 'intake_stopnew'].includes(data)) return !!(await this.state.storage.get('busy'));
@@ -398,6 +400,31 @@ export class IntakeBuffer {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/discard' && request.method === 'POST') {
+      const source = await request.clone().json().catch(() => ({}));
+      const result = await this._exclusive(async () => {
+        if (!(await this._callbackOwned(source))) return { refused: true };
+        if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
+            (await this.state.storage.get('launching'))?.length || (await this.state.storage.get('cpStopWindow'))?.pending) {
+          return { pending: true };
+        }
+        const buf = (await this.state.storage.get('buf')) || [];
+        const retry = (await this.state.storage.get('retryBatch')) || [];
+        await this.state.storage.delete('buf');
+        await this.state.storage.delete('retryBatch');
+        await this.state.storage.delete('retryBatchAttempts');
+        for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
+          'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+          'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
+        await this.state.storage.deleteAlarm();
+        await this._bumpDraftRevisionLocked();
+        const batchId = await this._nextBatchLocked(null, null);
+        return { discarded: true, count: buf.length + retry.length, batchId };
+      });
+      if (result.batchId) await this._closePending(this.env, result.batchId, 'cleared');
+      if (result.refused || result.pending) return Response.json({ discarded: false, ...result }, { status: 409 });
+      return json(result);
+    }
     if (this.env.EXECUTION_BACKEND === 'control-plane' && request.method === 'POST' &&
         ['/flush', '/cancel', '/stop-launch'].includes(url.pathname)) {
       const source = await request.clone().json().catch(() => ({}));
@@ -976,6 +1003,61 @@ export class IntakeBuffer {
       const { text, msg, flush, telegramUpdateId } = await request.json();
       const diverted = await this._divertToSupplement(msg, '/append');
       if (diverted) return diverted;
+      const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
+      const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
+      const oldUnsupported = cpMode && !mediaOf(msg) && !mediaEnabled(this.env) &&
+        [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])]
+          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+      if (unsupportedMedia || oldUnsupported) {
+        const reset = await this._exclusive(async () => {
+          const busy = !!(await this.state.storage.get('busy'));
+          if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
+              (await this.state.storage.get('launching'))?.length || (await this.state.storage.get('cpStopWindow'))?.pending) return { state: 'pending' };
+          if (unsupportedMedia && busy) return { state: 'busy' };
+          if (oldUnsupported && busy) {
+            const buf = (await this.state.storage.get('buf')) || [];
+            const retry = (await this.state.storage.get('retryBatch')) || [];
+            await this.state.storage.put('buf', buf.filter(item => !mediaOf(item.msg) || item.msg?.fileRef));
+            if (retry.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) {
+              await this.state.storage.delete('retryBatch');
+              await this.state.storage.delete('retryBatchAttempts');
+            }
+            await this.state.storage.delete('collectorMsgId');
+            await this._bumpDraftRevisionLocked();
+            return { state: 'held-cleaned' };
+          }
+          await this.state.storage.delete('buf');
+          await this.state.storage.delete('retryBatch');
+          await this.state.storage.delete('retryBatchAttempts');
+          for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
+            'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+            'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
+          await this.state.storage.deleteAlarm();
+          await this._bumpDraftRevisionLocked();
+          const batchId = await this._nextBatchLocked(null, null);
+          return { state: 'cleared', batchId };
+        });
+        if (reset.batchId) await this._closePending(this.env, reset.batchId, 'cleared');
+        if (unsupportedMedia) {
+          await sendTracked(this.env, msg.chat.id,
+            reset.state === 'busy' || reset.state === 'pending'
+              ? '⚠️ В этом тестовом режиме вложения пока не поддерживаются — это сообщение не добавил. Уже собранный ввод и текущую задачу не трогал; отправь запрос текстом.'
+              : '⚠️ В этом тестовом режиме вложения пока не поддерживаются — задачу не запускал и эту порцию сбросил. Отправь её текстом; черновик можно сбросить кнопкой в меню.',
+            {}, threadIdOf(msg)).catch(() => null);
+          return json({ buffered: 0, refused: true, unsupported: 'media' });
+        }
+        if (reset.state === 'pending') {
+          await sendTracked(this.env, msg.chat.id,
+            '⌛ Предыдущая порция ещё сверяется с запуском, поэтому текст пока не добавил. Текущий запуск не тронут; отправь сообщение ещё раз после его завершения.',
+            {}, threadIdOf(msg)).catch(() => null);
+          return json({ buffered: 0, refused: true, reason: 'launch_pending' });
+        }
+        await sendTracked(this.env, msg.chat.id,
+          reset.state === 'held-cleaned'
+            ? '⚠️ Удалил неподдерживаемое вложение из отложенной порции; остальные сообщения и текущую задачу сохранил. Это текстовое сообщение добавил к отложенной порции.'
+            : '⚠️ В предыдущей порции было вложение, которое этот режим не может передать. Сбросил старую порцию; это текстовое сообщение начал как новую задачу.',
+          {}, threadIdOf(msg)).catch(() => null);
+      }
       const buf = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
         if (this.env.EXECUTION_BACKEND === 'control-plane') {
@@ -2027,8 +2109,16 @@ export class IntakeBuffer {
     const base = items.at(-1)?.msg;
     const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
     if (error?.code === 'INTAKE_PREPARATION_FAILED' && !checkpoint?.snapshotRequestId) {
+      const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg));
       const released = await this._exclusive(async () => {
-        await this.state.storage.put('retryBatch', items.map(item => ({ ...item, heldWhileBusy: true })));
+        if (refusedMedia) {
+          // This batch cannot be prepared in the active CP profile. Do not put it
+          // back into retryBatch: every later attempt would fail on the same media.
+          await this.state.storage.delete('retryBatch');
+          await this.state.storage.delete('retryBatchAttempts');
+        } else {
+          await this.state.storage.put('retryBatch', items.map(item => ({ ...item, heldWhileBusy: true })));
+        }
         const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
         const remaining = unresolved.filter(key => key !== launchKey);
         await this.state.storage.put('cpUnresolvedLaunches', remaining);
@@ -2039,8 +2129,9 @@ export class IntakeBuffer {
         await this._releaseBusyLocked();
         return true;
       });
-      await sendTracked(this.env, base?.chat?.id,
-        '⚠️ Вложения сохранены. Передача новому исполнителю ещё не подключена; задача не запущена. Пачку можно запустить повторно после подключения вложений.',
+      await sendTracked(this.env, base?.chat?.id, refusedMedia
+        ? '⚠️ Вложения пока не поддерживаются в этом тестовом режиме. Задачу не запускал, неподдерживаемую порцию сбросил. Отправь запрос текстом или начни новую порцию.'
+        : '⚠️ Вложения сохранены. Передача новому исполнителю ещё не подключена; задача не запущена. Пачку можно запустить повторно после подключения вложений.',
         {}, threadIdOf(base)).catch(() => null);
       if (released) await this._afterBusyRelease();
       return;

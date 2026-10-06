@@ -441,7 +441,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
     expect(send.mock.calls[0][3].flat().map(button => button.callback_data)).toEqual([
-      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'input_draft',
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'input_draft', 'intake_discard|1',
     ]);
     send.mockClear();
     const legacy = new IntakeBuffer({ storage }, { BOT_TOKEN: 'legacy-token' });
@@ -906,7 +906,7 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.filter(call => String(call[2]).includes('Подтверждение не получено'))).toHaveLength(1);
   });
 
-  it('restores unsupported media for explicit retry without periodic admission attempts', async () => {
+  it('refuses unsupported media and drops it instead of retrying the same failed batch', async () => {
     const { owner, storage } = fixture();
     const media = [{ msg: { message_id: 7, chat: { id: 42 }, document: { file_id: 'offline-file' } }, text: 'document' }];
     await storage.put('buf', media);
@@ -914,15 +914,56 @@ describe('existing collector control-plane ownership', () => {
     await owner._dispatch();
     expect(await storage.get('busy')).toBeUndefined();
     expect(await storage.get('cpUnresolvedLaunches')).toBeUndefined();
-    expect((await storage.get('retryBatch'))[0].msg).toEqual(media[0].msg);
-    expect(send.mock.calls.some(call => String(call[2]).includes('задача не запущена'))).toBe(true);
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('порцию сбросил'))).toBe(true);
     await owner.alarm();
     await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(route).not.toHaveBeenCalled();
     await owner._dispatch();
-    expect(handleMessage).toHaveBeenCalledTimes(2);
-    expect((await storage.get('retryBatch'))[0].msg).toEqual(media[0].msg);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await storage.get('retryBatch')).toBeUndefined();
+  });
+
+  it('refuses an unsupported attachment before buffering it', async () => {
+    const { owner, storage } = fixture();
+    const voice = { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } };
+    const response = await owner.fetch(rpc('/append', { text: '', msg: voice, telegramUpdateId: 107 }));
+    expect(await response.json()).toMatchObject({ refused: true, unsupported: 'media' });
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
+    expect(send.mock.calls.some(call => String(call[2]).includes('вложения пока не поддерживаются'))).toBe(true);
+  });
+
+  it('drops a stranded unsupported attachment and starts a fresh batch with the next text', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }]);
+    const response = await owner.fetch(rpc('/append', { text: 'новая текстовая задача', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новая текстовая задача' }, telegramUpdateId: 108 }));
+    expect((await response.json()).buffered).toBe(1);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новая текстовая задача']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Сбросил старую порцию'))).toBe(true);
+  });
+
+  it('offers an owned revision-bound discard action and refuses to discard unresolved dispatch', async () => {
+    const { owner, storage, env } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('buf', items);
+    await owner._showCollector(42, 1, 1);
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    const revision = await storage.get('draftRevision');
+    expect(callbacks).toContain(`intake_discard|${revision}`);
+    const body = { sourceMessageId: 99, callbackData: `intake_discard|${revision}`, username: 'test-profile' };
+    expect(await storage.get('collectorMsgId')).toBe(99);
+    expect(await owner._callbackOwned(body)).toBe(true);
+    expect(await (await owner.fetch(rpc('/callback-owner', body))).json()).toEqual({ owned: true });
+    await storage.put('cpUnresolvedLaunches', ['pending-launch']);
+    expect((await owner.fetch(rpc('/discard', body))).status).toBe(409);
+    expect(await storage.get('buf')).toEqual(items);
+    await storage.delete('cpUnresolvedLaunches');
+    expect((await owner.fetch(rpc('/discard', body))).status).toBe(200);
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toBeUndefined();
   });
 
   it('keeps a preparation-labelled error unknown once a frozen admission snapshot exists', async () => {

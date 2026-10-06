@@ -34,6 +34,7 @@ async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
 
 function needsControlPlaneOwnership(data) {
   return ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
+    || /^intake_discard\|\d+$/.test(data || '')
     || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '')
     || ['workrun|', 'intake_stopyes|', 'intake_stopno|', 'stop|', 'stopok|', 'stopno|'].some(prefix => data?.startsWith(prefix));
 }
@@ -825,6 +826,23 @@ export async function handleCallbackQuery(cq, env) {
         ? '↩️ Передача отменена — сообщения остались в порции. Задача при этом осталась остановленной: запустить порцию можно кнопкой в меню.'
         : '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
     }
+    return;
+  }
+
+  if (/^intake_discard\|\d+$/.test(data || '')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🗑 Сбрасываю эту порцию…');
+    if (!env.INTAKE) return;
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+    const response = await stub.fetch('https://intake/discard', { method: 'POST',
+      body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
+    if (!response?.ok) {
+      await sendT(env, chatId, threadId, '⌛ Не получилось безопасно сбросить порцию: запуск уже проверяется или принят. Текущая задача не затронута.');
+      return;
+    }
+    const result = await response.json().catch(() => ({}));
+    if (result.discarded) await sendT(env, chatId, threadId,
+      `🗑 Порция сброшена (${result.count} сообщ.). Текущая задача не затронута — можно отправить новую.`);
     return;
   }
 
