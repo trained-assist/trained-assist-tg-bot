@@ -2383,6 +2383,20 @@ export class IntakeBuffer {
   }
 
   async alarm() {
+    try {
+      await this._alarm();
+    } finally {
+      if (this.env.EXECUTION_BACKEND === 'control-plane'
+          && ((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) {
+        const now = Date.now();
+        const retryAt = now + BUSY_POLL_MS;
+        const alarmAt = await this.state.storage.getAlarm();
+        if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+      }
+    }
+  }
+
+  async _alarm() {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
       await this._recoverControlPlaneCollectorCleanup();
       const stopWindow = await this.state.storage.get('cpStopWindow');

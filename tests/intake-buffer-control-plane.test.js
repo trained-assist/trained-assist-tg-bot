@@ -83,6 +83,57 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('cleanup alarm preservation does not postpone an earlier unrelated alarm', async () => {
+    const { owner, storage } = fixture();
+    const earlier = Date.now() + 1000;
+    await storage.put('cpCollectorCleanupRequests', [receipt.requestId]);
+    vi.spyOn(owner, '_alarm').mockImplementation(async () => storage.setAlarm(earlier));
+    await owner.alarm();
+    expect(await storage.getAlarm()).toBe(earlier);
+  });
+
+  it('parked re-offer still deletes its alarm after all terminal cleanup edits finish', async () => {
+    const { storage, env } = fixture();
+    await storage.put(`cp-collector-cleanup:${receipt.requestId}`, { requestId: receipt.requestId,
+      profileId: receipt.profileId, state: 'pending', messageId: 99, chatId: 42, text: 'Terminal collector status' });
+    await storage.put('input-message:99', receipt.requestId);
+    await storage.put('cpCollectorCleanupRequests', [receipt.requestId]);
+    await storage.put('parkedAt', Date.now() - 16 * 60_000);
+    await new IntakeBuffer({ storage }, env).alarm();
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([]);
+    expect(await storage.get('parkReoffers')).toBe(1);
+    expect(await storage.getAlarm()).toBeUndefined();
+  });
+
+  it('cold parked re-offer preserves the alarm for an unknown terminal cleanup edit ACK', async () => {
+    const { storage, env } = fixture();
+    const intent = { requestId: receipt.requestId, profileId: receipt.profileId,
+      state: 'pending', messageId: 99, chatId: 42, text: 'Terminal collector status' };
+    await storage.put(`cp-collector-cleanup:${receipt.requestId}`, intent);
+    await storage.put(`input-message:99`, receipt.requestId);
+    await storage.put('cpCollectorCleanupRequests', [receipt.requestId]);
+    await storage.put('parkedAt', Date.now() - 16 * 60_000);
+    await storage.put('buf', items);
+    await storage.put('collectorMsgId', 100);
+    edit.mockImplementation(async (_token, _chatId, messageId) => {
+      if (messageId === 99) throw new Error('lost edit acknowledgement');
+      return { ok: true };
+    });
+    await new IntakeBuffer({ storage }, env).alarm();
+    expect(await storage.get('parkReoffers')).toBe(1);
+    expect(await storage.get('buf')).toEqual(items);
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([receipt.requestId]);
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    const originalEdit = edit.mock.calls.find(call => call[2] === 99);
+    edit.mockResolvedValue({ ok: true });
+    await new IntakeBuffer({ storage }, env).alarm();
+    expect(edit.mock.calls.filter(call => call[2] === 99)).toEqual([originalEdit, originalEdit]);
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([]);
+    expect((await storage.get(`cp-collector-cleanup:${receipt.requestId}`)).state).toBe('done');
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
   it.each(['invalid', 'failed'])('cold cleanup reaches later entries despite eight permanently %s entries', async kind => {
     const { owner, storage, env } = fixture();
     const blocked = Array.from({ length: 8 }, (_, index) => `blocked-${index}`);
