@@ -10,7 +10,7 @@ function existingUxWorkerdBundle() {
   const sourceRoot = process.env.EXISTING_UX_SCENARIO_SOURCE_ROOT ?? process.cwd();
   return buildSync({
     stdin: { resolveDir: sourceRoot, contents: `
-      import worker, { IntakeBuffer as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
+      import worker, { IntakeBufferReset as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
       export default {
         async fetch(request, env, context) {
           if (new URL(request.url).pathname === '/scenario-reconcile') {
