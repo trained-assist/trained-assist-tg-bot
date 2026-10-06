@@ -34,6 +34,8 @@ async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
 
 function needsControlPlaneOwnership(data) {
   return ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
+    || /^intake_discard\|\d+$/.test(data || '')
+    || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '')
     || ['workrun|', 'intake_stopyes|', 'intake_stopno|', 'stop|', 'stopok|', 'stopno|'].some(prefix => data?.startsWith(prefix));
 }
 
@@ -658,10 +660,15 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
-  if (data === 'intake_run' || data === 'intake_parallel' || data?.startsWith('workrun|')) {
+  if (data === 'intake_run' || data === 'intake_parallel' || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '') || data?.startsWith('workrun|')) {
     const parallel = data === 'intake_parallel';
+    const style = /^ws\|(explore|answer|auto)\|\d+$/.exec(data || '')?.[1] || null;
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…');
+    const launchAck = style === 'explore' ? '🧭 Изучу и задам вопросы…'
+      : style === 'answer' ? '📝 Готовлю полный ответ…'
+        : style === 'auto' ? '✨ Выбираю подходящий способ…'
+          : parallel ? '⚡ Параллельно…' : '📨 Передаю задачу…';
+    await answerCallbackQuery(env.BOT_TOKEN, id, launchAck);
     if (env.INTAKE) {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const response = await stub.fetch('https://intake/flush', { method: 'POST', body: JSON.stringify({ parallel, ...callbackSource(cq, env, session) }) })
@@ -761,16 +768,18 @@ export async function handleCallbackQuery(cq, env) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     await close('⛔ Останавливаю задачу…');
     // Same honest stop as /stop and the ⛔ button: hold the intake queue, cancel
-    // queued delivery, kill the chain. The launch happens after, never before —
-    // an unconfirmed stop must not be followed by a new run (F7 / SS-03).
-    const result = await stopChat(env, { username: session.username, chatId, threadId, ...callbackSource(cq, env, session) });
-    if (result.error && !result.killed) {
+    // queued delivery and kill the chain. Supplement launches remain gated on
+    // confirmation; stop-new is an explicit independent task if stopping fails.
+    const result = await stopChat(env, { username: session.username, chatId, threadId,
+      preserveDraft: true, ...callbackSource(cq, env, session) });
+    if (result.error && !(mode === 'new' && env.EXECUTION_BACKEND === 'control-plane')) {
       console.warn('[stop-launch] stop not confirmed:', result.error.message);
-      await close(env.EXECUTION_BACKEND === 'control-plane'
-        ? '⚠️ Остановка не подтверждена — порцию не запускал.'
-        : '⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача продолжает работать.');
+      await close(result.killed
+        ? '⚠️ Агент не подтвердил завершение задачи — добавку не запускал, чтобы не задвоить работу.'
+        : '⚠️ Не удалось подтвердить остановку — порцию не запускал. Задача может продолжать работу.');
       return;
     }
+    const stopUnconfirmed = !!(result.error && mode === 'new' && env.EXECUTION_BACKEND === 'control-plane');
     const sessionId = session.activeSessionId || session.lastSessionId;
     const route = mode === 'supp' ? { sessionId, forceNew: false, projectId: session.projectId || null,
       projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } : null;
@@ -788,7 +797,9 @@ export async function handleCallbackQuery(cq, env) {
       return;
     }
     const what = mode === 'supp' ? 'продолжу её с твоими сообщениями' : 'запущу их новой задачей';
-    await close(r?.waiting
+    await close(stopUnconfirmed
+      ? '⚠️ Остановка старой задачи не подтверждена. Порция запускается отдельной задачей; старая может продолжить работу.'
+      : r?.waiting
       ? `⛔ Задача остановлена. Как только остановка подтвердится — ${what}.`
       : `⛔ Задача уже завершалась. ${mode === 'supp' ? 'Продолжаю её' : 'Запускаю'} с твоими сообщениями.`);
     return;
@@ -816,6 +827,23 @@ export async function handleCallbackQuery(cq, env) {
         ? '↩️ Передача отменена — сообщения остались в порции. Задача при этом осталась остановленной: запустить порцию можно кнопкой в меню.'
         : '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
     }
+    return;
+  }
+
+  if (/^intake_discard\|\d+$/.test(data || '')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🧹 Очищаю весь ввод…');
+    if (!env.INTAKE) return;
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+    const response = await stub.fetch('https://intake/discard', { method: 'POST',
+      body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
+    if (!response?.ok) {
+      await sendT(env, chatId, threadId, '⌛ Не получилось безопасно очистить ввод: запуск или загрузка файла ещё проверяется. Текущая задача не затронута.');
+      return;
+    }
+    const result = await response.json().catch(() => ({}));
+    if (result.discarded) await sendT(env, chatId, threadId,
+      `🧹 Весь незапущенный ввод очищен (${result.count} блоков/файлов). Текущая задача не затронута — можно начать заново.`);
     return;
   }
 
@@ -1076,14 +1104,34 @@ export async function handleCallbackQuery(cq, env) {
       await closeBubble(`${why} — задача продолжает работать. Написанное вернул во входящие: запустить его можно кнопкой «▶️ Запустить агента».`);
       return;
     }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Перезапускаю…');
-    await closeBubble('➕ Останавливаю задачу и перезапускаю с дополнением…');
-    await stopTask(env, { username: session.username, chatId, threadId }).catch(() => {});
-    // Through handleMessage (not a bare runTask) so voice is transcribed and files
-    // are uploaded exactly like any intake batch; the pinned intakeRoute keeps the
-    // task's session, so no project picker and no new dialog.
+    await answerCallbackQuery(env.BOT_TOKEN, id, '➕ Проверяю остановку…');
+    await closeBubble('➕ Проверяю остановку перед перезапуском…');
+    let stopped;
+    try {
+      stopped = await stopTask(env, { username: session.username, chatId, threadId });
+    } catch (error) {
+      await releaseToIntake(env, chatId, threadId, draft.items);
+      await closeBubble('⚠️ Не удалось подтвердить остановку. Дополнение вернул во входящие — новый запуск не выполнял, повторно нажимать не нужно.');
+      await answerCallbackQuery(env.BOT_TOKEN, id, 'Остановка не подтверждена');
+      console.error('[supplement] stop failed:', error.message);
+      return;
+    }
+    if (stopped?.confirmed !== true && stopped?.stopConfirmed !== true) {
+      await releaseToIntake(env, chatId, threadId, draft.items);
+      await closeBubble('⚠️ Остановка не подтверждена — дополнение вернул во входящие, новый запуск не выполнял.');
+      await answerCallbackQuery(env.BOT_TOKEN, id, 'Остановка не подтверждена');
+      return;
+    }
+    await answerCallbackQuery(env.BOT_TOKEN, id, stopped?.stopped === false
+      ? 'Предыдущая задача уже завершилась — запускаю продолжение'
+      : 'Остановка подтверждена — запускаю дополнение');
+    await closeBubble(stopped?.stopped === false
+      ? '✅ Предыдущая задача уже завершилась. Запускаю дополнение как продолжение в том же диалоге — повторно нажимать не нужно.'
+      : '✅ Остановка подтверждена. Запускаю дополнение в том же диалоге — повторно нажимать не нужно.');
+    // Preserve voice and file messages through the ordinary intake handler. The
+    // stop response is checked first, so an unconfirmed old run cannot overlap.
     const base = draft.items.at(-1).msg;
-    const note = '[Дополнение к задаче, которая только что выполнялась — она остановлена, продолжай с учётом этого:]';
+    const note = '[Дополнение к задаче — продолжай с учётом этих сообщений:]';
     const header = { text: note, msg: { chat: base.chat, text: note } };
     const { handleMessage } = await import('./message.js');
     return handleMessage({ ...base, intakeItems: [header, ...draft.items],
@@ -1091,7 +1139,7 @@ export async function handleCallbackQuery(cq, env) {
         projectChosen: true, projectPicked: false, newProject: false, contextFromSession: null } },
     env, { mode: 'deep', forceClaude: true, initialMsgId: msgId || null, initiatedAt,
       requestId: `sup-${draft.taskId}-${msgId || id}` })
-      .catch(err => sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`));
+      .catch(err => sendT(env, chatId, threadId, `❌ Ошибка запуска дополнения: ${err.message}`));
   }
 
   await answerCallbackQuery(env.BOT_TOKEN, id);

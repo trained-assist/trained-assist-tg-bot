@@ -55,7 +55,7 @@ async function cancelRecovery(env, { chatId, threadId }) {
   return cancelled;
 }
 
-export async function stopChat(env, { username, chatId, threadId = null, replyTo = null }) {
+export async function stopChat(env, { username, chatId, threadId = null, replyTo = null, preserveDraft = false }) {
   if (controlPlaneStopDisabled(env)) return { killed: 0, held: 0, cancelled: 0,
     hadIntent: false, intake: false, error: controlPlaneStopDisabledError() };
   let intake = null;
@@ -63,7 +63,7 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
     try {
       const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
       const res = await stub.fetch('https://intake/stop', { method: 'POST',
-        body: JSON.stringify({ replyTo, username, chatId, threadId }) });
+        body: JSON.stringify({ replyTo, username, chatId, threadId, preserveDraft }) });
       intake = res.ok ? await res.json() : null;
     } catch (e) {
       // Never let a buffer hiccup block the kill itself.
@@ -76,25 +76,36 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
     : await cancelOutbox(env, { username, chatId, threadId }) + await cancelRecovery(env, { chatId, threadId });
   let killed = 0;
   let error = null;
+  let stopConfirmed = false;
   try {
     const result = await stopTask(env, { username, chatId, threadId });
     killed = result?.killed || 0;
+    stopConfirmed = result?.confirmed === true || result?.stopConfirmed === true;
+    if (!stopConfirmed) {
+      error = new Error('agent did not confirm that the task stopped');
+    }
   } catch (e) {
     error = e;
   }
   const held = intake?.held || 0;
   console.log(`[stop] chat=${chatId} thread=${threadId ?? '-'} killed=${killed} held=${held} cancelled=${cancelled} intent=${!!intake?.hadIntent}${error ? ` error=${error.message}` : ''}`);
-  return { killed, held, cancelled, hadIntent: !!intake?.hadIntent, intake: !!intake, error };
+  return { killed, held, cancelled, hadIntent: !!intake?.hadIntent, intake: !!intake,
+    clearedDraftCount: intake?.clearedDraftCount || 0, stopConfirmed, error };
 }
 
 // One wording for both entry points. `null` = the DO's own «⛔ Остановлено. N
 // ждут» collector already says everything — no second bubble.
-export function stopReplyText({ killed, held, cancelled = 0, hadIntent, error }, { button = false } = {}) {
-  if (killed > 0) return button ? '⛔ Задача остановлена.' : '🛑 Задача остановлена.';
-  if (error && !held && !hadIntent && !cancelled) return `❌ Ошибка: ${error.message}`;
+export function stopReplyText({ killed, held, cancelled = 0, hadIntent, clearedDraftCount = 0, error }, { button = false } = {}) {
+  if (error) return (killed > 0
+    ? '⚠️ Сигнал отправлен, но завершение задачи не подтверждено. Исход неизвестен.'
+    : '⚠️ Не удалось подтвердить остановку. Исход неизвестен.')
+    + (clearedDraftCount ? ` Незапущенный ввод очищен (${clearedDraftCount} блоков/файлов).` : '');
+  if (killed > 0) return (button ? '⛔ Задача остановлена.' : '🛑 Задача остановлена.')
+    + (clearedDraftCount ? ` Ввод очищен (${clearedDraftCount} блоков/файлов).` : '');
   // A cancelled queued delivery must be stated plainly — never «отправлю
   // автоматически»: the whole point of the stop is that nothing runs later.
-  if (cancelled) return button ? '⛔ Остановлено — очередь не запустится сама.' : '⛔ Остановлено — задача снята с очереди и сама не запустится.';
+  if (cancelled) return (button ? '⛔ Остановлено — очередь не запустится сама.' : '⛔ Остановлено — задача снята с очереди и сама не запустится.')
+    + (clearedDraftCount ? ` Ввод очищен (${clearedDraftCount} блоков/файлов).` : '');
   if (held) return button ? '⛔ Остановлено — очередь не запустится сама.' : null;
   if (hadIntent) return '⛔ Автозапуск отменён.';
   return button ? '🤷 Нет активной задачи для остановки.' : '🤷 Нет активных задач для остановки.';

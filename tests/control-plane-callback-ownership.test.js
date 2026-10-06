@@ -27,7 +27,7 @@ import { stopChat } from '../src/lib/stop-chat.js';
 import { IntakeBuffer } from '../src/intake-buffer.js';
 
 const session = { username: 'fixture-user', activeSessionId: 'fixture-session' };
-const actions = ['intake_run', 'intake_parallel', 'intake_cancel', 'workrun|old',
+const actions = ['intake_run', 'intake_parallel', 'intake_cancel', 'ws|explore|7', 'workrun|old',
   'intake_stopsupp', 'intake_stopnew', 'intake_stopyes|supp', 'intake_stopno|new',
   'stop|task', 'stopok|task', 'stopno|task'];
 function callback(data, messageId = 42, threadId = null) {
@@ -92,7 +92,7 @@ describe('CP source-message ownership', () => {
     expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
   });
 
-  for (const data of ['intake_run', 'intake_parallel', 'intake_cancel']) it(`current ${data} carries source for atomic DO recheck`, async () => {
+  for (const data of ['intake_run', 'intake_parallel', 'intake_cancel', 'ws|explore|7']) it(`current ${data} carries source for atomic DO recheck`, async () => {
     const { env, fetch } = environment(true);
     await handleCallbackQuery(callback(data, 42, 9), env);
     expect(env.INTAKE.idFromName).toHaveBeenCalledWith('7:9');
@@ -175,6 +175,20 @@ describe('CP source-message ownership', () => {
     expect(editMessage.mock.calls.some(call => String(call[3]).includes('Задача продолжает работать'))).toBe(false);
   });
 
+  it('unconfirmed stop may launch stop-new input as a separate task', async () => {
+    const { env, fetch } = environment(true);
+    fetch.mockImplementation(async url => url.endsWith('/held')
+      ? Response.json({ items: [{}] })
+      : url.endsWith('/stop-launch') ? Response.json({ launching: true, count: 1 })
+        : Response.json({ owned: true }));
+    await handleCallbackQuery(callback('intake_stopyes|new'), env);
+    const launch = fetch.mock.calls.find(([url]) => url.endsWith('/stop-launch'));
+    expect(launch).toBeDefined();
+    expect(JSON.parse(launch[1].body)).toMatchObject({ mode: 'new', callbackData: 'intake_stopyes|new' });
+    expect(editMessage.mock.calls.some(call => String(call[3]).includes('старая может продолжить работу'))).toBe(true);
+    expect(editMessage.mock.calls.some(call => String(call[3]).includes('Задача остановлена'))).toBe(false);
+  });
+
   it('stop prompt registers exact returned confirmation ID against the original source', async () => {
     const { env, fetch } = environment(true);
     sendMessageWithKeyboard.mockResolvedValueOnce({ ok: true, result: { message_id: 84 } });
@@ -228,7 +242,9 @@ describe('actual IntakeBuffer callback composition (ownership endpoint is not mo
   it('current collector ownership succeeds through the real DO endpoint', async () => {
     const { entries, env } = actualDo();
     seed(entries);
-    expect(await controlPlaneCallbackOwned(callback('intake_run'), env, session)).toBe(true);
+    entries.set('draftRevision', 7);
+    expect(await controlPlaneCallbackOwned(callback('ws|explore|7'), env, session)).toBe(true);
+    expect(await controlPlaneCallbackOwned(callback('ws|explore|6'), env, session)).toBe(false);
   });
 
   it('current cancel button reaches actual DO mutation and preserves input', async () => {
@@ -244,7 +260,8 @@ describe('actual IntakeBuffer callback composition (ownership endpoint is not mo
   for (const endpoint of ['flush', 'cancel']) it(`real DO ${endpoint} refuses changed collector after ownership precheck`, async () => {
     const { object, entries, env } = actualDo();
     seed(entries, endpoint === 'cancel');
-    const data = endpoint === 'flush' ? 'intake_run' : 'intake_cancel';
+    entries.set('draftRevision', 7);
+    const data = endpoint === 'flush' ? 'ws|answer|7' : 'intake_cancel';
     expect(await controlPlaneCallbackOwned(callback(data), env, session)).toBe(true);
     entries.set('collectorMsgId', 99);
     const before = [...entries];

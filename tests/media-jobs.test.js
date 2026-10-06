@@ -50,6 +50,14 @@ async function fixture(message=msg) {
 }
 afterEach(()=>vi.unstubAllGlobals());
 describe('durable R2 pipeline',()=>{
+ it('stores the original without transcribing audio in the Control Plane path',async()=>{
+  const f=await fixture();f.env.EXECUTION_BACKEND='control-plane';
+  await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');
+  await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');
+  expect(f.s.data.get('job').fileRef).toMatchObject({storage:'r2',mime:'audio/ogg',size:3});
+  expect(f.s.data.get('job').transcript).toBeUndefined();
+  expect(f.net.mock.calls.some(([url])=>String(url).endsWith('/action'))).toBe(false);
+ });
  it('ACKs before bytes; voice downloads once, survives restart, then delivers refs and transcript',async()=>{
   const f=await fixture();expect(f.net).not.toHaveBeenCalled();expect(f.intake.data.get('buf')[0].mediaPending).toBe(true);
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('transcribe');
@@ -111,6 +119,16 @@ describe('durable R2 pipeline',()=>{
   const real=f.env.INTAKE;f.env.INTAKE={idFromName:n=>n,get:()=>({fetch:async()=>new Response('',{status:503})})};
   await f.job.alarm();expect(f.s.data.get('job').stage).toBe('deliver');const calls=f.net.mock.calls.length;
   f.env.INTAKE=real;await f.job.alarm();expect(f.s.data.get('job').stage).toBe('done');expect(f.net).toHaveBeenCalledTimes(calls);
+ });
+ it('a late media result cannot resurrect an intake reservation cleared by the user',async()=>{
+  const f=await fixture();
+  await f.job.alarm();await f.job.alarm();
+  await f.intake.storage.delete('buf');
+  await f.job.alarm();
+  expect(f.s.data.get('job').stage).toBe('failed');
+  expect(f.s.data.get('job').error).toBe('intake_reservation_cleared');
+  expect(f.intake.data.get('buf')).toBeUndefined();
+  expect(f.s.alarm).toBeNull();
  });
  it('reconciliation rearms a stranded active job without repeating a completed phase',async()=>{
   const f=await fixture();await f.job.alarm();await f.s.storage.deleteAlarm();await f.io._recoverMedia();

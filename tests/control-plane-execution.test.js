@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { runControlPlaneTask } from '../src/lib/control-plane-execution.js';
+import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
 import { makeEnv, MemKV } from './helpers/p11-helpers.js';
 
 function fixture() {
   const calls = [];
   const snapshots = new Map();
   const receipts = new Map();
+  const fake = new FakeControlPlane();
   let routeFails = false;
   const env = makeEnv({ TG_SLICE: new MemKV(), CONTROL_PLANE_SESSION_ID: 'source-session' });
   const stub = { async fetch(url, options = {}) {
@@ -30,18 +32,14 @@ function fixture() {
     const pathname = new URL(url).pathname;
     const body = JSON.parse(options.body);
     calls.push({ pathname, body });
-    if (pathname === '/intake') return Response.json({ durable: true, requestId: body.requestId,
-      userTaskId: `task-${body.requestId}`, profileId: body.profileId, acceptedAt: Date.now() });
-    if (pathname === '/route') {
-      if (routeFails) throw new Error('route acknowledgement unknown');
-      return Response.json({ decision: 'catalogue-method' });
-    }
-    throw new Error('unexpected execution endpoint');
+    if (pathname === '/route' && routeFails) throw new Error('route acknowledgement unknown');
+    const result = await fake.fetch(url, options);
+    return Response.json(result.value, { status: result.status });
   } };
   const input = { userId: 1001, username: 'integrator', requestId: 'batch-1', sessionId: 'dialog-1',
     task: '[Сообщение 1]\nработает?\n\n[Сообщение 2]\nпосчитай расходы', initialMsgId: 123,
     inputItems: [{ msg: { text: 'работает?', message_id: 11 } }, { msg: { text: 'посчитай расходы', message_id: 12 } }] };
-  return { env, input, calls, snapshots, receipts, failRoute: value => { routeFails = value; } };
+  return { env, input, calls, snapshots, receipts, fake, failRoute: value => { routeFails = value; } };
 }
 
 describe('existing collector control-plane execution boundary', () => {
@@ -52,6 +50,8 @@ describe('existing collector control-plane execution boundary', () => {
     expect(state.calls[0].body.inputItems).toEqual([{ text: 'работает?', artifactRefs: [] }, { text: 'посчитай расходы', artifactRefs: [] }]);
     expect(ack).toMatchObject({ durable: true, controlPlane: true, routingPending: false });
     expect(ack.taskId).toBe(ack.userTaskId);
+    expect(state.fake.routes).toMatchObject([{ taskId: ack.userTaskId, route: 'agent', continuation: { requested: true, issued: false } }]);
+    expect(state.fake.runs(ack.userTaskId)).toHaveLength(0);
   });
 
   it('reuses frozen input and source session after a cold adapter restart', async () => {
@@ -64,6 +64,22 @@ describe('existing collector control-plane execution boundary', () => {
     const body = [...state.snapshots.values()][0].body;
     expect(body.controlPlaneEnvelope.sessionId).toBe('source-session');
     expect(body.controlPlaneEnvelope.inputItems[0].text).toBe('работает?');
+  });
+
+  it('freezes the selected work style with the complete source input across retries', async () => {
+    const state = fixture();
+    const selected = { ...state.input, workStyle: 'explore', workStyleSource: 'explicit' };
+    await runControlPlaneTask(state.env, selected);
+    await runControlPlaneTask(state.env, { ...selected, workStyle: 'answer', workStyleSource: 'explicit' });
+
+    const saved = [...state.snapshots.values()][0].body.controlPlaneEnvelope;
+    expect(saved.inputItems).toEqual([
+      { text: 'работает?', artifactRefs: [] },
+      { text: 'посчитай расходы', artifactRefs: [] },
+    ]);
+    expect(saved).toMatchObject({ workStyle: 'explore', workStyleSource: 'explicit' });
+    expect(state.calls.filter(call => call.pathname === '/intake')).toHaveLength(1);
+    expect(state.calls[0].body).toMatchObject({ workStyle: 'explore', workStyleSource: 'explicit' });
   });
 
   it('keeps durable task identity when route acknowledgement is lost', async () => {

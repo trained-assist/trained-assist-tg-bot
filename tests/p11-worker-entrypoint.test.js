@@ -8,6 +8,7 @@ import { TgDeliveryOutbox } from '../src/sandbox-tg/delivery.js';
 import { TgDeliveryOwnerClient } from '../src/sandbox-tg/delivery-owner.js';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
 import { readFile } from 'node:fs/promises';
+import ingressBuffer from '../src/ingress-buffer/worker.js';
 
 describe('P11 exported Worker composition', () => {
   let env, fake, emulator, fetchSpy;
@@ -51,6 +52,7 @@ describe('P11 exported Worker composition', () => {
     const source = await readFile(new URL('../wrangler.sandbox-tg.toml', import.meta.url), 'utf8');
     expect(source).toMatch(/^name = "trained-assist-tg-sandbox"$/m);
     expect(source).toMatch(/^main = "src\/sandbox-tg\/index.js"$/m);
+    expect(source).toMatch(/^TG_SLICE_MODE = "batch"$/m);
     expect(source).toMatch(/\[triggers\]\s*crons = \["\* \* \* \* \*"\]/);
     expect(source).toContain('new_sqlite_classes = ["TgDeliveryOwner"]');
   });
@@ -354,5 +356,83 @@ describe('P11 exported Worker composition', () => {
     expect(fake.tasks).toHaveLength(1);
     const accepted = fake.eventLog.find(event => event.kind === 'task_accepted');
     expect(accepted.payload.inputItems).toHaveLength(2);
+  });
+
+  it('refuses a batch with media lacking a durable manifest without launching or consuming it', async () => {
+    env.TG_SLICE_MODE = 'batch';
+    await webhook(emulator.pushMessage({ chatId: 1001, text: 'Посмотри аудио' }));
+    await webhook(emulator.pushMessage({ chatId: 1001, voice: {
+      file_id: 'telegram-secret-file-id', duration: 4, mime_type: 'audio/ogg', file_size: 128,
+    } }));
+
+    const response = await webhook(emulator.pushUpdate({ callback_query: {
+      id: 'launch-media', data: 'tg-launch:tg-1001', message: { message_id: 10, chat: { id: 1001 } },
+    } }));
+    expect(response.status).toBe(200);
+    await worker.scheduled({}, env);
+
+    expect(fake.tasks).toHaveLength(0);
+    expect(JSON.parse(await env.TG_SLICE.get('batch:tg-1001')).status).toBe('collecting');
+    expect(emulator.messagesTo(1001).some(item => item.message.text.includes('Черновик сохранён; задачу не запускал'))).toBe(true);
+    expect(await env.TG_SLICE.get('batch:tg-1001')).not.toContain('telegram-secret-file-id');
+  });
+
+  it('stores media before collection and sends its full manifest only on explicit launch', async () => {
+    env.TG_SLICE_MODE = 'batch';
+    env.INGRESS_BUFFER_TOKEN = 'fixture-buffer-token';
+    const objects = new Map();
+    const bucket = {
+      async head(key) {
+        const object = objects.get(key);
+        return object ? { size: object.bytes.length, customMetadata: object.customMetadata, httpMetadata: object.httpMetadata } : null;
+      },
+      async put(key, body, options) {
+        const object = { bytes: new Uint8Array(body), customMetadata: options.customMetadata, httpMetadata: options.httpMetadata };
+        objects.set(key, object);
+        return { size: object.bytes.length };
+      },
+      async get(key) { return objects.get(key) ?? null; },
+    };
+    env.INGRESS_BUFFER = { fetch: (request, init) => ingressBuffer.fetch(request instanceof Request ? request : new Request(request, init), {
+      INGRESS_BUFFER_TOKEN: env.INGRESS_BUFFER_TOKEN, INGRESS_MEDIA_BUCKET: bucket,
+    }) };
+    const audio = new TextEncoder().encode('voice bytes');
+    fetchSpy.mockImplementation(async (input, init) => {
+      const url = new URL(input);
+      if (url.origin === env.CONTROL_PLANE_URL) {
+        const result = await fake.fetch(input, init);
+        return Response.json(result.value, { status: result.status });
+      }
+      if (url.origin === env.TELEGRAM_API_BASE && url.pathname.endsWith('/getFile')) {
+        return Response.json({ ok: true, result: { file_path: 'files/voice.ogg', file_size: audio.length } });
+      }
+      if (url.origin === env.TELEGRAM_API_BASE && url.pathname.startsWith('/file/bot')) return new Response(audio);
+      if (url.origin === env.TELEGRAM_API_BASE) return emulator.fetch(input, init);
+      throw new Error('unexpected fixture origin');
+    });
+
+    await webhook(emulator.pushMessage({ chatId: 1001, text: 'Посмотри аудио' }));
+    const voiceUpdate = emulator.pushMessage({ chatId: 1001, voice: {
+      file_id: 'telegram-secret-file-id', duration: 4, mime_type: 'audio/ogg', file_size: audio.length,
+    } });
+    await webhook(voiceUpdate);
+    const uploadCount = objects.size;
+    await webhook(voiceUpdate);
+    expect(objects.size).toBe(uploadCount);
+    expect(fake.tasks).toHaveLength(0);
+    expect(JSON.parse(await env.TG_SLICE.get('batch:tg-1001')).items[1].artifactManifest).toMatchObject({
+      contractVersion: 1, ownerProfileId: env.CONTROL_PLANE_PROFILE, mediaType: 'audio/ogg', sizeBytes: audio.length,
+    });
+    expect(JSON.parse(await env.TG_SLICE.get('batch:tg-1001'))).not.toHaveProperty('items.1.file_id');
+    expect([...objects.keys()]).toHaveLength(1);
+
+    await webhook(emulator.pushUpdate({ callback_query: {
+      id: 'launch-materialized-media', data: 'tg-launch:tg-1001', message: { message_id: 10, chat: { id: 1001 } },
+    } }));
+    expect(fake.tasks).toHaveLength(1);
+    const accepted = fake.eventLog.find(event => event.kind === 'task_accepted');
+    expect(accepted.payload.inputItems).toHaveLength(2);
+    expect(accepted.payload.inputItems[1].artifacts).toMatchObject([{ ownerProfileId: env.CONTROL_PLANE_PROFILE, sizeBytes: audio.length }]);
+    expect(JSON.stringify(accepted.payload)).not.toContain('telegram-secret-file-id');
   });
 });
