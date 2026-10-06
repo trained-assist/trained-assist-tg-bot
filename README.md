@@ -4,6 +4,8 @@ Telegram gateway Trained Assist на Cloudflare Worker. Отвечает за we
 
 Документы содержат действующие требования, контракты и инструкции. Планы выполнения, статусы, ревью прошлых версий и evidence ведутся в GitHub issues/PR/Project. Целевая модель не является утверждением о текущем deployment; его готовность проверяется по конкретным SHA и приёмке.
 
+Для user-originated проверки живого тестового бота, выбора между probability/Shturman lanes, проверки занятости и tail-команд см. [Telegram user E2E runbook](docs/TELEGRAM-USER-E2E.md).
+
 ## Контракт поведения
 
 - Сохранять requestId, principal/profile, bot, chat/thread и destination до передачи задачи. Квитанция приёма не означает запуска/завершения.

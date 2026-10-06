@@ -8,17 +8,52 @@ deployed bot and got a visible response.
 
 ## Before sending
 
-1. Confirm the test Worker deployment/version and the sandbox bot username with
-   the owner of the test environment. Open the bot from the actual Telegram user
-   account that is allowed by the test profile. Verify the recipient in the chat
-   header; for the current sandbox that is `@probability_cat_bot`.
-2. Start Cloudflare Worker logs for that same service with `npx wrangler tail
-   trained-assist-tg-ux-sandbox`. Keep the stream open before sending. The logs
-   are corroborating ingress evidence, not a substitute for the user's chat.
-3. Send one ordinary, harmless text with a unique marker, for example:
+1. Choose an unclaimed lane in [architecture sandbox issue #185](https://github.com/trained-assist/trained-agent-architecture/issues/185). Available ingress lanes:
+
+   | Bot | Worker | Wrangler config |
+   |---|---|---|
+   | `@probability_cat_bot` | `trained-assist-tg-ux-sandbox` | `wrangler.sandbox-tg-existing-ux.toml` |
+   | `@Shturman_bot` | `trained-assist-tg-shturman-sandbox` | `wrangler.sandbox-tg-shturman.toml` |
+
+   Both gateways currently bind to the same Control Plane Worker/Task Store and
+   Runner route. They are separate Telegram/chat intake lanes, not isolated
+   end-to-end stacks. Claim one lane before use; if it is claimed or occupied,
+   choose the other. The configured Telegram account/chat allowlist still
+   applies, but a tester does not need to enter API keys or Cloudflare
+   credentials into Telegram.
+2. Check actual occupancy, not `/health` alone. `/health` is liveness only.
+   The protected `/collector-state` reports `busy`, `buf`, `launching`,
+   `retryBatch`, and unresolved CP/stop barriers. Treat the lane as occupied if
+   it has an active claim, a task/launch in progress, pending buffered input,
+   unresolved launch, or pending stop. Do not clear state to free a lane; ask the
+   owner/engineering session to inspect it.
+3. An engineering session can tail that exact Worker before sending. From the
+   TG bot checkout, use the matching command:
+
+   ```bash
+   npx wrangler tail trained-assist-tg-ux-sandbox --config wrangler.sandbox-tg-existing-ux.toml
+   npx wrangler tail trained-assist-tg-shturman-sandbox --config wrangler.sandbox-tg-shturman.toml
+   ```
+
+   Wrangler needs an authenticated Cloudflare operator session; the tester does
+   not. I can run the tail and correlate evidence without asking the user to
+   operate Wrangler. Tail logs are corroborating ingress evidence, not a
+   substitute for the user's chat.
+4. Send one ordinary, harmless text with a unique marker, for example:
    `USER-E2E-<date-time>: reply only “received”; do not start a task.` Do not use
    launch words, callbacks, attachments, voice messages, or sensitive content
    in the basic ingress test.
+
+## No-login HTTP test API status
+
+There is no deployed unauthenticated HTTP seed + SSE result-feed endpoint yet.
+The public `/health` route is only liveness; `/webhook`, `/collector-state`, and
+delivery routes remain protected. Do not send raw unsigned webhook updates or
+remove those checks. A sandbox-only no-login seed/feed API with bounded budgets,
+per-run result tickets, and lane status/leases is requested in
+[issue #402](https://github.com/trained-assist/trained-assist-tg-bot/issues/402).
+Until that is implemented and deployed, a real user-originated E2E must be sent
+through Telegram; the engineering session can observe it using the Worker tail.
 
 ## Evidence to collect
 
