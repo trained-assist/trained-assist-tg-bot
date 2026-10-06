@@ -1,5 +1,11 @@
 # Requirements Log — Alesa (trained-assist-tg-bot)
 
+## Telegram UX migration #144 — 2026-10-05
+
+- [active] New native acceptance fixtures freeze an explicit expected answer substring into their private identity and require its presence in the persisted result; a nonempty unrelated answer is not goal acceptance. Existing fixture identities remain unchanged when no goal assertion is supplied.
+- [active] The new control-plane contour hides stop/restart choices when its explicit stop gate is false; queue, parallel launch and input preview remain available. Legacy menus are unchanged. Re-enable only after observed cancellation provenance is accepted.
+- [validated] Busy collector regression covers both explicit gate values; entrypoint authorization continues to reject disabled stale stop callbacks.
+
 ## Sandbox integration #140 — 2026-10-05
 
 - [active] Work in `ta-integrator-tg-v1` on `integration/first-working-version-20261005`; publish a draft PR, without merge or deployment.

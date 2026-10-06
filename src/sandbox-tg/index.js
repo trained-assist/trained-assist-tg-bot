@@ -66,7 +66,7 @@ app.get('/delivery-cutover', async c => c.json(await c.env._sliceCtrl.outbox.ope
 
 const webhook = app;
 
-function createController(env, config = readTgSliceConfig(env)) {
+export function createController(env, config = readTgSliceConfig(env)) {
   const client = new ControlPlaneClient(config, {
     fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
     logSink: line => console.log(line),

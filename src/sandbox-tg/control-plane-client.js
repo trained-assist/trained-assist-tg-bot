@@ -117,7 +117,7 @@ export class ControlPlaneClient {
       requestId: input.requestId,
       profileId: this.config.profileId,
       conversationRef: input.conversationId ?? null,
-      sessionId: this.config.sessionId,
+      sessionId: Object.hasOwn(input, 'sessionId') ? input.sessionId : this.config.sessionId,
       inputItems: input.inputItems ?? [{ text: input.text, artifactRefs: input.artifactRefs ?? [] }],
       waitTimeoutSec: input.waitTimeoutSec ?? null,
     };
@@ -191,6 +191,40 @@ export class ControlPlaneClient {
   async route(userTaskId) {
     const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true } });
     return value;
+  }
+
+  async cancel(userTaskId, options = {}) {
+    const { value } = await this.request('POST', '/cancel', { body: {
+      taskId: userTaskId, ...(options.reason ? { reason: options.reason } : {}),
+    } });
+    return {
+      cancelled: value?.cancelled === true,
+      stopConfirmed: value?.stopConfirmed === true,
+      status: str(value?.status) ?? 'unknown',
+      generation: numOrNull(value?.generation),
+      nativeStops: Array.isArray(value?.nativeStops) ? value.nativeStops : [],
+    };
+  }
+
+  /** Durable stop-window reconciliation. Telegram address mapping stays in the gateway. */
+  async stopTargets(input) {
+    const { value } = await this.request('POST', '/cp-stop-targets', { body: {
+      profileId: this.config.profileId,
+      conversationId: input.conversationId,
+      windowId: input.windowId,
+      admissionBarrierComplete: input.admissionBarrierComplete === true,
+      admissionRequestIds: input.admissionRequestIds,
+      restart: input.restart === true,
+    } });
+    return {
+      snapshotId: str(value?.snapshotId),
+      profileId: str(value?.profileId),
+      conversationId: str(value?.conversationId),
+      tasks: Array.isArray(value?.tasks) ? value.tasks : [],
+      unresolved: value?.unresolved !== false,
+      reason: str(value?.reason),
+      stopConfirmed: value?.stopConfirmed === true,
+    };
   }
 
   /** Signal (human answer in an open awaiting). The idempotency key is mandatory. */
