@@ -83,13 +83,24 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
-  it('cleanup alarm preservation does not postpone an earlier unrelated alarm', async () => {
-    const { owner, storage } = fixture();
-    const earlier = Date.now() + 1000;
+  it.each([null, -1000, 120000, 1000])('real cleanup preserves an earlier alarm and replaces absent/expired/later alarms: %s', async offset => {
+    const { storage, env } = fixture();
+    const before = Date.now();
+    const scheduled = offset === null ? null : before + offset;
+    if (scheduled !== null) await storage.setAlarm(scheduled);
     await storage.put('cpCollectorCleanupRequests', [receipt.requestId]);
-    vi.spyOn(owner, '_alarm').mockImplementation(async () => storage.setAlarm(earlier));
-    await owner.alarm();
-    expect(await storage.getAlarm()).toBe(earlier);
+    await storage.put(`cp-collector-cleanup:${receipt.requestId}`, { requestId: receipt.requestId,
+      profileId: receipt.profileId, state: 'pending', messageId: 99, chatId: 42, text: 'Terminal collector status' });
+    await storage.put('input-message:99', receipt.requestId);
+    edit.mockRejectedValue(new Error('lost edit acknowledgement'));
+    await new IntakeBuffer({ storage }, env).alarm();
+    expect(edit).toHaveBeenCalledTimes(1);
+    if (offset === 1000) expect(await storage.getAlarm()).toBe(scheduled);
+    else {
+      expect(await storage.getAlarm()).toBeGreaterThanOrEqual(before + 60000);
+      expect(await storage.getAlarm()).toBeLessThanOrEqual(Date.now() + 60000);
+    }
+    expect(await storage.get('cpCollectorCleanupRequests')).toEqual([receipt.requestId]);
   });
 
   it('parked re-offer still deletes its alarm after all terminal cleanup edits finish', async () => {

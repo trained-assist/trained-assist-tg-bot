@@ -2229,9 +2229,16 @@ export class IntakeBuffer {
         }));
       }
     } finally { release(); }
-    if (((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) {
-      await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
-    }
+    await this._ensureControlPlaneCollectorCleanupAlarm();
+  }
+
+  async _ensureControlPlaneCollectorCleanupAlarm() {
+    if (this.env.EXECUTION_BACKEND !== 'control-plane'
+        || !((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) return;
+    const now = Date.now();
+    const retryAt = now + BUSY_POLL_MS;
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
   }
 
   async _pollControlPlaneTasks({ launch = false } = {}) {
@@ -2324,9 +2331,7 @@ export class IntakeBuffer {
         return true;
       });
       if (released) await this._afterBusyRelease();
-      if (((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) {
-        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
-      }
+      await this._ensureControlPlaneCollectorCleanupAlarm();
       if (controlPlaneStopDisabled(this.env) && (await this.state.storage.get('cpStopWindow'))?.pending) {
         await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       }
@@ -2386,13 +2391,7 @@ export class IntakeBuffer {
     try {
       await this._alarm();
     } finally {
-      if (this.env.EXECUTION_BACKEND === 'control-plane'
-          && ((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) {
-        const now = Date.now();
-        const retryAt = now + BUSY_POLL_MS;
-        const alarmAt = await this.state.storage.getAlarm();
-        if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
-      }
+      await this._ensureControlPlaneCollectorCleanupAlarm();
     }
   }
 
