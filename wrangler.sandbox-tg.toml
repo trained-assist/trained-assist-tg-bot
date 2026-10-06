@@ -36,7 +36,7 @@ service = "trained-assist-ingress-buffer-sandbox"
 
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
-TG_SLICE_MODE = "direct"
+TG_SLICE_MODE = "batch"
 TG_SLICE_ROUTER_ENABLED = "true"
 TG_SLICE_DELIVERY_PAUSED = "false"
 
