@@ -80,7 +80,8 @@ async function cmdAddUser(chatId, parts, env) {
   if (!username) return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /adduser username [Имя Фамилия]');
   const displayName = parts.slice(2).join(' ') || username;
 
-  const existing = await getUser(env.USERS, username);
+  const existing = await getUser(env.USERS, username) ||
+    (env.LOGIN_USERS ? await getUser(env.LOGIN_USERS, username) : null);
   if (existing) return sendMessage(env.BOT_TOKEN, chatId, `❌ Пользователь "${username}" уже существует.`);
 
   const password = generatePassword();
@@ -151,7 +152,8 @@ async function cmdStats(chatId, env) {
 async function cmdResetPass(chatId, parts, env) {
   const username = parts[1];
   if (!username) return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /pass_reset username');
-  const existing = await getUser(env.USERS, username);
+  const existing = await getUser(env.USERS, username) ||
+    (env.LOGIN_USERS ? await getUser(env.LOGIN_USERS, username) : null);
   if (!existing) return sendMessage(env.BOT_TOKEN, chatId, `❌ Пользователь "${username}" не найден.`);
 
   const password = generatePassword();

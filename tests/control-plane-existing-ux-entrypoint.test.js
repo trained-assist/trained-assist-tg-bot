@@ -13,6 +13,7 @@ function fixture() {
   const collectorCalls = [];
   const env = makeEnv({ SESSIONS: new MemKV(), TG_SLICE: new MemKV(), TG_SLICE_ALLOWED_USERS: '7',
     SESSION_NAMESPACE: 'isolated-ux', INTAKE_DEBOUNCE: 'on' });
+  env.PRODUCTION_USERS = new MemKV();
   env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
     collectorCalls.push({ name, url, body: JSON.parse(options.body) });
     return Response.json({ appended: true });
@@ -96,6 +97,42 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
     expect(await state.env.SESSIONS.get('1001')).toBeNull();
     expect(JSON.parse(await state.env.SESSIONS.get('isolated-ux:1001')).controlPlaneProfile).toBe('profile-1');
+  });
+
+  it('logs in with an admin-created profile and keeps sandbox password reset local', async () => {
+    const state = fixture();
+    const password = 'production-profile-pass';
+    const salt = new Uint8Array(16).fill(12);
+    const key = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await webcrypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256);
+    const saltHex = [...salt].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const passwordHash = [...new Uint8Array(bits)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const productionUser = { name: 'Profile Owner', salt: saltHex, passwordHash };
+    await state.env.PRODUCTION_USERS.put('user:owner', JSON.stringify(productionUser));
+
+    const login = await state.send({ ...state.update, update_id: 2,
+      message: { ...state.update.message, message_id: 12, text: `/login owner ${password}` } });
+    expect(await login.json()).toMatchObject({ authenticated: true });
+
+    const resetState = fixture();
+    await resetState.env.PRODUCTION_USERS.put('user:owner', JSON.stringify(productionUser));
+    const reset = await resetState.send({ ...resetState.update, update_id: 2,
+      message: { ...resetState.update.message, message_id: 12, text: '/pass_reset owner' } });
+    expect(await reset.json()).toMatchObject({ ok: true });
+    const resetMessage = sendMessage.mock.calls.at(-1)[2];
+    const sandboxPassword = /Пароль: <code>([^<]+)<\/code>/.exec(resetMessage)?.[1];
+    expect(sandboxPassword).toBeTruthy();
+    expect(resetMessage).toContain(`/login owner ${sandboxPassword}`);
+    expect(JSON.parse(await resetState.env.PRODUCTION_USERS.get('user:owner'))).toEqual(productionUser);
+    expect(JSON.parse(await resetState.env.TG_SLICE.get('user:owner')).passwordHash).not.toBe(passwordHash);
+
+    const secondChat = { ...resetState.update, update_id: 3,
+      message: { ...resetState.update.message, message_id: 13, chat: { id: 1002, type: 'private' },
+        text: `/login owner ${sandboxPassword}` } };
+    expect(await (await resetState.send(secondChat)).json()).toMatchObject({ authenticated: true });
+    expect(JSON.parse(await resetState.env.SESSIONS.get('isolated-ux:1002'))).toMatchObject({
+      username: 'owner', controlPlaneProfile: 'profile-1',
+    });
   });
 
   it('refuses unsigned ingress before collector and session mutations', async () => {

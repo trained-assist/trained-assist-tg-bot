@@ -217,7 +217,11 @@ export async function cmdLogin(msg, env) {
     );
   }
 
-  const user = await getUser(env.USERS, username);
+  // UX sandbox profiles are authored through the existing production admin flow.
+  // Check the sandbox-local copy first (created by sandbox /pass_reset), then
+  // read the production registry without ever writing to it.
+  const user = await getUser(env.USERS, username) ||
+    (env.LOGIN_USERS ? await getUser(env.LOGIN_USERS, username) : null);
   if (!user) {
     return sendIn(env, chatId, threadId, '❌ Пользователь не найден.');
   }

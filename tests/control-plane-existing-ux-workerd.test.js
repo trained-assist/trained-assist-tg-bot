@@ -282,7 +282,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     return reply({ error: 'unconfigured offline transport' }, 500);
   };
   const runtimeOptions = { name: 'existing-ux-scenario', modules: true, script, compatibilityDate: '2024-01-01',
-    compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS'],
+    compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS', 'PRODUCTION_USERS'],
     kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
     bindings: Object.fromEntries(Object.entries({ ...env, TEST_CHAT_IDS: '' })
       .filter(([, value]) => typeof value === 'string')),
@@ -348,7 +348,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     const passwordBits = await webcrypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, passwordKey, 256);
     const saltHex = [...salt].map(byte => byte.toString(16).padStart(2, '0')).join('');
     const passwordHash = [...new Uint8Array(passwordBits)].map(byte => byte.toString(16).padStart(2, '0')).join('');
-    await (await runtime.getKVNamespace('TG_SLICE')).put('user:workerd-user', JSON.stringify({ name: 'Workerd User', salt: saltHex, passwordHash }));
+    const productionUser = { name: 'Workerd User', salt: saltHex, passwordHash };
+    await (await runtime.getKVNamespace('PRODUCTION_USERS')).put('user:workerd-user', JSON.stringify(productionUser));
     let loginPassword = password;
     if (boundary === 'pending-stop-no-launch') {
       const reset = await webhook(message(1, '/pass_reset workerd-user', 43));
@@ -356,6 +357,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       loginPassword = /Пароль: <code>([^<]+)<\/code>/.exec(providerMessages.at(-1)?.text || '')?.[1];
       expect(loginPassword).toBeTruthy();
       expect(providerMessages.at(-1).text).toContain(`/login workerd-user ${loginPassword}`);
+      expect(await (await runtime.getKVNamespace('PRODUCTION_USERS')).get('user:workerd-user', 'json')).toEqual(productionUser);
+      expect(await (await runtime.getKVNamespace('TG_SLICE')).get('user:workerd-user', 'json')).toMatchObject({ name: 'Workerd User' });
     }
     const login = await webhook(message(2, `/login workerd-user ${loginPassword}`));
     expect(login.status).toBe(200);
