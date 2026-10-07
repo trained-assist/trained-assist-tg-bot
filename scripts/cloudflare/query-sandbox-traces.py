@@ -86,24 +86,31 @@ if not traces_response.get("success"):
 
 trace_items = traces_response.get("result", {}).get("traces", [])
 trace_candidate_count = len(trace_items)
-trace_field_names = sorted({key for trace in trace_items for key in trace})
-trace_service_types = {}
 matching_traces = []
 for trace in trace_items:
     services = trace.get("service", trace.get("services"))
-    kind = type(services).__name__
-    trace_service_types[kind] = trace_service_types.get(kind, 0) + 1
     if services == WORKER or (isinstance(services, list) and WORKER in services):
         matching_traces.append(trace)
 
-summaries = [
-    {
-        "spans": trace.get("spans"),
-        "duration_ms": trace.get("traceDurationMs"),
-        "errors": len(trace.get("errors", [])),
-    }
-    for trace in matching_traces
-]
+root_span_counts = {}
+durations = []
+span_counts = []
+error_trace_count = 0
+error_count = 0
+for trace in matching_traces:
+    root_span = trace.get("rootSpanName") or trace.get("rootTransactionName")
+    if root_span:
+        root_span_counts[root_span] = root_span_counts.get(root_span, 0) + 1
+    duration = trace.get("traceDurationMs")
+    if isinstance(duration, (int, float)):
+        durations.append(duration)
+    spans = trace.get("spans")
+    if isinstance(spans, (int, float)):
+        span_counts.append(spans)
+    trace_errors = trace.get("errors", [])
+    if trace_errors:
+        error_trace_count += 1
+        error_count += len(trace_errors)
 
 print(
     json.dumps(
@@ -113,11 +120,24 @@ print(
                 read_worker_settings().get("result", {}).get("observability", {}).get("traces", {})
             ),
             "window_hours": 24,
-            "trace_count": len(summaries),
+            "trace_count": len(matching_traces),
             "trace_candidate_count": trace_candidate_count,
-            "trace_field_names": trace_field_names,
-            "trace_service_field_types": trace_service_types,
-            "traces": summaries[:20],
+            "traces_truncated": traces_response.get("result", {}).get("truncated", False),
+            "root_span_counts": root_span_counts,
+            "duration_ms": {
+                "count": len(durations),
+                "min": min(durations) if durations else None,
+                "max": max(durations) if durations else None,
+                "avg": round(sum(durations) / len(durations), 2) if durations else None,
+            },
+            "span_count": {
+                "count": len(span_counts),
+                "min": min(span_counts) if span_counts else None,
+                "max": max(span_counts) if span_counts else None,
+                "avg": round(sum(span_counts) / len(span_counts), 2) if span_counts else None,
+            },
+            "error_trace_count": error_trace_count,
+            "error_count": error_count,
         },
         indent=2,
     )
