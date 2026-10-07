@@ -91,7 +91,7 @@ function existingUxWorkerdBundle() {
 
 async function workerdWaitFor(predicate) {
   const deadline = Date.now() + 10000;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error('Local workerd scenario observation timed out');
     await new Promise(resolveWait => setTimeout(resolveWait, 25));
   }
@@ -387,6 +387,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     expect(cpIntakes).toHaveLength(0);
     expect(cpRoutes).toHaveLength(0);
     expect((await state()).get('buf')).toHaveLength(2);
+    await workerdWaitFor(async () => typeof (await state()).get('receiptDue') === 'number');
     const receiptDue = (await state()).get('receiptDue');
     expect(receiptDue).toBeTypeOf('number');
     await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, receiptDue - Date.now()) + 50));
