@@ -28,8 +28,13 @@ class MemoryStorage {
 function makeEnv(overrides = {}) {
   const storage = new MemoryStorage();
   const store = new SandboxAcceptOnlyStore({ storage });
+  const internalRequests = [];
   const namespace = {
-    get: vi.fn(() => ({ fetch: (request, init) => store.fetch(request instanceof Request ? request : new Request(request, init)) })),
+    get: vi.fn(() => ({ fetch: (request, init) => {
+      const internalRequest = request instanceof Request ? request : new Request(request, init);
+      internalRequests.push(internalRequest.clone());
+      return store.fetch(internalRequest);
+    } })),
     idFromName: vi.fn(name => name),
   };
   const env = {
@@ -41,15 +46,15 @@ function makeEnv(overrides = {}) {
     RUNNER: { fetch: vi.fn(() => { throw new Error('Runner must not be called'); }) },
     ...overrides,
   };
-  return { env, storage, store, namespace };
+  return { env, storage, store, namespace, internalRequests };
 }
 
 const post = (env, body, headers = {}) => gateway.fetch(new Request('https://sandbox.test/sandbox/accept-only/requests', {
   method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body,
 }), env);
 const eventRequest = (env, taskId, ticket, after = 0) => gateway.fetch(new Request(
-  `https://sandbox.test/sandbox/accept-only/requests/${taskId}/events?after=${after}`,
-  { headers: { authorization: `Bearer ${ticket}` } },
+  `https://sandbox.test/sandbox/accept-only/requests/${taskId}/events`,
+  { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket, after }) },
 ), env);
 
 afterEach(() => vi.useRealTimers());
@@ -78,7 +83,7 @@ describe('anonymous sandbox accept-only API', () => {
   });
 
   it('enforces actual streamed body bytes and text bounds before storage', async () => {
-    const { env, storage } = makeEnv();
+    const { env, storage, internalRequests } = makeEnv();
     const tooLarge = await post(env, JSON.stringify({ text: 'x'.repeat(5000) }));
     expect(tooLarge.status).toBe(413);
 
@@ -96,7 +101,7 @@ describe('anonymous sandbox accept-only API', () => {
   });
 
   it('accepts without classification or execution and exposes only ticket-scoped replay', async () => {
-    const { env, storage } = makeEnv();
+    const { env, storage, internalRequests } = makeEnv();
     const cpFetch = env.CONTROL_PLANE_SERVICE.fetch;
     const runnerFetch = env.RUNNER.fetch;
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -109,12 +114,24 @@ describe('anonymous sandbox accept-only API', () => {
     expect(first).toMatchObject({ mode: 'accept_only', executionStarted: false, tokenUsage: 0 });
     expect(first.taskId).not.toBe(second.taskId);
     expect(first.ticket).not.toBe(second.ticket);
+    expect(first.eventsUrl).not.toContain(first.ticket);
+    expect(first.eventsUrl).not.toContain('?');
 
     const own = await eventRequest(env, first.taskId, first.ticket);
     expect(own.status).toBe(200);
+    expect(own.headers.get('cache-control')).toBe('no-store');
+    const internalReplay = internalRequests.find(request => new URL(request.url).pathname === `/events/${first.taskId}`);
+    expect(internalReplay.url).not.toContain(first.ticket);
+    expect(internalReplay.headers.has('authorization')).toBe(false);
+    expect(await internalReplay.json()).toMatchObject({ ticket: first.ticket, after: '0' });
     expect(await own.json()).toMatchObject({ events: [{ type: 'accepted_only', status: 'accepted_only', executionStarted: false, tokenUsage: 0 }], nextCursor: 1 });
     expect((await eventRequest(env, first.taskId, second.ticket)).status).toBe(404);
     expect((await eventRequest(env, second.taskId, first.ticket)).status).toBe(404);
+    const oversizedReplay = await gateway.fetch(new Request(`https://sandbox.test/sandbox/accept-only/requests/${first.taskId}/events`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ticket-test': first.ticket },
+      body: JSON.stringify({ ticket: first.ticket, padding: 'x'.repeat(600) }),
+    }), env);
+    expect(oversizedReplay.status).toBe(413);
     expect((await eventRequest(env, first.taskId, first.ticket, 1).then(response => response.json())).events).toEqual([]);
     for (let index = 0; index < 58; index++) expect((await eventRequest(env, first.taskId, first.ticket, 1)).status).toBe(200);
     expect((await eventRequest(env, first.taskId, first.ticket, 1)).status).toBe(429);
@@ -165,8 +182,9 @@ describe('anonymous sandbox accept-only API', () => {
         })));
       expect(replies.map(response => response.status).sort()).toEqual([202, 202, 202, 202, 202, 429]);
       const accepted = await replies.find(response => response.status === 202).json();
-      const replay = await runtime.dispatchFetch(`${accepted.eventsUrl}?after=0`, {
-        headers: { authorization: `Bearer ${accepted.ticket}` },
+      const replay = await runtime.dispatchFetch(accepted.eventsUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ticket: accepted.ticket, after: 0 }),
       });
       expect(replay.status).toBe(200);
       expect(await replay.json()).toMatchObject({ events: [{ type: 'accepted_only', taskId: accepted.taskId }], nextCursor: 1 });

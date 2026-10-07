@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 
 const app = new Hono();
 const MAX_BODY_BYTES = 4096;
+const MAX_REPLAY_BODY_BYTES = 512;
 const MAX_TEXT_CODEPOINTS = 2000;
 const TICKET_TTL_MS = 15 * 60 * 1000;
 const IP_WINDOW_MS = 60 * 1000;
@@ -28,8 +29,12 @@ function enabledForSandbox(env) {
 }
 
 async function readBoundedJson(request) {
+  return readBoundedJsonWithLimit(request, MAX_BODY_BYTES);
+}
+
+async function readBoundedJsonWithLimit(request, maxBytes) {
   const length = request.headers.get('content-length');
-  if (length && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) return { error: 'too_large' };
+  if (length && (!/^\d+$/.test(length) || Number(length) > maxBytes)) return { error: 'too_large' };
   if (!request.body) return { error: 'invalid' };
   const reader = request.body.getReader();
   const chunks = [];
@@ -39,7 +44,7 @@ async function readBoundedJson(request) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         await reader.cancel();
         return { error: 'too_large' };
       }
@@ -84,17 +89,22 @@ app.post('/sandbox/accept-only/requests', async context => {
   return json(context, { ...body, eventsUrl: `${origin}/sandbox/accept-only/requests/${body.taskId}/events` }, 202);
 });
 
-app.get('/sandbox/accept-only/requests/:taskId/events', async context => {
+app.post('/sandbox/accept-only/requests/:taskId/events', async context => {
   if (!enabledForSandbox(context.env)) return json(context, { error: 'sandbox_accept_only_disabled' }, 404);
-  const auth = context.req.header('authorization') ?? '';
-  const match = /^Bearer ([A-Za-z0-9_-]{40,64})$/.exec(auth);
-  if (!match) return json(context, { error: 'not_found' }, 404);
-  const afterRaw = context.req.query('after') ?? '0';
+  const parsed = await readBoundedJsonWithLimit(context.req.raw, MAX_REPLAY_BODY_BYTES);
+  if (parsed.error === 'too_large') return json(context, { error: 'request_too_large' }, 413);
+  if (parsed.error || !parsed.value || Array.isArray(parsed.value) ||
+      Object.keys(parsed.value).some(key => !['ticket', 'after'].includes(key)) ||
+      typeof parsed.value.ticket !== 'string' || !/^[A-Za-z0-9_-]{40,64}$/.test(parsed.value.ticket)) {
+    return json(context, { error: 'not_found' }, 404);
+  }
+  const afterRaw = parsed.value.after === undefined ? '0' : String(parsed.value.after);
   if (!/^(0|[1-9]\d{0,8})$/.test(afterRaw)) return json(context, { error: 'invalid_cursor' }, 400);
   const taskId = context.req.param('taskId');
   if (!/^sbx_[A-Za-z0-9_-]{20,64}$/.test(taskId)) return json(context, { error: 'not_found' }, 404);
-  const response = await stubFor(context.env).fetch(`https://accept-only.internal/events/${taskId}?after=${afterRaw}`, {
-    headers: { authorization: `Bearer ${match[1]}` },
+  const response = await stubFor(context.env).fetch(`https://accept-only.internal/events/${taskId}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: parsed.value.ticket, after: afterRaw }),
   });
   return new Response(response.body, { status: response.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 });
@@ -115,8 +125,12 @@ export class SandboxAcceptOnlyStore {
     const url = new URL(request.url);
     if (url.hostname !== 'accept-only.internal') return Response.json({ error: 'not_found' }, { status: 404 });
     if (request.method === 'POST' && url.pathname === '/admit') return this.admit(request);
-    const eventMatch = request.method === 'GET' && /^\/events\/(sbx_[A-Za-z0-9_-]{20,64})$/.exec(url.pathname);
-    if (eventMatch) return this.events(eventMatch[1], url.searchParams.get('after') ?? '0', request.headers.get('authorization'));
+    const eventMatch = request.method === 'POST' && /^\/events\/(sbx_[A-Za-z0-9_-]{20,64})$/.exec(url.pathname);
+    if (eventMatch) {
+      let body;
+      try { body = await request.json(); } catch { return Response.json({ error: 'not_found' }, { status: 404 }); }
+      return this.events(eventMatch[1], String(body?.after ?? '0'), body?.ticket);
+    }
     return Response.json({ error: 'not_found' }, { status: 404 });
   }
 
@@ -178,10 +192,11 @@ export class SandboxAcceptOnlyStore {
     else await this.state.storage.setAlarm?.(next);
   }
 
-  async events(taskId, after, authorization) {
-    const match = /^Bearer ([A-Za-z0-9_-]{40,64})$/.exec(authorization ?? '');
-    if (!match) return Response.json({ error: 'not_found' }, { status: 404 });
-    const ticketHash = await digest(match[1]);
+  async events(taskId, after, ticket) {
+    if (typeof ticket !== 'string' || !/^[A-Za-z0-9_-]{40,64}$/.test(ticket) || !/^(0|[1-9]\d{0,8})$/.test(after)) {
+      return Response.json({ error: 'not_found' }, { status: 404 });
+    }
+    const ticketHash = await digest(ticket);
     const now = Date.now();
     const access = await this.state.storage.transaction(async storage => {
       const record = await storage.get(`run:${taskId}`);
