@@ -994,6 +994,45 @@ it('recovers the persisted launch after isolate loss without auto-running it', a
    expect(await state.storage.get('retryBatch')).toBeUndefined();
  });
 
+ it('keeps an ambiguous legacy launch separate until the owner dismisses waiting, then releases only the chat hold', async () => {
+   const state = makeState();
+   const sessions = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null,
+     put: async () => {} };
+   const io = new IntakeBuffer(state, { BOT_TOKEN: 't', SESSIONS: sessions, AGENT_URL: 'https://agent.test' });
+   const original = { text: 'old uncertain task', msg: { chat: { id: 42 }, message_id: 123, text: 'old uncertain task' } };
+   await state.storage.put('buf', [original]);
+   handleMessage.mockRejectedValueOnce(new Error('agent acknowledgement timed out'));
+
+   await io.fetch(flushReq());
+
+   const [notice] = sendMessageWithKeyboard.mock.calls.filter(call => String(call[2]).includes('Подтверждение запуска'));
+   expect(notice[2]).toContain('Автоматически её не повторяю');
+   const callback = notice[3][0][0].callback_data;
+   const token = callback.split('|')[1];
+   const archived = await state.storage.get(`legacy-unknown:${token}`);
+   expect(archived).toMatchObject({ state: 'unknown', messageIds: [123], items: [original], chatId: 42 });
+   expect(await state.storage.get('retryBatch')).toBeUndefined();
+   expect(await state.storage.get('launching')).toBeUndefined();
+   expect(await state.storage.get('busy')).toBe(true);
+
+   await io.fetch(new Request('https://intake/append', { method: 'POST', body: JSON.stringify({
+     text: 'independent task', msg: { chat: { id: 42 }, message_id: 124, text: 'independent task' },
+   }) }));
+   expect((await state.storage.get('buf')).map(item => item.text)).toEqual(['independent task']);
+
+   const action = await state.storage.get(`legacy-unknown-dismiss:${token}`);
+   const dismissed = await io.fetch(new Request('https://intake/dismiss-unknown', { method: 'POST', body: JSON.stringify({
+     messageId: action.messageId, callbackData: callback, username: 'test-profile',
+   }) }));
+   expect(dismissed.status).toBe(200);
+   expect(await dismissed.json()).toEqual({ dismissed: true, outcomeUnknown: true });
+   expect(await state.storage.get(`legacy-unknown:${token}`)).toMatchObject({ state: 'unknown', userDismissedAt: expect.any(Number) });
+   expect(await state.storage.get(`legacy-unknown-dismiss:${token}`)).toMatchObject({ status: 'dismissed' });
+   expect(await state.storage.get('busy')).toBeUndefined();
+   expect((await state.storage.get('buf')).map(item => item.text)).toEqual(['independent task']);
+   expect(await state.storage.get('retryBatch')).toBeUndefined();
+ });
+
  it('archives the batch after 3 failures, allows fresh tasks, and restores it explicitly', async () => {
    // Regression test: a non-transient preparation failure (e.g. a permanently
    // bad credential) used to re-populate retryBatch unconditionally, so it

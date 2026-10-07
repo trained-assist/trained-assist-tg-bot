@@ -315,6 +315,26 @@ describe('callbacks — intake_cancel (#305)', () => {
     expect(sendMessage.mock.calls.at(-1)?.[2] || '').toContain('Передача отменена');
   });
 
+  it('sends task-scoped ownership data for legacy unknown-task dismissal', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const stub = { fetch: vi.fn().mockResolvedValue(new Response('{}', { status: 200 })) };
+    const env = {
+      BOT_TOKEN: 'test-token', SESSIONS: {}, AGENT_URL: 'http://agent', AGENT_SECRET: 'secret',
+      INTAKE: { idFromName: name => name, get: () => stub },
+    };
+    const data = 'intake_dismiss_unknown|123e4567-e89b-42d3-a456-426614174000';
+
+    await handleCallbackQuery({ id: 'dismiss-legacy', data, from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    expect(stub.fetch).toHaveBeenCalledTimes(1);
+    expect(stub.fetch.mock.calls[0][0]).toBe('https://intake/dismiss-unknown');
+    expect(JSON.parse(stub.fetch.mock.calls[0][1].body)).toEqual({
+      messageId: 42, callbackData: data, username: 'testuser',
+    });
+  });
+
   it('stays silent when there was nothing queued to cancel', async () => {
     vi.clearAllMocks();
     const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
