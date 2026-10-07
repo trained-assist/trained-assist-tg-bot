@@ -178,6 +178,9 @@ for invocation_events in invocations.values():
     for event in invocation_events if isinstance(invocation_events, list) else []:
         for item in walk(event):
             metadata = item.get("$metadata", {})
+            service = item.get("service") or metadata.get("service")
+            if service != WORKER:
+                continue
             span_name = item.get("spanName") or metadata.get("spanName")
             origin = item.get("origin") or metadata.get("origin")
             if origin == "fetch" or (isinstance(span_name, str) and "fetch" in span_name.lower()):
@@ -201,6 +204,9 @@ for row in event_rows:
     source = row.get("source", {}) if isinstance(row, dict) else {}
     if not isinstance(source, dict):
         source = {}
+    service = metadata.get("service") or source.get("service")
+    if service != WORKER:
+        continue
     span_name = metadata.get("spanName") or source.get("spanName")
     origin = metadata.get("origin") or source.get("origin")
     trace_id = metadata.get("traceId") or source.get("traceId")
@@ -246,7 +252,7 @@ print(
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
-            "event_row_count": len(event_rows),
+            "event_row_count": len(event_summaries),
             "trace_event_count": len(event_summaries),
             "trace_events": event_summaries[:50],
             "outbound_fetch_span_count": len(fetch_spans),
