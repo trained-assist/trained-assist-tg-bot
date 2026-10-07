@@ -112,7 +112,7 @@ function tapRun(env, chatId) {                    // ▶️ Запустить �
 
 // How many envelopes were emitted since a recorded mark.
 const since = (mark) => tg.slice(mark);
-const RUN_CB = 'intake_run';
+const hasLaunchAction = event => event.buttons.some(button => /^intake_run\|(explore|answer|auto)$/.test(button));
 
 beforeEach(() => {
   tg.length = 0;
@@ -153,7 +153,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     expect(tg.filter(e => e.kind === 'send')).toHaveLength(1);
     // The collector always carries the launch button.
     await env.quiet(42);
-    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    expect(tg.some(hasLaunchAction)).toBe(true);
     expect(handleMessage).not.toHaveBeenCalled();             // nothing auto-fires
 
     await tapRun(env, 42);
@@ -215,7 +215,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     ]) await routeText({ chat: { id: 42 }, ...msg }, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
     await env.quiet(42);
-    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    expect(tg.some(hasLaunchAction)).toBe(true);
     await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const batch = handleMessage.mock.calls[0][0].intakeItems;
@@ -256,7 +256,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     await drain();
     await runFinished(env, 42, 'req-c5');
     await env.quiet(42);
-    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    expect(tg.some(hasLaunchAction)).toBe(true);
 
     // 6: launch the held follow-ups as a second deep run.
     await tapRun(env, 42);
@@ -295,7 +295,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
 
     const emitted = since(mark);
     expect(emitted.length).toBeGreaterThan(0);               // never silent
-    expect(emitted.some(e => e.buttons.includes(RUN_CB))).toBe(true); // «▶️» offered
+    expect(emitted.some(hasLaunchAction)).toBe(true);
     expect(emitted.some(e => /input/i.test(e.text || ''))).toBe(true); // asks
     expect(handleMessage).toHaveBeenCalledTimes(1);          // <-- current bug: fires 2nd run
   });
