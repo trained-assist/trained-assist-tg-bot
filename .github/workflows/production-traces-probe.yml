@@ -10,11 +10,12 @@ jobs:
   query:
     if: github.ref_name == 'main'
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_OBSERVABILITY_TOKEN: ${{ secrets.CF_OBSERVABILITY_TOKEN }}
       CF_WORKER_NAME: trained-assist-tg-bot
+      CF_GENERATE_HEALTH_TRAFFIC: "true"
     steps:
       - uses: actions/checkout@v4
       - name: Query production trace summaries
