@@ -512,6 +512,32 @@ describe('existing collector control-plane ownership', () => {
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
+  it.each(['queued', 'stopLaunch'])('keeps independent launch controls visible despite stale %s state', async staleState => {
+    const { owner, storage, source } = await stopFixture();
+    await owner.fetch(rpc('/stop', source));
+    await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
+    if (staleState === 'queued') await storage.put('launchQueued', true);
+    else await storage.put('stopLaunch', { mode: 'new', route: 'old-route', at: Date.now() });
+    await owner._showCollector(42, 1, 2);
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(callbacks).toContain(`ws|answer|${await storage.get('draftRevision')}`);
+    expect(callbacks).not.toContain('intake_cancel');
+    expect((await storage.get('cpStopWindow')).pending).toBe(true);
+  });
+
+  it('sends a fresh independent-launch collector if Telegram cannot edit the prior bubble', async () => {
+    const { owner, storage, source } = await stopFixture();
+    await owner.fetch(rpc('/stop', source));
+    await storage.put('collectorMsgId', 999);
+    await storage.put('collectorBatchId', 'old-batch');
+    await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
+    edit.mockResolvedValueOnce({ ok: false, description: 'message to edit not found' });
+    await owner._showCollector(42, 1, 2);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
+    expect(await storage.get('collectorMsgId')).toBe(700);
+  });
+
   it('retains stopped task identities across terminal polling and restart; independent input launches without waiting', async () => {
     const { owner, storage, env, source } = await stopFixture();
     env.SESSIONS = owner.env.SESSIONS;

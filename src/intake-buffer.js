@@ -1955,7 +1955,9 @@ export class IntakeBuffer {
           await this.state.storage.put(`cp-unknown-dismiss:${token}`, { ...unknownDismiss, messageId: null });
         }
       }
-      const keyboard = (queued || stopLaunch) ? CANCEL_BTN
+      // A pending stop belongs to the old run. Its stale queue/stop action must
+      // not hide controls for this distinct, still-unlaunched draft.
+      const keyboard = (queued || stopLaunch) && !canLaunchIndependently ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
@@ -1986,8 +1988,10 @@ export class IntakeBuffer {
           if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
           return prevId;
         }
-        // A transient edit error must not create a duplicate control message.
-        if (!/message to edit not found/i.test(edited?.description || '')) {
+        // During unresolved stop, the user needs a visible launch control for the
+        // independent draft. If Telegram cannot edit the prior collector, publish
+        // a fresh one (the old bubble is neutralized below when the send succeeds).
+        if (!canLaunchIndependently && !/message to edit not found/i.test(edited?.description || '')) {
           await this._scheduleReceipt();
           return prevId;
         }
