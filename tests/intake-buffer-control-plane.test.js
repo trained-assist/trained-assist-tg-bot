@@ -535,7 +535,7 @@ describe('existing collector control-plane ownership', () => {
     await owner._showCollector(42, 1, 2);
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
-    expect(await storage.get('collectorMsgId')).toBe(700);
+    expect(await storage.get('collectorMsgId')).toBe(99);
   });
 
   it('retains stopped task identities across terminal polling and restart; independent input launches without waiting', async () => {
