@@ -43,6 +43,25 @@ describe('isolated staging test agent', () => {
     expect(denied.status).toBe(403);
   });
 
+  it('clears intake only for the configured synthetic user and chat', async () => {
+    const gateEnv = { ...env, TEST_CHAT_IDS: '24790956' };
+    const allowed = await worker.fetch(request('/intake-gate', {
+      method: 'POST',
+      body: { username: env.TEST_USERNAME, chatId: 24790956, text: 'safe staging task' },
+    }), gateEnv);
+    expect(await allowed.json()).toEqual({ level: 'clear', delayMs: 1000, announce: null });
+    const denied = await worker.fetch(request('/intake-gate', {
+      method: 'POST',
+      body: { username: env.TEST_USERNAME, chatId: 12345, text: 'safe staging task' },
+    }), gateEnv);
+    expect(denied.status).toBe(403);
+    const unauthorized = await worker.fetch(request('/intake-gate', {
+      method: 'POST', secret: '',
+      body: { username: env.TEST_USERNAME, chatId: 24790956, text: 'safe staging task' },
+    }), gateEnv);
+    expect(unauthorized.status).toBe(401);
+  });
+
   it('rejects runs that are not log-only synthetic chats', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch');
     const response = await worker.fetch(request('/run', {
@@ -85,6 +104,28 @@ describe('isolated staging test agent', () => {
       outcome: 'quick',
       answer: 'Да, тестовый агент отвечает. Внешние инструменты отключены.',
     });
+  });
+
+  it('uses the staging gateway service binding for run-finished callbacks', async () => {
+    const gatewayFetch = vi.fn().mockResolvedValue(Response.json({ busy: false }));
+    const networkFetch = vi.spyOn(globalThis, 'fetch');
+    const response = await worker.fetch(request('/run', {
+      method: 'POST',
+      body: {
+        username: env.TEST_USERNAME,
+        chatId: -100000000000000,
+        userId: -100000000000000,
+        delivery: 'log',
+        requestId: 'service-binding-run',
+        task: 'safe staging task',
+      },
+    }), { ...env, GATEWAY: { fetch: gatewayFetch } });
+    expect(response.status).toBe(202);
+    expect(gatewayFetch).toHaveBeenCalledTimes(1);
+    const [callback] = gatewayFetch.mock.calls[0];
+    expect(new URL(callback.url).pathname).toBe('/internal/run-finished');
+    expect(callback.headers.get('Authorization')).toBe(`Bearer ${env.AGENT_SECRET}`);
+    expect(networkFetch).not.toHaveBeenCalled();
   });
 
   it('does not expose or implement tool routes', async () => {

@@ -5,6 +5,11 @@ compatibility_date = "2026-10-01"
 [vars]
 GATEWAY_URL = "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev"
 TEST_USERNAME = "tgpatrol_20261007_v1"
+TEST_CHAT_IDS = "24790956"
+
+[[services]]
+binding = "GATEWAY"
+service = "trained-assist-tg-bot-staging"
 
 # For `wrangler dev --local`, save the same random test key to an ignored
 # `.dev.vars.staging-agent` file as TEST_AGENT_SECRET. Deployed auth uses only

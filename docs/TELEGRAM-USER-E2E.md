@@ -165,10 +165,19 @@ continue with `/start`, `/help`, a quick question, and an ordinary task. Inspect
 Worker uses an isolated deterministic agent at
 `trained-assist-tg-test-agent-staging`; it only accepts the synthetic test
 username, supports read-only project/session/classification routes, and accepts
-task runs only when the gateway has changed the chat id to its reserved test id
-and set `delivery:"log"`. It returns a canned answer through the existing
-staging `/internal/run-finished` callback. It has no MCP or tool routes and does
-not persist or log task content.
+intake decisions only for the synthetic private chat. It accepts task runs only
+when the gateway has changed the chat id to its reserved test id and set
+`delivery:"log"`. It returns a canned answer through a Cloudflare service
+binding to the staging `/internal/run-finished` route. It has no MCP or tool
+routes and does not persist or log task content.
+
+The branch CI runner `scripts/staging/telegram-user-path-e2e.mjs` sends `/help`,
+a quick question, and an ordinary task one at a time through the signed staging
+webhook. Before sending, it confirms the synthetic chat is idle; after each
+input it checks that the run settles and leaves no buffered messages. The
+`staging-user-path-e2e` job deploys the isolated test agent and synchronizes
+staging-only secrets from Actions before running the probe. Worker tail logs
+remain the evidence for the exact canned answer and suppressed Telegram effects.
 
 The bot and test agent must have the same random staging-only `AGENT_SECRET`.
 Provision it with `wrangler secret bulk` JSON input; avoid `secret put` through a

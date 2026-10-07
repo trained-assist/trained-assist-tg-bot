@@ -21,6 +21,10 @@ function sync(args, values) {
     throw new Error(`Wrangler secret sync failed (${result.status ?? result.error?.message ?? 'unknown'})`);
   }
 }
+const deploy = spawnSync(wrangler, ['deploy', '--config', 'wrangler.staging-agent.toml'], {
+  encoding: 'utf8', env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
+});
+if (deploy.error || deploy.status !== 0) throw new Error(`Staging test agent deploy failed (${deploy.status ?? deploy.error?.message ?? 'unknown'})`);
 sync(['--config', 'wrangler.staging-agent.toml'], { AGENT_SECRET: agentSecret });
 sync(['--env', 'staging'], {
   AGENT_SECRET: agentSecret,

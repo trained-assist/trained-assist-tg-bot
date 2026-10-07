@@ -26,6 +26,18 @@ function summarize(state) {
     stranded: !!state.stranded,
   };
 }
+async function waitUntilIdle(label) {
+  await new Promise(resolve => setTimeout(resolve, 4000));
+  let state = summarize(await readState());
+  for (let attempt = 0; attempt < 20 && (state.busy || state.bufferedMessages || state.retryMessages || state.launching || state.stranded); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    state = summarize(await readState());
+  }
+  console.log(`${label}: intake ${JSON.stringify(state)}`);
+  if (state.busy || state.bufferedMessages || state.retryMessages || state.launching || state.stranded) {
+    throw new Error(`${label}: staging intake did not settle`);
+  }
+}
 let before = summarize(await readState());
 for (let attempt = 0; attempt < 8 && before.launching && !before.busy && !before.bufferedMessages && !before.retryMessages; attempt++) {
   await new Promise(resolve => setTimeout(resolve, 1500));
@@ -68,13 +80,5 @@ for (let i = 0; i < cases.length; i++) {
     throw new Error(`${test.label}: webhook returned HTTP ${response.status}: ${detail.slice(0, 120)}`);
   }
   console.log(`${test.label}: webhook accepted (HTTP ${response.status})`);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await waitUntilIdle(test.label);
 }
-// Allow the webhook's waitUntil dispatch, run outbox alarm, and agent callback to settle.
-let after = summarize(await readState());
-for (let attempt = 0; attempt < 18 && (after.busy || after.bufferedMessages || after.retryMessages || after.launching || after.stranded); attempt++) {
-  await new Promise(resolve => setTimeout(resolve, 2500));
-  after = summarize(await readState());
-}
-console.log(`intake settled: ${JSON.stringify(after)}`);
-if (after.busy || after.bufferedMessages || after.retryMessages || after.launching || after.stranded) throw new Error('Staging chat did not settle after the E2E requests');

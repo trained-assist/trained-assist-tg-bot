@@ -30,6 +30,12 @@ function isTestUser(username, env) {
   return typeof env.TEST_USERNAME === 'string' && username === env.TEST_USERNAME;
 }
 
+function isTestChat(chatId, env) {
+  const id = Number(chatId);
+  if (!Number.isSafeInteger(id) || id === 0) return false;
+  return String(env.TEST_CHAT_IDS || '').split(',').some(value => value.trim() && Number(value.trim()) === id);
+}
+
 function answerFor(task) {
   const text = task.trim().toLowerCase();
   if (/^\/help(?:\s|$)/.test(text)) {
@@ -45,10 +51,16 @@ async function handleRun(request, env) {
   if (!authorized(request, env)) return json({ error: 'unauthorized' }, 401);
   const body = await request.json().catch(() => null);
   const chatId = Number(body?.chatId ?? body?.userId);
-  if (!isTestUser(body?.username, env) || body?.delivery !== 'log' ||
-      !Number.isSafeInteger(chatId) || chatId < RESERVED_CHAT_MIN || chatId > RESERVED_CHAT_MAX ||
-      Number(body?.userId) !== chatId || !REQUEST_ID_RE.test(body?.requestId || '') ||
-      typeof body?.task !== 'string' || body.task.trim().length === 0 || body.task.length > 5000) {
+  const allowed = {
+    user: isTestUser(body?.username, env),
+    logOnly: body?.delivery === 'log',
+    reservedChat: Number.isSafeInteger(chatId) && chatId >= RESERVED_CHAT_MIN && chatId <= RESERVED_CHAT_MAX,
+    matchingChatIds: Number(body?.userId) === chatId,
+    requestId: REQUEST_ID_RE.test(body?.requestId || ''),
+    task: typeof body?.task === 'string' && body.task.trim().length > 0 && body.task.length <= 5000,
+  };
+  if (Object.values(allowed).some(value => !value)) {
+    console.warn(`[test-agent] run rejected requestId=${body?.requestId || '-'} checks=${JSON.stringify(allowed)}`);
     return json({ error: 'test-only run rejected' }, 403);
   }
 
@@ -57,7 +69,8 @@ async function handleRun(request, env) {
   }
 
   const answer = answerFor(body.task);
-  const callback = await fetch(`${env.GATEWAY_URL.replace(/\/$/, '')}/internal/run-finished`, {
+  console.log(`[test-agent] run accepted requestId=${body.requestId} chatId=${chatId}`);
+  const callbackInit = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -70,7 +83,11 @@ async function handleRun(request, env) {
       answer,
     }),
     signal: AbortSignal.timeout(5000),
-  }).catch(() => null);
+  };
+  const callback = await (env.GATEWAY
+    ? env.GATEWAY.fetch(new Request('https://gateway/internal/run-finished', callbackInit))
+    : fetch(`${env.GATEWAY_URL.replace(/\/$/, '')}/internal/run-finished`, callbackInit)).catch(() => null);
+  console.log(`[test-agent] gateway callback requestId=${body.requestId} status=${callback?.status || 'network-error'}`);
   if (!callback?.ok) return json({ error: 'staging gateway callback failed' }, 502);
 
   // Do not retain or log task content. Replays are safe because this backend has
@@ -90,16 +107,28 @@ export default {
       return json({ paused: false, phase: 'ready', active: 0, durableIngress: 1 });
     }
     if (request.method === 'GET' && url.pathname === '/project-decision') {
-      if (!isTestUser(url.searchParams.get('username'), env)) return json({ error: 'test user only' }, 403);
+      const allowedUser = isTestUser(url.searchParams.get('username'), env);
+      console.log(`[test-agent] route=project-decision userAllowed=${allowedUser}`);
+      if (!allowedUser) return json({ error: 'test user only' }, 403);
       return json({ action: 'quick', choices: [] });
     }
     if (request.method === 'GET' && url.pathname === '/projects') {
-      if (!isTestUser(url.searchParams.get('username'), env)) return json({ error: 'test user only' }, 403);
+      const allowedUser = isTestUser(url.searchParams.get('username'), env);
+      console.log(`[test-agent] route=projects userAllowed=${allowedUser}`);
+      if (!allowedUser) return json({ error: 'test user only' }, 403);
       return json({ projects: [] });
     }
     if (request.method === 'GET' && url.pathname === '/sessions') return json({ sessions: [] });
     if (request.method === 'POST' && url.pathname === '/classify') {
       return json({ sessionId: null, confidence: 'low' });
+    }
+    if (request.method === 'POST' && url.pathname === '/intake-gate') {
+      const body = await request.json().catch(() => null);
+      if (!isTestUser(body?.username, env) || !isTestChat(body?.chatId, env) ||
+          typeof body?.text !== 'string' || body.text.length > 5000) {
+        return json({ error: 'test-only intake rejected' }, 403);
+      }
+      return json({ level: 'clear', delayMs: 1000, announce: null });
     }
     if (request.method === 'POST' && url.pathname === '/run') return handleRun(request, env);
     return json({ error: 'not found' }, 404);
