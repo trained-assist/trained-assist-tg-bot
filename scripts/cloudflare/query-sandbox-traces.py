@@ -190,6 +190,31 @@ for invocation_events in invocations.values():
                     }
                 )
 
+events_response = query("events")
+if not events_response.get("success"):
+    print(json.dumps({"errors": events_response.get("errors", [])}), file=sys.stderr)
+    raise SystemExit(1)
+event_rows = events_response.get("result", {}).get("events", {}).get("events", [])
+event_summaries = []
+for row in event_rows:
+    metadata = row.get("$metadata", {}) if isinstance(row, dict) else {}
+    source = row.get("source", {}) if isinstance(row, dict) else {}
+    if not isinstance(source, dict):
+        source = {}
+    span_name = metadata.get("spanName") or source.get("spanName")
+    origin = metadata.get("origin") or source.get("origin")
+    trace_id = metadata.get("traceId") or source.get("traceId")
+    if trace_id or span_name:
+        event_summaries.append(
+            {
+                "span": span_name,
+                "origin": origin,
+                "has_trace_id": bool(trace_id),
+                "status_code": metadata.get("statusCode") or source.get("statusCode"),
+                "duration_ms": metadata.get("duration") or source.get("duration"),
+            }
+        )
+
 keys_response = read_keys()
 if not keys_response.get("success"):
     print(json.dumps({"errors": keys_response.get("errors", [])}), file=sys.stderr)
@@ -221,6 +246,9 @@ print(
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
+            "event_row_count": len(event_rows),
+            "trace_event_count": len(event_summaries),
+            "trace_events": event_summaries[:50],
             "outbound_fetch_span_count": len(fetch_spans),
             "outbound_fetch_spans": fetch_spans[:50],
         },
