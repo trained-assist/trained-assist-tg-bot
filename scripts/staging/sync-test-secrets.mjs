@@ -26,4 +26,11 @@ sync(['--env', 'staging'], {
   AGENT_SECRET: agentSecret,
   TELEGRAM_WEBHOOK_SECRET: webhookSecret,
 });
+// Workers secret changes create new versions. Give global routes a short
+// propagation window before the signed webhook probe starts.
+await new Promise(resolve => setTimeout(resolve, 8000));
+const probe = await fetch('https://trained-assist-tg-test-agent-staging.skillset-apply.workers.dev/project-decision?username=tgpatrol_20261007_v1', {
+  headers: { Authorization: `Bearer ${agentSecret}`, 'user-agent': 'tg-staging-secret-sync/1.0' },
+});
+if (!probe.ok) throw new Error(`Staging test agent auth probe returned HTTP ${probe.status}`);
 console.log('Synchronized isolated staging agent and webhook secrets. Values are not displayed.');

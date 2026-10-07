@@ -53,10 +53,20 @@ for (let i = 0; i < cases.length; i++) {
       text: test.text,
     },
   };
-  const response = await fetch(`${gateway}/webhook`, {
-    method: 'POST', headers, body: JSON.stringify(update),
-  });
-  if (!response.ok) throw new Error(`${test.label}: webhook returned HTTP ${response.status}`);
+  let response;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    response = await fetch(`${gateway}/webhook`, {
+      method: 'POST', headers, body: JSON.stringify(update),
+    });
+    // A 401 is rejected before dispatch or state access, so retrying this same
+    // signed update is safe while Cloudflare propagates newly synchronized keys.
+    if (response.status !== 401) break;
+    await new Promise(resolve => setTimeout(resolve, 2500));
+  }
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`${test.label}: webhook returned HTTP ${response.status}: ${detail.slice(0, 120)}`);
+  }
   console.log(`${test.label}: webhook accepted (HTTP ${response.status})`);
   await new Promise(resolve => setTimeout(resolve, 1500));
 }
