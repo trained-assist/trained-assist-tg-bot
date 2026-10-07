@@ -103,7 +103,7 @@ def query(view: str) -> dict:
         "parameters": {
             "datasets": ["cloudflare-workers"],
             "view": view,
-            "filters": [
+            "filters": [] if view == "traces" else [
                 {
                     "key": "$metadata.service",
                     "operation": "eq",
@@ -152,6 +152,11 @@ if not traces_response.get("success"):
     raise SystemExit(1)
 
 trace_items = traces_response.get("result", {}).get("traces", [])
+trace_items = [
+    trace
+    for trace in trace_items
+    if WORKER in trace.get("service", [])
+]
 summaries = [
     {
         "root_span": trace.get("rootSpanName"),
