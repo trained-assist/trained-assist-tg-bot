@@ -346,6 +346,15 @@ export class IntakeBuffer {
     return revision;
   }
 
+  async _activeUnresolvedLaunches() {
+    const keys = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+    const active = [];
+    for (const key of keys) {
+      if (!(await this.state.storage.get(`cp-launch:${key}`))?.userDismissed) active.push(key);
+    }
+    return active;
+  }
+
   async _callbackOwned(source) {
     try { return await this._callbackOwnedUnchecked(source); } catch { return false; }
   }
@@ -361,6 +370,12 @@ export class IntakeBuffer {
     if (session?.username !== source.username) return false;
     const data = source.callbackData;
     if (typeof data !== 'string') return false;
+    const dismissUnknown = /^intake_dismiss_unknown\|([a-f0-9-]{36})$/.exec(data);
+    if (dismissUnknown) {
+      const action = await this.state.storage.get(`cp-unknown-dismiss:${dismissUnknown[1]}`);
+      return !!action && action.messageId === messageId && action.username === source.username &&
+        action.intentId === (await this.state.storage.get('cpStopWindow'))?.intentId;
+    }
     const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(data);
     if (/^intake_stop(yes|no)\|(supp|new)$/.test(data || '')) {
       const confirmation = await this.state.storage.get(`cp-confirmation:${messageId}`);
@@ -397,7 +412,7 @@ export class IntakeBuffer {
       const source = await request.clone().json().catch(() => ({}));
       const result = await this._exclusive(async () => {
         if (!(await this._callbackOwned(source))) return { refused: true };
-        if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
+        if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length ||
             (await this.state.storage.get('launching'))?.length) {
           return { pending: true };
         }
@@ -444,6 +459,28 @@ export class IntakeBuffer {
 
   async _fetch(request) {
     const url = new URL(request.url);
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/dismiss-unknown' && request.method === 'POST') {
+      const source = await request.json().catch(() => ({}));
+      const result = await this._exclusive(async () => {
+        if (!(await this._callbackOwned(source))) return { refused: true };
+        const token = String(source.callbackData || '').split('|')[1];
+        const action = await this.state.storage.get(`cp-unknown-dismiss:${token}`);
+        const checkpoint = action && await this.state.storage.get(`cp-launch:${action.launchKey}`);
+        const window = await this.state.storage.get('cpStopWindow');
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        if (!action || !checkpoint || !window?.pending || action.intentId !== window.intentId ||
+            !unresolved.includes(action.launchKey) || !(window.admissionLaunchKeys || []).includes(action.launchKey)) return { refused: true };
+        await this.state.storage.put(`cp-launch:${action.launchKey}`, { ...checkpoint, userDismissed: true, userDismissedAt: Date.now() });
+        await this.state.storage.put('cpStopWindow', { ...window, userDismissedLaunchKeys:
+          [...new Set([...(window.userDismissedLaunchKeys || []), action.launchKey])] });
+        return { dismissed: true, chatId: window.chatId, threadId: window.threadId };
+      });
+      if (result.refused) return new Response('Unknown task ownership mismatch', { status: 409 });
+      await sendTracked(this.env, result.chatId, '⏸ Больше не жду подтверждения старой задачи в этом чате. Её исход остаётся неизвестным: она могла запуститься и продолжиться. Повторно её не запускаю; новую задачу можно начать отдельно.', {}, result.threadId).catch(() => null);
+      const buf = (await this.state.storage.get('buf')) || [];
+      if (buf.length) await this._showCollector(result.chatId, buf.length, buf.at(-1)?.msg?.message_id, result.threadId);
+      return json({ dismissed: true, outcomeUnknown: true });
+    }
     if (controlPlaneStopDisabled(this.env) && request.method === 'POST'
         && ['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'].includes(url.pathname)) {
       return Response.json({ error: 'control_plane_stop_disabled' }, { status: 409 });
@@ -1216,7 +1253,7 @@ export class IntakeBuffer {
       const authorized = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return false;
         if (this.env.EXECUTION_BACKEND === 'control-plane' &&
-            (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return false;
+            (this.cpDispatches || (await this._activeUnresolvedLaunches()).length)) return false;
         if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return false;
         if (styleLaunch) {
           await this.state.storage.put('launchWorkStyle', styleLaunch[1]);
@@ -1368,7 +1405,7 @@ export class IntakeBuffer {
       const res = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return null;
         if (this.env.EXECUTION_BACKEND === 'control-plane' && mode !== 'new' &&
-            (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return null;
+            (this.cpDispatches || (await this._activeUnresolvedLaunches()).length)) return null;
         if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && mode !== 'new') return null;
         const store = this.state.storage;
         if (await store.get('stopLaunch')) return { already: true };
@@ -1857,12 +1894,25 @@ export class IntakeBuffer {
       // release) describes input that has already left for the agent.
       // busy deliberately does NOT mask ▶️ — held input is a batch of its own, and
       // killing the button here left the chat with no way to launch it (issue #303).
+      let unknownDismiss = null;
+      if (cpMode && stopPending) {
+        const window = await this.state.storage.get('cpStopWindow');
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        const launchKey = unresolved.find(key => (window?.admissionLaunchKeys || []).includes(key));
+        const checkpoint = launchKey && await this.state.storage.get(`cp-launch:${launchKey}`);
+        if (launchKey && checkpoint && !checkpoint.userDismissed && !window?.userDismissedLaunchKeys?.includes(launchKey)) {
+          const token = crypto.randomUUID();
+          unknownDismiss = { token, launchKey, intentId: window.intentId, username: window.username };
+          await this.state.storage.put(`cp-unknown-dismiss:${token}`, { ...unknownDismiss, messageId: null });
+        }
+      }
       const keyboard = (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
           ? workStyleKeyboard(draftRevision)
         : LAUNCH_BTN;
+      if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');
       const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
       const claimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
@@ -1883,6 +1933,7 @@ export class IntakeBuffer {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
           { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
         if (edited?.ok || /message is not modified/i.test(edited?.description || '')) {
+          if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: prevId });
           if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
           return prevId;
         }
@@ -1903,9 +1954,11 @@ export class IntakeBuffer {
         await editMessage(this.env.BOT_TOKEN, chatId, prevId, '↑ Сообщение выше устарело — новое ниже.',
           { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         await this.state.storage.put('collectorMsgId', id);
+        if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: id });
         if (batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
       } else if (id) {
         await this.state.storage.put('collectorMsgId', id);
+        if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: id });
         if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
       }
       else if (!cpMode) await this._scheduleReceipt();
@@ -2248,7 +2301,21 @@ export class IntakeBuffer {
     }
     if (checkpoint?.notified) return;
     if (checkpoint) await this.state.storage.put(`cp-launch:${launchKey}`, { ...checkpoint, notified: true });
-    await sendTracked(this.env, base?.chat?.id,
+    const stopWindow = await this.state.storage.get('cpStopWindow');
+    const isStopDependency = stopWindow?.pending && (stopWindow.admissionLaunchKeys || []).includes(launchKey);
+    if (isStopDependency && !stopWindow.userDismissedLaunchKeys?.includes(launchKey)) {
+      const token = crypto.randomUUID();
+      await this.state.storage.put(`cp-unknown-dismiss:${token}`, { launchKey, intentId: stopWindow.intentId,
+        username: stopWindow.username, messageId: null });
+      const sent = await sendKeyboardTracked(this.env, base?.chat?.id,
+        '⚠️ Подтверждение не получено; сверяю ту же задачу. Собранный ввод сохранён.',
+        [[{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${token}` }]],
+        {}, threadIdOf(base)).catch(() => null);
+      const messageId = sent?.result?.message_id;
+      if (Number.isSafeInteger(messageId)) await this.state.storage.put(`cp-unknown-dismiss:${token}`, {
+        launchKey, intentId: stopWindow.intentId, username: stopWindow.username, messageId,
+      });
+    } else await sendTracked(this.env, base?.chat?.id,
       '⚠️ Подтверждение не получено; сверяю ту же задачу. Собранный ввод сохранён.',
       {}, threadIdOf(base)).catch(() => null);
   }
@@ -2523,7 +2590,7 @@ export class IntakeBuffer {
   async _pollControlPlaneTasks({ launch = false } = {}) {
     if (this.cpDispatches) return false;
     try { await this._recoverControlPlaneLaunch(); } catch { return false; }
-    if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length) return false;
+    if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length) return false;
     const ids = (await this.state.storage.get('cpBusyRequests')) || [];
     if (!ids.length) return false;
     try {

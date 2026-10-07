@@ -83,6 +83,43 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('lets the owner dismiss waiting on one unknown launch without deleting its evidence or retrying it', async () => {
+    const { owner, storage, env } = fixture();
+    const token = '123e4567-e89b-42d3-a456-426614174000';
+    const launchKey = '[1]';
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('launching', items);
+    await storage.put('cpUnresolvedLaunches', [launchKey]);
+    await storage.put(`cp-launch:${launchKey}`, { msg: { ...items[0].msg, intakeItems: items }, profileId: 'test-profile', botUsername: 'test-bot' });
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-intent', username: 'test-profile', chatId: 42,
+      threadId: null, profileId: 'test-profile', admissionLaunchKeys: [launchKey] });
+    await storage.put(`cp-unknown-dismiss:${token}`, { launchKey, intentId: 'stop-intent', username: 'test-profile', messageId: 99 });
+    const callback = { messageId: 99, callbackData: `intake_dismiss_unknown|${token}`, username: 'test-profile' };
+    expect(await (await owner.fetch(rpc('/callback-owner', callback))).json()).toEqual({ owned: true });
+    const response = await owner.fetch(rpc('/dismiss-unknown', callback));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ dismissed: true, outcomeUnknown: true });
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
+    expect(await storage.get(`cp-launch:${launchKey}`)).toMatchObject({ userDismissed: true });
+    expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, userDismissedLaunchKeys: [launchKey] });
+    expect(await owner._activeUnresolvedLaunches()).toEqual([]);
+    await owner._recoverControlPlaneLaunch();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith('test-bot-token', 42, expect.stringContaining('исход остаётся неизвестным'), expect.objectContaining({}));
+
+    await storage.put('buf', [{ text: 'новая задача', msg: { chat: { id: 42 }, message_id: 2, text: 'новая задача' } }]);
+    await storage.put('draftRevision', 3);
+    await owner._showCollector(42, 1, 2);
+    const launch = { messageId: 99, callbackData: 'ws|answer|3', username: 'test-profile' };
+    expect(await owner._callbackOwned(launch)).toBe(true);
+    const launched = await owner.fetch(rpc('/flush', { parallel: true, ...launch }));
+    expect(launched.status).toBe(200);
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('новая задача');
+    expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true, workStyle: 'answer' });
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey, '[2]']);
+  });
+
   it.each(['stop-disabled', 'busy'])('real %s scheduling preserves an earlier alarm even without cleanup entries', async branch => {
     const { storage, env } = fixture();
     env.TG_SLICE_STOP_ENABLED = 'false';
@@ -462,10 +499,16 @@ describe('existing collector control-plane ownership', () => {
   it('offers an independent launch while stop reconciliation is unresolved', async () => {
     const { owner, storage, source } = await stopFixture();
     await owner.fetch(rpc('/stop', source));
+    const stopWindow = await storage.get('cpStopWindow');
+    await storage.put('cpStopWindow', { ...stopWindow, admissionLaunchKeys: ['[1]'] });
+    await storage.put('cpUnresolvedLaunches', ['[1]']);
+    await storage.put('cp-launch:[1]', { profileId: 'test-profile', botUsername: 'test-bot', msg: items[0].msg });
     await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
     await owner._showCollector(42, 1, 2, null, '⛔ Остановлено');
     expect(send.mock.calls.at(-1)[2]).toBe('⏳ Старая задача ещё сверяется. Этот независимый ввод можно запустить отдельно.');
-    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(callbacks).toContain(`ws|answer|${await storage.get('draftRevision')}`);
+    expect(callbacks.some(value => /^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(value))).toBe(true);
     expect(handleMessage).not.toHaveBeenCalled();
   });
 

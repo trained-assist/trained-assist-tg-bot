@@ -34,6 +34,7 @@ async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
 
 function needsControlPlaneOwnership(data) {
   return ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
+    || /^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(data || '')
     || /^intake_discard\|\d+$/.test(data || '')
     || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '')
     || ['workrun|', 'intake_stopyes|', 'intake_stopno|', 'stop|', 'stopok|', 'stopno|'].some(prefix => data?.startsWith(prefix));
@@ -827,6 +828,18 @@ export async function handleCallbackQuery(cq, env) {
         ? '↩️ Передача отменена — сообщения остались в порции. Задача при этом осталась остановленной: запустить порцию можно кнопкой в меню.'
         : '↩️ Передача отменена — сообщения остались в порции. Когда будешь готов, запускай кнопкой.');
     }
+    return;
+  }
+
+  if (/^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(data || '')) {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '⏸ Перестаю ждать старую задачу…');
+    if (!env.INTAKE) return;
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+    const response = await stub.fetch('https://intake/dismiss-unknown', { method: 'POST',
+      body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
+    if (!response?.ok) await sendT(env, chatId, threadId,
+      '⌛ Не получилось снять ожидание. Старая задача и её статус не изменены; используй последнее сообщение.');
     return;
   }
 
