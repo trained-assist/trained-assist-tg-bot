@@ -83,7 +83,12 @@ def read_service_values() -> dict:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
-        print(json.dumps({"values_http_status": error.code}), file=sys.stderr)
+        try:
+            details = json.load(error)
+            messages = [item.get("message", "") for item in details.get("errors", [])]
+        except Exception:
+            messages = []
+        print(json.dumps({"values_http_status": error.code, "errors": messages}), file=sys.stderr)
         raise SystemExit(1)
 
 
