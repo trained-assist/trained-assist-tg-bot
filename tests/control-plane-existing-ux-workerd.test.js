@@ -384,6 +384,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(independentLaunch.status).toBe(200);
         expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
         expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText]);
+        expect(providerMessages.some(item => item.text.includes('Запускаю параллельно — новая сессия'))).toBe(true);
         expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes.at(-1).requestId}`).taskId).not.toBe('ut-workerd-old');
         const launchedState = await state();
         expect(launchedState.get('cpStopWindow')).toMatchObject({ pending: true,
