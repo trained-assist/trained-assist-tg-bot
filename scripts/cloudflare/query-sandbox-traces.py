@@ -20,14 +20,6 @@ SETTINGS_API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/scripts/{WORKER}/script-settings"
 )
-KEYS_API = (
-    "https://api.cloudflare.com/client/v4/accounts/"
-    f"{ACCOUNT_ID}/workers/observability/telemetry/keys"
-)
-VALUES_API = (
-    "https://api.cloudflare.com/client/v4/accounts/"
-    f"{ACCOUNT_ID}/workers/observability/telemetry/values"
-)
 
 
 def read_worker_settings() -> dict:
@@ -44,55 +36,6 @@ def read_worker_settings() -> dict:
         raise SystemExit(1)
 
 
-def read_keys() -> dict:
-    request = urllib.request.Request(
-        KEYS_API,
-        data=b"{}",
-        headers={
-            "Authorization": f"Bearer {TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        print(json.dumps({"keys_http_status": error.code}), file=sys.stderr)
-        raise SystemExit(1)
-
-
-def read_service_values() -> dict:
-    now = int(time.time() * 1000)
-    body = {
-        "datasets": ["cloudflare-workers"],
-        "key": "$metadata.service",
-        "type": "string",
-        "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
-        "limit": 1000,
-    }
-    request = urllib.request.Request(
-        VALUES_API,
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {TOKEN}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        try:
-            details = json.load(error)
-            messages = [item.get("message", "") for item in details.get("errors", [])]
-        except Exception:
-            messages = []
-        print(json.dumps({"values_http_status": error.code, "errors": messages}), file=sys.stderr)
-        raise SystemExit(1)
-
-
 def query(view: str) -> dict:
     now = int(time.time() * 1000)
     body = {
@@ -103,7 +46,7 @@ def query(view: str) -> dict:
         "limit": 500,
         "parameters": {
             "datasets": ["cloudflare-workers"],
-            "filters": [] if view == "traces" else [
+            "filters": [
                 {
                     "key": "$metadata.service",
                     "operation": "eq",
@@ -221,23 +164,6 @@ for row in event_rows:
             }
         )
 
-keys_response = read_keys()
-if not keys_response.get("success"):
-    print(json.dumps({"errors": keys_response.get("errors", [])}), file=sys.stderr)
-    raise SystemExit(1)
-keys = keys_response.get("result", [])
-key_names = [item.get("key", "") for item in keys if isinstance(item, dict)]
-service_values = read_service_values().get("result", [])
-matching_services = sorted(
-    {
-        item.get("value")
-        for item in service_values
-        if isinstance(item, dict)
-        and isinstance(item.get("value"), str)
-        and (WORKER in item["value"] or "sandbox" in item["value"].lower())
-    }
-)
-
 print(
     json.dumps(
         {
@@ -245,10 +171,6 @@ print(
             "worker_trace_settings": (
                 read_worker_settings().get("result", {}).get("observability", {}).get("traces", {})
             ),
-            "telemetry_key_count": len(key_names),
-            "telemetry_keys": key_names[:100],
-            "service_value_count": len(service_values),
-            "sandbox_service_values": matching_services,
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
