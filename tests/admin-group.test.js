@@ -11,7 +11,7 @@ vi.mock('../src/handlers/message.js', () => ({ handleMessage: vi.fn() }));
 vi.mock('../src/handlers/commands.js', () => ({ handleCommand: (...a) => handleCommand(...a), isAdminForwardedCommand: () => false }));
 vi.mock('../src/handlers/user-mgmt.js', () => ({
   handleUserMgmt: (...a) => handleUserMgmt(...a),
-  isUserMgmtCommand: (t) => /^\/(adduser|um|listusers)/.test(t),
+  isUserMgmtCommand: (t) => /^\/(adduser|um|listusers|pass_reset)/.test(t),
 }));
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
 vi.mock('../src/lib/kv.js', () => ({ getSession: vi.fn(async () => ({})), setSession: vi.fn() }));
@@ -49,6 +49,7 @@ describe('isAdminGroupChat', () => {
   it('isAdminOnlyCommand is exact-token', () => {
     expect(isAdminOnlyCommand('/adduser x Y')).toBe(true);
     expect(isAdminOnlyCommand('/adduser@bot x')).toBe(true);
+    expect(isAdminOnlyCommand('/pass_reset alice')).toBe(true);
     expect(isAdminOnlyCommand('/addusers')).toBe(false);
     expect(isAdminOnlyCommand('что-то /adduser x')).toBe(false);
   });

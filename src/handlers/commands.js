@@ -236,6 +236,7 @@ export async function cmdLogin(msg, env) {
   // the flaky-count dependency. Reversible: /all_off turns it back off.
   await setSession(env.SESSIONS, chatId, {
     username, name: user.name, telegramUserId: from?.id,
+    ...(env.CONTROL_PLANE_PROFILE ? { controlPlaneProfile: env.CONTROL_PLANE_PROFILE } : {}),
     ...(isGroup ? { allMsgMode: true } : {}),
   }, threadId);
   return sendIn(env, chatId, threadId,

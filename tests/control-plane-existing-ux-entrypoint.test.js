@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { webcrypto } from 'node:crypto';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
 
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
@@ -6,7 +7,7 @@ vi.mock('../src/lib/telegram.js', () => ({ answerCallbackQuery: vi.fn(), sendMes
   sendMessageWithKeyboard: vi.fn(), editMessage: vi.fn() }));
 import worker from '../src/sandbox-tg/existing-ux.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
-import { answerCallbackQuery } from '../src/lib/telegram.js';
+import { answerCallbackQuery, sendMessage } from '../src/lib/telegram.js';
 
 function fixture() {
   const collectorCalls = [];
@@ -59,11 +60,39 @@ describe('signed existing-UX ingress', () => {
     expect(state.collectorCalls).toEqual([]);
   });
 
-  it('stores ordinary input only in the separate collector', async () => {
+  it('requires the profile login before accepting ordinary input', async () => {
     const state = fixture();
-    expect((await state.send()).status).toBe(200);
+    const refused = await state.send();
+    expect(refused.status).toBe(200);
+    expect(await refused.json()).toMatchObject({ ok: true, authenticated: false });
+    expect(state.collectorCalls).toEqual([]);
+    expect(await state.env.SESSIONS.get('isolated-ux:1001')).toBeNull();
+    expect(sendMessage).toHaveBeenCalledWith(state.env.TG_SANDBOX_BOT_TOKEN, 1001,
+      expect.stringContaining('/login username password'));
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+  });
+
+  it('logs a profile into this chat and then accepts input under that username', async () => {
+    const state = fixture();
+    const password = 'fixture-pass';
+    const salt = new Uint8Array(16).fill(9);
+    const key = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await webcrypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256);
+    const saltHex = [...salt].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const passwordHash = [...new Uint8Array(bits)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    await state.env.TG_SLICE.put('user:owner', JSON.stringify({ name: 'Profile Owner', salt: saltHex, passwordHash }));
+    const login = await state.send({ ...state.update, update_id: 2,
+      message: { ...state.update.message, message_id: 12, text: `/login owner ${password}` } });
+    expect(login.status).toBe(200);
+    expect(await login.json()).toMatchObject({ ok: true, authenticated: true });
+    expect(JSON.parse(await state.env.SESSIONS.get('isolated-ux:1001'))).toMatchObject({
+      username: 'owner', name: 'Profile Owner', controlPlaneProfile: 'profile-1',
+    });
+    const inputUpdate = { ...state.update, update_id: 3,
+      message: { ...state.update.message, message_id: 13, text: 'работает?' } };
+    expect((await state.send(inputUpdate)).status).toBe(200);
     expect(state.collectorCalls).toEqual([{ name: '1001', url: 'https://intake/append',
-      body: { text: 'работает?', msg: state.update.message, flush: false, telegramUpdateId: 1 } }]);
+      body: { text: 'работает?', msg: inputUpdate.message, flush: false, telegramUpdateId: 3 } }]);
     expect(handleCallbackQuery).not.toHaveBeenCalled();
     expect(await state.env.SESSIONS.get('1001')).toBeNull();
     expect(JSON.parse(await state.env.SESSIONS.get('isolated-ux:1001')).controlPlaneProfile).toBe('profile-1');
@@ -86,6 +115,7 @@ describe('signed existing-UX ingress', () => {
 
   it('does not send unsupported legacy callbacks to legacy execution', async () => {
     const state = fixture();
+    await state.env.SESSIONS.put('isolated-ux:1001', JSON.stringify({ username: 'test-profile', controlPlaneProfile: 'profile-1' }));
     const update = { update_id: 2, callback_query: { id: 'owned', data: 'sp:old-session', from: { id: 7 }, message: state.update.message } };
     const response = await state.send(update);
     expect(await response.json()).toMatchObject({ ok: true, unsupported: true });
@@ -95,6 +125,7 @@ describe('signed existing-UX ingress', () => {
 
   it('does not expose native stop before exit provenance is accepted', async () => {
     const state = fixture();
+    await state.env.SESSIONS.put('isolated-ux:1001', JSON.stringify({ username: 'test-profile', controlPlaneProfile: 'profile-1' }));
     const update = { update_id: 2, callback_query: { id: 'owned', data: 'intake_stopyes|supp', from: { id: 7 }, message: state.update.message } };
     const response = await state.send(update);
     expect(await response.json()).toMatchObject({ ok: true, unsupported: true });
