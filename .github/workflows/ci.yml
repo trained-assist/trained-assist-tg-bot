@@ -17,6 +17,26 @@ on:
         default: false
 
 jobs:
+  staging-user-path-e2e:
+    name: staging-user-path-e2e
+    if: github.event_name == 'push' && github.ref_name == 'codex/tg-staging-agent-test-418'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exercise staging Telegram user paths
+        env:
+          TG_STAGING_WEBHOOK_SECRET: ${{ secrets.TG_STAGING_WEBHOOK_SECRET }}
+          TG_STAGING_AGENT_SECRET: ${{ secrets.TG_STAGING_AGENT_SECRET }}
+        run: node scripts/staging/telegram-user-path-e2e.mjs
+
   scenario-gate:
     name: scenario-gate
     runs-on: ubuntu-latest
