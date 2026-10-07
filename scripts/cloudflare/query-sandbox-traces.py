@@ -98,11 +98,11 @@ def query(view: str) -> dict:
     body = {
         "queryId": f"adhoc-{WORKER}-{view}",
         "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
+        "view": view,
         "dry": True,
         "limit": 500,
         "parameters": {
             "datasets": ["cloudflare-workers"],
-            "view": view,
             "filters": [] if view == "traces" else [
                 {
                     "key": "$metadata.service",
