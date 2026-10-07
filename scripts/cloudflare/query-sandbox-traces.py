@@ -89,6 +89,67 @@ def walk(value):
             yield from walk(child)
 
 
+def get_attribute(item: dict, *names: str):
+    """Read OTEL attributes whether the API returns them flat or nested."""
+    metadata = item.get("$metadata", {})
+    source = item.get("source", {})
+    attributes = item.get("attributes", {})
+    for name in names:
+        for container in (item, metadata, source, attributes):
+            value = container.get(name) if isinstance(container, dict) else None
+            if value is not None:
+                return value
+    return None
+
+
+def summarize_rows(rows: list) -> dict:
+    origins = {}
+    statuses = {}
+    fetch_count = 0
+    fetch_statuses = {}
+    fetch_durations = []
+    trace_ids = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for item in walk(row):
+            service = get_attribute(item, "service", "service.name", "faas.name", "cloudflare.script_name")
+            if service != WORKER:
+                continue
+            origin = get_attribute(item, "origin")
+            if origin:
+                origins[origin] = origins.get(origin, 0) + 1
+            trace_id = get_attribute(item, "traceId", "trace_id")
+            if trace_id:
+                trace_ids.add(trace_id)
+            span_name = get_attribute(item, "spanName", "span.name", "name")
+            is_fetch = origin == "fetch" or (isinstance(span_name, str) and "fetch" in span_name.lower())
+            status = get_attribute(item, "http.response.status_code", "statusCode", "status_code")
+            duration = get_attribute(item, "duration", "duration_ms", "durationMs")
+            if status is not None:
+                key = str(status)
+                statuses[key] = statuses.get(key, 0) + 1
+            if is_fetch:
+                fetch_count += 1
+                if status is not None:
+                    key = str(status)
+                    fetch_statuses[key] = fetch_statuses.get(key, 0) + 1
+                if isinstance(duration, (int, float)):
+                    fetch_durations.append(duration)
+    return {
+        "row_count": len(rows),
+        "unique_trace_count": len(trace_ids),
+        "origin_counts": origins,
+        "status_counts": statuses,
+        "outbound_fetch_count": fetch_count,
+        "outbound_fetch_status_counts": fetch_statuses,
+        "outbound_fetch_duration_ms": {
+            "count": len(fetch_durations),
+            "min": min(fetch_durations) if fetch_durations else None,
+            "max": max(fetch_durations) if fetch_durations else None,
+            "avg": round(sum(fetch_durations) / len(fetch_durations), 2) if fetch_durations else None,
+        },
+    }
 traces_response = query("traces")
 if not traces_response.get("success"):
     print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
@@ -141,28 +202,14 @@ if not events_response.get("success"):
     print(json.dumps({"errors": events_response.get("errors", [])}), file=sys.stderr)
     raise SystemExit(1)
 event_rows = events_response.get("result", {}).get("events", {}).get("events", [])
-event_summaries = []
-for row in event_rows:
-    metadata = row.get("$metadata", {}) if isinstance(row, dict) else {}
-    source = row.get("source", {}) if isinstance(row, dict) else {}
-    if not isinstance(source, dict):
-        source = {}
-    service = metadata.get("service") or source.get("service")
-    if service != WORKER:
-        continue
-    span_name = metadata.get("spanName") or source.get("spanName")
-    origin = metadata.get("origin") or source.get("origin")
-    trace_id = metadata.get("traceId") or source.get("traceId")
-    if trace_id or span_name:
-        event_summaries.append(
-            {
-                "span": span_name,
-                "origin": origin,
-                "has_trace_id": bool(trace_id),
-                "status_code": metadata.get("statusCode") or source.get("statusCode"),
-                "duration_ms": metadata.get("duration") or source.get("duration"),
-            }
-        )
+event_summary = summarize_rows(event_rows)
+invocation_rows = [
+    row
+    for invocation_events in invocations.values()
+    if isinstance(invocation_events, list)
+    for row in invocation_events
+]
+invocation_summary = summarize_rows(invocation_rows)
 
 print(
     json.dumps(
@@ -174,11 +221,10 @@ print(
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
-            "event_row_count": len(event_summaries),
-            "trace_event_count": len(event_summaries),
-            "trace_events": event_summaries[:50],
-            "outbound_fetch_span_count": len(fetch_spans),
-            "outbound_fetch_spans": fetch_spans[:50],
+            "event_sample": event_summary,
+            "invocation_sample": invocation_summary,
+            "event_sample_limit": 500,
+            "outbound_fetch_span_count": invocation_summary["outbound_fetch_count"],
         },
         indent=2,
     )
