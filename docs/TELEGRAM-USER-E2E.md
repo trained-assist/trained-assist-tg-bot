@@ -136,3 +136,33 @@ tail` recorded `POST /webhook` and `POST /intake/append` as `Ok`. The bot replie
 Latin test marker, so this run verifies the pending-stop flow and visible
 acknowledgement, not exact input text. The signed Workerd/SQLite regression
 checks the exact stored text, once-only admission, no debounce and no CP launch.
+
+## Staging HTTP test user (synthetic Telegram updates)
+
+The isolated `trained-assist-tg-bot-staging` Worker can exercise the real webhook
+handler and test-mode outgoing effects without sending user messages through
+Telegram. Use this when a Telegram client session is unavailable; record it as
+webhook E2E, not user-originated Telegram E2E. Requests must include the
+`X-Telegram-Bot-Api-Secret-Token` header matching the staging
+`TELEGRAM_WEBHOOK_SECRET`. The staging chat IDs must be present in its
+`TEST_CHAT_IDS`; outgoing text and buttons are written to Cloudflare Worker logs.
+
+A shared synthetic account named `tgpatrol_20261007_v1` was provisioned in
+staging. Its password is stored in the `trained-assist/trained-assist-tg-bot`
+repository Actions secret `TG_STAGING_TEST_USER_PASSWORD`; Actions workflows
+can read it, but GitHub does not reveal saved secret values to collaborators.
+Never copy the password into this document, issues, PRs, logs, or shell history.
+The webhook signing value is stored separately as `TG_STAGING_WEBHOOK_SECRET`
+for authorized Actions workflows. GitHub will not reveal this value for local
+requests; use the hidden Wrangler prompt to set a local staging webhook secret
+when running synthetic updates from a workstation. Rotate the account password before sharing access outside the trusted test team.
+
+After sending `/login <username> <password>` to the synthetic private chat,
+continue with `/start`, `/help`, a quick question, and an ordinary task. Inspect
+`[test-mode]` log lines for visible replies and callbacks. A normal task requires
+the staging Worker to have its agent endpoint and credentials configured; if
+those are absent, report the setup failure and do not treat a login/help probe
+as task E2E. Synthetic chat IDs are staging-only bindings in `wrangler.toml`;
+never copy this configuration into another environment. Recreate or reset this
+account only in staging, and update the Actions secret whenever its password
+changes.

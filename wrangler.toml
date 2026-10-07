@@ -77,7 +77,7 @@ MEDIA_PIPELINE = "off"
 RECOVERY_IMPORT_LEGACY = "off"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # staging = polygon for ШАГ 1 debounce testing
-TEST_CHAT_IDS = ""
+TEST_CHAT_IDS = "-5308931318,24790956"
 
 # DO binding must be redeclared per named env (migrations are top-level, shared).
 [[env.staging.durable_objects.bindings]]
