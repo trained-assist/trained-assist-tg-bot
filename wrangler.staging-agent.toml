@@ -1,0 +1,11 @@
+name = "trained-assist-tg-test-agent-staging"
+main = "src/staging-agent/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+GATEWAY_URL = "https://trained-assist-tg-bot-staging.skillset-apply.workers.dev"
+TEST_USERNAME = "tgpatrol_20261007_v1"
+
+# For `wrangler dev --local`, save the same random test key to an ignored
+# `.dev.vars.staging-agent` file as TEST_AGENT_SECRET. Deployed auth uses only
+# the Cloudflare AGENT_SECRET secret above.
