@@ -161,12 +161,31 @@ before sharing access outside the trusted test team.
 
 After sending `/login <username> <password>` to the synthetic private chat,
 continue with `/start`, `/help`, a quick question, and an ordinary task. Inspect
-`[test-mode]` log lines for visible replies and callbacks. A normal task requires
-the staging Worker to have its agent endpoint and credentials configured; if
-those are absent, report the setup failure and do not treat a login/help probe
-as task E2E. The shared staging Worker currently lacks an isolated agent
-backend; track this in [bot issue #418](https://github.com/trained-assist/trained-assist-tg-bot/issues/418).
-Synthetic chat IDs are staging-only bindings in `wrangler.toml`;
-never copy this configuration into another environment. Recreate or reset this
-account only in staging, and update the Actions secret whenever its password
+`[test-mode]` log lines for visible replies and callbacks. The shared staging
+Worker uses an isolated deterministic agent at
+`trained-assist-tg-test-agent-staging`; it only accepts the synthetic test
+username, supports read-only project/session/classification routes, and accepts
+task runs only when the gateway has changed the chat id to its reserved test id
+and set `delivery:"log"`. It returns a canned answer through the existing
+staging `/internal/run-finished` callback. It has no MCP or tool routes and does
+not persist or log task content.
+
+The bot and test agent must have the same random staging-only `AGENT_SECRET`.
+Provision it with `wrangler secret bulk` JSON input; avoid `secret put` through a
+pipe because a trailing newline may become part of the value. Do not print the
+value or put it in a transcript, repository, issue, or PR. `AGENT_URL` is a
+non-secret staging binding in `wrangler.toml`; the agent's gateway callback is
+fixed to the staging bot URL in `wrangler.staging-agent.toml`. Never reuse
+production credentials or point either Worker at a production agent.
+
+For local isolated agent development, run
+`python3 scripts/staging/create-test-agent-key.py`, then
+`wrangler dev --config wrangler.staging-agent.toml --local --var GATEWAY_URL:https://example.invalid`.
+The script writes a random key to the ignored `.dev.vars.staging-agent` file
+and does not print it. Set `TEST_AGENT_SECRET` from that file in the local
+Worker environment; never use it as a deployed secret.
+
+Synthetic chat IDs are staging-only bindings in `wrangler.toml`; never copy
+this configuration into another environment. Recreate or reset the account
+only in staging, and update the Actions password secret whenever its password
 changes.
