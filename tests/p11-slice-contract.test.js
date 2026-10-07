@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { MemKV, collectLogSink, makeEnv } from '../tests/helpers/p11-helpers.js';
-import { readTgSliceConfig, authScheme, PRODUCTION_BOT_USERNAMES } from '../src/sandbox-tg/config.js';
+import { readTgSliceConfig, authScheme, PRODUCTION_BOT_USERNAMES, chatAllowed } from '../src/sandbox-tg/config.js';
 import { ControlPlaneClient } from '../src/sandbox-tg/control-plane-client.js';
 import { profileForUpdate } from '../src/sandbox-tg/profile.js';
 import { TelegramEmulator } from '../src/sandbox-tg/telegram-emulator.js';
@@ -36,6 +36,12 @@ describe('config — production-bot guard + env-only', () => {
     expect(profile.channel).toBe('telegram');
     expect(profile.conversationId).toBe('tg-1001');
     expect(profile.ingressRef).toBe('tg:probability_cat_bot:1001:7');
+  });
+  it('opens additional chats only for an explicitly sandbox-marked UX lane', () => {
+    expect(() => readTgSliceConfig(makeEnv({ TG_SLICE_OPEN_SANDBOX: 'true' }))).toThrow(/only for a sandbox Worker/i);
+    const config = readTgSliceConfig(makeEnv({ TG_SLICE_OPEN_SANDBOX: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox' }));
+    expect(chatAllowed(config, -100999)).toBe(true);
+    expect(readTgSliceConfig(makeEnv({})).openSandbox).toBe(false);
   });
   it('auth scheme depends on bearer key', () => {
     expect(authScheme(readTgSliceConfig(makeEnv({ CONTROL_PLANE_API_KEY: '' })))).toBe('x-principal');

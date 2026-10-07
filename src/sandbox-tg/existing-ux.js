@@ -4,12 +4,14 @@ import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
 import { TgDeliveryOwner } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
-import { getSession, setSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
 import { conversationKey, threadIdOf } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
 import { initTestMode, rememberCallback } from '../lib/test-mode.js';
-import { answerCallbackQuery } from '../lib/telegram.js';
+import { answerCallbackQuery, sendMessage } from '../lib/telegram.js';
+import { cmdLogin } from '../handlers/commands.js';
+import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 
 const app = new Hono();
@@ -18,7 +20,8 @@ app.all('/sandbox/accept-only/*', c => acceptOnlyWorker.fetch(c.req.raw, c.env))
 
 function executionEnv(env) {
   return applySessionNamespace({ ...env, EXECUTION_BACKEND: 'control-plane',
-    BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN, BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME });
+    BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN, BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME,
+    USERS: env.USERS ?? env.TG_SLICE, CONTROL_PLANE_PROFILE: env.CONTROL_PLANE_PROFILE });
 }
 
 app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
@@ -64,15 +67,60 @@ app.post('/webhook', async context => {
   const message = update.message ?? update.callback_query?.message;
   const sender = update.callback_query?.from ?? message?.from;
   const allowedUsers = String(env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean);
-  if (!message?.chat || !config.allowedChats.includes(String(message.chat.id)) || !allowedUsers.includes(String(sender?.id))) return context.json({ error: 'owner refused' }, 403);
+  if (!message?.chat || !sender?.id || (!config.openSandbox &&
+      (!config.allowedChats.includes(String(message.chat.id)) || !allowedUsers.includes(String(sender.id))))) return context.json({ error: 'owner refused' }, 403);
   if (!env.INTAKE || !env.SESSIONS || env.INTAKE_DEBOUNCE === 'off') return context.json({ error: 'collector not configured' }, 503);
   await createController(env, config).outbox.open();
   const threadId = threadIdOf(message);
-  const session = await getSession(env.SESSIONS, message.chat.id, threadId);
+  const runtimeEnv = executionEnv(env);
+  const command = String(message.text ?? '').trim().split(/\s+/)[0].split('@')[0].toLowerCase();
+  let session = await getSession(runtimeEnv.SESSIONS, message.chat.id, threadId);
   if (session?.controlPlaneProfile && session.controlPlaneProfile !== config.profileId) return context.json({ error: 'profile mismatch' }, 403);
-  if (!session) await setSession(env.SESSIONS, message.chat.id, {
-    username: 'integrator', telegramUserId: sender.id, controlPlaneProfile: config.profileId,
-  }, threadId);
+
+  // Older sandbox builds silently assigned every sender the same synthetic
+  // `integrator` profile. Keep those sessions inert and let the existing
+  // username/password login replace them explicitly.
+  if (session?.username === 'integrator') {
+    if (command === '/login') {
+      await deleteSession(runtimeEnv.SESSIONS, message.chat.id, threadId);
+      session = null;
+    } else session = null;
+  }
+
+  if (command === '/login') {
+    await cmdLogin(message, runtimeEnv);
+    const authenticated = await getSession(runtimeEnv.SESSIONS, message.chat.id, threadId);
+    if (authenticated?.username && authenticated.username !== 'integrator') {
+      await setSession(runtimeEnv.SESSIONS, message.chat.id,
+        { ...authenticated, controlPlaneProfile: config.profileId }, threadId);
+    }
+    return context.json({ ok: true, authenticated: !!authenticated?.username && authenticated.username !== 'integrator' });
+  }
+
+  if (isUserMgmtCommand(message.text ?? '')) {
+    if (!config.allowedChats.includes(String(message.chat.id)) || !allowedUsers.includes(String(sender.id))) {
+      await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+        'Эта команда доступна оператору тестового бота.');
+      return context.json({ ok: true, refused: true });
+    }
+    const userMessage = command === '/pass_reset'
+      ? { ...message, text: message.text.replace(/^\/pass_reset(?=@|\s|$)/i, '/resetpass') }
+      : message;
+    await handleUserMgmt(userMessage, runtimeEnv);
+    return context.json({ ok: true });
+  }
+
+  if (!session?.username || session.username === 'integrator') {
+    if (update.callback_query) {
+      await answerCallbackQuery(env.TG_SANDBOX_BOT_TOKEN, update.callback_query.id,
+        'Сначала войди: /login username password');
+      return context.json({ ok: true, authenticated: false });
+    }
+    await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+      'Чтобы войти в этом чате, отправь <code>/login username password</code>.\n' +
+      'Один и тот же профиль можно подключить отдельно в каждом чате.');
+    return context.json({ ok: true, authenticated: false });
+  }
   initTestMode(env);
   if (update.callback_query) {
     rememberCallback(update.callback_query.id, message.chat.id);

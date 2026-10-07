@@ -62,6 +62,10 @@ export function readTgSliceConfig(env) {
     throw new TgSliceConfigError('TG_SLICE_EVENT_TRANSPORT must be auto|events-endpoint|status-history', 'TG_SLICE_EVENT_TRANSPORT');
   }
   const allowedChats = parseChatList(env['TG_SLICE_ALLOWED_CHATS']);
+  const openSandbox = env.TG_SLICE_OPEN_SANDBOX === 'true';
+  if (openSandbox && env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox') {
+    throw new TgSliceConfigError('TG_SLICE_OPEN_SANDBOX is permitted only for a sandbox Worker', 'TG_ACCEPT_ONLY_ENVIRONMENT');
+  }
   const chatProfiles = {};
   for (const entry of parseChatList(env['TG_SLICE_CHAT_PROFILES'])) {
     const [chatId, profileId] = entry.split(':').map(part => part.trim());
@@ -69,6 +73,7 @@ export function readTgSliceConfig(env) {
   }
   return {
     botUsername,
+    openSandbox,
     botToken: requireVar(env, 'TG_SANDBOX_BOT_TOKEN'),
     controlPlaneUrl: stripTrailingSlash(requireVar(env, 'CONTROL_PLANE_URL')),
     principalId: requireVar(env, 'CONTROL_PLANE_PRINCIPAL'),
@@ -90,6 +95,10 @@ export function readTgSliceConfig(env) {
     eventTransport: transport,
     maxTurns: num(env, 'TG_SLICE_MAX_TURNS', 32, 1, 512),
   };
+}
+
+export function chatAllowed(config, chatId) {
+  return config.openSandbox === true || config.allowedChats.includes(String(chatId));
 }
 
 /** Which auth scheme the slice uses — for logs and reports (never the key itself). */
