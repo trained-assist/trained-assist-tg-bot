@@ -65,6 +65,7 @@ def read_keys() -> dict:
 def read_service_values() -> dict:
     now = int(time.time() * 1000)
     body = {
+        "datasets": ["cloudflare-workers"],
         "key": "$metadata.service",
         "type": "string",
         "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
@@ -100,6 +101,7 @@ def query(view: str) -> dict:
         "dry": True,
         "limit": 500,
         "parameters": {
+            "datasets": ["cloudflare-workers"],
             "view": view,
             "filters": [
                 {
