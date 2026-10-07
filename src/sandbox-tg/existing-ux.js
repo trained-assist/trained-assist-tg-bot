@@ -21,7 +21,8 @@ app.all('/sandbox/accept-only/*', c => acceptOnlyWorker.fetch(c.req.raw, c.env))
 function executionEnv(env) {
   return applySessionNamespace({ ...env, EXECUTION_BACKEND: 'control-plane',
     BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN, BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME,
-    USERS: env.USERS ?? env.TG_SLICE, CONTROL_PLANE_PROFILE: env.CONTROL_PLANE_PROFILE });
+    USERS: env.USERS ?? env.TG_SLICE, LOGIN_USERS: env.PRODUCTION_USERS,
+    CONTROL_PLANE_PROFILE: env.CONTROL_PLANE_PROFILE });
 }
 
 app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
