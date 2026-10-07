@@ -36,7 +36,7 @@ it('production deploy is explicit and requires successful CI and staging gate', 
   expect(graph.get('deploy')).toContain('promoted: ${{ steps.selection.outputs.promoted }}');
   expect(graph.get('deploy')).toContain("needs.ci.result == 'success'");
   expect(graph.get('deploy')).toContain("needs.staging-gate.result == 'success'");
-  expect(graph.get('deploy')).not.toContain('always()');
+  expect(graph.get('deploy')).toContain('if: always()');
   expect(graph.get('deploy')).not.toContain("github.event_name == 'push'");
   expect(graph.get('deploy')).toContain('production stays unchanged');
   expect(source).toContain('deploy_production:');
@@ -48,7 +48,7 @@ it('production smoke only runs after the explicitly requested successful promoti
   expect(graph.get('smoke-test')).toContain("github.event_name == 'workflow_dispatch'");
   expect(graph.get('smoke-test')).toContain("needs.deploy.result == 'success'");
   expect(graph.get('smoke-test')).toContain("needs.deploy.outputs.promoted == 'true'");
-  expect(graph.get('smoke-test')).not.toContain('always()');
+  expect(graph.get('smoke-test')).toContain('if: always()');
 });
 it('staging acceptance remains required and validates the deployed revision', () => {
   const graph = jobs();
