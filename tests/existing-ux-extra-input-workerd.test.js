@@ -12,7 +12,7 @@ const answer = 'Offline aggregate fixture: preserved first and additional input.
 
 function bundle() {
   return buildSync({ stdin: { resolveDir: process.cwd(), contents: `
-    import worker, { IntakeBuffer as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
+    import worker, { IntakeBufferReset as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
     export default worker;
     export { TgDeliveryOwner };
     export class IntakeBuffer extends RealIntakeBuffer {
