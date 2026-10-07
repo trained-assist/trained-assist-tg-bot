@@ -115,7 +115,12 @@ export async function getRegisteredCommands(token) {
 }
 
 export async function sendMessage(token, chatId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'sendMessage', text);
+  if (isTestChatCached(chatId)) {
+    const buttons = (extra?.reply_markup?.inline_keyboard ?? []).flat()
+      .map(button => `${button.text ?? ''}${button.callback_data ? ` {${button.callback_data}}` : button.url ? ` <${button.url}>` : ''}`)
+      .filter(Boolean).join(' | ');
+    return suppress(chatId, 'sendMessage', `${text}${buttons ? ` buttons=[${buttons}]` : ''}`);
+  }
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -133,7 +138,10 @@ export async function sendMessage(token, chatId, text, extra = {}) {
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', text);
+  if (isTestChatCached(chatId)) {
+    const buttons = (extra?.reply_markup?.inline_keyboard ?? []).flat().map(button => `${button.text ?? ''}${button.callback_data ? ` {${button.callback_data}}` : ''}`).filter(Boolean).join(' | ');
+    return suppress(chatId, 'editMessage', `msg=${messageId} ${text}${buttons ? ` buttons=[${buttons}]` : ''}`);
+  }
   const { lifecycleEnv, ...telegramExtra } = extra;
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',

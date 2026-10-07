@@ -1,5 +1,6 @@
 import { readTgSliceConfig, TgSliceConfigError } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
+import { isTestChat } from '../lib/test-mode.js';
 
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
 const key = id => `delivery:${id}`;
@@ -182,8 +183,10 @@ export class TgDeliveryOwner {
     const api = new TelegramApi(config);
     let completion;
     try {
-      const result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-        text: claim.text, replyMarkup: claim.replyMarkup });
+      const result = isTestChat(this.env, claim.destination.chatId)
+        ? (console.log(`[test-mode] kind=sendMessage chat=${claim.destination.chatId} text=${String(claim.text ?? '').replace(/\s+/g, ' ').slice(0, 300)}${claim.replyMarkup?.inline_keyboard?.length ? ` buttons=${JSON.stringify(claim.replyMarkup.inline_keyboard).slice(0, 500)}` : ''}`), { message_id: Date.now() % 1000000000 + 1 })
+        : await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          text: claim.text, replyMarkup: claim.replyMarkup });
       if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new Error();
       completion = { ...claim, status: 'sent', telegramMessageId: result.message_id, sentAt: Date.now(), reason: 'provider_accepted' };
     } catch (error) {

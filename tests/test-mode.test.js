@@ -99,6 +99,11 @@ describe('модульный кэш для lib/telegram.js (init-точки)', (
     initTestMode(envOf(''));
     expect(isTestChatCached(TEST)).toBe(false);
   });
+  it('sandbox allowlist defaults to test chats when Telegram slice routing is enabled', () => {
+    expect(isTestChat({ TG_HTTP_TEST_MODE: 'true', TG_SLICE_ALLOWED_CHATS: '-123,456' }, -123)).toBe(true);
+    expect(isTestChat({ TG_HTTP_TEST_MODE: 'true', TG_SLICE_ALLOWED_CHATS: '-123,456' }, 456)).toBe(true);
+    expect(isTestChat({ TG_HTTP_TEST_MODE: 'true', TG_SLICE_ALLOWED_CHATS: '-123,456', TEST_CHAT_IDS: '' }, -123)).toBe(false);
+  });
   it('suppress возвращает заглушку и пишет строку журнала', () => {
     const r = suppress(TEST, 'sendMessage', 'привет');
     expect(r).toEqual({ ok: true, suppressed: true });

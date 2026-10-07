@@ -1,10 +1,8 @@
 // Test mode (US-TEST-01; design docs/test-mode/DESIGN.md).
 //
-// A chat listed in the env var TEST_CHAT_IDS travels the WHOLE gateway path and
-// gets a real agent answer, but nothing is ever sent to Telegram: every gateway
-// send is replaced by a journal line (`[test-mode] …` → Workers Logs), and the
-// run is dispatched with `delivery:"log"` PLUS a dead (reserve) chatId, so even
-// an agent that ignores the flag cannot reach the real chat (layer B, §2.1).
+// A chat listed in TEST_CHAT_IDS (or the sandbox Worker allowlist) travels the
+// whole gateway path and gets a real agent answer, but nothing is sent to
+// Telegram: gateway effects go to Workers Logs and runs use a reserve chat ID.
 // Real users are untouched: with no/empty/garbage TEST_CHAT_IDS nothing matches.
 //
 // Everything here is synchronous (R14 — no await on the hot path) and fail-safe
@@ -24,7 +22,13 @@ function parse(raw) {
 }
 
 function idsFor(env) {
-  const raw = String(env?.TEST_CHAT_IDS ?? '');
+  // The isolated Control Plane sandbox has no reliable Telegram API delivery.
+  // Treat its explicitly allowlisted chats as test chats unless configured
+  // otherwise, so webhook inputs still traverse the production-shaped handler
+  // while every outbound effect is recorded in Workers Logs.
+  const sandboxChats = env?.TG_HTTP_TEST_MODE === 'true'
+    ? env?.TG_SLICE_ALLOWED_CHATS : '';
+  const raw = String(env?.TEST_CHAT_IDS ?? sandboxChats ?? '');
   if (raw !== listRaw) { list = parse(raw); listRaw = raw; }
   return list;
 }
