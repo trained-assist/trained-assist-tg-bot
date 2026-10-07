@@ -16,6 +16,24 @@ API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
 )
+SETTINGS_API = (
+    "https://api.cloudflare.com/client/v4/accounts/"
+    f"{ACCOUNT_ID}/workers/scripts/{WORKER}/script-settings"
+)
+
+
+def read_worker_settings() -> dict:
+    request = urllib.request.Request(
+        SETTINGS_API,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        print(json.dumps({"settings_http_status": error.code}), file=sys.stderr)
+        raise SystemExit(1)
 
 
 def query(view: str) -> dict:
@@ -113,6 +131,9 @@ print(
     json.dumps(
         {
             "worker": WORKER,
+            "worker_trace_settings": (
+                read_worker_settings().get("result", {}).get("observability", {}).get("traces", {})
+            ),
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
