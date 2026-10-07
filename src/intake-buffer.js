@@ -2701,6 +2701,7 @@ export class IntakeBuffer {
 
   async _alarm() {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
+      await this._recoverMedia();
       await this._recoverControlPlaneCollectorCleanup();
       const stopWindow = await this.state.storage.get('cpStopWindow');
       if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
@@ -2723,6 +2724,8 @@ export class IntakeBuffer {
         }
         if ((await this.state.storage.get('cpStopWindow'))?.pending) return;
       }
+    } else {
+      await this._recoverMedia();
     }
     // A «стоп + запуск» choice waiting for its start outranks every timer below
     // (RC-04/RC-05): if the run is gone and the batch is ready, run it now.
@@ -2746,7 +2749,6 @@ export class IntakeBuffer {
         }
       }
     }
-    await this._recoverMedia();
 
     // If not busy and media still pending — _recoverMedia re-armed the alarm; wait.
     // _recoverMedia already fired the deadline for anything past MEDIA_DEADLINE_MS,
