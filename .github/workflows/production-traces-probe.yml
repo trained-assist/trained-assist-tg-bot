@@ -16,6 +16,7 @@ jobs:
       CF_OBSERVABILITY_TOKEN: ${{ secrets.CF_OBSERVABILITY_TOKEN }}
       CF_WORKER_NAME: trained-assist-tg-bot
       CF_HEALTH_PROBE_COUNT: "80"
+      CF_REQUIRE_OUTBOUND_SPAN: "true"
     steps:
       - uses: actions/checkout@v4
       - name: Generate sampled production health traces
@@ -26,6 +27,15 @@ jobs:
               https://trained-assist-tg-bot.skillset-apply.workers.dev/health \
               --output /dev/null
             sleep 0.25
+          done
+      - name: Generate sampled outbound fetch traces
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            curl --fail --silent --show-error --max-time 10 \
+              https://trained-assist-tg-bot.skillset-apply.workers.dev/debug/whoami \
+              --output /dev/null
+            sleep 0.5
           done
       - name: Query production trace summaries
         run: python3 scripts/cloudflare/query-worker-traces.py

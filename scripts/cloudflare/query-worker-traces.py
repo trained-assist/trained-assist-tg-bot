@@ -128,6 +128,24 @@ if health_probe_count and not matching_traces:
     )
     raise SystemExit(1)
 
+outbound_fetch_trace_count = sum(
+    1 for trace in matching_traces if isinstance(trace.get("spans"), (int, float)) and trace["spans"] > 1
+)
+if os.environ.get("CF_REQUIRE_OUTBOUND_SPAN") == "true" and not outbound_fetch_trace_count:
+    print(
+        json.dumps(
+            {
+                "worker": WORKER,
+                "health_probe_count": health_probe_count,
+                "trace_count": len(matching_traces),
+                "outbound_fetch_trace_count": 0,
+                "error": "No production trace contained a nested outbound fetch span",
+            }
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 root_span_counts = {}
 root_span_durations = {}
 durations = []
@@ -161,6 +179,7 @@ print(
             "window_hours": 24,
             "health_probe_count": health_probe_count,
             "trace_count": len(matching_traces),
+            "outbound_fetch_trace_count": outbound_fetch_trace_count,
             "trace_candidate_count": trace_candidate_count,
             "traces_truncated": traces_response.get("result", {}).get("truncated", False),
             "root_span_counts": root_span_counts,
