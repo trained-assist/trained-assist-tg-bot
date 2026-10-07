@@ -20,6 +20,10 @@ SETTINGS_API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/scripts/{WORKER}/script-settings"
 )
+KEYS_API = (
+    "https://api.cloudflare.com/client/v4/accounts/"
+    f"{ACCOUNT_ID}/workers/observability/telemetry/keys"
+)
 
 
 def read_worker_settings() -> dict:
@@ -33,6 +37,24 @@ def read_worker_settings() -> dict:
             return json.load(response)
     except urllib.error.HTTPError as error:
         print(json.dumps({"settings_http_status": error.code}), file=sys.stderr)
+        raise SystemExit(1)
+
+
+def read_keys() -> dict:
+    request = urllib.request.Request(
+        KEYS_API,
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        print(json.dumps({"keys_http_status": error.code}), file=sys.stderr)
         raise SystemExit(1)
 
 
@@ -127,6 +149,13 @@ for invocation_events in invocations.values():
                     }
                 )
 
+keys_response = read_keys()
+if not keys_response.get("success"):
+    print(json.dumps({"errors": keys_response.get("errors", [])}), file=sys.stderr)
+    raise SystemExit(1)
+keys = keys_response.get("result", [])
+key_names = [item.get("key", "") for item in keys if isinstance(item, dict)]
+
 print(
     json.dumps(
         {
@@ -134,6 +163,8 @@ print(
             "worker_trace_settings": (
                 read_worker_settings().get("result", {}).get("observability", {}).get("traces", {})
             ),
+            "telemetry_key_count": len(key_names),
+            "telemetry_keys": key_names[:100],
             "window_hours": 24,
             "trace_count": len(summaries),
             "traces": summaries[:20],
