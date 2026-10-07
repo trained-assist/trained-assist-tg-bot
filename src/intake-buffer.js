@@ -2153,7 +2153,7 @@ export class IntakeBuffer {
         // ack has no requestId field — its taskId IS the dispatch requestId.
         const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
         if (dispatchRequestId) {
-          const ids = await this._busyRequestIds();
+          const ids = (await this._busyRequestIds()).filter(id => id !== stableRequestId);
           if (!ids.includes(dispatchRequestId)) await this.state.storage.put('busyRequestIds', [...ids, dispatchRequestId]);
           // Race: the window's first run reported finished while this dispatch
           // was still in flight and released the hold — reopen it for THIS run.
