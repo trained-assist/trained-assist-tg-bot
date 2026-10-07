@@ -29,19 +29,19 @@ it('production deploy is explicit and requires successful CI and staging gate', 
   const graph = jobs();
   expect(graph.get('deploy')).toContain('needs: [ci, staging-gate]');
   expect(graph.get('deploy')).toContain("github.event_name == 'workflow_dispatch'");
-  expect(graph.get('deploy')).toContain('inputs.deploy_production == true');
+  expect(graph.get('deploy')).toContain("inputs.deploy_production == 'yes'");
   expect(graph.get('deploy')).toContain("needs.ci.result == 'success'");
   expect(graph.get('deploy')).toContain("needs.staging-gate.result == 'success'");
   expect(graph.get('deploy')).not.toContain('always()');
   expect(graph.get('deploy')).not.toContain("github.event_name == 'push'");
   expect(source).toContain('deploy_production:');
-  expect(source).toContain('default: false');
-  expect(source).toContain('type: boolean');
+  expect(source).toContain('default: no');
+  expect(source).toContain('type: choice');
 });
 it('production smoke only runs after the explicitly requested successful promotion', () => {
   const graph = jobs();
   expect(graph.get('smoke-test')).toContain("github.event_name == 'workflow_dispatch'");
-  expect(graph.get('smoke-test')).toContain('inputs.deploy_production == true');
+  expect(graph.get('smoke-test')).toContain("inputs.deploy_production == 'yes'");
   expect(graph.get('smoke-test')).toContain("needs.deploy.result == 'success'");
   expect(graph.get('smoke-test')).not.toContain('always()');
 });
