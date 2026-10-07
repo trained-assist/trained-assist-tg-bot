@@ -45,6 +45,12 @@ id = "915ffeedb74440538009bdc1bd00d381"
 binding = "SESSIONS"
 id = "915ffeedb74440538009bdc1bd00d381"
 
+# Read existing profile records created by the production admin flow. Runtime
+# login only reads this namespace; sandbox password resets are written to TG_SLICE.
+[[kv_namespaces]]
+binding = "PRODUCTION_USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
 [[services]]
 binding = "CONTROL_PLANE_SERVICE"
 service = "trained-assist-cp-telegram-ux-v1-sandbox"
