@@ -654,7 +654,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
     expect(send.mock.calls[0][3].flat().map(button => button.callback_data)).toEqual([
-      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'input_draft', 'intake_discard|1',
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_discard|1',
     ]);
     send.mockClear();
     const legacy = new IntakeBuffer({ storage }, { BOT_TOKEN: 'legacy-token' });
