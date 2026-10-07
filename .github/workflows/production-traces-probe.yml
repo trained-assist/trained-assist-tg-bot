@@ -1,25 +1,21 @@
-name: Sandbox traces probe
+name: Production traces probe
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - fix/ux-sandbox-existing-profiles-20261007
-    paths:
-      - .github/workflows/sandbox-traces-probe.yml
-      - scripts/cloudflare/query-worker-traces.py
 
 permissions:
   contents: read
 
 jobs:
   query:
+    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_OBSERVABILITY_TOKEN: ${{ secrets.CF_OBSERVABILITY_TOKEN }}
+      CF_WORKER_NAME: trained-assist-tg-bot
     steps:
       - uses: actions/checkout@v4
-      - name: Query sandbox trace summaries
+      - name: Query production trace summaries
         run: python3 scripts/cloudflare/query-worker-traces.py
