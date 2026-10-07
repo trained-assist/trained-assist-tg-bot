@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // update is dropped silently, same as the group path.
 
 const handleMessage = vi.fn();
+const intakeFetch = vi.fn(async () => new Response('{}'));
 vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMessage(...a) }));
 vi.mock('../src/handlers/commands.js', () => ({ handleCommand: vi.fn(), isAdminForwardedCommand: () => false }));
 vi.mock('../src/handlers/user-mgmt.js', () => ({ handleUserMgmt: vi.fn(), isUserMgmtCommand: () => false }));
@@ -23,9 +24,10 @@ import { dispatchInner } from '../src/index.js';
 import { sendMessage } from '../src/lib/telegram.js';
 
 const now = () => Math.floor(Date.now() / 1000);
-const env = () => ({ BOT_TOKEN: 't', SESSIONS: {} });
+const env = () => ({ BOT_TOKEN: 't', SESSIONS: {}, INTAKE_DEBOUNCE: 'on',
+  INTAKE: { idFromName: key => key, get: () => ({ fetch: intakeFetch }) } });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); intakeFetch.mockResolvedValue(new Response('{}')); });
 
 describe('private chat — content-less service updates', () => {
   it('pinned_message notification is dropped silently, not routed to handleMessage', async () => {
@@ -39,10 +41,11 @@ describe('private chat — content-less service updates', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('a real text message still reaches routing as before', async () => {
+  it('a real text message enters the durable intake route', async () => {
     await dispatchInner({
       message: { chat: { id: 99, type: 'private' }, date: now(), from: { id: 99 }, text: 'продолжай' },
     }, env());
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(intakeFetch).toHaveBeenCalledTimes(1);
   });
 });

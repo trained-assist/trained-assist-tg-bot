@@ -174,7 +174,10 @@ export async function handleMessage(msg, env, opts = {}) {
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   // /project <…> manages projects itself (agent quick answer) — never gate it behind the picker.
   const projectCommand = PROJECT_COMMAND_RE.test(msg.text || '');
-  if (env.EXECUTION_BACKEND !== 'control-plane' && !opts.parallel && !projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
+  // Buffered Telegram input has already crossed the intake boundary. Do not
+  // divert it into the legacy Agent project picker after the user explicitly
+  // launches the collected batch; the selected/current project remains in route.
+  if (!msg.intakeItems && env.EXECUTION_BACKEND !== 'control-plane' && !opts.parallel && !projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg, threadId,
