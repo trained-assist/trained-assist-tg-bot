@@ -27,6 +27,17 @@ deployed bot and got a visible response.
    it has an active claim, a task/launch in progress, pending buffered input,
    unresolved launch, or pending stop. Do not clear state to free a lane; ask the
    owner/engineering session to inspect it.
+   The gateway's `TG_SLICE_ALLOWED_CHATS` and `TG_SLICE_ALLOWED_USERS` are
+   Cloudflare secrets, not checked-in values. Do not infer the test destination
+   from an old chat ID, bot token, another project, or a synthetic fixture. If
+   the owner has not provided the intended chat, ask them to open the chosen
+   bot's private chat and send `/start` (or a harmless unique test message).
+   Then inspect the matching Worker's protected/authorized Telegram update
+   evidence and confirm the received `message.chat.id` and `message.from.id`
+   against the configured allowlists without printing secret values. A private
+   chat ID is not a credential, but keep it in the trusted local test bindings
+   unless a shared runbook genuinely needs the literal value. For a group or
+   forum topic, confirm the chat ID and `message_thread_id` separately.
 3. An engineering session can tail that exact Worker before sending. From the
    TG bot checkout, use the matching command:
 
@@ -39,7 +50,8 @@ deployed bot and got a visible response.
    not. I can run the tail and correlate evidence without asking the user to
    operate Wrangler. Tail logs are corroborating ingress evidence, not a
    substitute for the user's chat.
-4. Send one ordinary, harmless text with a unique marker, for example:
+4. After confirming the destination and that it is idle, send one ordinary,
+   harmless text with a unique marker, for example:
    `USER-E2E-<date-time>: reply only “received”; do not start a task.` Do not use
    launch words, callbacks, attachments, voice messages, or sensitive content
    in the basic ingress test.
