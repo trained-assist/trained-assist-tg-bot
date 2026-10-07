@@ -7,6 +7,9 @@ workers_dev = true
 [observability]
 enabled = true
 
+[observability.logs]
+invocation_logs = false
+
 [triggers]
 crons = ["* * * * *"]
 
@@ -18,9 +21,17 @@ class_name = "TgDeliveryOwner"
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
+[[durable_objects.bindings]]
+name = "SANDBOX_ACCEPT_ONLY"
+class_name = "SandboxAcceptOnlyStore"
+
 [[migrations]]
 tag = "sandbox-shturman-existing-ux-v1"
 new_sqlite_classes = ["TgDeliveryOwner", "IntakeBuffer"]
+
+[[migrations]]
+tag = "sandbox-accept-only-v1"
+new_sqlite_classes = ["SandboxAcceptOnlyStore"]
 
 [[kv_namespaces]]
 binding = "TG_SLICE"
@@ -44,6 +55,9 @@ EXECUTION_BACKEND = "control-plane"
 INTAKE_DEBOUNCE = "on"
 SESSION_NAMESPACE = "integrator-shturman-v1"
 MEDIA_PIPELINE = "off"
+TG_ACCEPT_ONLY_ENABLED = "true"
+TG_ACCEPT_ONLY_ENVIRONMENT = "sandbox"
+TG_ACCEPT_ONLY_MODE = "accept-only"
 CONTROL_PLANE_URL = "https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev"
 CONTROL_PLANE_PRINCIPAL = "integration-telegram-ux-v1"
 CONTROL_PLANE_PROFILE = "integration-telegram-ux-v1"

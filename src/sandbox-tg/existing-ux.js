@@ -10,8 +10,11 @@ import { conversationKey, threadIdOf } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
 import { initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery } from '../lib/telegram.js';
+import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 
 const app = new Hono();
+
+app.all('/sandbox/accept-only/*', c => acceptOnlyWorker.fetch(c.req.raw, c.env));
 
 function executionEnv(env) {
   return applySessionNamespace({ ...env, EXECUTION_BACKEND: 'control-plane',
@@ -113,4 +116,4 @@ export default {
   },
 };
 
-export { IntakeBuffer, TgDeliveryOwner };
+export { IntakeBuffer, TgDeliveryOwner, SandboxAcceptOnlyStore };

@@ -58,14 +58,15 @@ deployed bot and got a visible response.
 
 ## No-login HTTP test API status
 
-There is no deployed unauthenticated HTTP seed + SSE result-feed endpoint yet.
-The public `/health` route is only liveness; `/webhook`, `/collector-state`, and
-delivery routes remain protected. Do not send raw unsigned webhook updates or
-remove those checks. A sandbox-only no-login seed/feed API with bounded budgets,
-per-run result tickets, and lane status/leases is requested in
-[issue #402](https://github.com/trained-assist/trained-assist-tg-bot/issues/402).
-Until that is implemented and deployed, a real user-originated E2E must be sent
-through Telegram; the engineering session can observe it using the Worker tail.
+The first code slice of issue #402 adds a disabled-by-default accept-only API;
+see [SANDBOX-ACCEPT-ONLY-API.md](SANDBOX-ACCEPT-ONLY-API.md). It accepts and
+stores a bounded synthetic request and exposes ticket-scoped receipt replay,
+but does not run the classifier, Control Plane, Runner, or Telegram delivery.
+Both checked-in sandbox configs keep the feature disabled, and this change does
+not deploy it. This is not a full task E2E and does not replace a user-originated
+Telegram test. The public `/health` route remains liveness only;
+`/webhook`, `/collector-state`, and delivery routes remain protected. Never send
+raw unsigned webhook updates or remove those checks.
 
 ## Evidence to collect
 
