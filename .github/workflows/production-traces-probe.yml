@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   query:
-    if: github.ref_name == 'main' || (github.ref_name == 'fix/prod-trace-probe-curl-20261007' && github.actor == 'kobzevvv')
+    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
