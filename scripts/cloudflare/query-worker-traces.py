@@ -11,7 +11,13 @@ import urllib.request
 
 ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
 TOKEN = os.environ["CF_OBSERVABILITY_TOKEN"]
-WORKER = "trained-assist-tg-ux-sandbox"
+WORKER = os.environ.get("CF_WORKER_NAME", "trained-assist-tg-ux-sandbox")
+ALLOWED_WORKERS = {
+    "trained-assist-tg-ux-sandbox",
+    "trained-assist-tg-bot",
+}
+if WORKER not in ALLOWED_WORKERS:
+    raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
