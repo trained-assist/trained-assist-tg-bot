@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { FORCE_RUN_RE, AUTO_LAUNCH_RE } from '../src/intake-routing.js';
+import { FORCE_RUN_RE, AUTO_LAUNCH_RE, shouldDebounce } from '../src/intake-routing.js';
+
+describe('shouldDebounce — intake admission cannot fail open', () => {
+  it('keeps content on the intake route when debounce is off or the binding is absent', () => {
+    expect(shouldDebounce({ text: 'задача' }, { INTAKE_DEBOUNCE: 'off', INTAKE: {} })).toBe(true);
+    expect(shouldDebounce({ text: 'задача' }, { INTAKE_DEBOUNCE: 'on' })).toBe(true);
+  });
+  it('keeps slash commands and empty updates on their dedicated path', () => {
+    expect(shouldDebounce({ text: '/stop' }, { INTAKE: {} })).toBe(false);
+    expect(shouldDebounce({ text: '' }, { INTAKE: {} })).toBe(false);
+  });
+});
 
 describe('AUTO_LAUNCH_RE — standalone continuation/confirm signals', () => {
   it('matches known confirm words', () => {

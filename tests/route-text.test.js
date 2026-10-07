@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // The shared text-routing rule (#530 group path): both the private and the group
 // branch of dispatchInner call routeText, so this one helper decides whether a
 // message accumulates in the intake buffer or goes straight to the agent. These
-// tests lock that a plain text message ALWAYS buffers (no per-message session)
-// and that the documented bypasses still reach handleMessage directly.
+// tests lock that user-authored content is admitted to the durable buffer before
+// project/session routing, independent of the debounce toggle.
 
 const handleMessage = vi.fn();
 const openProjectChoice = vi.fn();
@@ -22,6 +22,7 @@ vi.mock('../src/lib/project-choice.js', () => ({ openProjectChoice: (...a) => op
 import { routeText } from '../src/index.js';
 import { getSession } from '../src/lib/kv.js';
 import { getProjectDecision } from '../src/lib/agent-client.js';
+import { sendMessage } from '../src/lib/telegram.js';
 
 function makeEnv() {
   const appended = [];
@@ -31,6 +32,7 @@ function makeEnv() {
     env: {
       INTAKE_DEBOUNCE: 'on',
       BOT_TOKEN: 't',
+      SESSIONS: {},
       INTAKE: { idFromName: (n) => n, get: () => stub },
     },
   };
@@ -47,14 +49,15 @@ describe('routeText — shared private+group intake rule', () => {
     expect(_appended[0]).toMatchObject({ text: 'быстрая мысль', flush: false });
   });
 
-  it('turns «закрепи X» into /project pin X at once — no intake, no project picker', async () => {
+  it('buffers project configuration phrases before routing them', async () => {
     const { env, _appended } = makeEnv();
     getSession.mockResolvedValue({ username: 'u' });
     getProjectDecision.mockResolvedValue({ action: 'ask', choices: [{ id: 'a' }, { id: 'b' }] });
     await routeText({ chat: { id: 42 }, text: 'закрепи Фриланс-заказы' }, env, 42);
-    expect(handleCommand).toHaveBeenCalledWith(expect.objectContaining({ text: '/project pin Фриланс-заказы' }), env);
+    expect(handleCommand).not.toHaveBeenCalled();
     expect(openProjectChoice).not.toHaveBeenCalled();
-    expect(_appended).toHaveLength(0);
+    expect(_appended).toHaveLength(1);
+    expect(_appended[0].text).toBe('закрепи Фриланс-заказы');
   });
 
   it('flushes immediately on a bare force word', async () => {
@@ -88,36 +91,34 @@ describe('routeText — shared private+group intake rule', () => {
       projectId: 'chosen', forceNew: true });
   });
 
-  it('honours the kill-switch — routes straight to the agent when off', async () => {
+  it('still buffers user input when the debounce toggle is off', async () => {
     const { env, _appended } = makeEnv();
     env.INTAKE_DEBOUNCE = 'off';
     await routeText({ chat: { id: 42 }, text: 'что угодно' }, env, 42);
-    // Nothing is buffered. The only DO call is the «➕ Дополнить» lookup ({op:'add'}),
-    // which must still work with the buffer switched off (it answered «not armed» here).
-    expect(_appended.filter(b => !b.op)).toHaveLength(0);
-    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(_appended).toHaveLength(1);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
-  it('shows project picker immediately for brand-new session with ≥2 projects', async () => {
+  it('does not call the legacy project API or show a picker before buffering a new session', async () => {
     const { env, _appended } = makeEnv();
     getSession.mockResolvedValueOnce({ username: 'alice' }); // no lastSessionId
     getProjectDecision.mockResolvedValueOnce({ action: 'ask', choices: [{ id: 'p1' }, { id: 'p2' }], active: 'p1' });
     openProjectChoice.mockResolvedValueOnce();
     const msg = { chat: { id: 42 }, text: 'привет, хочу начать работу' };
     await routeText(msg, env, 42);
-    expect(openProjectChoice).toHaveBeenCalledTimes(1);
-    expect(openProjectChoice.mock.calls[0][3]).toMatchObject({ input: msg });
-    expect(_appended).toHaveLength(0); // did NOT go into the buffer
+    expect(openProjectChoice).not.toHaveBeenCalled();
+    expect(getProjectDecision).not.toHaveBeenCalled();
+    expect(_appended).toHaveLength(1);
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('buffers normally when brand-new session has only one project', async () => {
     const { env, _appended } = makeEnv();
     getSession.mockResolvedValueOnce({ username: 'alice' }); // no lastSessionId
-    getProjectDecision.mockResolvedValueOnce({ action: 'auto', choices: [{ id: 'p1' }] });
     await routeText({ chat: { id: 42 }, text: 'привет' }, env, 42);
     expect(openProjectChoice).not.toHaveBeenCalled();
     expect(_appended).toHaveLength(1); // went into buffer normally
+    expect(getProjectDecision).not.toHaveBeenCalled();
   });
 
   it('buffers normally for returning user even when multi-project (picker shown after ▶️)', async () => {
@@ -165,5 +166,14 @@ describe('routeText — forum topic routing (#255)', () => {
     getSession.mockResolvedValueOnce({ username: 'alice', lastSessionId: 's-1' });
     await routeText({ chat: { id: 42, type: 'private' }, text: 'привет' }, env, 42);
     expect(keys).toEqual(['42']);
+  });
+
+  it('fails closed when the intake binding is absent instead of calling the legacy handler', async () => {
+    const { env } = makeEnv();
+    delete env.INTAKE;
+    await routeText({ chat: { id: 42 }, text: 'не теряй меня' }, env, 42);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(env.INTAKE).toBeUndefined();
+    expect(sendMessage).toHaveBeenCalledWith('t', 42, expect.stringContaining('Не удалось сохранить'), {});
   });
 });
