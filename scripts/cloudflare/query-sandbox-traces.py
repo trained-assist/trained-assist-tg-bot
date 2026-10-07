@@ -93,6 +93,7 @@ for trace in trace_items:
         matching_traces.append(trace)
 
 root_span_counts = {}
+root_span_durations = {}
 durations = []
 span_counts = []
 error_trace_count = 0
@@ -104,6 +105,8 @@ for trace in matching_traces:
     duration = trace.get("traceDurationMs")
     if isinstance(duration, (int, float)):
         durations.append(duration)
+        if root_span:
+            root_span_durations.setdefault(root_span, []).append(duration)
     spans = trace.get("spans")
     if isinstance(spans, (int, float)):
         span_counts.append(spans)
@@ -124,6 +127,15 @@ print(
             "trace_candidate_count": trace_candidate_count,
             "traces_truncated": traces_response.get("result", {}).get("truncated", False),
             "root_span_counts": root_span_counts,
+            "root_span_duration_ms": {
+                name: {
+                    "count": len(values),
+                    "min": min(values),
+                    "max": max(values),
+                    "avg": round(sum(values) / len(values), 2),
+                }
+                for name, values in sorted(root_span_durations.items())
+            },
             "duration_ms": {
                 "count": len(durations),
                 "min": min(durations) if durations else None,
