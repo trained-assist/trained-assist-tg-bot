@@ -18,6 +18,7 @@ ALLOWED_WORKERS = {
 }
 if WORKER not in ALLOWED_WORKERS:
     raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
+HEALTH_PROBE_COUNT = 80
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
@@ -85,18 +86,66 @@ def query(view: str) -> dict:
         raise SystemExit(1)
 
 
+def belongs_to_worker(trace: dict) -> bool:
+    services = trace.get("service", trace.get("services"))
+    return services == WORKER or (isinstance(services, list) and WORKER in services)
+
+
+health_probe_count = 0
+if os.environ.get("CF_GENERATE_HEALTH_TRAFFIC") == "true":
+    if WORKER != "trained-assist-tg-bot":
+        raise SystemExit("health traffic generation is only allowed for the production bot Worker")
+    health_url = "https://trained-assist-tg-bot.skillset-apply.workers.dev/health"
+    for _ in range(HEALTH_PROBE_COUNT):
+        request = urllib.request.Request(health_url, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                health = json.load(response)
+                if response.status != 200 or health.get("status") != "alive":
+                    raise SystemExit("production health probe returned an unexpected response")
+                health_probe_count += 1
+        except urllib.error.HTTPError as error:
+            print(json.dumps({"health_probe_http_status": error.code}), file=sys.stderr)
+            raise SystemExit(1)
+        time.sleep(0.25)
+
+
 traces_response = query("traces")
 if not traces_response.get("success"):
     print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
     raise SystemExit(1)
 
 trace_items = traces_response.get("result", {}).get("traces", [])
+if health_probe_count:
+    for _ in range(3):
+        has_worker_trace = any(belongs_to_worker(trace) for trace in trace_items)
+        if has_worker_trace:
+            break
+        time.sleep(15)
+        traces_response = query("traces")
+        if not traces_response.get("success"):
+            print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+            raise SystemExit(1)
+        trace_items = traces_response.get("result", {}).get("traces", [])
 trace_candidate_count = len(trace_items)
 matching_traces = []
 for trace in trace_items:
-    services = trace.get("service", trace.get("services"))
-    if services == WORKER or (isinstance(services, list) and WORKER in services):
+    if belongs_to_worker(trace):
         matching_traces.append(trace)
+
+if health_probe_count and not matching_traces:
+    print(
+        json.dumps(
+            {
+                "worker": WORKER,
+                "health_probe_count": health_probe_count,
+                "trace_count": 0,
+                "error": "No sampled production trace appeared after safe health probes",
+            }
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 root_span_counts = {}
 root_span_durations = {}
@@ -129,6 +178,7 @@ print(
                 read_worker_settings().get("result", {}).get("observability", {}).get("traces", {})
             ),
             "window_hours": 24,
+            "health_probe_count": health_probe_count,
             "trace_count": len(matching_traces),
             "trace_candidate_count": trace_candidate_count,
             "traces_truncated": traces_response.get("result", {}).get("truncated", False),
