@@ -5,11 +5,12 @@
 // never logged, never put into a query string and never returned in an error.
 
 export class TelegramApiError extends Error {
-  constructor(status, payload) {
+  constructor(status, payload, payloadVerified = false) {
     super(`telegram ${payload?.error_code ?? 'error'}: ${payload?.description ?? status}`);
     this.name = 'TelegramApiError';
     this.status = status;
     this.payload = payload ?? null;
+    this.payloadVerified = payloadVerified;
     this.retryAfterSec = Number(payload?.parameters?.retry_after) || null;
   }
 
@@ -44,25 +45,34 @@ export class TelegramApi {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res;
+    let text;
     try {
       res = await this.fetchImpl(this.botUrl(method), {
         method: 'POST',
+        redirect: 'manual',
         headers,
         body,
         signal: controller.signal,
       });
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel();
+        throw new Error('telegram redirect refused');
+      }
+      text = await res.text();
+      if (text.length > 65536) throw new Error('telegram response too large');
     } finally {
       clearTimeout(timer);
     }
-    const text = await res.text();
     let payload = null;
+    let payloadVerified = false;
     try {
       payload = text ? JSON.parse(text) : null;
+      payloadVerified = payload !== null && typeof payload === 'object' && !Array.isArray(payload);
     } catch {
       payload = { ok: false, error_code: res.status, description: text.slice(0, 200) };
     }
     if (!res.ok || payload?.ok !== true) {
-      throw new TelegramApiError(res.status, payload);
+      throw new TelegramApiError(res.status, payload, payloadVerified);
     }
     return payload.result;
   }
@@ -79,9 +89,10 @@ export class TelegramApi {
     });
   }
 
-  sendMessage({ chatId, text, replyToMessageId = null, replyMarkup = null, parseMode = null }) {
+  sendMessage({ chatId, text, threadId = null, replyToMessageId = null, replyMarkup = null, parseMode = null }) {
     return this.call('sendMessage', {
       chat_id: chatId,
+      message_thread_id: threadId ?? undefined,
       text,
       reply_to_message_id: replyToMessageId ?? undefined,
       reply_markup: replyMarkup ?? undefined,
@@ -109,7 +120,7 @@ export class TelegramApi {
   }
 
   deleteMessage({ chatId, messageId }) {
-    return this.call('deleteMessage', { chat_id: ChatId, message_id: messageId });
+    return this.call('deleteMessage', { chat_id: chatId, message_id: messageId });
   }
 }
 

@@ -4,6 +4,10 @@ import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
+import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
+import { controlPlaneClient, publishRoutingDegradation } from './lib/control-plane-execution.js';
+import { isTerminalTaskStatus } from './sandbox-tg/contract.js';
+import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -27,9 +31,12 @@ import { applySessionNamespace } from './lib/session-namespace.js';
 // BUSY_MAX_MS releases the hold so the buffer can't be trapped forever.
 
 import { sendMessage, sendDocument, sendMessageWithKeyboard, editMessage } from './lib/telegram.js';
-import { coalesceBuffer, coalesceItem } from './intake-routing.js';
-import { threadExtra, threadIdOf } from './conversation-context.js';
+import { coalesceBuffer, coalesceItem, FORCE_RUN_RE } from './intake-routing.js';
+import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './lib/control-plane-stop-gate.js';
+import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { pruneHistory } from './group-history.js';
+import { logError } from './log.js';
+import { resolveErrorPublisher, buildErrorEvent, initErrorPublisher } from './error-publisher.js';
 
 // Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
 // force every test that mocks that module to declare them). They call the imported
@@ -74,6 +81,21 @@ const BUSY_POLL_MS = 60_000;     // while busy, the alarm ticks this often and a
                                  // push. The hold is released on the first idle tick,
                                  // so a dropped push costs ~1 min, not BUSY_MAX_MS.
 const DEBOUNCE_MS = 3 * 60_000; // quiet period for ALL automatic launches
+// Граница ожидания пакета ДЛЯ НАРУЖНОГО НАБЛЮДЕНИЯ (arch#132 R9). Это не таймер
+// запуска: пользователь законно может дописывать пачку минутами. Значение —
+// заведомо больше сборки медиа и тишины пользователя, но меньше BUSY_MAX_MS, чтобы
+// «у пользователя всё ещё открыт редактор» никогда не выглядело как потерянный ввод.
+const PENDING_BATCH_DEADLINE_MS = 30 * 60_000;
+// Ключ пакета ЛОКАЛЕН для инстанса DO: сам Durable Object и есть «чат», поэтому
+// ключ не зависит от chatId — иначе /clear (у которого чата в теле нет) не мог бы
+// закрыть пакет.
+const BATCH_KEY = 'pendingBatch';
+// How long the agent's /tasks/running answer stays untrusted for a window whose
+// dispatch went through the outbox. Two owners release that hold before this (the
+// outbox on permanent reject and on prolonged agent downtime); this only covers a
+// lost outbox record. Well under BUSY_MAX_MS so a lost job degrades to «agent says
+// nothing is running» instead of «chat frozen for 45 minutes» (prod 2026-10-04).
+const OUTBOX_POLL_GRACE_MS = 10 * 60_000;
 const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: past this the
                                        // item is dropped from the batch as failed, so a lost
                                        // MediaJob alarm can't leave the chat permanently
@@ -89,6 +111,19 @@ const LAUNCH_BTN = [[{ text: 'Изучи и задай вопросы', callback
   { text: 'Дай полный ответ', callback_data: 'intake_run|answer' }],
   [{ text: 'На твоё усмотрение', callback_data: 'intake_run|auto' },
   { text: '🧹 Очистить весь ввод', callback_data: 'intake_clear' }]];
+const WORK_STYLES = ['explore', 'answer', 'auto'];
+function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) {
+  const labels = { explore: '🧭 Изучи и задай вопросы', answer: '📝 Дай полный ответ', auto: '✨ На твоё усмотрение' };
+  const styles = WORK_STYLES.map(style => [{ text: labels[style], callback_data: `ws|${style}|${revision}` }]);
+  if (busy) {
+    styles.push([{ text: '⚡ Параллельно', callback_data: 'intake_parallel' }]);
+    if (stopEnabled) styles.push([{ text: '🛑 Стоп и запуск с добавкой', callback_data: 'intake_stopsupp' },
+      { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
+  }
+  styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
+  styles.push([{ text: '🧹 Очистить весь ввод', callback_data: `intake_discard|${revision}` }]);
+  return styles;
+}
 // Shown INSTEAD of LAUNCH_BTN under the statuses that mean "THIS batch is
 // already taken": the tap happened, a ▶️ still sitting there is read as «нажата
 // она или нет?» — the ambiguity the owner asked to remove (29.09). The mask follows
@@ -134,7 +169,7 @@ const heldText = n => `✓ Получил ещё ${n} сообщений, пок
 const queuedText = n => `⏳ Порция из ${n} сообщений уйдёт агенту сразу после текущей задачи. Передумал — отменить можно ниже.`;
 // ⛔ Стоп (#1856): held input after a stop. Never auto-dispatched — only ▶️ or a
 // NEW message sent after the stop re-arms launching.
-const stoppedText = n => `⛔ Остановлено. ${n} сообщений ждут и сами не запустятся. «▶️ Запустить агента» — передам их агенту; новое сообщение вернёт обычный режим (они войдут в него же).`;
+const stoppedText = n => `⏸ ${n} сообщений отложены и сами не запустятся. Статус остановки текущей задачи проверяется отдельно.`;
 // RC-04/RC-05 — a chosen «стоп + запуск» is in flight. The batch WILL start on its
 // own here (that is what was chosen), so the text must not promise a button and
 // must not re-ask the question; the only thing left is to take it back.
@@ -200,13 +235,17 @@ export class IntakeBuffer {
     // directly from the Workers runtime so it can't piggyback on the fetch-handler
     // wrapper. Without this, session reads inside the DO ignore the namespace and
     // can find sessions from a different bot (cross-bot auto-login bug).
-    this.env = applySessionNamespace(env);
+    this.env = applySessionNamespace(env.EXECUTION_BACKEND === 'control-plane'
+      ? { ...env, BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN, BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME }
+      : env);
     // Test mode init point #2 — every send this accumulator makes goes through
     // lib/telegram.js, which reads the module cache (DESIGN §2.2).
     initTestMode(this.env);
+    initErrorPublisher(this.env);
     this.mutation = Promise.resolve();
     this.uiMutation = Promise.resolve();
     this.historyMutation = Promise.resolve();
+    this.cpDispatches = 0;
   }
 
   // Group history (src/group-history.js) has its own lock: an ambient message must
@@ -219,6 +258,84 @@ export class IntakeBuffer {
     try { return await fn(); } finally { release(); }
   }
 
+  /**
+   * Идентичность пакета накопителя для внешнего наблюдения (arch#132 R9).
+   *
+   * batchId стабилен, пока пакет жив, и МЕНЯЕТСЯ после запуска: следующая пачка —
+   * другой вход с другим «первым сообщением». Время первого сообщения хранится
+   * отдельно и не перебивается, иначе активный чат подменял бы возраст самого
+   * старого непродвинувшегося ввода свежими.
+   */
+  async _batchIdLocked(chatId, threadId) {
+    const store = this.state.storage;
+    let batch = await store.get(BATCH_KEY);
+    if (!batch?.batchId) {
+      const ck = conversationKey(chatId, threadId);
+      batch = { batchId: `${ck}#1`, seq: 1, conversationKey: ck, firstMessageAt: Date.now() };
+      await store.put(BATCH_KEY, batch);
+    }
+    return batch;
+  }
+
+  /**
+   * Следующая пачка: предыдущая ушла в задачу/отменена, время стартуем заново.
+   * Возвращает ПРЕДЫДУЩИЙ batchId — его и надо закрыть наружу; новый появляется
+   * только когда в него реально придёт сообщение.
+   */
+  async _nextBatchLocked(chatId, threadId) {
+    const store = this.state.storage;
+    const prev = await store.get(BATCH_KEY);
+    // conversationKey нужен только как метка; если чата нет (/clear), берём её из
+    // предыдущего пакета, иначе метка была бы 'null'.
+    const ck = (chatId == null && prev?.conversationKey) || conversationKey(chatId, threadId);
+    await store.put(BATCH_KEY, {
+      batchId: `${ck}#${(prev?.seq ?? 0) + 1}`, seq: (prev?.seq ?? 0) + 1,
+      conversationKey: ck, firstMessageAt: Date.now(),
+    });
+    return prev?.batchId ?? null;
+  }
+
+  /**
+   * Сообщить control plane о накопленном пакете. BEST-EFFORT: сбой уходит в лог
+   * и не имеет права ломать приём сообщения — иначе детектор, который мы строим,
+   * сам станет причиной тишины.
+   */
+  async _announcePending(env, batch, { profileId, destinationId, prepState, deadlineMs } = {}) {
+    if (!batch) return;
+    // Сторожевой канал ОБЯЗАН быть безвредным. Здесь он зовётся из приёма и из
+    // запуска; необработанное исключение из него превратилось бы в «сбой запуска»
+    // (catch в _dispatch снимает busy) или в «приём не состоялся». Поэтому
+    // весь вызов под футпринтом: наблюдаемость не имеет права влиять на приём
+    // и запуск — ради этого её и делали.
+    try {
+      await this._registerPending(env, batch, { profileId, destinationId, prepState, deadlineMs });
+    } catch (e) {
+      console.warn(`[pending-intake] announce ${batch.batchId} threw: ${e.message}`);
+    }
+  }
+
+  /** Закрытие пакета наружу — тоже под футпринтом, по тем же причинам. */
+  async _closePending(env, batchId, reason, userTaskId = null) {
+    try {
+      await closePendingBatch(env, batchId, reason, userTaskId);
+    } catch (e) {
+      console.warn(`[pending-intake] close ${batchId} threw: ${e.message}`);
+    }
+  }
+
+  async _registerPending(env, batch, { profileId, destinationId, prepState, deadlineMs } = {}) {
+    if (!batch) return;
+    await registerPendingBatch(env, {
+      batchId: batch.batchId,
+      profileId,
+      destinationId: destinationId ?? null,
+      conversationId: batch.conversationKey ?? null,
+      firstMessageAt: batch.firstMessageAt,
+      prepState,
+      deadlineMs,
+    });
+  }
+
   async _exclusive(fn) {
     const previous = this.mutation;
     let release;
@@ -227,8 +344,213 @@ export class IntakeBuffer {
     try { return await fn(); } finally { release(); }
   }
 
+  async _bumpDraftRevisionLocked(store = this.state.storage) {
+    const previous = await store.get('draftRevision');
+    const revision = (Number.isSafeInteger(previous) && previous > 0 ? previous : 0) + 1;
+    await store.put('draftRevision', revision);
+    return revision;
+  }
+
+  async _callbackOwned(source) {
+    try { return await this._callbackOwnedUnchecked(source); } catch { return false; }
+  }
+
+  async _callbackOwnedUnchecked(source) {
+    const messageId = source.messageId ?? source.sourceMessageId;
+    if (!Number.isSafeInteger(messageId) || messageId <= 0 || typeof source.username !== 'string') return false;
+    const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+    const last = items.at(-1)?.msg || (await this.state.storage.get('launching'))?.at(-1)?.msg;
+    const chatId = last?.chat?.id ?? await this.state.storage.get('busyChatId');
+    if (chatId == null) return false;
+    const session = await getSession(this.env.SESSIONS, chatId, last ? threadIdOf(last) : await this.state.storage.get('busyThread'));
+    if (session?.username !== source.username) return false;
+    const data = source.callbackData;
+    if (typeof data !== 'string') return false;
+    const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(data);
+    if (/^intake_stop(yes|no)\|(supp|new)$/.test(data || '')) {
+      const confirmation = await this.state.storage.get(`cp-confirmation:${messageId}`);
+      const currentRequestIds = [...new Set((await this.state.storage.get('cpBusyRequests')) || [])].sort();
+      return !!confirmation && confirmation.username === source.username && confirmation.mode === data.split('|')[1]
+        && JSON.stringify(confirmation.requestIds || []) === JSON.stringify(currentRequestIds);
+    }
+    const collector = await this.state.storage.get('collectorMsgId');
+    const preparing = await this.state.storage.get('preparingMsgId');
+    if (data?.startsWith('stop|') || data?.startsWith('stopok|') || data?.startsWith('stopno|')) {
+      if (messageId !== preparing || !(await this.state.storage.get('busy'))) return false;
+      const taskId = data.split('|')[1];
+      const snapshotRequestId = await this.state.storage.get(`input-message:${messageId}`);
+      for (const requestId of (await this.state.storage.get('cpBusyRequests')) || []) {
+        if (requestId !== snapshotRequestId) continue;
+        const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+        if (!record?.terminal && record?.receipt?.userTaskId === taskId) return true;
+      }
+      return false;
+    }
+    if (messageId !== collector || !items.length) return false;
+    const queued = !!(await this.state.storage.get('launchQueued')) || !!(await this.state.storage.get('stopLaunch'));
+    if (queued) return data === 'intake_cancel';
+    if (/^intake_discard\|\d+$/.test(data)) return Number(data.split('|')[1]) === await this.state.storage.get('draftRevision');
+    if (styleLaunch) return Number(styleLaunch[2]) === await this.state.storage.get('draftRevision');
+      if (data === 'intake_run') return false; // CP collector buttons are revision-bound workStyle actions.
+    if (['intake_parallel', 'intake_stopsupp', 'intake_stopnew'].includes(data)) return !!(await this.state.storage.get('busy'));
+    return false;
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/discard' && request.method === 'POST') {
+      const source = await request.clone().json().catch(() => ({}));
+      const result = await this._exclusive(async () => {
+        if (!(await this._callbackOwned(source))) return { refused: true };
+        if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
+            (await this.state.storage.get('launching'))?.length) {
+          return { pending: true };
+        }
+        const buf = (await this.state.storage.get('buf')) || [];
+        const retry = (await this.state.storage.get('retryBatch')) || [];
+        if ([...buf, ...retry].some(item => item.mediaPending || item.preparingAt)) return { pending: true, preparing: true };
+        const failedKeys = [...(await this.state.storage.list({ prefix: 'failed:' })).keys()];
+        const failedMediaKeys = [...(await this.state.storage.list({ prefix: 'media-failed:' })).keys()];
+        const failedCount = (await Promise.all(failedKeys.map(async key => (await this.state.storage.get(key))?.items?.length || 0)))
+          .reduce((count, length) => count + length, 0);
+        await this.state.storage.delete('buf');
+        await this.state.storage.delete('retryBatch');
+        await this.state.storage.delete('retryBatchAttempts');
+        for (const key of [...failedKeys, ...failedMediaKeys]) await this.state.storage.delete(key);
+        for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
+          'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+          'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
+        await this.state.storage.deleteAlarm();
+        await this._bumpDraftRevisionLocked();
+        const batchId = await this._nextBatchLocked(null, null);
+        return { discarded: true, count: buf.length + retry.length + failedCount + failedMediaKeys.length, batchId };
+      });
+      if (result.batchId) await this._closePending(this.env, result.batchId, 'cleared');
+      if (result.refused || result.pending) return Response.json({ discarded: false, ...result }, { status: 409 });
+      return json(result);
+    }
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && request.method === 'POST' &&
+        ['/flush', '/cancel', '/stop-launch'].includes(url.pathname)) {
+      const source = await request.clone().json().catch(() => ({}));
+      const allowed = await this._exclusive(async () => {
+        if (this.cpCallbackInFlight || !(await this._callbackOwned(source))) return false;
+        if (url.pathname === '/flush' && !['intake_parallel'].includes(source.callbackData) &&
+            !/^ws\|(explore|answer|auto)\|\d+$/.test(source.callbackData || '')) return false;
+        if (url.pathname === '/cancel' && source.callbackData !== 'intake_cancel') return false;
+        if (url.pathname === '/stop-launch' && source.callbackData !== `intake_stopyes|${source.mode}`) return false;
+        this.cpCallbackInFlight = true;
+        return true;
+      });
+      if (!allowed) return new Response('Callback ownership mismatch', { status: 409 });
+      try { return await this._fetch(request); } finally { this.cpCallbackInFlight = false; }
+    }
+    return this._fetch(request);
+  }
+
+  async _fetch(request) {
+    const url = new URL(request.url);
+    if (controlPlaneStopDisabled(this.env) && request.method === 'POST'
+        && ['/stop', '/cp-stop-targets', '/stop-launch', '/callback-confirmation', '/supplement'].includes(url.pathname)) {
+      return Response.json({ error: 'control_plane_stop_disabled' }, { status: 409 });
+    }
+    if (url.pathname === '/cp-stop-targets' && request.method === 'POST') {
+      if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
+      const source = await request.json().catch(() => null);
+      try { await this._exclusive(async () => this._readControlPlaneStopTargets(source)); }
+      catch { return new Response('Stop scope mismatch', { status: 409 }); }
+      try { return json(await this._driveControlPlaneStop(source)); }
+      catch {
+        await this._exclusive(async () => {
+          const current = await this.state.storage.get('cpStopWindow');
+          if (current) {
+            await this.state.storage.put('cpStopWindow', { ...current, pending: true, unresolved: true });
+            await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+          }
+        });
+        return json({ unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown' });
+      }
+    }
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/callback-owner' && request.method === 'POST') {
+      const source = await request.json();
+      return this._exclusive(async () => json({ owned: await this._callbackOwned(source) }));
+    }
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/callback-confirmation' && request.method === 'POST') {
+      const source = await request.json();
+      return this._exclusive(async () => {
+        if (!Number.isSafeInteger(source.messageId) || source.messageId <= 0 ||
+            !['intake_stopsupp', 'intake_stopnew'].includes(source.callbackData) ||
+            !(await this._callbackOwned({ ...source, messageId: source.sourceMessageId }))) {
+          return new Response('Confirmation ownership mismatch', { status: 409 });
+        }
+        const value = { username: source.username, mode: source.callbackData === 'intake_stopsupp' ? 'supp' : 'new',
+          sourceMessageId: source.sourceMessageId,
+          requestIds: [...new Set((await this.state.storage.get('cpBusyRequests')) || [])].sort() };
+        const key = `cp-confirmation:${source.messageId}`;
+        const existing = await this.state.storage.get(key);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(value)) return new Response('Confirmation conflict', { status: 409 });
+        await this.state.storage.put(key, value);
+        return json({ owned: true });
+      });
+    }
+    if (url.pathname === '/cp-session') {
+      if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      const { requestId, sessionId } = await request.json();
+      if (typeof requestId !== 'string' || !/^tg-[a-f0-9]{64}$/.test(requestId) ||
+          typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 256) {
+        return new Response('Invalid session identity', { status: 400 });
+      }
+      return this._exclusive(async () => {
+        const profileId = controlPlaneClient(this.env).config.profileId;
+        return this.state.storage.transaction(async tx => {
+          const key = `cp-session:${requestId}`;
+          const existing = await tx.get(key);
+          if (existing && existing.profileId !== profileId) return new Response('Session scope mismatch', { status: 409 });
+          const value = existing || { requestId, sessionId, profileId };
+          if (!existing) await tx.put(key, value);
+          return json({ sessionId: value.sessionId });
+        });
+      });
+    }
+    if (url.pathname === '/cp-acceptance') {
+      if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
+      if (request.method === 'GET') {
+        const record = await this.state.storage.get(`cp-acceptance:${url.searchParams.get('requestId')}`);
+        return json({ receipt: record?.receipt ?? null });
+      }
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      const { requestId, receipt } = await request.json();
+      return this._exclusive(async () => {
+        const snapshot = typeof requestId === 'string' && await this._readSnapshot(requestId);
+        const envelope = snapshot?.body?.controlPlaneEnvelope;
+        let profileId;
+        try {
+          profileId = controlPlaneClient(this.env).config.profileId;
+        } catch {
+          return new Response('Control plane configuration unavailable', { status: 503 });
+        }
+        if (!requestId || !envelope || envelope.requestId !== requestId ||
+            receipt?.requestId !== requestId || receipt?.profileId !== envelope.profileId || receipt?.profileId !== profileId ||
+            typeof receipt?.userTaskId !== 'string' || !receipt.userTaskId || receipt.durable !== true) {
+          return new Response('Acceptance scope mismatch', { status: 409 });
+        }
+        const key = `cp-acceptance:${requestId}`;
+        const existing = await this.state.storage.get(key);
+        if (existing) {
+          if (existing.receipt.userTaskId !== receipt.userTaskId || existing.receipt.profileId !== receipt.profileId ||
+              existing.receipt.requestId !== requestId) return new Response('Acceptance conflict', { status: 409 });
+          return json({ receipt: existing.receipt });
+        }
+        await this.state.storage.transaction(async tx => {
+          await tx.put(key, { receipt, terminal: false });
+          const ids = (await tx.get('cpBusyRequests')) || [];
+          await tx.put('cpBusyRequests', [...new Set([...ids, requestId])]);
+          await tx.put('busy', true);
+          await tx.setAlarm(Date.now() + BUSY_POLL_MS);
+        });
+        return json({ receipt });
+      });
+    }
 
     // Strongly-consistent mirror of the chat's project picker (src/lib/picker-mirror.js).
     // Deliberately outside _exclusive(): the flush that opens the picker calls here
@@ -287,6 +609,11 @@ export class IntakeBuffer {
           });
         }
         if (body.initialMsgId) await this.state.storage.put(`input-message:${body.initialMsgId}`, id);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (existing?.body || body).controlPlaneEnvelope) {
+          const launchKey = JSON.stringify((existing?.items || items || []).map(item => item.msg?.message_id));
+          const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+          if (checkpoint) await this.state.storage.put(`cp-launch:${launchKey}`, { ...checkpoint, snapshotRequestId: id });
+        }
         return json({ id, body: existing?.body || body });
       });
     }
@@ -352,6 +679,14 @@ export class IntakeBuffer {
       // still scheduled for this chat, or is it asleep? A non-empty buffer with no
       // alarm and no busy IS the dead-end (#248, chat -1003814002203).
       const alarm = await this.state.storage.getAlarm();
+      const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+      const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
+      const stopWindow = await this.state.storage.get('cpStopWindow');
+      const unresolvedCheckpointMedia = await Promise.all(unresolvedLaunches.map(async key => {
+        const checkpoint = await this.state.storage.get(`cp-launch:${key}`);
+        const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+        return items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef);
+      }));
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
@@ -371,6 +706,15 @@ export class IntakeBuffer {
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
         parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
         stopped: (await this.state.storage.get('stopped')) || null,
+        controlPlaneBarrier: this.env.EXECUTION_BACKEND === 'control-plane' ? {
+          unresolvedLaunchCount: unresolvedLaunches.length,
+          unresolvedCheckpointHasUnsupportedMedia: unresolvedCheckpointMedia.some(Boolean),
+          busyRequestCount: busyRequests.length,
+          stopPending: stopWindow?.pending === true,
+        } : null,
+        collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
+          ? (await this.state.storage.get(`cp-collector-send:${(await this.state.storage.get(BATCH_KEY))?.batchId}`)) || null
+          : null,
         // A parked batch is an intentional wait for ▶️ (visible, one re-offer) —
         // not a dead-end. `stranded` now means: buffer non-empty, nothing
         // scheduled, and NOT parked = genuinely lost.
@@ -401,6 +745,7 @@ export class IntakeBuffer {
     // and never re-offering a launch). Never launches anything.
     if (url.pathname === '/clear' && request.method === 'POST') {
       if (await this.state.storage.get('busy')) return json({ busy: true, cleared: false });
+      let clearedBatchId = null;
       const result = await this._exclusive(async () => {
         const buf = (await this.state.storage.get('buf')) || [];
         const retry = (await this.state.storage.get('retryBatch')) || [];
@@ -424,8 +769,12 @@ export class IntakeBuffer {
         await this.state.storage.delete('parkedAt');
         await this.state.storage.delete('parkReoffers');
         await this.state.storage.deleteAlarm();
+        clearedBatchId = await this._nextBatchLocked(null, null);
         return { cleared: buf.length + retry.length, failed: failedKeys.length };
       });
+      // Решение пользователя/оператора — это НЕ «зависший ввод» (arch#132 R9):
+      // иначе детектор через 30 минут напомнил бы про пакет, который сняли.
+      await this._closePending(this.env, clearedBatchId, 'cleared');
       return json(result);
     }
 
@@ -441,13 +790,34 @@ export class IntakeBuffer {
     //   • KEEPS the messages and shows «⛔ Остановлено. N ждут — ▶️».
     // Only an explicit ▶️ (/flush) or a NEW message after the stop clears it.
     if (url.pathname === '/stop' && request.method === 'POST') {
-      const { replyTo = null, chatId: reqChatId = null, threadId: reqThreadId = null } =
-        await request.json().catch(() => ({}));
+      const source = await request.json().catch(() => ({}));
+      const { replyTo = null, chatId: reqChatId = null, threadId: reqThreadId = null, preserveDraft = false } = source;
       const res = await this._exclusive(async () => {
         const store = this.state.storage;
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          try {
+            const session = await getSession(this.env.SESSIONS, reqChatId, reqThreadId);
+            const username = source.username ?? session?.username;
+            const profileId = controlPlaneClient(this.env).config.profileId;
+            const scope = await store.get('cpScope');
+            if (!username || session?.username !== username || !scope || scope.chatId !== reqChatId
+              || scope.threadId !== reqThreadId || scope.profileId !== profileId) return null;
+            const previous = await store.get('cpStopWindow');
+            if (!previous?.pending) {
+              const admissionRequestIds = [...new Set(await store.get('cpBusyRequests') || [])].sort();
+              await store.put('cpStopWindow', { intentId: crypto.randomUUID(), restart: previous?.stopConfirmed === true,
+                username, chatId: reqChatId, threadId: reqThreadId, profileId,
+                preserveDraft: preserveDraft === true,
+                previousGroups: previous?.groups || [], admissionRequestIds,
+                admissionLaunchKeys: [...(await store.get('cpUnresolvedLaunches') || [])], groups: [], tasks: [],
+                pending: true, unresolved: true, stopConfirmed: false,
+                createdAt: Date.now() });
+            }
+          } catch { return null; }
+        }
         const had = !!((await store.get('launchAfterRelease')) || (await store.get('launchWhenReady'))
           || (await store.get('launchQueued')) || (await store.get('debounceExpiresAt')));
-        for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'debounceExpiresAt',
+        for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchWorkStyle', 'launchWorkStyleSource', 'debounceExpiresAt',
           'gateLevel', 'shortDebounce', 'gateConsulted', 'gateErrAttempts', 'receiptDue', 'resumedHeld',
           'parkedAt', 'parkReoffers']) {
           await store.delete(k);
@@ -455,14 +825,45 @@ export class IntakeBuffer {
         await store.put('stopped', Date.now());
         const busy = !!(await store.get('busy'));
         const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
+        const failedKeys = this.env.EXECUTION_BACKEND === 'control-plane'
+          ? [...(await store.list({ prefix: 'failed:' })).keys()] : [];
+        const failedMediaKeys = this.env.EXECUTION_BACKEND === 'control-plane'
+          ? [...(await store.list({ prefix: 'media-failed:' })).keys()] : [];
+        const failedDraftCount = (await Promise.all(failedKeys.map(async key => (await store.get(key))?.items?.length || 0)))
+          .reduce((count, length) => count + length, 0) + failedMediaKeys.length;
+        const preserveSelectedDraft = preserveDraft === true || (await store.get('cpStopWindow'))?.preserveDraft === true;
+        const resetControlPlaneDraft = this.env.EXECUTION_BACKEND === 'control-plane' && !preserveSelectedDraft;
+        const clearedDraftCount = resetControlPlaneDraft ? items.length + failedDraftCount : 0;
+        if (resetControlPlaneDraft) {
+          await store.delete('buf');
+          await store.delete('retryBatch');
+          await store.delete('retryBatchAttempts');
+          await store.delete('launchParallel');
+          await store.delete('launchWorkStyle');
+          await store.delete('launchWorkStyleSource');
+          for (const key of [...failedKeys, ...failedMediaKeys]) await store.delete(key);
+          await this._bumpDraftRevisionLocked();
+        }
         // The alarm only stays for what is not a launch: the busy safety poll and
         // media recovery. Everything else it could do now is dispatch.
-        if (busy) await store.setAlarm(Date.now() + BUSY_POLL_MS);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await store.get('cpStopWindow'))?.pending) await store.setAlarm(Date.now() + BUSY_POLL_MS);
+        else if (busy) await store.setAlarm(Date.now() + BUSY_POLL_MS);
         else if (items.some(i => i.mediaPending)) await store.setAlarm(Date.now() + 60_000);
         else await store.deleteAlarm();
         const prevCollector = items.length ? await store.get('collectorMsgId') : null;
         if (prevCollector) await store.delete('collectorMsgId');
-        return { held: items.length, busy, hadIntent: had, prevCollector, last: items.at(-1)?.msg || null };
+        const clearedBatchId = resetControlPlaneDraft && clearedDraftCount
+          ? await this._nextBatchLocked(items.at(-1)?.msg?.chat?.id, threadIdOf(items.at(-1)?.msg)) : null;
+        const independentBatchId = resetControlPlaneDraft && clearedDraftCount && (await store.get('cpStopWindow'))?.pending
+          ? (await this._batchIdLocked(reqChatId, reqThreadId)).batchId : null;
+        return { held: resetControlPlaneDraft ? 0 : items.length, clearedDraftCount, busy, hadIntent: had, prevCollector,
+          last: items.at(-1)?.msg || null, clearedBatchId, independentBatchId };
+      });
+      if (res === null) return new Response('Stop scope mismatch', { status: 409 });
+      if (res.clearedBatchId) await this._closePending(this.env, res.clearedBatchId, 'cleared');
+      if (res.independentBatchId) await this._announcePending(this.env, { batchId: res.independentBatchId }, {
+        profileId: source.username, destinationId: String(reqChatId), prepState: 'collecting',
+        deadlineMs: PENDING_BATCH_DEADLINE_MS,
       });
       console.log(`[stop] intake chat=${res.last?.chat?.id ?? reqChatId} held=${res.held} busy=${res.busy} hadIntent=${res.hadIntent}`);
       if (res.held) {
@@ -471,12 +872,13 @@ export class IntakeBuffer {
         // The old collector may sit off-screen with ▶️/↩️ on it: neutralise it and
         // post a fresh one right under the stop, where the user is looking.
         if (res.prevCollector && chatId) {
-          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⛔ Остановлено — порция отложена, см. ниже.',
+          await editMessage(this.env.BOT_TOKEN, chatId, res.prevCollector, '⏸ Порция отложена — статус остановки проверяется, см. ниже.',
             { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         }
         await this._showCollector(chatId, res.held, replyTo || res.last?.message_id, threadId);
       }
-      return json({ stopped: true, held: res.held, busy: res.busy, hadIntent: res.hadIntent });
+      return json({ stopped: true, held: res.held, clearedDraftCount: res.clearedDraftCount,
+        busy: res.busy, hadIntent: res.hadIntent });
     }
 
     if (url.pathname === '/media-result' && request.method === 'POST') {
@@ -505,6 +907,10 @@ export class IntakeBuffer {
     }
 
     if (url.pathname === '/run-finished' && request.method === 'POST') {
+      if (this.env.EXECUTION_BACKEND === 'control-plane') {
+        const released = await this._pollRunFinishedIfIdle(0);
+        return json({ busy: !released && !!(await this.state.storage.get('busy')), released });
+      }
       const { requestId = null, consumed = [] } = await request.json().catch(() => ({}));
       const consumedIds = new Set((Array.isArray(consumed) ? consumed : []).filter(Number.isSafeInteger));
       const released = await this._exclusive(async () => {
@@ -554,6 +960,7 @@ export class IntakeBuffer {
         if (seen.includes(msg.message_id) || items.some(i => i.msg.message_id === msg.message_id)) return false;
         items.push({ text: msg.text, msg, preparingAt: Date.now() });
         await this.state.storage.put('buf', items);
+        await this._bumpDraftRevisionLocked();
         return true;
       });
       if (!accepted) return json({ duplicate: true });
@@ -594,6 +1001,7 @@ export class IntakeBuffer {
           else items[index] = { text: result.msg.text, msg: result.msg, intentText: msg.text || msg.caption || '' };
         }
         await this.state.storage.put('buf', items);
+        await this._bumpDraftRevisionLocked();
         const seen = (await this.state.storage.get('received')) || [];
         await this.state.storage.put('received', [...seen, msg.message_id].slice(-1000));
         const seq = ((await this.state.storage.get('armSeq')) || 0) + 1;
@@ -627,17 +1035,132 @@ export class IntakeBuffer {
       }
       const stillFreshest = await this._exclusive(async () => (await this.state.storage.get('armSeq')) === claim.seq);
       if (stillFreshest) await this._armAutoDispatch(msg.chat.id, claim.items, msg.message_id, threadIdOf(msg));
+      // Наружу: «у меня накоплено вот это» (arch#132 R9). Время первого сообщения
+      // пакета НЕ перебивается новыми — иначе возраст самого старого ввода
+      // подменялся бы свежими.
+      const batch = await this._exclusive(async () => this._batchIdLocked(msg.chat.id, threadIdOf(msg)));
+      const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg)).catch(() => null);
+      await this._announcePending(this.env, batch, {
+        profileId: session?.username ?? null,
+        destinationId: String(msg.chat.id),
+        prepState: 'collecting',
+        deadlineMs: PENDING_BATCH_DEADLINE_MS,
+      });
       return json({ buffered: claim.items.length });
     }
 
     if (url.pathname === '/append' && request.method === 'POST') {
-      const { text, msg, flush } = await request.json();
+      const { text, msg, flush, telegramUpdateId } = await request.json();
       const diverted = await this._divertToSupplement(msg, '/append');
       if (diverted) return diverted;
+      const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
+      const pendingStopWindow = cpMode && (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
+      let heldBehindPendingUnsupportedLaunch = false;
+      const hasUnsupportedUnresolvedLaunch = async () => {
+        if (!cpMode || mediaEnabled(this.env)) return false;
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        for (const launchKey of unresolved) {
+          const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+          const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
+          if (items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) return true;
+        }
+        return false;
+      };
+      const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
+        [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
+          ...((await this.state.storage.get('launching')) || [])]
+          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef) || await hasUnsupportedUnresolvedLaunch();
+      // Reconcile an orphaned admission checkpoint whenever the user sends a
+      // fresh text. It may outlive `launching` after a cold restart, so tying
+      // recovery only to a visible unsupported-media draft can wedge the chat.
+      if (cpMode && !mediaOf(msg) && !this.cpDispatches &&
+          ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length) {
+        await this._recoverControlPlaneLaunch().catch(() => false);
+      }
+      let oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
+      if (unsupportedMedia || oldUnsupported) {
+        const reset = await this._exclusive(async () => {
+          const busy = !!(await this.state.storage.get('busy'));
+          if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
+              (await this.state.storage.get('launching'))?.length || (await this.state.storage.get('cpStopWindow'))?.pending) return { state: 'pending' };
+          if (unsupportedMedia && busy) return { state: 'busy' };
+          if (oldUnsupported && busy) {
+            const buf = (await this.state.storage.get('buf')) || [];
+            const retry = (await this.state.storage.get('retryBatch')) || [];
+            await this.state.storage.put('buf', buf.filter(item => !mediaOf(item.msg) || item.msg?.fileRef));
+            if (retry.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) {
+              await this.state.storage.delete('retryBatch');
+              await this.state.storage.delete('retryBatchAttempts');
+            }
+            await this.state.storage.delete('collectorMsgId');
+            await this._bumpDraftRevisionLocked();
+            return { state: 'held-cleaned' };
+          }
+          await this.state.storage.delete('buf');
+          await this.state.storage.delete('retryBatch');
+          await this.state.storage.delete('retryBatchAttempts');
+          for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
+            'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+            'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
+          await this.state.storage.deleteAlarm();
+          await this._bumpDraftRevisionLocked();
+          const batchId = await this._nextBatchLocked(null, null);
+          return { state: 'cleared', batchId };
+        });
+        if (reset.batchId) await this._closePending(this.env, reset.batchId, 'cleared');
+        if (unsupportedMedia) {
+          await sendTracked(this.env, msg.chat.id,
+            reset.state === 'busy' || reset.state === 'pending'
+              ? '⚠️ В этом тестовом режиме вложения пока не поддерживаются — это сообщение не добавил. Уже собранный ввод и текущую задачу не трогал; отправь запрос текстом.'
+              : '⚠️ В этом тестовом режиме вложения пока не поддерживаются — задачу не запускал и эту порцию сбросил. Отправь её текстом; черновик можно сбросить кнопкой в меню.',
+            {}, threadIdOf(msg)).catch(() => null);
+          return json({ buffered: 0, refused: true, unsupported: 'media' });
+        }
+        if (reset.state === 'pending') {
+          heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported;
+          if (heldBehindPendingUnsupportedLaunch) {
+            // The original admission is still uncertain. Keep its evidence and
+            // accept fresh text as held input; never make the user resend it or
+            // risk a parallel launch. The normal busy path below stores it.
+          } else {
+          await sendTracked(this.env, msg.chat.id,
+            '⌛ Предыдущая порция ещё сверяется с запуском, поэтому текст пока не добавил. Текущий запуск не тронут; отправь сообщение ещё раз после его завершения.',
+            {}, threadIdOf(msg)).catch(() => null);
+          return json({ buffered: 0, refused: true, reason: 'launch_pending' });
+          }
+        }
+        if (reset.state !== 'pending') await sendTracked(this.env, msg.chat.id,
+          reset.state === 'held-cleaned'
+            ? '⚠️ Удалил неподдерживаемое вложение из отложенной порции; остальные сообщения и текущую задачу сохранил. Это текстовое сообщение добавил к отложенной порции.'
+            : '⚠️ В предыдущей порции было вложение, которое этот режим не может передать. Сбросил старую порцию; это текстовое сообщение начал как новую задачу.',
+          {}, threadIdOf(msg)).catch(() => null);
+      }
       const buf = await this._exclusive(async () => {
         const items = (await this.state.storage.get('buf')) || [];
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          if (!Number.isSafeInteger(msg.message_id) || msg.message_id <= 0 ||
+              (telegramUpdateId !== undefined && (!Number.isSafeInteger(telegramUpdateId) || telegramUpdateId < 0))) return null;
+          const messageKey = `cp-input-message:${msg.message_id}`;
+          const updateKey = telegramUpdateId === undefined ? null : `cp-input-update:${telegramUpdateId}`;
+          if (await this.state.storage.get(messageKey) || (updateKey && await this.state.storage.get(updateKey))) return null;
+          const batch = await this._batchIdLocked(msg.chat.id, threadIdOf(msg));
+          await this.state.storage.transaction(async tx => {
+            const scope = { chatId: msg.chat.id, threadId: threadIdOf(msg), profileId: controlPlaneClient(this.env).config.profileId };
+            const existingScope = await tx.get('cpScope');
+            if (existingScope && JSON.stringify(existingScope) !== JSON.stringify(scope)) throw new Error('Collector scope mismatch');
+            await tx.put('cpScope', scope);
+            const ownership = { batchId: batch.batchId, messageId: msg.message_id, telegramUpdateId: telegramUpdateId ?? null };
+            await tx.put(messageKey, ownership);
+            if (updateKey) await tx.put(updateKey, ownership);
+            await tx.put('buf', [...items, { text, msg, telegramUpdateId }]);
+            await this._bumpDraftRevisionLocked(tx);
+          });
+          items.push({ text, msg, telegramUpdateId });
+          if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
+        }
         // Telegram can retry delivery of the same update.
-        if (!msg.message_id || !items.some(item => item.msg.message_id === msg.message_id)) {
+        if (this.env.EXECUTION_BACKEND !== 'control-plane' && (!msg.message_id || !items.some(item => item.msg.message_id === msg.message_id))) {
           items.push({ text, msg });
           await this.state.storage.put('buf', items);
           if (await this.state.storage.get('stopped')) await this._resumeAfterStopLocked(msg.message_id);
@@ -651,15 +1174,32 @@ export class IntakeBuffer {
         }
         return items;
       });
+      if (buf === null) return json({ duplicate: true });
 
-      if ((await this.state.storage.get('busy')) === true) {
-        // A run is in flight — hold new messages (never auto-run), but ACK them so
-        // the user isn't met with silence. A fresh launch button is offered once
-        // the run finishes; here we only confirm receipt.
-        await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+      const independentForceLaunch = flush && pendingStopWindow && cpMode && FORCE_RUN_RE.test(text || '');
+      if (((await this.state.storage.get('busy')) === true && !independentForceLaunch)
+          || heldBehindPendingUnsupportedLaunch || (pendingStopWindow && !independentForceLaunch)) {
+        // A run or another launch barrier is still active. Hold new messages,
+        // never auto-run them, and ACK them so the user isn't met with silence.
+      if (pendingStopWindow) await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+      else await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+        if (heldBehindPendingUnsupportedLaunch || pendingStopWindow) await sendTracked(this.env, msg.chat?.id,
+          pendingStopWindow && !heldBehindPendingUnsupportedLaunch
+            ? '🕒 Это отдельная новая задача. Старая ещё сверяется; запусти ввод кнопкой, не дожидаясь её.'
+            : '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
+          {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
       }
       if (flush) {
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          if (!FORCE_RUN_RE.test(text || '')) return new Response('Explicit launch word required', { status: 400 });
+          if (pendingStopWindow) {
+            await this.state.storage.put('launchParallel', true);
+            await this.state.storage.delete('stopped');
+          }
+          await this._dispatch();
+          return json({ flushed: true });
+        }
         // Force word (запускай/го) — launch immediately, coalescing everything.
         return this.fetch(new Request('https://intake/flush', { method: 'POST' }));
       }
@@ -672,12 +1212,33 @@ export class IntakeBuffer {
       // `parallel: true` — the user's explicit «⚡ Параллельно» (RC-03): launch
       // this batch NOW as a second run of the same busy window instead of
       // queueing it after the current one. Legacy callers send no body.
-      const { parallel = false, workStyle = null } = await request.json().catch(() => ({}));
+      const source = await request.json().catch(() => ({}));
+      const stopWindowPending = this.env.EXECUTION_BACKEND === 'control-plane'
+        && (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      const parallel = source.parallel === true || stopWindowPending;
+      const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
-      await this._exclusive(async () => {
+      const authorized = await this._exclusive(async () => {
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return false;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' &&
+            (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return false;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return false;
+        if (styleLaunch) {
+          await this.state.storage.put('launchWorkStyle', styleLaunch[1]);
+          await this.state.storage.put('launchWorkStyleSource', 'explicit');
+        } else if (parallel) {
+          await this.state.storage.put('launchWorkStyle', 'auto');
+          await this.state.storage.put('launchWorkStyleSource', 'default');
+        }
+        if (parallel) await this.state.storage.put('launchParallel', true);
         await this.state.storage.delete('stopped');
         await this.state.storage.delete('resumedHeld');
+        return this.env.EXECUTION_BACKEND === 'control-plane'
+          ? { buffer: JSON.stringify((await this.state.storage.get('buf')) || []),
+              retry: JSON.stringify(await this.state.storage.get('retryBatch')) }
+          : true;
       });
+      if (!authorized) return new Response('Callback ownership mismatch', { status: 409 });
       // Button tap / force word while a run is in flight. Never a second
       // concurrent run (#1527 F1), but never a silent no-op either: the held
       // «▶️ Запустить агента» button used to do nothing mid-run. First self-heal
@@ -714,7 +1275,7 @@ export class IntakeBuffer {
             }
             // Take the batch right now — _dispatch joins the open window (its
             // ack appends this run's requestId; the hold drops after the LAST one).
-            await this._dispatch(undefined, workStyle);
+            await this._dispatch();
             return json({ busy: true, parallel: true });
           }
           await this.state.storage.put('launchAfterRelease', true);
@@ -750,7 +1311,7 @@ export class IntakeBuffer {
         return json({ preparing: true, queued: true });
       }
       if (parallel) await this.state.storage.put('launchParallel', true);
-      await this._dispatch(undefined, workStyle);
+      await this._dispatch(authorized === true ? undefined : authorized.buffer, authorized === true ? undefined : authorized.retry);
       return json(parallel ? { flushed: true, parallel: true } : { flushed: true });
     }
 
@@ -760,20 +1321,25 @@ export class IntakeBuffer {
     // The held messages stay exactly where they were: the next render simply
     // offers ▶️ again.
     if (url.pathname === '/cancel' && request.method === 'POST') {
+      const source = await request.json().catch(() => ({}));
       const cancelled = await this._exclusive(async () => {
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return null;
         const store = this.state.storage;
         const had = !!((await store.get('launchQueued'))
           || (await store.get('launchAfterRelease'))
           || (await store.get('launchWhenReady'))
-          || (await store.get('stopLaunch'))); // RC-04/05: отмена действует на ЛЮБОЙ пункт меню
-        const stopLaunchCancelled = !!(await store.get('stopLaunch'));
+          || (!controlPlaneStopDisabled(this.env) && (await store.get('stopLaunch')))); // RC-04/05: отмена действует на ЛЮБОЙ пункт меню
+        const stopLaunchCancelled = !controlPlaneStopDisabled(this.env) && !!(await store.get('stopLaunch'));
         await store.delete('launchQueued');
         await store.delete('launchAfterRelease');
         await store.delete('launchWhenReady');
         await store.delete('launchParallel');
-        await store.delete('stopLaunch');
+        await store.delete('launchWorkStyle');
+        await store.delete('launchWorkStyleSource');
+        if (!controlPlaneStopDisabled(this.env)) await store.delete('stopLaunch');
         return { had, stopLaunchCancelled };
       });
+      if (cancelled === null) return new Response('Callback ownership mismatch', { status: 409 });
       if (cancelled?.had) {
         // Re-render the same collector with ▶️ back — done outside the lock
         // (Telegram I/O), same single-owner serialization as every collector edit.
@@ -802,19 +1368,28 @@ export class IntakeBuffer {
     // not busy (SS-08: the run had already finished) → degrade to an ordinary
     // launch, honestly narrated by the caller.
     if (url.pathname === '/stop-launch' && request.method === 'POST') {
-      const { mode = 'new', route = null } = await request.json().catch(() => ({}));
+      const source = await request.json().catch(() => ({}));
+      const { mode = 'new', route = null } = source;
       const res = await this._exclusive(async () => {
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return null;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode !== 'new' &&
+            (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length)) return null;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && mode !== 'new') return null;
         const store = this.state.storage;
         if (await store.get('stopLaunch')) return { already: true };
         const items = [...((await store.get('retryBatch')) || []), ...((await store.get('buf')) || [])];
         if (!items.length) return { nothing: true };
-        if (await store.get('busy')) {
+        if (await store.get('busy') && !(mode === 'new' && this.env.EXECUTION_BACKEND === 'control-plane'
+            && (await store.get('cpStopWindow'))?.pending)) {
           await store.put('stopLaunch', { mode: mode === 'supp' ? 'supp' : 'new', route, at: Date.now() });
           return { waiting: true, count: items.length };
         }
         await this._prepareStopLaunchLocked({ mode: mode === 'supp' ? 'supp' : 'new', route }, items);
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && mode === 'new'
+            && ((await store.get('cpStopWindow'))?.pending || await store.get('busy'))) await store.put('launchParallel', true);
         return { launching: true, count: items.length };
       });
+      if (res === null) return new Response('Callback ownership mismatch', { status: 409 });
       if (res.launching) await this._dispatch();
       return json(res);
     }
@@ -827,9 +1402,10 @@ export class IntakeBuffer {
   // «ровно один ран — без дубля из буфера, retry или GTD»). Must run inside
   // _exclusive; `spec` is re-read under the lock by _consumeStopLaunch.
   async _prepareStopLaunchLocked(spec, items) {
+    if (controlPlaneStopDisabled(this.env)) throw controlPlaneStopDisabledError();
     const store = this.state.storage;
     await store.delete('stopped'); // the explicit choice IS the lift of the ⛔ hold
-    for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+    for (const k of ['launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel', 'launchWorkStyle', 'launchWorkStyleSource',
       'debounceExpiresAt', 'gateLevel', 'gateConsulted', 'gateErrAttempts', 'receiptDue']) {
       await store.delete(k);
     }
@@ -844,14 +1420,17 @@ export class IntakeBuffer {
   // (the flag is taken under the lock). Still-preparing attachments are NOT lost:
   // the choice stays remembered and the next tick tries again.
   async _consumeStopLaunch() {
+    if (controlPlaneStopDisabled(this.env)) return false;
     const spec = await this.state.storage.get('stopLaunch');
     if (!spec) return false;
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && spec.mode !== 'new') return false;
     // The window still belongs to the run being stopped: launching NOW would lose
     // the bookkeeping (_dispatch refuses a non-empty busy window) and, worse, take
     // the batch out of the launch position while nobody may launch it. Wait for
     // the release — run-finished, the self-heal poll or BUSY_MAX — which always
     // ends in _afterBusyRelease and comes back here.
-    if (await this.state.storage.get('busy')) return false;
+    if (await this.state.storage.get('busy') && !(this.env.EXECUTION_BACKEND === 'control-plane'
+        && spec.mode === 'new' && (await this.state.storage.get('cpStopWindow'))?.pending)) return false;
     const items = [...((await this.state.storage.get('retryBatch')) || []),
       ...((await this.state.storage.get('buf')) || [])];
     if (!items.length) {
@@ -871,6 +1450,8 @@ export class IntakeBuffer {
       if (!current) return false;
       await this.state.storage.delete('stopLaunch');
       await this._prepareStopLaunchLocked(current, items);
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && current.mode === 'new'
+          && ((await this.state.storage.get('cpStopWindow'))?.pending || await this.state.storage.get('busy'))) await this.state.storage.put('launchParallel', true);
       return true;
     });
     if (!taken) return false;
@@ -946,6 +1527,7 @@ export class IntakeBuffer {
         items.push({ text: msg.text, msg: { ...msg, mediaJob: id }, mediaPending: true, mediaOwner: session.username, mediaFirstSeenAt: Date.now(),
           ...(await tx.get('busy') ? { heldWhileBusy: true } : {}) });
         await tx.put('buf', items);
+        await this._bumpDraftRevisionLocked(tx);
         await tx.put('received', [...seen, msg.message_id].slice(-1000));
         await tx.setAlarm(Date.now() + 60000);
       });
@@ -960,6 +1542,15 @@ export class IntakeBuffer {
     if (!accepted) return json({ duplicate: true });
     await enqueueMedia(msg, this.env, session).catch(() => {}); // watchdog retries
     await this._scheduleReceipt();
+    // Медиа в пакете — тоже наблюдаемый вход (arch#132 R9): снаружи видно, что
+    // шлюз ждёт расшифровку, и это НЕ то же самое, что «ввод потерялся».
+    const batch = await this._exclusive(async () => this._batchIdLocked(msg.chat.id, threadIdOf(msg)));
+    await this._announcePending(this.env, batch, {
+      profileId: session?.username ?? null,
+      destinationId: String(msg.chat.id),
+      prepState: 'preparing',
+      deadlineMs: PENDING_BATCH_DEADLINE_MS,
+    });
     return json({ queued: true, id });
   }
 
@@ -1005,7 +1596,7 @@ export class IntakeBuffer {
       // Already committed: delivery retry must not overwrite/recreate an item.
       if (index < 0) {
         const delivered = await this.state.storage.get(`media-delivered:${result.id}`);
-        return delivered ? json({ duplicate: true }) : new Response('Reservation missing', { status: 409 });
+        return delivered ? json({ duplicate: true }) : new Response('Reservation cleared', { status: 410 });
       }
       const item = items[index];
       if (item.mediaOwner !== result.username) return new Response('Owner mismatch', { status: 403 });
@@ -1024,6 +1615,7 @@ export class IntakeBuffer {
             fileRef: result.fileRef, transcript: result.transcript, transcriptRef: result.transcriptRef } };
         }
         await tx.put('buf', items);
+        await this._bumpDraftRevisionLocked(tx);
         await tx.put(`media-delivered:${result.id}`, true);
         if (!items.some(i => i.mediaPending) && !(await tx.get('busy'))) await tx.deleteAlarm();
       });
@@ -1032,7 +1624,7 @@ export class IntakeBuffer {
     });
     if (notify) {
       const text = result.error
-        ? `⚠️ ${result.error}. Ссылка на вложение сохранена для восстановления; в следующую задачу оно не войдёт. Можно продолжать текстом; для повторной обработки отправь вложение ещё раз.`
+        ? `⚠️ Не удалось принять файл (${result.error}). Задача не запускалась; отправь файл ещё раз.`
         : result.transcript ? `🎤 ${result.transcript}` : '✅ Вложение сохранено. Можно запускать проработку.';
       if (!result.error) {
         await this._scheduleReceipt();
@@ -1086,6 +1678,7 @@ export class IntakeBuffer {
   // collector names how many of those messages were held by the stop, so they
   // never ride along unseen.
   async _resumeAfterStopLocked(newMessageId = null) {
+    if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending) return;
     const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
     const held = items.filter(i => i.msg?.message_id !== newMessageId).length;
     await this.state.storage.delete('stopped');
@@ -1098,7 +1691,10 @@ export class IntakeBuffer {
   // a media item whose transcript just resolved) so the auto-dispatch gate is
   // never silently skipped for one of them.
   async _armAutoDispatch(chatId, remaining, replyToMessageId, threadId = null) {
-    if (await this._autoLaunchBlocked(remaining)) return; // RC-06: no silent start
+    if (await this._autoLaunchBlocked(remaining)) {
+      await this._scheduleReceipt();
+      return;
+    }
     await this.state.storage.delete('gateLevel');
     await this.state.storage.delete('shortDebounce');
     await this.state.storage.delete('gateConsulted');
@@ -1167,6 +1763,7 @@ export class IntakeBuffer {
   // announcement. Any miss keeps the default three-minute timer, so the expiry
   // gate below still decides — never a silent dead-end.
   async _consultGate(chatId, threadId = null) {
+    if (this.env.EXECUTION_BACKEND === 'control-plane') return;
     if (!chatId || !this.env.AGENT_URL) return;
     const store = this.state.storage;
     const debounceExpiresAt = await store.get('debounceExpiresAt');
@@ -1235,16 +1832,29 @@ export class IntakeBuffer {
       if (!chatId) return null;
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
+      const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
+      const draftRevision = cpMode ? await this._exclusive(async () => {
+        let revision = await this.state.storage.get('draftRevision');
+        if (!Number.isSafeInteger(revision) || revision < 1) {
+          revision = 1;
+          await this.state.storage.put('draftRevision', revision);
+        }
+        return revision;
+      }) : null;
       const queued = !!(await this.state.storage.get('launchQueued'));
       const stopped = !!(await this.state.storage.get('stopped'));
+      const stopPending = this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending === true;
       const busy = !!(await this.state.storage.get('busy'));
+      const canLaunchIndependently = cpMode && stopPending && items.length > 0;
       const stopLaunch = await this.state.storage.get('stopLaunch');
       const resumedHeld = (await this.state.storage.get('resumedHeld')) || 0;
       const n = items.length || count;
-      const text = (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
+      const text = stopPending && items.length
+        ? `⏳ Старая задача ещё сверяется. Этот независимый ввод можно запустить отдельно.`
+        : (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
         : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
-        : collectorText(n) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
+        : (cpMode ? `✓ Получил ${n} сообщений. Всё собрано в один input. Выбери, как начать.` : collectorText(n)) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
       // so «задачу забрал» can be walked back. Otherwise launch button under every
       // status that is not "the batch is taken" (issue #303).
@@ -1254,29 +1864,56 @@ export class IntakeBuffer {
       // killing the button here left the chat with no way to launch it (issue #303).
       const keyboard = (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
-        : busy ? QUEUE_BTN
+        : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
+        : cpMode
+          ? workStyleKeyboard(draftRevision)
         : LAUNCH_BTN;
-      const prevId = await this.state.storage.get('collectorMsgId');
-      if (prevId && !fresh) {
+      let prevId = await this.state.storage.get('collectorMsgId');
+      const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
+      const claimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
+      if (claimKey && !prevId) {
+        const claim = await this.state.storage.get(claimKey);
+        if (claim?.state === 'sent' && claim.messageId) {
+          prevId = claim.messageId;
+          await this.state.storage.put('collectorMsgId', prevId);
+        }
+        if (claim?.state === 'sending' || claim?.state === 'unknown') {
+          if (claim.state === 'sending') await this.state.storage.put(claimKey, { ...claim, state: 'unknown' });
+          return null;
+        }
+      }
+      const previousCollectorBatch = cpMode ? await this.state.storage.get('collectorBatchId') : null;
+      if (stopPending && items.length && previousCollectorBatch !== batch?.batchId) prevId = null;
+      if (prevId && (!fresh || cpMode)) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
           { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
-        if (edited?.ok || /message is not modified/i.test(edited?.description || '')) return prevId;
+        if (edited?.ok || /message is not modified/i.test(edited?.description || '')) {
+          if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+          return prevId;
+        }
         // A transient edit error must not create a duplicate control message.
         if (!/message to edit not found/i.test(edited?.description || '')) {
           await this._scheduleReceipt();
           return prevId;
         }
       }
+      if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
       const id = sent?.result?.message_id;
+      if (claimKey) await this.state.storage.put(claimKey, id && sent?.ok
+        ? { state: 'sent', messageId: id } : { state: 'unknown' });
       // A fresh bubble becomes THE collector: the older one is edited to a neutral
       // line so two launch buttons never compete (same reason as /stop).
-      if (id && fresh) {
+      if (id && (fresh || stopPending && items.length)) {
         await editMessage(this.env.BOT_TOKEN, chatId, prevId, '↑ Сообщение выше устарело — новое ниже.',
           { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         await this.state.storage.put('collectorMsgId', id);
-      } else if (id) await this.state.storage.put('collectorMsgId', id);
-      else await this._scheduleReceipt();
+        if (batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+      } else if (id) {
+        await this.state.storage.put('collectorMsgId', id);
+        if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+      }
+      else if (!cpMode) await this._scheduleReceipt();
       return id || null;
     } finally { release(); }
   }
@@ -1294,15 +1931,19 @@ export class IntakeBuffer {
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a fresh button afterwards).
-  async _dispatch(expectedBuffer, workStyle = null) {
+  async _dispatch(expectedBuffer, expectedRetryBatch) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
+    let launchWorkStyle = 'auto';
+    let launchWorkStyleSource = 'default';
     const buf = await this._exclusive(async () => {
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return [];
       // A parallel dispatch (RC-03) is allowed to start while the window is
       // open — it JOINS it; every other dispatch still waits for the release.
       if ((await this.state.storage.get('busy')) && !parallel) return [];
       // ⛔ Стоп holds the batch: only /flush (which lifts the hold first) may launch.
       if (await this.state.storage.get('stopped')) return [];
       if (expectedBuffer !== undefined && JSON.stringify((await this.state.storage.get('buf')) || []) !== expectedBuffer) return [];
+      if (expectedRetryBatch !== undefined && JSON.stringify(await this.state.storage.get('retryBatch')) !== expectedRetryBatch) return [];
       // Cancel any pending debounce alarm — dispatch is happening now (manually or
       // via the timer itself). Without this the alarm could fire a second dispatch.
       await this.state.storage.delete('debounceExpiresAt');
@@ -1314,6 +1955,23 @@ export class IntakeBuffer {
       if (!items.length) return [];
       if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+      const selectedStyle = await this.state.storage.get('launchWorkStyle');
+      launchWorkStyle = WORK_STYLES.includes(selectedStyle) ? selectedStyle : 'auto';
+      launchWorkStyleSource = await this.state.storage.get('launchWorkStyleSource') === 'explicit' ? 'explicit' : 'default';
+      if (this.env.EXECUTION_BACKEND === 'control-plane') {
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+        const client = controlPlaneClient(this.env);
+        const base = items.at(-1).msg;
+        const continuation = items.find(item => item.msg.intakeRoute)?.msg;
+        await this.state.storage.put(`cp-launch:${launchKey}`, {
+          msg: { ...base, text: coalesceBuffer(items), intakeItems: items, intakeRoute: continuation?.intakeRoute },
+          initialMsgId: null, parallel, workStyle: launchWorkStyle, workStyleSource: launchWorkStyleSource,
+          profileId: client.config.profileId, botUsername: client.config.botUsername,
+        });
+        await this.state.storage.put('cpUnresolvedLaunches', [...new Set([...unresolved, launchKey])]);
+        this.cpDispatches++;
+      }
       // The FIRST run of a window owns busy/since; a parallel dispatch joins an
       // already open window without resetting its age (BUSY_MAX counts from A).
       const windowOwned = !(await this.state.storage.get('busy'));
@@ -1331,6 +1989,8 @@ export class IntakeBuffer {
       await this.state.storage.delete('launchQueued');
       await this.state.storage.delete('resumedHeld');
       await this.state.storage.delete('launchParallel'); // consumed by THIS dispatch
+      await this.state.storage.delete('launchWorkStyle'); // consumed by THIS immutable launch snapshot
+      await this.state.storage.delete('launchWorkStyleSource');
       return items;
     });
     if (!buf.length) return;
@@ -1349,7 +2009,13 @@ export class IntakeBuffer {
       intakeRoute: continuation?.intakeRoute };
 
     await this.state.storage.delete('receiptDue');
-    const initialMsgId = await this._showCollector(chatId, buf.length, base.message_id, threadId, '📨 Передаю собранный input агенту…');
+    const initialMsgId = await this._showCollector(chatId, buf.length, base.message_id, threadId,
+      this.env.EXECUTION_BACKEND === 'control-plane'
+        ? '📨 Передаю собранный ввод на определение интента…'
+        : '📨 Передаю собранный input агенту…').catch(error => {
+          if (this.env.EXECUTION_BACKEND !== 'control-plane') throw error;
+          return null;
+        });
     if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
     await this.state.storage.delete('collectorMsgId');
 
@@ -1358,13 +2024,20 @@ export class IntakeBuffer {
     await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
 
     let runAck = null;
+    if (this.env.EXECUTION_BACKEND === 'control-plane') {
+      const launchKey = JSON.stringify(buf.map(item => item.msg?.message_id));
+      const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+      await this.state.storage.put(`cp-launch:${launchKey}`, { ...checkpoint, initialMsgId });
+    }
     try {
       // Dynamic import avoids a circular import at module load.
       // mode:'deep' — «▶️ Запустить проработку» запускает НАДЁЖНУЮ (deep) сессию на всём
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
       // запросы всё равно перехватит быстрый ответ агента (runQuickAnswer) до deep-пути.
       const { handleMessage } = await import('./handlers/message.js');
-      await handleMessage(msg, this.env, { mode: 'deep', workStyle, ...(parallel ? { parallel: true } : {}), initialMsgId,
+      await handleMessage(msg, this.env, { mode: 'deep', ...(parallel ? { parallel: true } : {}), initialMsgId,
+        workStyle: launchWorkStyle, workStyleSource: launchWorkStyleSource,
+        ...(this.env.EXECUTION_BACKEND === 'control-plane' ? { collectorStatusHandled: true } : {}),
         onRunAccepted: (ack) => { runAck = ack || null; },
         onIntakePrepared: async (index, prepared) => {
           buf[index] = { ...buf[index], msg: prepared };
@@ -1372,6 +2045,15 @@ export class IntakeBuffer {
         },
       });
       if (runAck) {
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          await this._recordControlPlaneAck(runAck, buf);
+        }
+        // Пакет стал задачей: снимаем ожидание наружу и СВЯЗЫВАЕМ его с taskId
+        // (arch#132 R9). Связь берётся из ack'а запуска, поэтому гонять batchId
+        // через конверт приёма не нужно. Пакет при этом УЖЕ взят из буфера, так
+        // что следующая пачка получит новый batchId.
+        const launchedBatchId = await this._exclusive(async () => this._nextBatchLocked(chatId, threadIdOf(base)));
+        await this._closePending(this.env, launchedBatchId, 'launched', runAck.taskId ?? null);
         // requestId is what the agent echoes back in run-finished. The outbox
         // ack has no requestId field — its taskId IS the dispatch requestId.
         const dispatchRequestId = runAck.requestId || (runAck.outbox ? runAck.taskId : null) || null;
@@ -1386,17 +2068,26 @@ export class IntakeBuffer {
             await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
           }
         }
-        if (runAck.outbox) await this.state.storage.put('busyViaOutbox', true);
+        if (runAck.outbox) {
+          await this.state.storage.put('busyViaOutbox', true);
+          await this.state.storage.put('busyViaOutboxAt', Date.now());
+        }
         await this.state.storage.delete('launching');
         await this.state.storage.delete('retryBatchAttempts');
         // busy intentionally KEPT: the run's lifetime owns it now (#1527 F1).
         await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       } else {
+        if (this.env.EXECUTION_BACKEND === 'control-plane') return;
         // handleMessage resolved without reaching the agent (project picker,
         // oversized file, supplement draft, …) — no run to wait for.
         await this._exclusive(async () => this._releaseBusyLocked());
       }
     } catch (err) {
+      if (this.env.EXECUTION_BACKEND === 'control-plane') {
+        await this._handleControlPlaneLaunchFailure(err, buf);
+        await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        return;
+      }
       // Stop automatic retries after three failures, but preserve the complete
       // batch and preparation progress for explicit recovery. New input stays usable.
       const isPrepFailure = err?.code === 'INTAKE_PREPARATION_FAILED';
@@ -1422,8 +2113,13 @@ export class IntakeBuffer {
           : '⚠️ Подтверждение запуска не получено. Вся пачка сохранена — повторный запуск проверит, была ли задача уже принята, и не создаст дубль.',
         threadId);
       console.error(`[intake ${chatId}] batch preparation failed (attempt ${attempts || 1}${giveUp ? ', gave up' : ''}):`, err?.cause?.message || err?.message);
+      const failure = { code: 'INTAKE_PREP_FAILED', operation: 'prepareBatch', message: err?.cause?.message || err?.message, chatId, attempt: attempts || 1, gaveUp: giveUp };
+      logError(failure);
+      resolveErrorPublisher(this.env)?.(buildErrorEvent(failure));
       // Dispatch failed before/while reaching the agent — nothing is running.
       await this._exclusive(async () => this._releaseBusyLocked());
+    } finally {
+      if (this.env.EXECUTION_BACKEND === 'control-plane') this.cpDispatches--;
     }
     if (!(await this.state.storage.get('busy'))) {
       // Released above (no ack / dispatch failure): finish what the old
@@ -1454,11 +2150,14 @@ export class IntakeBuffer {
 
   // Must be called inside _exclusive: clear the whole busy record.
   async _releaseBusyLocked() {
+    await this.state.storage.delete('cpBusyRequests');
+    await this.state.storage.delete('cpUnresolvedLaunches');
     await this.state.storage.delete('busy');
     await this.state.storage.delete('busySince');
     await this.state.storage.delete('busyRequestIds');
     await this.state.storage.delete('busyRequestId'); // legacy scalar (pre-set key)
     await this.state.storage.delete('busyViaOutbox');
+    await this.state.storage.delete('busyViaOutboxAt');
     await this.state.storage.delete('busyChatId');
     await this.state.storage.delete('busyThread');
     await this.state.storage.delete('launching');
@@ -1513,10 +2212,465 @@ export class IntakeBuffer {
   // agent process restarted (in-memory counter reset). Outbox dispatches are
   // excluded: their counter only appears when the outbox actually delivers,
   // and releasing early while a job is still queued reopens the double-run hole.
+  async _handleControlPlaneLaunchFailure(error, items) {
+    const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+    const base = items.at(-1)?.msg;
+    const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
+    const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg));
+    const snapshotRequestId = checkpoint?.snapshotRequestId;
+    const acceptance = snapshotRequestId && await this.state.storage.get(`cp-acceptance:${snapshotRequestId}`);
+    const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
+    const unsupportedMediaRejectedBeforeAdmission = refusedMedia && !acceptance?.receipt?.durable
+      && !busyRequests.includes(snapshotRequestId);
+    const knownNoAdmission = error?.code === 'CONTROL_PLANE_NO_ADMISSION';
+    const confirmedNoAdmission = knownNoAdmission && !acceptance?.receipt?.durable
+      && !busyRequests.includes(snapshotRequestId);
+    if (confirmedNoAdmission || (error?.code === 'INTAKE_PREPARATION_FAILED' && (!snapshotRequestId || unsupportedMediaRejectedBeforeAdmission))) {
+      const released = await this._exclusive(async () => {
+        if (refusedMedia) {
+          // This batch cannot be prepared in the active CP profile. Do not put it
+          // back into retryBatch: every later attempt would fail on the same media.
+          await this.state.storage.delete('retryBatch');
+          await this.state.storage.delete('retryBatchAttempts');
+        } else {
+          await this.state.storage.put('retryBatch', items.map(item => ({ ...item, heldWhileBusy: true })));
+        }
+        const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+        const remaining = unresolved.filter(key => key !== launchKey);
+        await this.state.storage.put('cpUnresolvedLaunches', remaining);
+        await this.state.storage.delete(`cp-launch:${launchKey}`);
+        const launching = await this.state.storage.get('launching');
+        if (JSON.stringify(launching?.map(item => item.msg?.message_id)) === launchKey) await this.state.storage.delete('launching');
+        if (remaining.length || ((await this.state.storage.get('cpBusyRequests')) || []).length) return false;
+        await this._releaseBusyLocked();
+        return true;
+      });
+      await sendTracked(this.env, base?.chat?.id, refusedMedia
+        ? '⚠️ Вложения пока не поддерживаются в этом тестовом режиме. Задачу не запускал, неподдерживаемую порцию сбросил. Отправь запрос текстом или начни новую порцию.'
+        : knownNoAdmission
+          ? '⚠️ Подтверждение запуска не получено до передачи задачи. Запуск не создавал; сообщения сохранены для повтора.'
+          : '⚠️ Вложения сохранены. Передача новому исполнителю ещё не подключена; задача не запущена. Пачку можно запустить повторно после подключения вложений.',
+        {}, threadIdOf(base)).catch(() => null);
+      if (released) await this._afterBusyRelease();
+      return;
+    }
+    if (checkpoint?.notified) return;
+    if (checkpoint) await this.state.storage.put(`cp-launch:${launchKey}`, { ...checkpoint, notified: true });
+    await sendTracked(this.env, base?.chat?.id,
+      '⚠️ Подтверждение не получено; сверяю ту же задачу. Собранный ввод сохранён.',
+      {}, threadIdOf(base)).catch(() => null);
+  }
+
+  async _readControlPlaneStopTargets(source) {
+    const threadId = source?.threadId ?? null;
+    if (!source || typeof source.username !== 'string' || !source.username ||
+        !Number.isSafeInteger(source.chatId) || !source.chatId ||
+        (threadId !== null && (!Number.isSafeInteger(threadId) || threadId <= 0))) throw new Error('Invalid stop scope');
+    const profileId = controlPlaneClient(this.env).config.profileId;
+    const session = await getSession(this.env.SESSIONS, source.chatId, threadId);
+    if (session?.username !== source.username) throw new Error('Stop owner mismatch');
+    const scope = await this.state.storage.get('cpScope');
+    const window = await this.state.storage.get('cpStopWindow');
+    if (scope && (scope.chatId !== source.chatId || scope.threadId !== threadId || scope.profileId !== profileId)) throw new Error('Stop conversation mismatch');
+    if (window && (window.username !== source.username || window.chatId !== source.chatId ||
+        window.threadId !== threadId || window.profileId !== profileId)) throw new Error('Stop window mismatch');
+    if (!scope && !window) throw new Error('No stop scope proof');
+    const intent = window || {
+      intentId: crypto.randomUUID(), restart: false, groups: [], tasks: [], pending: true,
+      username: source.username, chatId: source.chatId, threadId, profileId,
+    };
+    const ids = [...new Set([...(intent.admissionRequestIds || []), ...(intent.tasks || []).map(task => task.requestId)])].sort();
+    const unresolvedAtStop = new Set(intent.admissionLaunchKeys || []);
+    const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+    const admissionBarrierComplete = ![...unresolvedAtStop].some(key => unresolvedLaunches.includes(key))
+      && !(this.cpDispatches > 0 && unresolvedAtStop.size > 0);
+    let unresolved = !admissionBarrierComplete;
+    if (await this.state.storage.get('busy') && !ids.length) unresolved = true;
+    const grouped = new Map();
+    for (const requestId of ids) {
+      const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+      const receipt = record?.receipt;
+      const snapshot = await this._readSnapshot(requestId);
+      const envelope = snapshot?.body?.controlPlaneEnvelope;
+      if (typeof requestId !== 'string' || receipt?.requestId !== requestId || receipt?.profileId !== profileId ||
+          receipt?.durable !== true || typeof receipt?.userTaskId !== 'string' || !receipt.userTaskId ||
+          snapshot?.body?.username !== source.username || envelope?.requestId !== requestId || envelope?.profileId !== profileId ||
+          !snapshot?.items?.length || snapshot.items.some(item => item.msg?.chat?.id !== source.chatId || threadIdOf(item.msg) !== threadId)) {
+        return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+          admissionBarrierComplete: false, admissionRequestIds: ids, unresolved: true, groups: [], tasks: [] };
+      }
+      const saved = intent.tasks?.find(task => task.requestId === requestId);
+      if (saved && (saved.userTaskId !== receipt.userTaskId || saved.profileId !== profileId)) throw new Error('Stop task mismatch');
+      const conversationId = envelope.conversationRef;
+      if (typeof conversationId !== 'string' || !conversationId) {
+        return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+          admissionBarrierComplete: false, admissionRequestIds: ids, unresolved: true, groups: [], tasks: [] };
+      }
+      if (!grouped.has(conversationId)) grouped.set(conversationId, []);
+      grouped.get(conversationId).push({ requestId, userTaskId: receipt.userTaskId, profileId, receiptId: receipt.receiptId });
+    }
+    if (!grouped.size && scope?.conversationId) grouped.set(scope.conversationId, []);
+    const groups = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([conversationId, tasks]) => ({
+      conversationId,
+      windowId: '',
+      restart: intent.restart === true && (intent.previousGroups || []).some(previous =>
+        previous.conversationId === conversationId && previous.stopConfirmed === true),
+      admissionRequestIds: tasks.map(task => task.requestId).sort(),
+      tasks,
+    }));
+    // Hash the conversation identity so the stable per-conversation window ID is
+    // bounded and does not expose conversation data in CP diagnostics.
+    for (const group of groups) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(group.conversationId));
+      const suffix = Array.from(new Uint8Array(digest).slice(0, 8), value => value.toString(16).padStart(2, '0')).join('');
+      group.windowId = `tgstop-${intent.intentId}-${suffix}`;
+    }
+    return { ...intent, username: source.username, chatId: source.chatId, threadId, profileId,
+      admissionBarrierComplete: !unresolved, admissionRequestIds: ids, unresolved,
+      noRemoteStop: groups.length === 0 && ids.length === 0 && !unresolved && !(await this.state.storage.get('busy')),
+      groups, tasks: groups.flatMap(group => group.tasks) };
+  }
+
+  async _driveControlPlaneStop(source) {
+    if (controlPlaneStopDisabled(this.env)) throw controlPlaneStopDisabledError();
+    const prepared = await this._exclusive(async () => this._readControlPlaneStopTargets(source));
+    if (prepared.unresolved) {
+      await this._exclusive(async () => {
+        const current = await this.state.storage.get('cpStopWindow');
+        if (current?.intentId === prepared.intentId) {
+          await this.state.storage.put('cpStopWindow', { ...current, admissionRequestIds: prepared.admissionRequestIds,
+            pending: true, unresolved: true });
+          await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        }
+      });
+      return { ...prepared, snapshotId: null, stopConfirmed: false };
+    }
+    if (prepared.noRemoteStop) {
+      const saved = await this._exclusive(async () => {
+        const current = await this.state.storage.get('cpStopWindow');
+        if (!current || current.intentId !== prepared.intentId) return false;
+        await this.state.storage.put('cpStopWindow', { ...current, pending: false, unresolved: false,
+          stopConfirmed: true, locallyNoRun: true, tasks: [], groups: [], updatedAt: Date.now() });
+        if (!(await this.state.storage.get('busy'))) await this.state.storage.deleteAlarm();
+        return true;
+      });
+      return { ...prepared, unresolved: !saved, stopConfirmed: saved, snapshotId: null, tasks: [] };
+    }
+    const client = controlPlaneClient(this.env);
+    const results = [];
+    for (const group of prepared.groups) {
+      const result = await client.stopTargets({ conversationId: group.conversationId,
+        windowId: group.windowId, admissionBarrierComplete: true,
+        admissionRequestIds: group.admissionRequestIds, restart: group.restart });
+      if (result.profileId !== prepared.profileId || result.conversationId !== group.conversationId) {
+        throw new Error('Control plane stop identity mismatch');
+      }
+      results.push({ ...result, windowId: group.windowId });
+    }
+    const confirmed = results.length > 0 && results.every(result => !result.unresolved && result.stopConfirmed);
+    const saved = await this._exclusive(async () => {
+      const current = await this.state.storage.get('cpStopWindow');
+      if (!current || current.intentId !== prepared.intentId) return false;
+      const tasks = results.flatMap(result => result.tasks);
+      await this.state.storage.put('cpStopWindow', { ...current, admissionRequestIds: prepared.admissionRequestIds,
+        groups: results, tasks,
+        pending: !confirmed, unresolved: !confirmed, stopConfirmed: confirmed,
+        snapshotId: results.length === 1 ? results[0].snapshotId : null, updatedAt: Date.now() });
+      if (!confirmed) await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+      else if (!(await this.state.storage.get('busy'))) await this.state.storage.deleteAlarm();
+      return true;
+    });
+    return { ...prepared, groups: results, tasks: results.flatMap(result => result.tasks),
+      unresolved: !saved || !confirmed, stopConfirmed: saved && confirmed,
+      snapshotId: results.length === 1 ? results[0].snapshotId : null };
+  }
+
+  async _recordControlPlaneAck(ack, items) {
+    const saved = await this.state.storage.get(`cp-acceptance:${ack.requestId}`);
+    const snapshot = await this._readSnapshot(ack.requestId);
+    const profileId = controlPlaneClient(this.env).config.profileId;
+    if (ack.controlPlane !== true || ack.durable !== true || !saved ||
+        saved.receipt.userTaskId !== ack.userTaskId || ack.taskId !== ack.userTaskId ||
+        saved.receipt.requestId !== ack.requestId || saved.receipt.profileId !== profileId ||
+        snapshot?.body?.controlPlaneEnvelope?.requestId !== ack.requestId ||
+        JSON.stringify(snapshot?.items?.map(item => item.msg?.message_id)) !== JSON.stringify(items.map(item => item.msg?.message_id))) {
+      throw new Error('Control plane acceptance is not persisted');
+    }
+    await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      const ids = (await tx.get('cpBusyRequests')) || [];
+      await tx.put('cpBusyRequests', [...new Set([...ids, ack.requestId])]);
+      const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+      const stopWindow = await tx.get('cpStopWindow');
+      if (stopWindow?.pending && (stopWindow.admissionLaunchKeys || []).includes(launchKey)) {
+        await tx.put('cpStopWindow', { ...stopWindow,
+          admissionRequestIds: [...new Set([...(stopWindow.admissionRequestIds || []), ack.requestId])].sort() });
+      }
+      const unresolved = (await tx.get('cpUnresolvedLaunches')) || [];
+      await tx.put('cpUnresolvedLaunches', unresolved.filter(key => key !== launchKey));
+      await tx.delete(`cp-launch:${launchKey}`);
+    }));
+  }
+
+  async _recoverControlPlaneLaunch() {
+    const checkpoint = await this._exclusive(async () => {
+      if (this.cpDispatches) return null;
+      const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+      if (!unresolved.length) return null;
+      const saved = await this.state.storage.get(`cp-launch:${unresolved[0]}`);
+      if (!saved) return null;
+      if ((await this.state.storage.get('cpStopWindow'))?.pending && !saved.parallel) return null;
+      const client = controlPlaneClient(this.env);
+      if (saved.profileId !== client.config.profileId || saved.botUsername !== client.config.botUsername) return null;
+      this.cpDispatches++;
+      return saved;
+    });
+    if (!checkpoint) return false;
+    try {
+      let ack;
+      const { handleMessage } = await import('./handlers/message.js');
+      await handleMessage(checkpoint.msg, this.env, {
+        mode: 'deep', ...(checkpoint.parallel ? { parallel: true } : {}),
+        workStyle: WORK_STYLES.includes(checkpoint.workStyle) ? checkpoint.workStyle : 'auto',
+        workStyleSource: checkpoint.workStyleSource === 'explicit' ? 'explicit' : 'default',
+        initialMsgId: checkpoint.initialMsgId,
+        collectorStatusHandled: true,
+        onRunAccepted: value => { ack = value; },
+      });
+      if (!ack) {
+        // handleMessage only returns without an ACK on paths that finish before
+        // runTask/CP admission (for example an oversized or unsupported item).
+        // Retire this exact checkpoint so the busy window cannot wedge forever.
+        await this._handleControlPlaneLaunchFailure(
+          Object.assign(new Error('Launch returned without a durable acceptance receipt'), { code: 'CONTROL_PLANE_NO_ADMISSION' }),
+          checkpoint.msg.intakeItems,
+        );
+        return false;
+      }
+      await this._recordControlPlaneAck(ack, checkpoint.msg.intakeItems);
+      const batchId = await this._exclusive(async () => this._nextBatchLocked(
+        checkpoint.msg.chat.id, threadIdOf(checkpoint.msg)));
+      await this._closePending(this.env, batchId, 'launched', ack.taskId);
+      const launching = await this.state.storage.get('launching');
+      if (JSON.stringify(launching?.map(item => item.msg?.message_id)) ===
+          JSON.stringify(checkpoint.msg.intakeItems.map(item => item.msg?.message_id))) {
+        await this.state.storage.delete('launching');
+      }
+      return true;
+    } catch (error) {
+      await this._handleControlPlaneLaunchFailure(error, checkpoint.msg.intakeItems);
+      return false;
+    } finally {
+      this.cpDispatches--;
+    }
+  }
+
+  async _queueControlPlaneCollectorCleanup(requestId, receipt, row, snapshot) {
+    const messageId = snapshot.body.initialMsgId;
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
+    const message = snapshot.items.at(-1)?.msg;
+    const intent = { requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId,
+      generation: row.generation, messageId, chatId: message.chat.id,
+      text: row.status === 'done' ? '✅ Готово. Результат отправлен отдельным сообщением.'
+        : row.status === 'failed' ? '❌ Задача завершилась ошибкой. Подробности отправлены отдельным сообщением.'
+          : '⛔ Задача отменена. Статус отправлен отдельным сообщением.' };
+    await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      if (await tx.get(`input-message:${messageId}`) !== requestId) return;
+      const key = `cp-collector-cleanup:${requestId}`;
+      if ((await tx.get(key))?.state === 'done') return;
+      await tx.put(key, { ...intent, state: 'pending' });
+      const pending = (await tx.get('cpCollectorCleanupRequests')) || [];
+      await tx.put('cpCollectorCleanupRequests', [...new Set([...pending, requestId])]);
+    }));
+    await this._recoverControlPlaneCollectorCleanup();
+  }
+
+  async _recoverControlPlaneCollectorCleanup() {
+    const previous = this.uiMutation;
+    let release;
+    this.uiMutation = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      const selected = await this._exclusive(async () => this.state.storage.transaction(async tx => {
+        const pending = (await tx.get('cpCollectorCleanupRequests')) || [];
+        const batch = pending.slice(0, 8);
+        if (batch.length) await tx.put('cpCollectorCleanupRequests', [...pending.slice(8), ...batch]);
+        return batch;
+      }));
+      for (const requestId of selected) {
+        const key = `cp-collector-cleanup:${requestId}`;
+        const intent = await this.state.storage.get(key);
+        if (intent?.state !== 'pending' || intent.profileId !== controlPlaneClient(this.env).config.profileId
+            || await this.state.storage.get(`input-message:${intent.messageId}`) !== requestId) continue;
+        const result = await editMessage(this.env.BOT_TOKEN, intent.chatId, intent.messageId, intent.text,
+          { reply_markup: { inline_keyboard: STATUS_BTN } }).catch(() => null);
+        if (!result?.ok && !(result?.error_code === 400 && /message is not modified|message to edit not found/i.test(result.description || ''))) continue;
+        await this._exclusive(async () => this.state.storage.transaction(async tx => {
+          const current = await tx.get(key);
+          if (JSON.stringify(current) !== JSON.stringify(intent)) return;
+          await tx.put(key, { ...intent, state: 'done' });
+          await tx.put('cpCollectorCleanupRequests', ((await tx.get('cpCollectorCleanupRequests')) || []).filter(value => value !== requestId));
+          if (await tx.get('preparingMsgId') === intent.messageId) await tx.delete('preparingMsgId');
+        }));
+      }
+    } finally { release(); }
+    await this._ensureControlPlaneCollectorCleanupAlarm();
+  }
+
+  async _ensureControlPlaneCollectorCleanupAlarm() {
+    if (this.env.EXECUTION_BACKEND !== 'control-plane'
+        || !((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) return;
+    await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+  }
+
+  async _ensureAlarmBy(retryAt) {
+    const now = Date.now();
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+  }
+
+  async _pollControlPlaneTasks({ launch = false } = {}) {
+    if (this.cpDispatches) return false;
+    try { await this._recoverControlPlaneLaunch(); } catch { return false; }
+    if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length) return false;
+    const ids = (await this.state.storage.get('cpBusyRequests')) || [];
+    if (!ids.length) return false;
+    try {
+      const client = controlPlaneClient(this.env);
+      const profileId = client.config.profileId;
+      const terminal = [];
+      const unresolved = [];
+      const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      for (const requestId of ids) {
+        const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+        const receipt = record?.receipt;
+        if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId || receipt.durable !== true) return false;
+        const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
+        const row = value?.taskStore;
+        if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
+        const runs = Array.isArray(value?.runs) ? value.runs : [];
+        const settledRuns = runs.every(run => ['done', 'failed', 'cancelled', 'unknown'].includes(run?.status));
+        const outcomeUnknown = (row.status === 'unknown' ||
+          (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
+          value?.awaiting?.status !== 'open';
+        if (outcomeUnknown) {
+          unresolved.push(requestId);
+          continue;
+        }
+        if (!isTerminalTaskStatus(row.status)) {
+          let routed;
+          const routingKnown = record.routingOutcome?.known === true && record.routingOutcome.publicationComplete === true;
+          const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
+          if (!routingKnown && !routingDeferred) {
+            if (stopPending) return false;
+            routed = await client.route(receipt.userTaskId);
+            if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return false;
+          }
+          if (!routingKnown && !routingDeferred && routed?.degraded === true) {
+            const snapshot = await this._readSnapshot(requestId);
+            const envelope = snapshot?.body?.controlPlaneEnvelope;
+            const message = snapshot?.items?.at(-1)?.msg;
+            if (envelope?.requestId !== requestId || envelope.profileId !== profileId ||
+                typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
+                !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
+            await publishRoutingDegradation(this.env, receipt, routed,
+              { chatId: message.chat.id, threadId: threadIdOf(message) },
+              `${envelope.conversationRef}-b${requestId.slice(-24)}`);
+          }
+          if (!routingKnown && !routingDeferred) {
+            await this._exclusive(async () => this.state.storage.transaction(async tx => {
+              const key = `cp-acceptance:${requestId}`;
+              const current = await tx.get(key);
+              if (current?.receipt?.userTaskId !== receipt.userTaskId || current.receipt.profileId !== profileId ||
+                  current.receipt.requestId !== requestId) throw new Error('Routing receipt changed');
+              await tx.put(key, { ...current, routingOutcome: {
+                known: true, publicationComplete: true, degraded: routed.degraded === true,
+                continuationIssued: routed.continuation?.issued === true,
+              } });
+            }));
+          }
+          return false;
+        }
+        if (!Number.isSafeInteger(row.generation) || row.generation < 1 ||
+            !Number.isSafeInteger(receipt.providerAcceptedAt) || receipt.providerAcceptedAt <= 0) return false;
+        const snapshot = await this._readSnapshot(requestId);
+        const envelope = snapshot?.body?.controlPlaneEnvelope;
+        const message = snapshot?.items?.at(-1)?.msg;
+        if (envelope?.requestId !== requestId || envelope.profileId !== profileId ||
+            typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
+            !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
+        const deliveryId = `terminal:${receipt.userTaskId}:g${row.generation}`;
+        const answer = typeof row.result === 'string' ? row.result : row.result?.answer;
+        const label = row.status === 'done' ? 'Готово. Текст результата отсутствует.'
+          : row.status === 'failed' ? 'Ошибка исполнителя.' : 'Отменено.';
+        const outbox = new TgDeliveryOwnerClient(this.env);
+        const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
+          conversationId: `${envelope.conversationRef}-b${requestId.slice(-24)}`,
+          userTaskId: receipt.userTaskId,
+          destination: { chatId: message.chat.id, threadId: threadIdOf(message) },
+          requestId: deliveryId, type: 'message',
+          text: row.status === 'done' && typeof answer === 'string' && answer.trim() ? answer : label });
+        if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return false;
+        const deliveryIndependent = row.status === 'failed' || row.status === 'cancelled';
+        try { await outbox.drain(); } catch { if (!deliveryIndependent) return false; }
+        const delivered = await outbox.load(deliveryId).catch(() => null);
+        if (!deliveryIndependent && (delivered?.deliveryId !== deliveryId || delivered.status !== 'sent')) return false;
+        await this._queueControlPlaneCollectorCleanup(requestId, receipt, row, snapshot);
+        terminal.push(requestId);
+      }
+      const released = await this._exclusive(async () => {
+        if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length || !(await this.state.storage.get('busy')) ||
+            JSON.stringify((await this.state.storage.get('cpBusyRequests')) || []) !== JSON.stringify(ids)) return false;
+        await this.state.storage.transaction(async tx => {
+          for (const requestId of terminal) {
+            const key = `cp-acceptance:${requestId}`;
+            const record = await tx.get(key);
+            await tx.put(key, { ...record, terminal: true });
+          }
+          for (const requestId of unresolved) {
+            const key = `cp-acceptance:${requestId}`;
+            const record = await tx.get(key);
+            await tx.put(key, { ...record, outcomeUnknown: true });
+          }
+        });
+        await this._releaseBusyLocked();
+        if (launch) await this.state.storage.put('launchAfterRelease', true);
+        return true;
+      });
+      if (released) await this._afterBusyRelease();
+      await this._ensureControlPlaneCollectorCleanupAlarm();
+      if (controlPlaneStopDisabled(this.env) && (await this.state.storage.get('cpStopWindow'))?.pending) {
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+      }
+      return released;
+    } catch {
+      return false;
+    }
+  }
+
   async _pollRunFinishedIfIdle(since, { launch = false } = {}) {
+    if (this.env.EXECUTION_BACKEND === 'control-plane') return this._pollControlPlaneTasks({ launch });
     const chatId = await this.state.storage.get('busyChatId');
     if (!chatId || !this.env.AGENT_URL) return false;
-    if (await this.state.storage.get('busyViaOutbox')) return false;
+    // Outbox dispatches are excluded WHILE THE OUTBOX STILL OWNS THE JOB: their
+    // counter only appears when the outbox actually delivers, so `running:false`
+    // says nothing about a job still queued, and releasing would reopen the
+    // double-run hole. That exclusion used to be permanent, which made a lost or
+    // undeliverable outbox job pin the chat until BUSY_MAX_MS — 45 minutes of a
+    // chat that accepts messages and never runs them (prod 2026-10-04, chat
+    // -5111318625: 33 minutes held, six messages inside, no run).
+    //
+    // The exclusion is now BOUNDED. Two independent owners already release the hold:
+    // the outbox itself on permanent reject, and the outbox on prolonged agent
+    // downtime (`run-outbox.js`, releaseIntakeBusy). This grace is the third and
+    // last line, for the case where the outbox record itself was lost — then the
+    // agent's answer is the only truth left, and a silent `running:false` for this
+    // long means there is nothing running to wait for.
+    const viaOutbox = await this.state.storage.get('busyViaOutbox');
+    if (viaOutbox) {
+      const outboxAt = (await this.state.storage.get('busyViaOutboxAt')) || since;
+      if (Date.now() - outboxAt < OUTBOX_POLL_GRACE_MS) return false;
+      console.log(`[intake ${chatId}] outbox hold exceeded grace (${OUTBOX_POLL_GRACE_MS}ms) — trusting the agent's answer`);
+    }
     if (Date.now() - since < 30_000) return false; // warmup: ack → counter visible
     try {
       const res = await fetch(`${this.env.AGENT_URL}/tasks/running?chatId=${encodeURIComponent(chatId)}`, {
@@ -1539,27 +2693,65 @@ export class IntakeBuffer {
     }
   }
 
+  async _ensureAlarmBy(retryAt) {
+    const now = Date.now();
+    const alarmAt = await this.state.storage.getAlarm();
+    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
+  }
+
   async alarm() {
+    try {
+      await this._alarm();
+    } finally {
+      await this._ensureControlPlaneCollectorCleanupAlarm();
+    }
+  }
+
+  async _alarm() {
+    if (this.env.EXECUTION_BACKEND === 'control-plane') {
+      await this._recoverControlPlaneCollectorCleanup();
+      const stopWindow = await this.state.storage.get('cpStopWindow');
+      if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
+        await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+      } else if (stopWindow?.pending) {
+        try {
+          const result = await this._driveControlPlaneStop({ username: stopWindow.username,
+            chatId: stopWindow.chatId, threadId: stopWindow.threadId });
+          if (result.stopConfirmed) {
+            const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+            const last = items.at(-1)?.msg;
+            await this._showCollector(last?.chat?.id ?? stopWindow.chatId, items.length,
+              last?.message_id ?? null, last ? threadIdOf(last) : stopWindow.threadId,
+              items.length ? null : '⛔ Остановка подтверждена. Новый запуск не выполнялся.');
+            return;
+          }
+        }
+        catch {
+          await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+        }
+        if ((await this.state.storage.get('cpStopWindow'))?.pending) return;
+      }
+    }
     // A «стоп + запуск» choice waiting for its start outranks every timer below
     // (RC-04/RC-05): if the run is gone and the batch is ready, run it now.
     if (await this._consumeStopLaunch()) return;
     const receiptDue = await this.state.storage.get('receiptDue');
     if (receiptDue) {
-      if (Date.now() < receiptDue && !((await this.state.storage.get('debounceExpiresAt')) <= Date.now())) { await this.state.storage.setAlarm(receiptDue); return; }
-      await this.state.storage.delete('receiptDue');
-      const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
-      if (items.length) {
-        const last = items.at(-1).msg;
-        const busy = await this.state.storage.get('busy');
-        // A queued tap owns the render (queuedText + ↩️): passing heldText here
-        // would re-paint «▶️ Запустить агента — запущу сразу после неё» over an
-        // already-tapped launch, i.e. put the button back before its undo.
-        const queued = busy && !!(await this.state.storage.get('launchQueued'));
-        const stopped = !!(await this.state.storage.get('stopped'));
-        await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
-          queued || stopped ? null : (busy ? heldText(items.length) : null));
-        // Settled burst, run idle: let the judge set the real delay + say why (29.09).
-        if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+      const receiptExpired = Date.now() >= receiptDue || (await this.state.storage.get('debounceExpiresAt')) <= Date.now();
+      const cpBusy = this.env.EXECUTION_BACKEND === 'control-plane' && await this.state.storage.get('busy');
+      if (!receiptExpired && !cpBusy) { await this.state.storage.setAlarm(receiptDue); return; }
+      if (receiptExpired) {
+        await this.state.storage.delete('receiptDue');
+        const items = ((await this.state.storage.get('buf')) || []).sort((a,b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
+        if (items.length) {
+          const last = items.at(-1).msg;
+          const busy = await this.state.storage.get('busy');
+          const queued = busy && !!(await this.state.storage.get('launchQueued'));
+          const stopped = !!(await this.state.storage.get('stopped'));
+          await this._showCollector(last.chat?.id, items.length, last.message_id, threadIdOf(last),
+            queued || stopped ? null : (busy ? heldText(items.length) : null));
+          if (!busy && !stopped) await this._consultGate(last.chat?.id, threadIdOf(last));
+        }
       }
     }
     await this._recoverMedia();
@@ -1600,7 +2792,9 @@ export class IntakeBuffer {
         const intent = coalescedIntent(buf);
         let verdict = { level: 'insufficient' };
         try {
-          if (intent.trim()) {
+          if (this.env.EXECUTION_BACKEND === 'control-plane') {
+            verdict = { level: 'clear' };
+          } else if (intent.trim()) {
             // Pass the chat identity so a short «продолжай» can be judged against
             // the assistant's last answer (agent #1823).
             const session = await this._gateSession(chatId, threadId);
@@ -1681,6 +2875,12 @@ export class IntakeBuffer {
     // agent's chat-scoped activity, and hard-cap at BUSY_MAX_MS. After any
     // release the collector below re-offers the launch button for held input.
     if ((await this.state.storage.get('busy')) === true) {
+      if (this.env.EXECUTION_BACKEND === 'control-plane') {
+        const released = await this._pollControlPlaneTasks();
+        if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+        else if (receiptDue) await this._ensureAlarmBy(receiptDue);
+        return;
+      }
       const since = (await this.state.storage.get('busySince')) || 0;
       const age = Date.now() - since;
       if (age < BUSY_MAX_MS) {

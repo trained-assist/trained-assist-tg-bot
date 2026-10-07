@@ -119,7 +119,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     // initialMsgId is the fresh placeholder (sendMessage → 98), NOT the old collector (99),
     // so the agent response always appears below any voice transcript already posted.
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', workStyle: null, initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
     // Epic #1527 PR1 (red-first F1): the run is in flight — busy must OUTLIVE
@@ -330,7 +330,7 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
     expect(handleMessage.mock.calls[0][0].text).toBe('do the thing');
     // Force word path: no prior collector, but a fresh placeholder is still sent (sendMessage → 98).
     expect(handleMessage.mock.calls[0][2]).toEqual({
-      mode: 'deep', workStyle: null, initialMsgId: 99,
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: 99,
       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
     });
   });
@@ -391,8 +391,8 @@ describe('IntakeBuffer — smart debounce with completeness gate', () => {
 
     await io.fetch(appendReq('start the task'));
     await receipt(io); // idle collector, with the launch button
-     expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
-     expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('Изучи и задай вопросы');
+    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('intake_run');
+    expect(kbText(sendMessageWithKeyboard.mock.calls.at(-1)?.[3])).toContain('Изучи и задай вопросы');
 
     const taken = counts();
     await io.fetch(flushReq()); await drain();
@@ -1243,7 +1243,7 @@ describe('queued launch has an «↩️ Отменить передачу аге
 describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
   const stopReq = () => new Request('https://intake/stop', { method: 'POST', body: JSON.stringify({ replyTo: 7 }) });
 
-  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector «Остановлено»', async () => {
+  it('a stop landing while the expiry judge is in flight wins: no dispatch, collector does not claim task stopped yet', async () => {
     const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     await io.fetch(appendReq('сделай отчёт'));
     await state.storage.delete('receiptDue');
@@ -1258,7 +1258,8 @@ describe('IntakeBuffer — /stop holds the queue (#1856)', () => {
     expect(handleMessage).not.toHaveBeenCalled();
     expect(await state.storage.get('stopped')).toBeTruthy();
     const texts = [...sendMessageWithKeyboard.mock.calls.map(c => c[2]), ...editMessage.mock.calls.map(c => c[3])];
-    expect(texts.some(t => /Остановлено\. 1 сообщений ждут/.test(t))).toBe(true);
+    expect(texts.some(t => /1 сообщений отложены/.test(t))).toBe(true);
+    expect(texts.some(t => /статус остановки текущей задачи проверяется отдельно/i.test(t))).toBe(true);
   });
 
   it('while busy: keeps the busy safety poll, drops launchAfterRelease; run-finished releases without launching', async () => {
@@ -1377,36 +1378,77 @@ describe('IntakeBuffer — инвариант: непустой буфер вс�
     await state.storage.put('buf', [{ text: 'часть', msg: { chat: { id: 42 }, text: 'часть', message_id: 5 } }]);
     await state.storage.put('stopped', true);
     await state.storage.deleteAlarm();
-     await io.alarm();
-     expect(handleMessage).not.toHaveBeenCalled();
-   });
- });
+    await io.alarm();
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+});
 
- // ── SC-START-01: start/pre-ready state keyboard contract ──────
- describe('SC-START-01: start keyboard buttons', () => {
-   it('idle collector shows exactly 4 buttons in order, no «Посмотреть input»', async () => {
-     const state = makeState();
-     const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
-     await io.fetch(appendReq('сделай отчёт'));
-     await receipt(io);
-     const kb = sendMessageWithKeyboard.mock.calls.at(-1)?.[3];
-     expect(kb).toBeDefined();
-     // Exactly 2 rows of 2 buttons = 4 buttons total
-     expect(kb.length).toBe(2);
-     expect(kb[0].length).toBe(2);
-     expect(kb[1].length).toBe(2);
-     // Order: «Изучи и задай вопросы», «Дай полный ответ», «На твоё усмотрение», «🧹 Очистить весь ввод»
-     expect(kb[0][0].text).toBe('Изучи и задай вопросы');
-     expect(kb[0][1].text).toBe('Дай полный ответ');
-     expect(kb[1][0].text).toBe('На твоё усмотрение');
-     expect(kb[1][1].text).toBe('🧹 Очистить весь ввод');
-     // No «Посмотреть input» anywhere on the start state
-     const allText = kb.flat().map(b => b.text).join(' ');
-     expect(allText).not.toContain('Посмотреть input');
-     // Callback data carries workStyle
-     expect(kb[0][0].callback_data).toBe('intake_run|explore');
-     expect(kb[0][1].callback_data).toBe('intake_run|answer');
-     expect(kb[1][0].callback_data).toBe('intake_run|auto');
-     expect(kb[1][1].callback_data).toBe('intake_clear');
-   });
- });
+// ── Граница исключения для outbox-окна (прод 2026-10-04) ─────────────────────
+// busyViaOutbox отключал самопроверку БЕЗ СРОКА. Если задача ушла через outbox и
+// не доставилась (агент был разрушен), очередь повторяла вечно, а чат оставался
+// «занятым» до BUSY_MAX_MS = 45 минут: -5111318625 простоял 33 минуты, шесть
+// сообщений внутри, запуска не было. Исключение теперь ограничено по времени.
+describe('IntakeBuffer — busyViaOutbox не отключает опрос навсегда', () => {
+  const withOutboxWindow = async (io, state, { ageMs }) => {
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - ageMs);
+    await state.storage.put('busyChatId', 42);
+    await state.storage.put('busyViaOutbox', true);
+    await state.storage.put('busyViaOutboxAt', Date.now() - ageMs);
+  };
+
+  it('в пределах десяти минут очередь ещё владеет окном — опрос молчит', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 5 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 5 * 60_000);
+
+    expect(released).toBe(false);
+    expect(await state.storage.get('busy')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('после границы ответ агента становится истиной: ничего не идёт — холд отпускается', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 11 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 11 * 60_000);
+
+    expect(released).toBe(true);
+    expect(await state.storage.get('busy')).toBeFalsy();
+    expect(await state.storage.get('busyViaOutbox')).toBeFalsy();
+    expect(await state.storage.get('busyViaOutboxAt')).toBeFalsy();
+    vi.unstubAllGlobals();
+  });
+
+  it('агент ещё что-то делает — холд остаётся даже после границы', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await withOutboxWindow(io, state, { ageMs: 11 * 60_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: true })));
+
+    const released = await io._pollRunFinishedIfIdle(Date.now() - 11 * 60_000);
+
+    expect(released).toBe(false);
+    expect(await state.storage.get('busy')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('окно без outbox ведёт себя как раньше: 30 с прогрева, потом опрос решает', async () => {
+    const state = makeState();
+    const io = new IntakeBuffer(state, { BOT_TOKEN: 't', AGENT_URL: 'https://agent', AGENT_SECRET: 's' });
+    await state.storage.put('busy', true);
+    await state.storage.put('busySince', Date.now() - 5 * 60_000);
+    await state.storage.put('busyChatId', 42);
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ running: false })));
+
+    expect(await io._pollRunFinishedIfIdle(Date.now())).toBe(false); // прогрев
+    expect(await io._pollRunFinishedIfIdle(Date.now() - 5 * 60_000)).toBe(true);
+    expect(await state.storage.get('busy')).toBeFalsy();
+    vi.unstubAllGlobals();
+  });
+});

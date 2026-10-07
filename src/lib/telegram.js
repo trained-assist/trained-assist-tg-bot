@@ -3,6 +3,8 @@ import { isTestChatCached, suppress, callbackChatId } from './test-mode.js';
 import commandsRegistry from '../../commands-registry.json';
 import { resolveAudience } from './audience.js';
 import { isCommandVisible } from './command-visibility.js';
+import { logError } from '../log.js';
+import { activeErrorPublisher, buildErrorEvent } from '../error-publisher.js';
 // Telegram Bot API helpers
 
 // One-shot per isolate: register the bot's command menu on Telegram as soon as
@@ -128,6 +130,9 @@ export async function sendMessage(token, chatId, text, extra = {}) {
     // message was 400-rejected and the user saw "ноль реакции"). Caller still
     // gets `data` back so existing flows don't break; we just log it loudly.
     console.error(`[sendMessage] chat=${chatId} failed:`, JSON.stringify(data));
+    const failure = { code: 'TELEGRAM_SEND_FAILED', operation: 'sendMessage', message: data.description, chatId };
+    logError(failure);
+    activeErrorPublisher()?.(buildErrorEvent(failure));
   }
   return data;
 }
@@ -187,8 +192,12 @@ export async function pinChatMessage(token, chatId, messageId, { silent = false 
     body: JSON.stringify({ chat_id: chatId, message_id: messageId, disable_notification: silent }),
   });
   const data = await res.json();
-  if (!data.ok) console.error(`[pin] failed chat=${chatId} msg=${messageId}:`, JSON.stringify(data));
-  else console.log(`[pin] ok chat=${chatId} msg=${messageId} silent=${silent}`);
+  if (!data.ok) {
+    console.error(`[pin] failed chat=${chatId} msg=${messageId}:`, JSON.stringify(data));
+    const failure = { code: 'TELEGRAM_PIN_FAILED', operation: 'pinChatMessage', message: data.description, chatId };
+    logError(failure);
+    activeErrorPublisher()?.(buildErrorEvent(failure));
+  } else console.log(`[pin] ok chat=${chatId} msg=${messageId} silent=${silent}`);
 }
 
 export async function unpinChatMessage(token, chatId, messageId) {

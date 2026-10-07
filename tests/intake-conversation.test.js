@@ -152,21 +152,21 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     await env.quiet(42);
     expect(tg.filter(e => e.kind === 'send')).toHaveLength(1);
     // The collector always carries the launch button.
-     await env.quiet(42);
-     expect(tg.some(e => e.buttons.some(b => b.startsWith('intake_run')))).toBe(true);
-     expect(handleMessage).not.toHaveBeenCalled();             // nothing auto-fires
+    await env.quiet(42);
+    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    expect(handleMessage).not.toHaveBeenCalled();             // nothing auto-fires
 
     await tapRun(env, 42);
     await drain();
 
-     expect(handleMessage).toHaveBeenCalledTimes(1);
-     const [msg, , opts] = handleMessage.mock.calls[0];
-     expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
-     expect(opts).toEqual({
-       mode: 'deep', workStyle: null, initialMsgId: expect.any(Number),
-       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
-     });
-   });
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const [msg, , opts] = handleMessage.mock.calls[0];
+    expect(msg.text).toBe(parts.join('\n'));                  // all 5 coalesced, in order
+    expect(opts).toEqual({
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
+  });
 
   it('C2: a question sent WHILE a run is in flight must not be swallowed (anti-«молчит»)', async () => {
     const { env } = makeWorld();
@@ -196,14 +196,14 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     await say(env, 42, 'го');                                 // bare force word → flush now
     await drain();
 
-     expect(handleMessage).toHaveBeenCalledTimes(1);
-     const [msg, , opts] = handleMessage.mock.calls[0];
-     expect(msg.text).toContain('собери участников выставки Rosupack');
-     expect(msg.text).toContain('только российские производители упаковки');
-     expect(opts).toEqual({
-       mode: 'deep', workStyle: null, initialMsgId: expect.any(Number),
-       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
-     });
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    const [msg, , opts] = handleMessage.mock.calls[0];
+    expect(msg.text).toContain('собери участников выставки Rosupack');
+    expect(msg.text).toContain('только российские производители упаковки');
+    expect(opts).toEqual({
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
   it('C4: voice reply plus photo and pasted text wait for one explicit launch', async () => {
@@ -214,9 +214,9 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
       { message_id: 12, text: 'скопированный текст' },
     ]) await routeText({ chat: { id: 42 }, ...msg }, env, 42);
     expect(handleMessage).not.toHaveBeenCalled();
-     await env.quiet(42);
-     expect(tg.some(e => e.buttons.some(b => b.startsWith('intake_run')))).toBe(true);
-     await tapRun(env, 42);
+    await env.quiet(42);
+    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
+    await tapRun(env, 42);
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const batch = handleMessage.mock.calls[0][0].intakeItems;
     expect(batch).toHaveLength(3);
@@ -255,19 +255,19 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
     await run1;
     await drain();
     await runFinished(env, 42, 'req-c5');
-     await env.quiet(42);
-     expect(tg.some(e => e.buttons.some(b => b.startsWith('intake_run')))).toBe(true);
+    await env.quiet(42);
+    expect(tg.some(e => e.buttons.includes(RUN_CB))).toBe(true);
 
-     // 6: launch the held follow-ups as a second deep run.
+    // 6: launch the held follow-ups as a second deep run.
     await tapRun(env, 42);
     await drain();
     expect(handleMessage).toHaveBeenCalledTimes(2);
     expect(handleMessage.mock.calls[1][0].text)
       .toBe('и добавь зарплатные вилки\nи топ-3 кандидата');
-     expect(handleMessage.mock.calls[1][2]).toEqual({
-       mode: 'deep', workStyle: null, initialMsgId: expect.any(Number),
-       onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
-     });
+    expect(handleMessage.mock.calls[1][2]).toEqual({
+      mode: 'deep', workStyle: 'auto', workStyleSource: 'default', initialMsgId: expect.any(Number),
+      onRunAccepted: expect.any(Function), onIntakePrepared: expect.any(Function),
+    });
   });
 
   // Regression: a follow-up reply must offer time to add supporting material.
@@ -295,7 +295,7 @@ describe('intake conversation — real routeText + real IntakeBuffer', () => {
 
     const emitted = since(mark);
     expect(emitted.length).toBeGreaterThan(0);               // never silent
-     expect(emitted.some(e => e.buttons.some(b => b.startsWith('intake_run')))).toBe(true); // «▶️» offered
+    expect(emitted.some(e => e.buttons.includes(RUN_CB))).toBe(true); // «▶️» offered
     expect(emitted.some(e => /input/i.test(e.text || ''))).toBe(true); // asks
     expect(handleMessage).toHaveBeenCalledTimes(1);          // <-- current bug: fires 2nd run
   });

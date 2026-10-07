@@ -21,6 +21,8 @@ import { chatConfigCommandFromPhrase } from './lib/project-command.js';
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 import { resolveAudience } from './lib/audience.js';
+import { logError } from './log.js';
+import { resolveErrorPublisher, buildErrorEvent, initErrorPublisher } from './error-publisher.js';
 
 const app = new Hono();
 
@@ -52,6 +54,10 @@ function logAudience(env) {
 // Preview deployments have no Telegram credentials or webhook ownership.
 // Reject ingress before touching even the dedicated staging KV bindings.
 app.use('*', async (c, next) => {
+  // Token-only helpers (lib/telegram.js) publish through the active error
+  // publisher — initialise it from env on every entry (same pattern as
+  // initTestMode). Unconfigured env keeps it null; publishing stays off.
+  initErrorPublisher(c.env);
   if (c.env.PREVIEW_ONLY === 'true' && c.req.path !== '/health') return c.json({ error: 'preview only' }, 403);
   return next();
 });
@@ -109,6 +115,9 @@ async function recordGatewaySent(env, chatId, messageId) {
     await env.SESSIONS.put(key, JSON.stringify(ids.slice(-300)), { expirationTtl: 3 * 24 * 60 * 60 });
   } catch (e) {
     console.error('[deliver] sent-record failed:', e.message);
+    const failure = { code: 'DELIVERY_FAILED', operation: 'recordGatewaySent', message: e.message, chatId };
+    logError(failure);
+    resolveErrorPublisher(env)?.(buildErrorEvent(failure));
   }
 }
 
@@ -146,8 +155,12 @@ app.post('/deliver', async c => {
   // актуальности и защита от второго запуска живут в нём же (пустой буфер → ответ
   // «нечего запускать», идущий ран → «уже идёт»), поэтому повторное нажатие или
   // гонка с начавшейся работой не создают второй запуск.
+  // sendMessageWithKeyboard takes the ROWS ARRAY and wraps it into reply_markup
+  // itself. Passing a pre-wrapped { inline_keyboard } double-wraps it and Telegram
+  // rejects the send with «field "inline_keyboard" must be of type Array» —
+  // found by the first live acceptance run of the C02.1 seam (2026-10-04).
   const keyboard = kind === 'stuck_input'
-    ? { inline_keyboard: [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]] }
+    ? [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]]
     : undefined;
 
   const result = await sendMessageWithKeyboard(c.env.BOT_TOKEN, chatId, text, keyboard, extra)
@@ -364,6 +377,9 @@ async function dispatch(update, env) {
     await dispatchInner(update, env);
   } catch (err) {
     console.error(`[dispatch] unhandled error chatId=${chatId}:`, err?.message, err?.stack);
+    const failure = { code: 'DISPATCH_ERROR', operation: 'dispatch', message: err?.message, chatId };
+    logError(failure);
+    resolveErrorPublisher(env)?.(buildErrorEvent(failure));
     if (chatId) {
       try {
         await sendMessage(env.BOT_TOKEN, chatId, `❌ Внутренняя ошибка: ${err?.message || err}`, threadExtra(threadId));

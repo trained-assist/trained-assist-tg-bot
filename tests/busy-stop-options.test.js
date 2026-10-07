@@ -18,7 +18,7 @@ vi.mock('../src/handlers/message.js', () => ({ handleMessage: (...a) => handleMe
 vi.mock('../src/intake-preflight.js', () => ({ preflight: (...a) => preflight(...a) }));
 vi.mock('../src/lib/agent-client.js', async original => ({
   ...await original(),
-  stopTask: vi.fn().mockResolvedValue({ killed: 1 }),
+  stopTask: vi.fn().mockResolvedValue({ killed: 1, confirmed: true }),
   runTask: vi.fn().mockResolvedValue({}),
   checkCompleteness: vi.fn().mockResolvedValue({ level: 'clear', complete: true }),
   getProjectDecision: vi.fn().mockResolvedValue({ action: 'auto', choices: [] }),
@@ -108,7 +108,7 @@ beforeEach(async () => {
   };
   await setSession(env.SESSIONS, chatId, { username: 'owner', activeSessionId: 's-1', lastSessionId: 's-1', lastMessageAt: Date.now() });
   preflight.mockImplementation(async msg => ({ msg }));
-  stopTask.mockResolvedValue({ killed: 1 });
+  stopTask.mockResolvedValue({ killed: 1, confirmed: true });
   let n = 0;
   handleMessage.mockImplementation(async (msg, _env, opts) => {
     opts?.onRunAccepted?.({ requestId: `req-${++n}`, durable: true, taskId: `task-${n}` });
@@ -200,7 +200,7 @@ describe('Ф3 busy menu — the two stop options (RC-04/RC-05)', () => {
     await busyWindow();
     await runFinished();
     await drain();
-    stopTask.mockResolvedValue({ killed: 0 });
+    stopTask.mockResolvedValue({ killed: 0, stopped: false, confirmed: true });
     await tap('intake_stopnew', 901);
     await drain();
     await tap('intake_stopyes|new', 902);
@@ -235,6 +235,19 @@ describe('Ф3 busy menu — the two stop options (RC-04/RC-05)', () => {
     expect(handleMessage).toHaveBeenCalledTimes(1); // только первый ран
     expect(await store().get('stopLaunch')).toBeUndefined();
     expect(say('Не удалось подтвердить остановку')).toBeTruthy();
+  });
+
+  it('SS-03: killed process without exit confirmation never launches a supplement', async () => {
+    await busyWindow();
+    stopTask.mockResolvedValue({ killed: 1, confirmed: false });
+    await tap('intake_stopsupp', 901);
+    await drain();
+    await tap('intake_stopyes|supp', 902);
+    await drain();
+
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(await store().get('stopLaunch')).toBeUndefined();
+    expect(say('не подтвердил завершение задачи')).toBeTruthy();
   });
 
   it('a busy-window alarm while the stop is in flight keeps the choice (no lost, no phantom run)', async () => {

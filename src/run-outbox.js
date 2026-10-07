@@ -1,5 +1,7 @@
 import { releaseBufferPins } from './lib/intake-files.js';
 import { applyTestDelivery, isTestChat, suppress } from './lib/test-mode.js';
+import { logError, logWarn } from './log.js';
+import { resolveErrorPublisher, buildErrorEvent } from './error-publisher.js';
 const AGENT_DOWN_NOTICE_MS = 30_000;
 // One durable outbox per profile/chat. Alarms retry until the agent acknowledges
 // the stable requestId. Files are chunked below DO's per-value storage limit.
@@ -86,6 +88,9 @@ export class RunOutbox {
             if ([400, 413, 422].includes(res.status)) {
               // Keep failed payloads for repair, but don't poison every following job.
               await this.state.storage.put(`failed:${job.id}`, { ...job, status: res.status });
+              const failure = { code: 'OUTBOX_REJECTED', operation: 'deliver', message: `agent rejected delivery HTTP ${res.status}`, chatId: job.chatId, requestId: job.id };
+              logError(failure);
+              resolveErrorPublisher(this.env)?.(buildErrorEvent({ ...failure, traceId: job.id }));
               await this.notify(job, `⚠️ Задача сохранена, но сервер отклонил её (HTTP ${res.status}). Нужна проверка; автоматически повторять её не буду.`);
               await this.state.storage.delete(`job:${job.id}`);
               // Epic #1527 PR1: the agent will never send run-finished for a
@@ -112,9 +117,26 @@ export class RunOutbox {
           // tell the user only when the agent has been unreachable for a while.
           const firstFailAt = job.firstFailAt || Date.now();
           const down = Date.now() - firstFailAt >= AGENT_DOWN_NOTICE_MS;
+          if (down && !job.notified) {
+            const failure = { code: 'OUTBOX_TRANSPORT_FAILED', operation: 'deliver', message: e.message, chatId: job.chatId, requestId: job.id, failedMs: Date.now() - firstFailAt };
+            logWarn(failure);
+            resolveErrorPublisher(this.env)?.(buildErrorEvent({ ...failure, traceId: job.id }));
+          }
           if (!job.firstFailAt || (down && !job.notified)) {
-            if (down) await this.notify(job, '⚠️ Сервер недоступен дольше обычного. Задача не потеряна — отправлю автоматически, когда он вернётся.');
+            if (down) await this.notify(job, '⚠️ Сервер недоступен дольше обычного. Задача не потеряна — отправлю автоматически, когда он вернётся. Пока можешь писать в чат: следующее сообщение уйдёт отдельной задачей.');
             await this.state.storage.put(`job:${job.id}`, { ...job, firstFailAt, ...(down ? { notified: true } : {}) });
+          }
+          // The chat must not stay locked behind a job we cannot deliver. The outbox
+          // KEEPS retrying (the payload is preserved and still goes out later), but the
+          // busy hold in the intake DO is released once the user has been told — otherwise
+          // an undeliverable job pins the chat until BUSY_MAX_MS (45 min), which is the
+          // 2026-10-04 incident: chat -5111318625 held 33 min with six messages inside
+          // and no run. Releasing loses nothing: the batch was already consumed by this
+          // dispatch, so there is nothing left to re-dispatch twice; and when the job is
+          // finally delivered the agent's own run-finished arrives as usual.
+          if (down && !job.holdReleased) {
+            await this.releaseIntakeBusy(job);
+            await this.state.storage.put(`job:${job.id}`, { ...job, firstFailAt, notified: true, holdReleased: true });
           }
           return; // preserve FIFO on transient errors
         }

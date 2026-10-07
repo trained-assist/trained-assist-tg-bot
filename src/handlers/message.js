@@ -9,8 +9,10 @@ import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
 import { transcribeAudio } from '../lib/speech.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
-import { threadExtra, threadIdOf } from '../conversation-context.js';
+import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
 import { noContentNudgeText } from '../group-routing.js';
+import { logError } from '../log.js';
+import { resolveErrorPublisher, buildErrorEvent, initErrorPublisher } from '../error-publisher.js';
 
 // Local tracked-send wrappers (see intake-buffer.js for rationale): call the
 // imported sendMessage/sendMessageWithKeyboard so existing mocks still intercept,
@@ -26,6 +28,9 @@ async function recordSent(env, chatId, result) {
     await env.SESSIONS.put(key, JSON.stringify(ids.slice(-300)), { expirationTtl: 3 * 24 * 60 * 60 });
   } catch (e) {
     console.error('[sent] record failed:', e.message);
+    const failure = { code: 'SENT_RECORD_FAILED', operation: 'recordSent', message: e.message, chatId };
+    logError(failure);
+    resolveErrorPublisher(env)?.(buildErrorEvent(failure));
   }
 }
 async function sendTracked(env, chatId, text, extra = {}, threadId = null) {
@@ -110,6 +115,9 @@ export async function handleMessage(msg, env, opts = {}) {
   }
 
   try {
+    if (env.EXECUTION_BACKEND === 'control-plane' && (msg.intakeItems || [{ msg }]).some(item => item.msg?.photo || item.msg?.document || item.msg?.voice || item.msg?.audio || item.msg?.video)) {
+      throw new Error('Вложения сохранены; передача новому исполнителю ещё не подключена.');
+    }
     if (msg.intakeItems) {
       const items = [];
       // Sequential uploads bound peak memory for old cached batches and large media.
@@ -151,6 +159,15 @@ export async function handleMessage(msg, env, opts = {}) {
     route = { ...route, sessionId: newSessionId(chatId), forceNew: true,
       projectChosen: false, projectId: session.projectId || null, contextFromSession: null };
   }
+  if (env.EXECUTION_BACKEND === 'control-plane') {
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+    const response = await stub.fetch('https://intake/cp-session', {
+      method: 'POST', body: JSON.stringify({ requestId: opts.requestId, sessionId: route.sessionId }),
+    });
+    if (!response.ok) throw new Error('Не удалось сохранить принадлежность диалога.');
+    const saved = await response.json();
+    route = { ...route, sessionId: saved.sessionId };
+  }
   const chosen = route.projectChosen || session.projectSelectionSessionId === route.sessionId;
   const pendingPickerExpired = !!session.pendingProjectChoice?.expiresAt && Date.now() >= session.pendingProjectChoice.expiresAt;
   if (pendingPickerExpired) {
@@ -162,7 +179,7 @@ export async function handleMessage(msg, env, opts = {}) {
   const pendingCreation = !pendingPickerExpired && !!session.pendingProjectChoice && !session.pendingProjectChoice.suspended && !route.projectChosen;
   // /project <…> manages projects itself (agent quick answer) — never gate it behind the picker.
   const projectCommand = PROJECT_COMMAND_RE.test(msg.text || '');
-  if (!opts.parallel && !projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
+  if (env.EXECUTION_BACKEND !== 'control-plane' && !opts.parallel && !projectCommand && (pendingCreation || ((route.forceNew || !session.lastSessionId) && !chosen))) {
     const decision = await getProjectDecision(env, { username: session.username, chatId, task: msg.text || msg.caption || '' });
     if (decision.action !== 'quick' && (pendingCreation || shouldAskProject({ isNewDialog: true, decision }))) {
       await openProjectChoice(env, chatId, session, { decision, input: msg, threadId,
@@ -226,9 +243,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
     const context = opts.isVoice ? '[voice-message]' : null;
 
     // Use caller-supplied placeholder if provided (e.g. from doc handler), otherwise send our own.
-    const placeholderRes = opts.initialMsgId
+    const placeholderRes = opts.initialMsgId || opts.collectorStatusHandled
       ? null
-      : await sendTracked(env, chatId, '📨 Передаю задачу агенту…', {}, threadId);
+      : await sendTracked(env, chatId, env.EXECUTION_BACKEND === 'control-plane' ? '📨 Определяю интент собранного запроса…' : '📨 Передаю задачу агенту…', {}, threadId);
     const initialMsgId = opts.initialMsgId ?? (placeholderRes?.result?.message_id ?? null);
 
     // Pass existing pinnedMsgId to agent — agent manages its content (skills, context, etc.)
@@ -245,7 +262,8 @@ async function handleText(chatId, session, text, env, opts = {}) {
       parallel: !!opts.parallel,
       contextFromSession: opts.intakeRoute ? (opts.intakeRoute.contextFromSession || null) : (session.contextFromSession || null),
       mode: opts.mode || null,
-      workStyle: opts.workStyle || null,
+      workStyle: opts.workStyle || 'auto',
+      workStyleSource: opts.workStyleSource === 'explicit' ? 'explicit' : 'default',
       forceClaude: opts.forceClaude || undefined,
       initialMsgId,
       pinnedMsgId: session.pinnedMsgId || null,
@@ -295,7 +313,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
       console.warn('[recovery] accepted, bookkeeping failed:', err.message);
       return { outcome: 'accepted', notice: `✅ Попытка восстановления ${opts.retryAttempt}/2: агент принял задачу.` };
     }
-    if (env.RUN_OUTBOX) throw err;
+    if (env.EXECUTION_BACKEND === 'control-plane' || env.RUN_OUTBOX) throw err;
     // R10: a 15s timeout ≠ agent down. Probe /health to tell "busy" from "down"
     // so we never falsely tell the user to resend (which spawns a duplicate session).
     const kind = await classifyAgentError(env, err);
@@ -311,6 +329,9 @@ async function handleText(chatId, session, text, env, opts = {}) {
         await enqueueRecovery(env, { chatId, text, opts: { ...retryOpts, retryAttempt: attempt } });
       } catch (queueError) {
         console.error('[recovery] enqueue failed', queueError.message);
+        const failure = { code: 'RECOVERY_ENQUEUE_FAILED', operation: 'enqueueRecovery', message: queueError.message, chatId };
+        logError(failure);
+        resolveErrorPublisher(env)?.(buildErrorEvent(failure));
         if (opts.durableInput) throw queueError;
         const notice = `⚠️ Восстановление не запланировано: ${reason}; не удалось сохранить повтор в очередь. Нужен ручной запуск.`;
         if (opts.isRetry) return { outcome: 'queue_failed', notice };
@@ -346,6 +367,7 @@ export async function processDueRetries(env) {
   // Test mode init point #3 — cron retries send outside any webhook dispatch
   // (DESIGN §2.2).
   initTestMode(env);
+  initErrorPublisher(env);
   if (env.RETRY_QUEUE && !env.RECOVERY_STORE) {
     const stub = env.RETRY_QUEUE.get(env.RETRY_QUEUE.idFromName('recovery'));
     const response = await stub.fetch('https://recovery/drain', { method: 'POST' });
@@ -378,6 +400,9 @@ export async function processDueRetries(env) {
       await finishRetry(store, entry, result.outcome);
     } catch (err) {
       console.error(`[recovery] chat=${chatId} worker failed:`, err.message);
+      const failure = { code: 'RECOVERY_WORKER_FAILED', operation: 'processDueRetries', message: err.message, chatId };
+      logError(failure);
+      resolveErrorPublisher(env)?.(buildErrorEvent(failure));
       // Keep the entry: a later cron reports an interrupted attempt. One broken
       // chat must not prevent recovery attempts for all other due entries.
     }
@@ -423,6 +448,10 @@ async function resolveSessionRoute(chatId, session, text, env) {
   // or the sign-split heal would silently reattach it to the chat's old pointer.
   if (session.activeSessionId) {
     return { type: 'run', sessionId: session.activeSessionId, forceNew: !!session.activeSessionIsNew };
+  }
+
+  if (env.EXECUTION_BACKEND === 'control-plane') {
+    return { type: 'run', sessionId: session.lastSessionId || newSessionId(chatId), forceNew: !session.lastSessionId };
   }
 
   // 3. No history at all → new session

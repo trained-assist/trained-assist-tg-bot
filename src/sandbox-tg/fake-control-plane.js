@@ -1,7 +1,7 @@
 // Local fake of the new control plane — the CI fixture (AC-101).
 //
 // Implements the same HTTP surface the slice client uses:
-//   POST /intake  GET /receipt  POST /start  POST /signal  POST /status
+//   POST /intake  GET /receipt  POST /route  POST /start  POST /signal  POST /status
 //   GET  /events   POST /resume  POST /connection-lost  GET /artifact  POST /recover
 //
 // Fault modes (same vocabulary as the TS fake):
@@ -55,6 +55,7 @@ export class FakeControlPlane {
     this.eventLog = [];
     this.awaiting = [];
     this.artifacts = [];
+    this.routes = [];
     // Ephemeral per-task instance state (lost on restart):
     this.instances = new Map();
     this.restarts = 0;
@@ -112,9 +113,10 @@ export class FakeControlPlane {
     const taskId = body?.taskId ?? url.searchParams.get('taskId') ?? '';
     let result;
     try {
-      if (url.pathname === '/') result = json({ service: 'fake-control-plane', endpoints: ['intake', 'receipt', 'start', 'signal', 'status', 'events', 'resume', 'artifact', 'recover'] });
+      if (url.pathname === '/') result = json({ service: 'fake-control-plane', endpoints: ['intake', 'receipt', 'route', 'start', 'signal', 'status', 'events', 'resume', 'artifact', 'recover'] });
       else if (url.pathname === '/intake') result = await this.intake(body);
       else if (url.pathname === '/receipt') result = await this.receipt(taskId);
+      else if (url.pathname === '/route') result = await this.route(taskId, body);
       else if (url.pathname === '/start') result = await this.start(taskId, body);
       else if (url.pathname === '/signal') result = await this.signal(taskId, body);
       else if (url.pathname === '/status') result = await this.status(taskId);
@@ -156,6 +158,19 @@ export class FakeControlPlane {
     const ev = this.eventLog.find(e => e.kind === 'task_accepted' && e.user_task_id === taskId);
     if (!ev) return json({ error: 'receipt not found' }, 404);
     return json({ receiptId: ev.event_id, requestId: ev.payload?.requestId ?? null, userTaskId: taskId, acceptedAt: ev.at });
+  }
+
+  async route(taskId, body) {
+    const task = this.tasks.find(entry => entry.user_task_id === taskId);
+    if (!task) return json({ error: 'task not found' }, 404);
+    const route = { decisionId: `decision-${this._idn()}`, policyVersion: 'fixture-policy-v1', route: 'agent',
+      mode: 'ai-agent-job', reasonCode: 'fixture_agent_route', degraded: false, outcome: 'escalated',
+      needsExecutor: true, executor: 'opencode', execution: { agentDispatchAttempts: 0, agentStarted: false },
+      continuation: { owner: 'output', requested: body?.continue === true, issued: false,
+        refusal: body?.continue === true ? 'continuation_policy_disabled' : null,
+        jobRef: null, runId: null, generation: null } };
+    this.routes.push({ taskId, ...route });
+    return json(route);
   }
 
   async start(taskId, body) {
@@ -205,6 +220,7 @@ export class FakeControlPlane {
     this.eventLog.push({ id: this._idn(), event_id: `evt-${this._idn()}`, user_task_id: taskId, kind: 'awaiting_answered', type: 'progress', at, payload: { awaitingInputId: aw.id, consumedByRun: aw.runId } });
     const task = this.tasks.find(t => t.user_task_id === taskId);
     task.status = 'done';
+    task.result = { answer: body?.payload?.answer ?? 'ok' };
     task.stage = 'finalize';
     this.eventLog.push({ id: this._idn(), event_id: `evt-${this._idn()}`, user_task_id: taskId, kind: 'result_ready', type: 'result_ready', at, payload: { result: { answer: body?.payload?.answer ?? 'ok' }, artifactRefs: [] } });
     const lost = this.faults.consume('loseSignalResponseOnce');
@@ -217,7 +233,7 @@ export class FakeControlPlane {
     const runs = this._runs.filter(r => r.task_id === taskId).map(r => ({ id: r.id, status: r.status, generation: r.generation, started_at: r.started_at, finished_at: r.finished_at, error_class: r.error_class, lease_until: null }));
     const openAwait = this.awaiting.find(a => a.user_task_id === taskId && a.status === 'open');
     return json({
-      taskStore: { ...task, history: JSON.stringify(this.eventLog.filter(e => e.user_task_id === taskId)) },
+      taskStore: { ...task, id: task.user_task_id, history: JSON.stringify(this.eventLog.filter(e => e.user_task_id === taskId)) },
       runs,
       awaiting: openAwait ? { id: openAwait.id, status: 'open', deadline: openAwait.deadline, question: openAwait.question } : null,
     });

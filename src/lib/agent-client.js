@@ -4,6 +4,9 @@ import { resolveAudience } from './audience.js';
 import { runInputTaskId } from '../input-assembly.js';
 import { pendingGroupHistory, formatHistoryBlock, ackGroupHistory, maxSeq, isGroupChatId } from '../group-history.js';
 import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
+import { controlPlaneClient, runControlPlaneTask } from './control-plane-execution.js';
+import { getSession } from './kv.js';
+import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './control-plane-stop-gate.js';
 // HTTP client for trained-assist-agent
 
 // The REAL model input of a dispatched run (agent-side: system prompt +
@@ -12,6 +15,7 @@ import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
 // Never throws: a miss (run predates the feature, other agent, network) returns
 // null and the caller falls back to its gateway-side snapshot view.
 export async function fetchRunInput(env, body) {
+  if (env.EXECUTION_BACKEND === 'control-plane') return null;
   try {
     const taskId = runInputTaskId(body);
     const username = body?.username;
@@ -52,7 +56,10 @@ export async function getProjects(env, { username, userId }) {
   }
 }
 
-export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
+export async function runTask(env, { userId, username, task, context, sessionId, contextFromSession, forceClaude, forceNew, mode, workStyle, workStyleSource, initialMsgId, pinnedMsgId, telegramUserId, projectId, projectPicked = false, newProjectName, fileBase64, fileName, fileMimeType, fileRefs, inputItems, requestId, threadId = null, initiatedAt = Date.now() }) {
+  if (env.EXECUTION_BACKEND === 'control-plane') {
+    return runControlPlaneTask(env, { userId, username, task, sessionId, initialMsgId, fileBase64, fileRefs, inputItems, requestId, threadId, workStyle, workStyleSource });
+  }
   const audience = resolveAudience(env);
   // Every run, not once per isolate: when a run lands in the wrong audience the
   // sessions silently mix (cross-bot leak #1290) and the only evidence is this
@@ -236,6 +243,9 @@ export async function classifyMessage(env, { message, sessions }) {
 const gateError = () => ({ level: 'error', complete: false, delayMs: null, announce: null, retryable: true });
 
 export async function checkCompleteness(env, { text, username = null, chatId = null, threadId = null } = {}) {
+  // Core allows 32s for provider fallbacks + 3s to read the response (#2130).
+  // Keep 5s of HTTP headroom; the old 10s limit discarded valid fallback replies.
+  const gateTimeoutMs = 40_000;
   // The verdict now carries delayMs/announce too (agent #1823): the judge decides
   // how long to wait and what to say. Older agents simply omit those fields, so the
   // gateway falls back to its own 3-minute timer.
@@ -251,7 +261,7 @@ export async function checkCompleteness(env, { text, username = null, chatId = n
         'Authorization': `Bearer ${env.AGENT_SECRET}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(gateTimeoutMs),
     });
     if (!res.ok) return gateError();
     const result = await res.json();
@@ -358,7 +368,44 @@ export async function orphanChecklistAction(env, { username, action, id, chatId 
   return res.json();
 }
 
+function controlPlaneStopError(code = 'CONTROL_PLANE_STOP_PENDING') {
+  return Object.assign(new Error('Остановка нового исполнителя не подтверждена; накопленный ввод сохранён, повторный запуск не выполняется.'),
+    { code, stopConfirmed: false, pending: true, killed: 0 });
+}
+
+async function stopControlPlaneTasks(env, { username, chatId, threadId }) {
+  if (!Number.isSafeInteger(chatId) || !chatId || !username
+    || (threadId !== null && (!Number.isSafeInteger(threadId) || threadId <= 0))) throw controlPlaneStopError();
+  const client = controlPlaneClient(env);
+  const profileId = client.config.profileId;
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!env.INTAKE || !client.config.allowedChats.includes(String(chatId))
+    || (client.config.chatProfiles[String(chatId)] && client.config.chatProfiles[String(chatId)] !== profileId)
+    || session?.username !== username || session.controlPlaneProfile !== profileId) throw controlPlaneStopError();
+  const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
+  // Persist the local hold before any CP call. The Intake DO retains the same
+  // stop intent and retries its immutable per-conversation windows after restart.
+  const held = await stub.fetch('https://intake/stop', { method: 'POST', body: JSON.stringify({ username, chatId, threadId }) });
+  if (!held.ok) throw controlPlaneStopError();
+  const response = await stub.fetch('https://intake/cp-stop-targets', { method: 'POST',
+    body: JSON.stringify({ username, chatId, threadId }) });
+  if (!response.ok) throw controlPlaneStopError();
+  const result = await response.json();
+  if (result?.profileId !== profileId || result.unresolved !== false || result.stopConfirmed !== true
+    || !Array.isArray(result.tasks) || result.tasks.some(task => task?.profileId !== profileId
+      || typeof task.userTaskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(task.userTaskId)
+      || typeof task.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(task.requestId)
+      || typeof task.receiptId !== 'string' || !task.receiptId)) throw controlPlaneStopError();
+  return { killed: result.tasks.length, stopConfirmed: true, status: 'stopped',
+    userTaskIds: result.tasks.map(task => task.userTaskId), snapshotId: result.snapshotId ?? null };
+}
+
 export async function stopTask(env, { username, chatId = null, threadId = null }) {
+  if (controlPlaneStopDisabled(env)) throw controlPlaneStopDisabledError();
+  if (env.EXECUTION_BACKEND === 'control-plane') {
+    try { return await stopControlPlaneTasks(env, { username, chatId, threadId }); }
+    catch { throw controlPlaneStopError(); }
+  }
   const tid = Number.isInteger(threadId) && threadId > 0 ? threadId : null;
   // ALWAYS scope the stop by this bot's audience + the chat (+ forum topic when
   // present). A `{ username }`-only payload makes the agent's /tasks/stop a
@@ -390,4 +437,3 @@ export async function stopTask(env, { username, chatId = null, threadId = null }
   if (!res.ok) throw new Error(`agent /tasks/stop HTTP ${res.status}`);
   return res.json();
 }
-
