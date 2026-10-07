@@ -29,7 +29,7 @@ it('production deploy is explicit and requires successful CI and staging gate', 
   const graph = jobs();
   expect(graph.get('deploy')).toContain('needs: [ci, staging-gate, production-request]');
   expect(graph.get('deploy')).toContain("github.event_name == 'workflow_dispatch'");
-  expect(graph.get('deploy')).toContain("needs.production-request.outputs.confirmed == 'true'");
+  expect(graph.get('deploy')).toContain("needs['production-request'].outputs.confirmed == 'true'");
   expect(graph.get('deploy')).toContain("needs.ci.result == 'success'");
   expect(graph.get('deploy')).toContain("needs.staging-gate.result == 'success'");
   expect(graph.get('deploy')).not.toContain('always()');
