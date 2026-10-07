@@ -22,7 +22,7 @@ function summarize(state) {
     busy: !!state.busy,
     bufferedMessages: Array.isArray(state.buf) ? state.buf.length : 0,
     retryMessages: Array.isArray(state.retryBatch) ? state.retryBatch.length : 0,
-    launching: !!state.launching,
+    launching: Array.isArray(state.launching) ? state.launching.length > 0 : !!state.launching,
     stranded: !!state.stranded,
   };
 }
