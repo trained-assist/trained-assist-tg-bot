@@ -31,6 +31,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+      - run: npm ci --include=dev
+      - name: Synchronize isolated staging secrets
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_STAGING_WEBHOOK_SECRET: ${{ secrets.TG_STAGING_WEBHOOK_SECRET }}
+          TG_STAGING_AGENT_SECRET: ${{ secrets.TG_STAGING_AGENT_SECRET }}
+        run: node scripts/staging/sync-test-secrets.mjs
       - name: Exercise staging Telegram user paths
         env:
           TG_STAGING_WEBHOOK_SECRET: ${{ secrets.TG_STAGING_WEBHOOK_SECRET }}
