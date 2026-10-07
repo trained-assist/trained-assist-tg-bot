@@ -17,9 +17,17 @@ class_name = "TgDeliveryOwner"
 name = "INTAKE"
 class_name = "IntakeBuffer"
 
+[[durable_objects.bindings]]
+name = "SANDBOX_ACCEPT_ONLY"
+class_name = "SandboxAcceptOnlyStore"
+
 [[migrations]]
 tag = "sandbox-existing-ux-v1"
 new_sqlite_classes = ["TgDeliveryOwner", "IntakeBuffer"]
+
+[[migrations]]
+tag = "sandbox-accept-only-v1"
+new_sqlite_classes = ["SandboxAcceptOnlyStore"]
 
 [[kv_namespaces]]
 binding = "TG_SLICE"
@@ -43,3 +51,6 @@ EXECUTION_BACKEND = "control-plane"
 INTAKE_DEBOUNCE = "on"
 SESSION_NAMESPACE = "integrator-existing-ux-v1"
 MEDIA_PIPELINE = "off"
+TG_ACCEPT_ONLY_ENABLED = "false"
+TG_ACCEPT_ONLY_ENVIRONMENT = "sandbox"
+TG_ACCEPT_ONLY_MODE = "accept-only"
