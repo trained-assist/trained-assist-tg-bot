@@ -115,8 +115,8 @@ function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) 
     styles.push([{ text: '⚡ Параллельно', callback_data: 'intake_parallel' }]);
     if (stopEnabled) styles.push([{ text: '🛑 Стоп и запуск с добавкой', callback_data: 'intake_stopsupp' },
       { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
+    styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
   }
-  styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
   styles.push([{ text: '🧹 Очистить весь ввод', callback_data: `intake_discard|${revision}` }]);
   return styles;
 }
