@@ -61,6 +61,15 @@ describe('project selection through actual creation, message and callback handle
     expect(runTask).toHaveBeenCalledTimes(1);
     expect(runTask.mock.calls[0][1]).toMatchObject({ projectId: 'p3', projectPicked: false });
   });
+  it('a launched buffered batch skips the legacy project picker', async () => {
+    await setSession(env.SESSIONS, chatId, { username: 'owner' });
+    const item = message('первая задача после буфера');
+    await handleMessage({ ...item, intakeItems: [{ text: item.text, msg: item }] }, env, { mode: 'deep' });
+    expect(getProjectDecision).not.toHaveBeenCalled();
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
+    expect(runTask).toHaveBeenCalledTimes(1);
+    expect(runTask.mock.calls[0][1]).toMatchObject({ task: expect.stringContaining(item.text), forceNew: true });
+  });
   it('regular picker (no mismatch) still pins the chosen project', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner' });
     await handleMessage(message('обычная новая задача'), env, { mode: 'deep' });
@@ -92,7 +101,7 @@ describe('project selection through actual creation, message and callback handle
     await tap('nd:'); await tap('pc:page:1'); await tap('pc:8');
     expect((await getSession(env.SESSIONS, chatId)).projectId).toBe('p8');
   });
-  it('preserves mixed voice, text and file through deferred selection in deep mode', async () => {
+  it('launches an already-buffered mixed voice, text and file batch without project selection', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner' });
     await env.SESSIONS.put('attachment:1', JSON.stringify({ base64: 'aGVsbG8=' }));
     const input = { ...message('full batch'), intakeItems: [
@@ -101,11 +110,10 @@ describe('project selection through actual creation, message and callback handle
       { text: 'Документ', msg: { document: { file_id: 'f', file_name: 'резюме.txt', mime_type: 'text/plain' }, attachmentKey: 'attachment:1' } },
     ] };
     await handleMessage(input, env, { mode: 'deep' });
-    expect(runTask).not.toHaveBeenCalled();
-    await tap('pc:1');
     expect(runTask).toHaveBeenCalledTimes(1);
+    expect(sendMessageWithKeyboard).not.toHaveBeenCalled();
     const payload = runTask.mock.calls[0][1];
-    expect(payload).toMatchObject({ projectId: 'p1', mode: 'deep', context: '[voice-message]' });
+    expect(payload).toMatchObject({ projectId: null, mode: 'deep', context: '[voice-message]' });
     expect(payload.fileRefs).toHaveLength(3); expect(payload.fileRefs[2].name).toBe('резюме.txt'); expect(payload.fileBase64).toBeFalsy();
     expect(payload.task).toContain('Первый текст'); expect(payload.task).toContain('Вторая мысль');
   });
@@ -217,15 +225,12 @@ describe('project selection through actual creation, message and callback handle
   });
   it('retains file refs and pending choice after dispatch rejection, then retries successfully', async () => {
     await setSession(env.SESSIONS, chatId, { username: 'owner' });
-    const input = { ...message('file'), intakeItems: [{ msg: {
-      chat: { id: chatId }, message_id: 55,
-      document: { file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain' },
-    } }] };
+    const input = { ...message('file'), document: { file_id: 'file', file_name: 'resume.txt', mime_type: 'text/plain' } };
     await handleMessage(input, env, { mode: 'deep' });
     runTask.mockRejectedValueOnce(new Error('agent /run HTTP 413'));
     await tap('pc:0');
     const pending = (await getSession(env.SESSIONS, chatId)).pendingProjectChoice;
-    expect(pending.input.intakeItems[0].msg.fileRef.name).toBe('resume.txt');
+    expect(pending.input.fileRef.name).toBe('resume.txt');
     const requestId = runTask.mock.calls[0][1].requestId;
     await tap('pc:0');
     expect(runTask).toHaveBeenCalledTimes(2);

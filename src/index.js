@@ -13,11 +13,8 @@ import { initTestMode, isTestChat, realChatId, rememberCallback } from './lib/te
 import { sendMessage, sendMessageWithKeyboard, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { recordGroupMessage } from './group-history.js';
-import { shouldDebounce, shouldAskProject, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
+import { shouldDebounce, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText, noContentNudgeText } from './group-routing.js';
-import { getProjectDecision } from './lib/agent-client.js';
-import { openProjectChoice } from './lib/project-choice.js';
-import { chatConfigCommandFromPhrase } from './lib/project-command.js';
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 
@@ -489,36 +486,22 @@ async function cancelSupplementForCommand(env, chatId, threadId) {
     : '✖️ Дополнение отменено — задача продолжает работать.', threadExtra(threadId)).catch(() => {});
 }
 
-// One text-routing rule for both private and group chats: buffer through the
-// intake accumulator (explicit launch by ▶️ button or force word), else pass
-// straight to the agent. Keeping this in one place is why the group path can't
-// silently drift from the private path again (#530).
+// One text-routing rule for both private and group chats. Every user-authored
+// task message is admitted to IntakeBuffer before any project/session routing;
+// a missing collector fails closed instead of falling through to the Agent.
 export async function routeText(msg, env, chatId) {
   const threadId = threadIdOf(msg);
-  // «текущий проект» / «закрепи X» / «сними закрепление» / «покажи настройки» → the command.
-  const configCmd = chatConfigCommandFromPhrase(msg.text);
-  if (configCmd) {
-    await handleCommand({ ...msg, text: configCmd }, env);
-    return;
-  }
   if (shouldDebounce(msg, env)) {
+    if (!env.INTAKE) {
+      await sendMessage(env.BOT_TOKEN, chatId,
+        '⚠️ Не удалось сохранить сообщение во входящие. Исполнитель не запускался — попробуй отправить ещё раз.',
+        threadExtra(threadId));
+      return;
+    }
     // Pin replies AND an explicitly chosen new project at receipt, so switching
     // menus before launch cannot move an already collected batch to another project.
-    const session = await getSession(env.SESSIONS, chatId, threadId);
+    const session = env.SESSIONS ? await getSession(env.SESSIONS, chatId, threadId) : null;
     const sessionId = session?.activeSessionId || session?.lastSessionId;
-
-    // Show the project picker immediately for new sessions with multiple projects,
-    // instead of waiting for the user to press ▶️ and the debounce to expire.
-    // This restores the pre-debounce UX where the picker appeared right after the first message.
-    if (!sessionId && session && !session.pendingProjectChoice) {
-      try {
-        const decision = await getProjectDecision(env, { username: session.username, chatId });
-        if (shouldAskProject({ isNewDialog: true, decision })) {
-          await openProjectChoice(env, chatId, session, { decision, input: msg, threadId });
-          return;
-        }
-      } catch { /* fail open — fall through to normal debounce path */ }
-    }
 
     if (msg.reply_to_message || (sessionId && session?.projectSelectionSessionId === sessionId)) {
       if (sessionId) msg = { ...msg, intakeRoute: { sessionId,
@@ -537,12 +520,18 @@ export async function routeText(msg, env, chatId) {
       method: 'POST',
       body: JSON.stringify({ text: msg.text, msg, flush }),
     });
+    if (!res.ok) {
+      await sendMessage(env.BOT_TOKEN, chatId,
+        '⚠️ Не удалось сохранить сообщение во входящие. Исполнитель не запускался — попробуй отправить ещё раз.',
+        threadExtra(threadId));
+      return;
+    }
     // «➕ Дополнить» armed → the buffer put this message into the supplement draft
     // instead (SS-06); the old handleMessage-side check was never reached from here.
     const diverted = await res?.json?.().catch(() => null);
     if (diverted?.supplement) await showSupplementConfirm(env, msg, chatId, threadId, diverted.supplement);
   } else {
-    // Debounce kill-switch: the buffer is bypassed, so ask the supplement collector directly.
+    // Slash commands and non-task updates keep their dedicated handlers.
     if (env.INTAKE && hasIntakeContent(msg) && await captureSupplement(env, msg, chatId, threadId)) return;
     await handleMessage(msg, env);
   }
