@@ -18,7 +18,7 @@ ALLOWED_WORKERS = {
 }
 if WORKER not in ALLOWED_WORKERS:
     raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
-HEALTH_PROBE_COUNT = 80
+health_probe_count = int(os.environ.get("CF_HEALTH_PROBE_COUNT", "0"))
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
@@ -89,25 +89,6 @@ def query(view: str) -> dict:
 def belongs_to_worker(trace: dict) -> bool:
     services = trace.get("service", trace.get("services"))
     return services == WORKER or (isinstance(services, list) and WORKER in services)
-
-
-health_probe_count = 0
-if os.environ.get("CF_GENERATE_HEALTH_TRAFFIC") == "true":
-    if WORKER != "trained-assist-tg-bot":
-        raise SystemExit("health traffic generation is only allowed for the production bot Worker")
-    health_url = "https://trained-assist-tg-bot.skillset-apply.workers.dev/health"
-    for _ in range(HEALTH_PROBE_COUNT):
-        request = urllib.request.Request(health_url, method="GET")
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                health = json.load(response)
-                if response.status != 200 or health.get("status") != "alive":
-                    raise SystemExit("production health probe returned an unexpected response")
-                health_probe_count += 1
-        except urllib.error.HTTPError as error:
-            print(json.dumps({"health_probe_http_status": error.code}), file=sys.stderr)
-            raise SystemExit(1)
-        time.sleep(0.25)
 
 
 traces_response = query("traces")
