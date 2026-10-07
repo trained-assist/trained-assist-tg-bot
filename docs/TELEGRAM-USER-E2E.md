@@ -154,15 +154,19 @@ can read it, but GitHub does not reveal saved secret values to collaborators.
 Never copy the password into this document, issues, PRs, logs, or shell history.
 The webhook signing value is stored separately as `TG_STAGING_WEBHOOK_SECRET`
 for authorized Actions workflows. GitHub will not reveal this value for local
-requests; use the hidden Wrangler prompt to set a local staging webhook secret
-when running synthetic updates from a workstation. Rotate the account password before sharing access outside the trusted test team.
+requests. To provision a local secret, pipe a JSON object with the exact value
+into `wrangler secret bulk --env=staging`; avoid `secret put` from a pipeline,
+which can store a newline as part of the secret. Rotate the account password
+before sharing access outside the trusted test team.
 
 After sending `/login <username> <password>` to the synthetic private chat,
 continue with `/start`, `/help`, a quick question, and an ordinary task. Inspect
 `[test-mode]` log lines for visible replies and callbacks. A normal task requires
 the staging Worker to have its agent endpoint and credentials configured; if
 those are absent, report the setup failure and do not treat a login/help probe
-as task E2E. Synthetic chat IDs are staging-only bindings in `wrangler.toml`;
+as task E2E. The shared staging Worker currently lacks an isolated agent
+backend; track this in [bot issue #418](https://github.com/trained-assist/trained-assist-tg-bot/issues/418).
+Synthetic chat IDs are staging-only bindings in `wrangler.toml`;
 never copy this configuration into another environment. Recreate or reset this
 account only in staging, and update the Actions secret whenever its password
 changes.
