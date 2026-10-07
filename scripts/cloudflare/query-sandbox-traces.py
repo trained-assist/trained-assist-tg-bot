@@ -109,10 +109,14 @@ def summarize_rows(rows: list) -> dict:
     fetch_statuses = {}
     fetch_durations = []
     trace_ids = set()
+    field_types = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         for item in walk(row):
+            for field, value in item.items():
+                kind = type(value).__name__
+                field_types.setdefault(field, set()).add(kind)
             service = get_attribute(item, "service", "service.name", "faas.name", "cloudflare.script_name")
             if service != WORKER:
                 continue
@@ -149,6 +153,7 @@ def summarize_rows(rows: list) -> dict:
             "max": max(fetch_durations) if fetch_durations else None,
             "avg": round(sum(fetch_durations) / len(fetch_durations), 2) if fetch_durations else None,
         },
+        "observed_field_types": {key: sorted(value) for key, value in sorted(field_types.items())},
     }
 traces_response = query("traces")
 if not traces_response.get("success"):
