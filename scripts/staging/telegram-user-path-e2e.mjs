@@ -26,7 +26,11 @@ function summarize(state) {
     stranded: !!state.stranded,
   };
 }
-const before = summarize(await readState());
+let before = summarize(await readState());
+for (let attempt = 0; attempt < 8 && before.launching && !before.busy && !before.bufferedMessages && !before.retryMessages; attempt++) {
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  before = summarize(await readState());
+}
 if (before.busy || before.bufferedMessages || before.retryMessages || before.launching || before.stranded) {
   throw new Error(`Staging chat is occupied; refusing to mutate it: ${JSON.stringify(before)}`);
 }
