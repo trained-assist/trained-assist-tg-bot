@@ -79,59 +79,6 @@ def query(view: str) -> dict:
         raise SystemExit(1)
 
 
-def summarize_rows(rows: list) -> dict:
-    origins = {}
-    event_types = {}
-    statuses = {}
-    fetch_count = 0
-    fetch_statuses = {}
-    fetch_durations = []
-    trace_ids = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        metadata = row.get("$metadata", {})
-        if not isinstance(metadata, dict):
-            continue
-        service = metadata.get("service") or metadata.get("scriptName")
-        if service != WORKER:
-            continue
-        event_type = metadata.get("type")
-        if event_type:
-            event_types[event_type] = event_types.get(event_type, 0) + 1
-        origin = metadata.get("origin")
-        if origin:
-            origins[origin] = origins.get(origin, 0) + 1
-        trace_id = metadata.get("traceId")
-        if trace_id:
-            trace_ids.add(trace_id)
-        status = metadata.get("statusCode")
-        duration = metadata.get("duration")
-        if status is not None:
-            key = str(status)
-            statuses[key] = statuses.get(key, 0) + 1
-        if origin == "fetch":
-            fetch_count += 1
-            if status is not None:
-                key = str(status)
-                fetch_statuses[key] = fetch_statuses.get(key, 0) + 1
-            if isinstance(duration, (int, float)):
-                fetch_durations.append(duration)
-    return {
-        "row_count": len(rows),
-        "unique_trace_count": len(trace_ids),
-        "event_type_counts": event_types,
-        "origin_counts": origins,
-        "status_counts": statuses,
-        "outbound_fetch_count": fetch_count,
-        "outbound_fetch_status_counts": fetch_statuses,
-        "outbound_fetch_duration_ms": {
-            "count": len(fetch_durations),
-            "min": min(fetch_durations) if fetch_durations else None,
-            "max": max(fetch_durations) if fetch_durations else None,
-            "avg": round(sum(fetch_durations) / len(fetch_durations), 2) if fetch_durations else None,
-        },
-    }
 traces_response = query("traces")
 if not traces_response.get("success"):
     print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
@@ -139,46 +86,24 @@ if not traces_response.get("success"):
 
 trace_items = traces_response.get("result", {}).get("traces", [])
 trace_candidate_count = len(trace_items)
-trace_service_counts = {}
+trace_field_names = sorted({key for trace in trace_items for key in trace})
+trace_service_types = {}
+matching_traces = []
 for trace in trace_items:
-    services = trace.get("service", [])
-    for service in services if isinstance(services, list) else []:
-        trace_service_counts[service] = trace_service_counts.get(service, 0) + 1
-trace_items = [
-    trace
-    for trace in trace_items
-    if WORKER in trace.get("service", [])
-]
+    services = trace.get("service", trace.get("services"))
+    kind = type(services).__name__
+    trace_service_types[kind] = trace_service_types.get(kind, 0) + 1
+    if services == WORKER or (isinstance(services, list) and WORKER in services):
+        matching_traces.append(trace)
+
 summaries = [
     {
-        "root_span": trace.get("rootSpanName"),
         "spans": trace.get("spans"),
         "duration_ms": trace.get("traceDurationMs"),
         "errors": len(trace.get("errors", [])),
     }
-    for trace in trace_items
+    for trace in matching_traces
 ]
-
-invocations_response = query("invocations")
-if not invocations_response.get("success"):
-    print(json.dumps({"errors": invocations_response.get("errors", [])}), file=sys.stderr)
-    raise SystemExit(1)
-
-invocations = invocations_response.get("result", {}).get("invocations", {})
-
-events_response = query("events")
-if not events_response.get("success"):
-    print(json.dumps({"errors": events_response.get("errors", [])}), file=sys.stderr)
-    raise SystemExit(1)
-event_rows = events_response.get("result", {}).get("events", {}).get("events", [])
-event_summary = summarize_rows(event_rows)
-invocation_rows = [
-    row
-    for invocation_events in invocations.values()
-    if isinstance(invocation_events, list)
-    for row in invocation_events
-]
-invocation_summary = summarize_rows(invocation_rows)
 
 print(
     json.dumps(
@@ -190,11 +115,9 @@ print(
             "window_hours": 24,
             "trace_count": len(summaries),
             "trace_candidate_count": trace_candidate_count,
-            "trace_service_counts": trace_service_counts,
+            "trace_field_names": trace_field_names,
+            "trace_service_field_types": trace_service_types,
             "traces": summaries[:20],
-            "event_sample": event_summary,
-            "invocation_sample": invocation_summary,
-            "event_sample_limit": 500,
         },
         indent=2,
     )
