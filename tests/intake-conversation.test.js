@@ -112,7 +112,7 @@ function tapRun(env, chatId) {                    // ▶️ Запустить �
 
 // How many envelopes were emitted since a recorded mark.
 const since = (mark) => tg.slice(mark);
-const hasLaunchAction = event => event.buttons.some(button => /^intake_run\|(explore|answer|auto)$/.test(button));
+const hasLaunchAction = event => event.buttons.some(button => /^(?:ws\|(explore|answer|auto)\|\d+|intake_run\|(explore|answer|auto))$/.test(button));
 
 beforeEach(() => {
   tg.length = 0;

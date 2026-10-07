@@ -148,7 +148,7 @@ describe('⛔ Стоп holds the intake queue (#1856)', () => {
     const c = lastCollector();
     expect(c.text).toMatch(/2 сообщений отложены/);
     expect(c.text).toMatch(/статус остановки текущей задачи проверяется отдельно/i);
-    expect(c.buttons.some(button => /^intake_run\|(explore|answer|auto)$/.test(button))).toBe(true);
+    expect(c.buttons.some(button => /^(?:ws\|(explore|answer|auto)\|\d+|intake_run\|(explore|answer|auto))$/.test(button))).toBe(true);
     expect(c.buttons).not.toContain('intake_cancel');
     expect(tg.some(e => /Нет активных задач/.test(e.text || ''))).toBe(false);
 
