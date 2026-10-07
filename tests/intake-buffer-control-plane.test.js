@@ -1318,7 +1318,7 @@ describe('existing collector control-plane ownership', () => {
     expect(await response.json()).toMatchObject({ buffered: 1, held: true });
     expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
     expect(await storage.get('debounceExpiresAt')).toBeUndefined();
-    expect(send.mock.calls.some(call => String(call[2]).includes('Это отдельная новая задача'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил отдельно'))).toBe(true);
     expect(send.mock.calls.some(call => call[3] && Array.isArray(call[3]) && call[3].flat()
       .some(button => button.callback_data.startsWith('ws|answer|')))).toBe(true);
     expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
