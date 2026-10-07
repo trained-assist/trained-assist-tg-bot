@@ -23,7 +23,7 @@ export function isAdminGroupChat(chatId, adminGroupId) {
   });
 }
 
-const ADMIN_ONLY_RE = /^\/(adduser|deluser|listusers|resetpass)(?:@\w+)?(?:\s|$)/i;
+const ADMIN_ONLY_RE = /^\/(adduser|deluser|listusers|resetpass|pass_reset)(?:@\w+)?(?:\s|$)/i;
 
 // Registry-driven local admin-only commands (commands-registry.json:
 // handler:"local" + adminOnly, e.g. /test_mode). Same treatment as the

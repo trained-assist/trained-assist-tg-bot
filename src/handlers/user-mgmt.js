@@ -1,10 +1,12 @@
 import { sendMessage } from '../lib/telegram.js';
 import { getUser, setUser, deleteUser, listUsernames } from '../lib/kv.js';
 
-const ADMIN_COMMANDS = ['/reauth', '/um', '/adduser', '/deluser', '/listusers', '/resetpass', '/stats'];
+const ADMIN_COMMANDS = ['/reauth', '/um', '/adduser', '/deluser', '/listusers', '/resetpass', '/pass_reset', '/stats'];
+const ADMIN_COMMAND_SET = new Set(ADMIN_COMMANDS);
 
 export function isUserMgmtCommand(text) {
-  return ADMIN_COMMANDS.some(cmd => text.startsWith(cmd));
+  const command = String(text || '').trim().split(/\s+/)[0].split('@')[0].toLowerCase();
+  return ADMIN_COMMAND_SET.has(command);
 }
 
 export async function handleUserMgmt(msg, env) {
@@ -18,7 +20,8 @@ export async function handleUserMgmt(msg, env) {
     case '/adduser':   return cmdAddUser(chatId, parts, env);
     case '/deluser':   return cmdDelUser(chatId, parts, env);
     case '/listusers': return cmdListUsers(chatId, env);
-    case '/resetpass': return cmdResetPass(chatId, parts, env);
+    case '/resetpass':
+    case '/pass_reset': return cmdResetPass(chatId, parts, env);
     case '/stats':     return cmdStats(chatId, env);
     // /reauth is handled by agent directly — TODO
   }
@@ -101,7 +104,9 @@ async function cmdDelUser(chatId, parts, env) {
   const username = parts[1];
   if (!username) return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /deluser username');
   const existing = await getUser(env.USERS, username);
-  if (!existing) return sendMessage(env.BOT_TOKEN, chatId, `❌ Пользователь "${username}" не найден.`);
+  if (!existing && env.TG_SLICE_OPEN_SANDBOX !== 'true') {
+    return sendMessage(env.BOT_TOKEN, chatId, `❌ Пользователь "${username}" не найден.`);
+  }
   await deleteUser(env.USERS, username);
   // TODO: also delete their sessions from SESSIONS KV
   await sendMessage(env.BOT_TOKEN, chatId, `✅ Пользователь @${username} удалён.`);
@@ -145,16 +150,18 @@ async function cmdStats(chatId, env) {
 
 async function cmdResetPass(chatId, parts, env) {
   const username = parts[1];
-  if (!username) return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /resetpass username');
+  if (!username) return sendMessage(env.BOT_TOKEN, chatId, 'Использование: /pass_reset username');
   const existing = await getUser(env.USERS, username);
   if (!existing) return sendMessage(env.BOT_TOKEN, chatId, `❌ Пользователь "${username}" не найден.`);
 
   const password = generatePassword();
   const { hash, salt } = await hashPassword(password);
-  await setUser(env.USERS, username, { ...existing, passwordHash: hash, salt });
+  await setUser(env.USERS, username, { ...(existing || { name: username, createdAt: new Date().toISOString() }), passwordHash: hash, salt });
 
   await sendMessage(env.BOT_TOKEN, chatId,
-    `🔑 Новый пароль для <code>${username}</code>:\n<code>${password}</code>\n\n` +
-    `Для входа: <code>/login ${username} ${password}</code>`
+    `🔑 Профиль: <code>${username}</code>\n` +
+    `Пароль: <code>${password}</code>\n\n` +
+    `В каждом чате, где добавлен @${env.BOT_USERNAME || 'бот'}, введи:\n` +
+    `<code>/login ${username} ${password}</code>`
   );
 }

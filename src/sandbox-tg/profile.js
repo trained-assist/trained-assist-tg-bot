@@ -2,8 +2,9 @@
 // profile + destination, and nothing else.
 //
 // Rules:
-//  - fail closed: a chat that is not explicitly allowed is NOT served (no
-//    default profile, no "anyone may talk to the sandbox");
+//  - normal slices fail closed for chats not explicitly allowed. The isolated
+//    UX login sandbox can opt into open chat ingress after profile login; its
+//    Worker still pins all execution to the configured sandbox profile.
 //  - the profile comes from the control-plane profile of the slice, optionally
 //    overridden per chat (TG_SLICE_CHAT_PROFILES) — the mapping is data, not code;
 //  - the destination is the chat (+ thread) the answer must go back to, and the
@@ -12,6 +13,8 @@
 //  - the ingress ref is deterministic: tg:<bot>:<chat>[:<thread>]:<messageId>.
 //    It is the correlation key of the whole slice and the first field of every
 //    log line (SANDBOX · I03: ingress ref, profile/channel/destination).
+
+import { chatAllowed } from './config.js';
 
 export const CHANNEL = 'telegram';
 
@@ -34,7 +37,7 @@ export function profileForUpdate(config, update) {
   const chatId = message.chat?.id;
   if (chatId == null) return null;
   const chatKey = String(chatId);
-  if (!config.allowedChats.includes(chatKey)) return null;
+  if (!chatAllowed(config, chatKey)) return null;
   const threadId = message.message_thread_id ?? null;
   return {
     profileId: config.chatProfiles[chatKey] ?? config.profileId,

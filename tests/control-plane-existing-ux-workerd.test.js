@@ -4,6 +4,7 @@ import { Miniflare } from 'miniflare';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { webcrypto } from 'node:crypto';
 import { makeEnv } from './helpers/p11-helpers.js';
 
 function existingUxWorkerdBundle() {
@@ -167,6 +168,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
     CONTROL_PLANE_PROFILE: 'workerd-profile', TG_SLICE_ALLOWED_CHATS: '42', TG_SLICE_ALLOWED_USERS: '43',
+    TG_SLICE_OPEN_SANDBOX: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox',
     TG_SANDBOX_BOT_TOKEN: 'offline-workerd-token', TELEGRAM_API_BASE: 'https://api.telegram.org',
     TELEGRAM_WEBHOOK_SECRET: 'offline-workerd-webhook', TG_SLICE_DELIVERY_PAUSED: 'false',
     TG_SLICE_DELIVERY_CUTOVER_MANIFEST: JSON.stringify({ version: 'tg-delivery-cutover-v1',
@@ -198,6 +200,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     const body = request.method === 'POST' ? await request.json() : null;
     if (url.hostname === 'api.telegram.org') {
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/sendMessage`) {
+        if (body.chat_id === 99) return reply({ ok: true, result: { message_id: 499, date: 1791190800 } });
         providerMessages.push(body);
         const messageId = 500 + providerMessages.length;
         telegramTimeline.push({ method: 'send', messageId, body });
@@ -292,8 +295,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       ...(signed ? { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET } : {}) },
     body: JSON.stringify(update),
   });
-  const message = (messageId, text, senderId = 43) => ({ update_id: messageId,
-    message: { message_id: messageId, date: 1791190800, chat: { id: 42, type: 'private' },
+  const message = (messageId, text, senderId = 43, chatId = 42) => ({ update_id: messageId,
+    message: { message_id: messageId, date: 1791190800, chat: { id: chatId, type: 'private' },
       from: { id: senderId, is_bot: false }, text } });
   const visibleTelegramMessages = () => {
     const messages = new Map();
@@ -339,6 +342,31 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   };
   try {
     runtime = new Miniflare(runtimeOptions);
+    const password = 'test-profile-password';
+    const salt = new Uint8Array(16).fill(7);
+    const passwordKey = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const passwordBits = await webcrypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, passwordKey, 256);
+    const saltHex = [...salt].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const passwordHash = [...new Uint8Array(passwordBits)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    await (await runtime.getKVNamespace('TG_SLICE')).put('user:workerd-user', JSON.stringify({ name: 'Workerd User', salt: saltHex, passwordHash }));
+    let loginPassword = password;
+    if (boundary === 'pending-stop-no-launch') {
+      const reset = await webhook(message(1, '/pass_reset workerd-user', 43));
+      expect(reset.status).toBe(200);
+      loginPassword = /Пароль: <code>([^<]+)<\/code>/.exec(providerMessages.at(-1)?.text || '')?.[1];
+      expect(loginPassword).toBeTruthy();
+      expect(providerMessages.at(-1).text).toContain(`/login workerd-user ${loginPassword}`);
+    }
+    const login = await webhook(message(2, `/login workerd-user ${loginPassword}`));
+    expect(login.status).toBe(200);
+    expect(await login.json()).toMatchObject({ ok: true, authenticated: true });
+    if (boundary === 'pending-stop-no-launch') {
+      const secondChatLogin = await webhook(message(3, `/login workerd-user ${loginPassword}`, 43, 44));
+      expect(secondChatLogin.status).toBe(200);
+      expect(await secondChatLogin.json()).toMatchObject({ ok: true, authenticated: true });
+      const secondChatSession = await (await runtime.getKVNamespace('SESSIONS')).get('integrator-existing-ux-v1:44', 'json');
+      expect(secondChatSession).toMatchObject({ username: 'workerd-user', controlPlaneProfile: 'workerd-profile' });
+    }
     if (boundary === 'pending-unsupported-cold' || boundary === 'pending-unsupported-launching' ||
         boundary === 'pending-unsupported-launching-lost-busy' || boundary === 'pending-stop-no-launch') {
       if (boundary === 'pending-stop-no-launch') admittedTasks.set('workerd-profile:old-request', {
@@ -404,7 +432,16 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       return;
     }
     expect((await webhook(message(100, 'Unsigned'), false)).status).toBe(401);
-    expect((await webhook(message(101, 'Wrong owner', 999))).status).toBe(403);
+    const unloggedChat = await webhook(message(101, 'Wrong owner', 999, 99));
+    expect(unloggedChat.status).toBe(200);
+    expect(await unloggedChat.json()).toMatchObject({ ok: true, authenticated: false });
+    await (await runtime.getKVNamespace('SESSIONS')).put('integrator-existing-ux-v1:42', JSON.stringify({
+      username: 'workerd-user', controlPlaneProfile: 'workerd-profile',
+      activeSessionId: 'workerd-source-session', lastSessionId: 'workerd-source-session',
+    }));
+    providerMessages.length = 0;
+    providerEdits.length = 0;
+    telegramTimeline.length = 0;
     expect((await webhook(message(102, 'category,amount\nfood,100\nfood,50'))).status).toBe(200);
     expect((await webhook(message(103, 'travel,275'))).status).toBe(200);
     expect((await webhook(message(103, 'travel,275'))).status).toBe(200);
@@ -428,7 +465,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     expect(providerMessages).toHaveLength(1);
     expect(cpIntakes).toHaveLength(0);
     const launchRevision = (await state()).get('draftRevision');
-    const launch = boundary === 'vertical' ? message(105, 'запускай')
+    const launch = boundary === 'vertical' ? message(105, 'запускай', 43)
       : { update_id: 105, callback_query: { id: 'workerd-launch', from: { id: 43, is_bot: false },
         data: `ws|auto|${launchRevision}`, message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(launch)).status).toBe(200);
@@ -440,7 +477,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     expect(admitted).toMatchObject({ workStyle: boundary === 'vertical' ? 'auto' : 'auto',
       workStyleSource: boundary === 'vertical' ? 'default' : 'explicit' });
     expect(admitted.sessionId).toBe('workerd-source-session');
-    const snapshotResponse = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
+    const snapshotResponse = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=workerd-user`);
     expect(snapshotResponse.status).toBe(200);
     const snapshot = await snapshotResponse.json();
     expect(snapshot.body.controlPlaneEnvelope).toEqual(admitted);
@@ -481,7 +518,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(cpIntakes).toHaveLength(1);
         expect(dispatchCount).toBe(1);
         expect(providerMessages).toHaveLength(2);
-        const restored = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
+        const restored = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=workerd-user`);
         expect(await restored.json()).toEqual(snapshot);
       }
       expect(legacyRequests).toEqual([]);
@@ -575,7 +612,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect(cpRoutes).toContainEqual({ taskId: 'ut-workerd-scenario', continue: true });
       const intake = await collector();
       expect((await intake.fetch('https://intake/stop', { method: 'POST',
-        body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
+        body: JSON.stringify({ username: 'workerd-user', chatId: 42, threadId: null }) })).status).toBe(200);
       if (boundary === 'stop-disabled') {
         expect((await webhook(message(106, 'Preserved additional input during pending stop'))).status).toBe(200);
         const pending = await state();
@@ -587,7 +624,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         const restored = await collector();
         for (const path of ['/stop', '/cp-stop-targets']) {
           expect((await restored.fetch(`https://intake${path}`, { method: 'POST',
-            body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(409);
+            body: JSON.stringify({ username: 'workerd-user', chatId: 42, threadId: null }) })).status).toBe(409);
         }
         completedTasks.add('ut-workerd-scenario');
         const due = (await state()).get('receiptDue');
@@ -610,7 +647,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         return;
       }
       expect((await intake.fetch('https://intake/cp-stop-targets', { method: 'POST',
-        body: JSON.stringify({ username: 'integrator', chatId: 42, threadId: null }) })).status).toBe(200);
+        body: JSON.stringify({ username: 'workerd-user', chatId: 42, threadId: null }) })).status).toBe(200);
       expect(cpStopRequests).toHaveLength(1);
       expect(cpStopRequests[0]).toMatchObject({ profileId: env.CONTROL_PLANE_PROFILE,
         conversationId: admitted.conversationRef, admissionBarrierComplete: true,
@@ -631,7 +668,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     const restored = await state();
     expect(restored.get('busy')).toBe(true);
     expect(restored.get(`cp-acceptance:${admitted.requestId}`)).toEqual(accepted);
-    const recoveredSnapshot = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=integrator`);
+    const recoveredSnapshot = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=workerd-user`);
     expect(await recoveredSnapshot.json()).toEqual(snapshot);
     await state(true);
     expect((await webhook(launch)).status).toBe(200);

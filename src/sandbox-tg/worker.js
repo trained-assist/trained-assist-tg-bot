@@ -7,6 +7,7 @@
 // Modes: 'direct' (default — P11 five-message scenario) and 'batch'
 // (TG_SLICE_MODE=batch — accumulator with one launch button, AC-102).
 import { ControlPlaneClient } from './control-plane-client.js';
+import { chatAllowed } from './config.js';
 import { profileForUpdate, extractMessage, extractCallbackQuery } from './profile.js';
 import { BatchCollector, KvBatchStore, MemoryBatchStore, BATCH_STATUS, tooLargeMessage, isTooLarge, attachmentOf, launchButton } from './batch.js';
 import { ConversationSession, ConversationIndex, KvConversationStore, MemoryConversationStore, ConversationNotFoundError, messageKey } from './conversation.js';
@@ -284,7 +285,7 @@ export class TgSliceController {
         let index;
         try { index = JSON.parse(raw); } catch { index = null; }
         const valid = Array.isArray(index?.turns) && index.destination &&
-          this.profile.allowedChats.includes(String(index.destination.chatId)) && index.requestingBot === this.profile.botUsername &&
+          chatAllowed(this.profile, index.destination.chatId) && index.requestingBot === this.profile.botUsername &&
           index.profileId === (this.profile.chatProfiles[String(index.destination.chatId)] ?? this.profile.profileId);
         const entry = valid ? index.turns[cursor.turnIndex] : null;
         const next = { pageCursor: cursor.nextPageCursor, conversationKey: null, nextPageCursor: null,
