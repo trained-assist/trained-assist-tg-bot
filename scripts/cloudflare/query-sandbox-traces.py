@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Read a short, sanitized summary of one sandbox Worker's recent traces."""
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
+TOKEN = os.environ["CF_OBSERVABILITY_TOKEN"]
+WORKER = "trained-assist-tg-ux-sandbox"
+API = (
+    "https://api.cloudflare.com/client/v4/accounts/"
+    f"{ACCOUNT_ID}/workers/observability/telemetry/query"
+)
+
+
+def query(view: str) -> dict:
+    now = int(time.time() * 1000)
+    body = {
+        "queryId": f"adhoc-{WORKER}-{view}",
+        "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
+        "dry": True,
+        "limit": 500,
+        "parameters": {
+            "view": view,
+            "filters": [
+                {
+                    "key": "$metadata.service",
+                    "operation": "eq",
+                    "type": "string",
+                    "value": WORKER,
+                }
+            ],
+        },
+    }
+    request = urllib.request.Request(
+        API,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        # Do not print request headers or token-bearing data.
+        try:
+            details = json.load(error)
+            messages = [item.get("message", "") for item in details.get("errors", [])]
+        except Exception:
+            messages = []
+        print(json.dumps({"http_status": error.code, "errors": messages}), file=sys.stderr)
+        raise SystemExit(1)
+
+
+def walk(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk(child)
+
+
+traces_response = query("traces")
+if not traces_response.get("success"):
+    print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+    raise SystemExit(1)
+
+trace_items = traces_response.get("result", {}).get("traces", [])
+summaries = [
+    {
+        "root_span": trace.get("rootSpanName"),
+        "spans": trace.get("spans"),
+        "duration_ms": trace.get("traceDurationMs"),
+        "errors": len(trace.get("errors", [])),
+    }
+    for trace in trace_items
+]
+
+invocations_response = query("invocations")
+if not invocations_response.get("success"):
+    print(json.dumps({"errors": invocations_response.get("errors", [])}), file=sys.stderr)
+    raise SystemExit(1)
+
+invocations = invocations_response.get("result", {}).get("invocations", {})
+fetch_spans = []
+for invocation_events in invocations.values():
+    for event in invocation_events if isinstance(invocation_events, list) else []:
+        for item in walk(event):
+            metadata = item.get("$metadata", {})
+            span_name = item.get("spanName") or metadata.get("spanName")
+            origin = item.get("origin") or metadata.get("origin")
+            if origin == "fetch" or (isinstance(span_name, str) and "fetch" in span_name.lower()):
+                fetch_spans.append(
+                    {
+                        "span": span_name or "fetch",
+                        "origin": origin,
+                        "status_code": item.get("statusCode", metadata.get("statusCode")),
+                        "duration_ms": item.get("duration", metadata.get("duration")),
+                    }
+                )
+
+print(
+    json.dumps(
+        {
+            "worker": WORKER,
+            "window_hours": 24,
+            "trace_count": len(summaries),
+            "traces": summaries[:20],
+            "outbound_fetch_span_count": len(fetch_spans),
+            "outbound_fetch_spans": fetch_spans[:50],
+        },
+        indent=2,
+    )
+)
