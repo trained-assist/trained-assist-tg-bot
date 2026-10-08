@@ -1,0 +1,45 @@
+name: Cleanup branch staging preview
+
+on:
+  pull_request:
+    types: [closed]
+  delete:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List orphan preview Workers without deleting them
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: staging-preview-cleanup-${{ github.event.pull_request.head.ref || github.event.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconcile preview Worker lifecycle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: node scripts/staging/cleanup-preview.mjs
