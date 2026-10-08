@@ -1263,11 +1263,18 @@ export class IntakeBuffer {
           || heldBehindPendingUnsupportedLaunch || (pendingStopWindow && !independentForceLaunch)) {
         // A run or another launch barrier is still active. Hold new messages,
         // never auto-run them, and ACK them so the user isn't met with silence.
-      if (pendingStopWindow) await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
-      else await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
-        if (heldBehindPendingUnsupportedLaunch || pendingStopWindow) await sendTracked(this.env, msg.chat?.id,
+      // Keep the independent-launch keyboard beside the latest held input. The
+      // status below is a separate Telegram message, so editing an older collector
+      // leaves the promised action out of view.
+      const collectorMessageId = pendingStopWindow
+        ? await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg), null, { fresh: true })
+        : null;
+      if (!pendingStopWindow) await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+      if (heldBehindPendingUnsupportedLaunch || pendingStopWindow) await sendTracked(this.env, msg.chat?.id,
           pendingStopWindow && !heldBehindPendingUnsupportedLaunch
-            ? '🕒 Текст сохранил отдельно. Старая задача всё ещё сверяется. Кнопки в сообщении выше запустят этот ввод отдельной задачей.'
+            ? collectorMessageId
+              ? '🕒 Текст сохранил отдельно. Старая задача всё ещё сверяется. Кнопки в сообщении выше запустят этот ввод отдельной задачей.'
+              : '🕒 Текст сохранил отдельно. Старая задача всё ещё сверяется; кнопки запуска не удалось показать. Текущий ввод не запускал.'
             : '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
           {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
@@ -1936,7 +1943,8 @@ export class IntakeBuffer {
       }) : null;
       const queued = !!(await this.state.storage.get('launchQueued'));
       const stopped = !!(await this.state.storage.get('stopped'));
-      const stopPending = this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      const stopWindow = cpMode ? await this.state.storage.get('cpStopWindow') : null;
+      const stopPending = stopWindow?.pending === true;
       const busy = !!(await this.state.storage.get('busy'));
       const canLaunchIndependently = cpMode && stopPending && items.length > 0;
       const stopLaunch = await this.state.storage.get('stopLaunch');
@@ -1977,14 +1985,26 @@ export class IntakeBuffer {
         : LAUNCH_BTN;
       if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');
+      const previousCollectorId = prevId;
       const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
+      const previousCollectorBatch = cpMode ? await this.state.storage.get('collectorBatchId') : null;
       const baseClaimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
       // A lost/failed send ACK must not wedge a pending-stop draft forever.
       // New input bumps draftRevision, so it gets one new safe collector attempt;
       // callbacks from any older bubble remain revision-bound and are rejected.
       const claimKey = baseClaimKey && stopPending && items.length
         ? `${baseClaimKey}:r${draftRevision}` : baseClaimKey;
-      if (claimKey && !prevId) {
+      const previousCollectorRevision = cpMode ? await this.state.storage.get('collectorDraftRevision') : null;
+      const previousCollectorStopIntentId = cpMode ? await this.state.storage.get('collectorStopIntentId') : null;
+      // During an unresolved stop, each new revision needs a new anchored bubble;
+      // the old collector may be far above the new status. Same-revision retries
+      // reuse a durable sent claim and cannot create duplicate controls.
+      let freshCollector = (fresh && !cpMode) || (stopPending && items.length > 0 && (
+        previousCollectorBatch !== batch?.batchId || previousCollectorRevision !== draftRevision ||
+        previousCollectorStopIntentId !== stopWindow?.intentId
+      ));
+      let currentRevisionClaimSent = false;
+      if (claimKey && (!prevId || freshCollector)) {
         const claim = await this.state.storage.get(claimKey);
         if (!claim && claimKey !== baseClaimKey) {
           const previousSent = await this.state.storage.get(baseClaimKey);
@@ -1996,26 +2016,36 @@ export class IntakeBuffer {
         if (claim?.state === 'sent' && claim.messageId) {
           prevId = claim.messageId;
           await this.state.storage.put('collectorMsgId', prevId);
+          currentRevisionClaimSent = true;
+          // A completed send for this exact revision is the collector to update;
+          // don't create a second bubble after recovering its durable claim.
+          if (stopPending && items.length) freshCollector = false;
         }
         if (claim?.state === 'sending' || claim?.state === 'unknown') {
           if (claim.state === 'sending') await this.state.storage.put(claimKey, { ...claim, state: 'unknown' });
           return null;
         }
       }
-      const previousCollectorBatch = cpMode ? await this.state.storage.get('collectorBatchId') : null;
-      if (stopPending && items.length && previousCollectorBatch !== batch?.batchId) prevId = null;
-      if (prevId && (!fresh || cpMode)) {
+      if (prevId && !freshCollector) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
           { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
         if (edited?.ok || /message is not modified/i.test(edited?.description || '')) {
           if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: prevId });
-          if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+          if (cpMode && batch?.batchId) {
+            await this.state.storage.put('collectorBatchId', batch.batchId);
+            await this.state.storage.put('collectorDraftRevision', draftRevision);
+            await this.state.storage.put('collectorStopIntentId', stopPending ? stopWindow?.intentId ?? null : null);
+          }
+          if (stopPending && previousCollectorId && previousCollectorId !== prevId) {
+            await editMessage(this.env.BOT_TOKEN, chatId, previousCollectorId, '↑ Сообщение выше устарело — новое ниже.',
+              { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+          }
           return prevId;
         }
         // During unresolved stop, the user needs a visible launch control for the
         // independent draft. If Telegram cannot edit the prior collector, publish
         // a fresh one (the old bubble is neutralized below when the send succeeds).
-        if (!canLaunchIndependently && !/message to edit not found/i.test(edited?.description || '')) {
+        if (currentRevisionClaimSent || (!canLaunchIndependently && !/message to edit not found/i.test(edited?.description || ''))) {
           await this._scheduleReceipt();
           return prevId;
         }
@@ -2027,16 +2057,26 @@ export class IntakeBuffer {
         ? { state: 'sent', messageId: id } : { state: 'unknown' });
       // A fresh bubble becomes THE collector: the older one is edited to a neutral
       // line so two launch buttons never compete (same reason as /stop).
-      if (id && (fresh || stopPending && items.length)) {
-        await editMessage(this.env.BOT_TOKEN, chatId, prevId, '↑ Сообщение выше устарело — новое ниже.',
-          { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+      if (id && (freshCollector || stopPending && items.length)) {
+        if (previousCollectorId && previousCollectorId !== id) {
+          await editMessage(this.env.BOT_TOKEN, chatId, previousCollectorId, '↑ Сообщение выше устарело — новое ниже.',
+            { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+        }
         await this.state.storage.put('collectorMsgId', id);
         if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: id });
-        if (batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+        if (batch?.batchId) {
+          await this.state.storage.put('collectorBatchId', batch.batchId);
+          await this.state.storage.put('collectorDraftRevision', draftRevision);
+          await this.state.storage.put('collectorStopIntentId', stopPending ? stopWindow?.intentId ?? null : null);
+        }
       } else if (id) {
         await this.state.storage.put('collectorMsgId', id);
         if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: id });
-        if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
+        if (cpMode && batch?.batchId) {
+          await this.state.storage.put('collectorBatchId', batch.batchId);
+          await this.state.storage.put('collectorDraftRevision', draftRevision);
+          await this.state.storage.put('collectorStopIntentId', stopPending ? stopWindow?.intentId ?? null : null);
+        }
       }
       else if (!cpMode) await this._scheduleReceipt();
       return id || null;
