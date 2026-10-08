@@ -117,6 +117,13 @@ app.post('/webhook', async context => {
         'Сначала войди: /login username password');
       return context.json({ ok: true, authenticated: false });
     }
+    if (String(message.text ?? '').trim().startsWith('/')) {
+      await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+        'Команда не распознана. Логин профиля можно посмотреть командой /listusers в исходном админ-чате.\n' +
+        'Здесь, в sandbox, выполни /pass_reset username — бот пришлёт тестовый пароль и команду входа.\n' +
+        'Для входа: /login username password.');
+      return context.json({ ok: true, authenticated: false, unknownCommand: true });
+    }
     await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
       'Чтобы войти в этом чате, отправь <code>/login username password</code>.\n' +
       'Один и тот же профиль можно подключить отдельно в каждом чате.');
