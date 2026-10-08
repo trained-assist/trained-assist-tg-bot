@@ -36,6 +36,8 @@ import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './lib/c
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { pruneHistory } from './group-history.js';
 
+const SANDBOX_ABANDON_STALE_AFTER_MS = 15 * 60_000;
+
 // Local tracked-send wrappers (NOT extra exports in lib/telegram.js — that would
 // force every test that mocks that module to declare them). They call the imported
 // sendMessage/sendMessageWithKeyboard (so existing mocks/assertions still work) and
@@ -818,6 +820,171 @@ export class IntakeBuffer {
         stranded: !busy && ((buf || []).length > 0) && !alarm && !debounceExpiresAt && !receiptDue
           && !(await this.state.storage.get('stopped')) && !parkedAt,
       });
+    }
+
+    // Sandbox operator recovery. The gateway validates the dedicated operator
+    // token before reaching this DO route. CP receipts/checkpoints are preserved;
+    // abandon only releases this one IntakeBuffer's local barrier.
+    if (url.pathname === '/operator/stop-window' && request.method === 'POST') {
+      if (this.env.EXECUTION_BACKEND !== 'control-plane' || this.env.TG_SANDBOX_OPERATOR_RECOVERY !== 'enabled') {
+        return Response.json({ error: 'sandbox_recovery_disabled' }, { status: 404 });
+      }
+      const source = await request.json().catch(() => null);
+      let result = await this._exclusive(async () => {
+        const stopWindow = await this.state.storage.get('cpStopWindow');
+        const existingAudit = source?.windowId && await this.state.storage.get(`cp-stop-abandon:${source.windowId}`);
+        if (existingAudit && source?.mode === 'abandon' && source.confirmWindowId === source.windowId &&
+            source.auditReason === 'sandbox_test_fixture_abandoned' &&
+            existingAudit.snapshot.profileId === source.profileId && existingAudit.snapshot.chatId === source.chatId &&
+            (existingAudit.snapshot.threadId ?? null) === (source.threadId ?? null)) {
+          return { abandoned: true, auditId: `cp-stop-abandon:${source.windowId}`,
+            snapshot: existingAudit.snapshot, replay: true };
+        }
+        const chatId = await this.state.storage.get('busyChatId') ?? stopWindow?.chatId;
+        const threadId = await this.state.storage.get('busyThread') ?? stopWindow?.threadId ?? null;
+        if (source?.chatId !== chatId || (source?.threadId ?? null) !== threadId ||
+            source?.profileId !== controlPlaneClient(this.env).config.profileId || stopWindow?.pending !== true) {
+          return { refused: true, reason: 'selector_mismatch' };
+        }
+        if (source?.windowId != null && source.windowId !== stopWindow?.intentId) return { refused: true, reason: 'window_identity_changed' };
+        const refuse = (reason, details = {}) => ({ refused: true, reason, ...details,
+          notifyChatId: chatId, notifyThreadId: threadId });
+        const entries = {};
+        const all = await this.state.storage.list();
+        for (const [key, value] of all) {
+          if (['buf', 'retryBatch', 'retryBatchAttempts', 'busy', 'busySince', 'busyChatId', 'busyThread',
+            'launching', 'cpScope', 'cpBusyRequests', 'cpUnresolvedLaunches', 'cpStopWindow', 'stopped',
+            'collectorMsgId', 'draftRevision', 'launchParallel'].includes(key) ||
+              key.startsWith('cp-acceptance:') || key.startsWith('cp-launch:') ||
+              key.startsWith('cp-snapshot:') || key.startsWith('cp-unknown-dismiss:')) entries[key] = redactRecoveryValue(value);
+        }
+        const snapshot = { version: 1, profileId: source.profileId, chatId, threadId,
+          windowId: stopWindow.intentId, capturedAt: Date.now(), entries };
+        if (source.mode === 'inspect') return { snapshot };
+        if (source.mode === 'release') {
+          const admissionIds = [...new Set([...(stopWindow.admissionRequestIds || []),
+            ...(stopWindow.tasks || []).map(task => task?.requestId).filter(Boolean)])].sort();
+          const busyIds = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
+          if (!admissionIds.length || JSON.stringify(busyIds) !== JSON.stringify(admissionIds) ||
+              this.cpDispatches || (await this.state.storage.get('launching'))?.length ||
+              (await this.state.storage.get('cpUnresolvedLaunches') || []).length) {
+            return refuse('admission_scope_unresolved', { snapshot });
+          }
+          const client = controlPlaneClient(this.env);
+          const verifiedTasks = [];
+          for (const requestId of admissionIds) {
+            const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+            const receipt = record?.receipt;
+            if (!receipt || receipt.requestId !== requestId || receipt.profileId !== source.profileId ||
+                receipt.durable !== true || typeof receipt.userTaskId !== 'string' || !receipt.userTaskId) {
+              return refuse('receipt_missing_or_conflicting', { snapshot });
+            }
+            let status;
+            try { status = await client.status(receipt.userTaskId); }
+            catch (error) { return refuse('control_plane_status_unavailable', { snapshot,
+              httpStatus: Number.isInteger(error?.status) ? error.status : null }); }
+            const taskMatches = status.id === receipt.userTaskId && isTerminalTaskStatus(status.status);
+            const runsTerminal = Array.isArray(status.runs) && status.runs.every(run =>
+              ['done', 'failed', 'cancelled'].includes(run.status));
+            const awaitingClosed = status.awaiting?.status !== 'open';
+            if (!taskMatches || !runsTerminal || !awaitingClosed) {
+              return refuse('control_plane_task_not_terminal', { snapshot, taskEvidence: {
+                taskId: status.id, status: status.status, generation: status.generation,
+                runs: status.runs.map(run => ({ id: run.id, status: run.status, generation: run.generation })),
+                awaitingStatus: status.awaiting?.status ?? null,
+              } });
+            }
+            verifiedTasks.push({ requestId, userTaskId: receipt.userTaskId,
+              status: status.status, generation: status.generation });
+          }
+          const current = await this.state.storage.get('cpStopWindow');
+          if (!current || current.intentId !== source.windowId) return { refused: true, reason: 'window_identity_changed', snapshot };
+          await this.state.storage.put('cpStopWindow', { ...current, pending: false, unresolved: false,
+            recoveryOutcome: 'verified_terminal', recoveryAt: Date.now(), verifiedTasks });
+          for (const requestId of admissionIds) {
+            const key = `cp-acceptance:${requestId}`;
+            const record = await this.state.storage.get(key);
+            await this.state.storage.put(key, { ...record, terminal: true, recoveredTerminalAt: Date.now() });
+          }
+          for (const key of ['busy', 'busySince', 'busyChatId', 'busyThread', 'cpBusyRequests', 'stopped', 'launchParallel',
+            'launchAfterRelease', 'launchWhenReady', 'launchQueued']) {
+            await this.state.storage.delete(key);
+          }
+          await this.state.storage.deleteAlarm();
+          await this._bumpDraftRevisionLocked();
+          const remainingDraft = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+          return { released: true, recoveryOutcome: 'verified_terminal', verifiedTasks, draftPreserved: true,
+            hasDraft: remainingDraft.length > 0, notifyChatId: chatId, notifyThreadId: threadId, snapshot };
+        }
+        if (source.mode !== 'abandon' || source.confirmWindowId !== stopWindow.intentId ||
+            source.auditReason !== 'sandbox_test_fixture_abandoned') {
+          return { refused: true, reason: 'abandon_confirmation_required', snapshot };
+        }
+        const auditId = `cp-stop-abandon:${stopWindow.intentId}`;
+        const prior = await this.state.storage.get(auditId);
+        if (prior) return { abandoned: true, auditId, snapshot: prior.snapshot, replay: true };
+        const launching = (await this.state.storage.get('launching')) || [];
+        const busySince = await this.state.storage.get('busySince');
+        const staleLaunching = !launching.length || (Number.isFinite(busySince) &&
+          Date.now() - busySince >= SANDBOX_ABANDON_STALE_AFTER_MS);
+        if (this.cpDispatches || !staleLaunching) {
+          return { refused: true, reason: 'dispatch_still_in_progress', snapshot };
+        }
+        await this.state.storage.put(auditId, { snapshot, auditReason: source.auditReason,
+          abandonedAt: Date.now(), cpEvidencePreserved: true });
+        for (const key of ['busy', 'busySince', 'busyChatId', 'busyThread', 'cpScope', 'cpBusyRequests',
+          'cpUnresolvedLaunches', 'cpStopWindow', 'stopped', 'launchParallel', 'launchAfterRelease',
+          'launchWhenReady', 'launchQueued']) await this.state.storage.delete(key);
+        await this.state.storage.deleteAlarm();
+        await this._bumpDraftRevisionLocked();
+        return { abandoned: true, auditId, snapshot, draftPreserved: true, cpEvidencePreserved: true,
+          notifyChatId: chatId, notifyThreadId: threadId };
+      });
+      if (source?.mode === 'inspect' && result.snapshot) {
+        const entries = result.snapshot.entries;
+        const requestIds = new Set([...(entries.cpBusyRequests || []),
+          ...(entries.cpStopWindow?.admissionRequestIds || []),
+          ...Object.keys(entries).filter(key => key.startsWith('cp-acceptance:')).map(key => key.slice('cp-acceptance:'.length)),
+          ...Object.values(entries).filter(value => value?.snapshotRequestId).map(value => value.snapshotRequestId)]);
+        const client = controlPlaneClient(this.env);
+        const tasks = [];
+        for (const requestId of [...requestIds].sort()) {
+          const receipt = entries[`cp-acceptance:${requestId}`]?.receipt;
+          if (!receipt?.userTaskId) {
+            tasks.push({ requestId, receipt: 'missing' });
+            continue;
+          }
+          try {
+            const status = await client.status(receipt.userTaskId);
+            tasks.push({ requestId, userTaskId: receipt.userTaskId, status: status.status,
+              generation: status.generation, runs: status.runs.map(run => ({ id: run.id, status: run.status,
+                generation: run.generation })), awaitingStatus: status.awaiting?.status ?? null });
+          } catch (error) {
+            tasks.push({ requestId, userTaskId: receipt.userTaskId, status: 'unavailable',
+              httpStatus: Number.isInteger(error?.status) ? error.status : null,
+              errorType: error?.name === 'ControlPlaneError' ? 'control_plane_rejected' : 'transport_error' });
+          }
+        }
+        result = { ...result, controlPlane: { tasks } };
+      }
+      if (result.released) {
+        if (result.hasDraft) await this._afterBusyRelease();
+        else await sendTracked(this.env, result.notifyChatId, '✓ Старая задача подтверждена как завершённая. Ожидающих сообщений нет.', {}, result.notifyThreadId).catch(() => null);
+      } else if (result.abandoned && !result.replay) {
+        await sendTracked(this.env, result.notifyChatId,
+          '⚠️ Тестовое окно снято вручную. Это не отменяет старую задачу; она ещё может выполняться. Черновик сохранён.', {}, result.notifyThreadId).catch(() => null);
+        await this._afterBusyRelease();
+      } else if (result.refused && result.notifyChatId != null) {
+        const condition = result.taskEvidence
+          ? `Control Plane сообщает status=${result.taskEvidence.status}; run=${result.taskEvidence.runs.map(run => run.status).join(',') || 'нет terminal evidence'}`
+          : `Причина сверки: ${result.reason}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}`;
+        await sendTracked(this.env, result.notifyChatId,
+          `⏳ Сверка не подтвердила завершение старой задачи: ${condition}. Черновик сохранён, отдельный запуск пока заблокирован. Повторно отправлять текст не нужно.`,
+          {}, result.notifyThreadId).catch(() => null);
+      }
+      const { notifyChatId, notifyThreadId, ...publicResult } = result;
+      return new Response(JSON.stringify(publicResult), { status: result.refused ? 409 : 200,
+        headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
     }
 
     if (url.pathname === '/restore' && request.method === 'POST') {
@@ -3149,4 +3316,16 @@ function json(obj) {
   return new Response(JSON.stringify(obj), {
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function redactRecoveryValue(value) {
+  if (Array.isArray(value)) return value.map(redactRecoveryValue);
+  if (!value || typeof value !== 'object') return value;
+  const output = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (['text', 'caption'].includes(key) && typeof child === 'string') {
+      output[key] = `[redacted ${child.length} characters]`;
+    } else output[key] = redactRecoveryValue(child);
+  }
+  return output;
 }

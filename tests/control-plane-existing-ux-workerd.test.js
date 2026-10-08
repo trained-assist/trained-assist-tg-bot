@@ -51,6 +51,7 @@ function existingUxWorkerdBundle() {
             const launchKey = JSON.stringify([7]);
             await this.state.storage.put('busy', true);
             await this.state.storage.put('busyChatId', 42);
+            await this.state.storage.put('cpScope', { chatId: 42, threadId: null, profileId: 'workerd-profile' });
             await this.state.storage.put('cpUnresolvedLaunches', [launchKey]);
             await this.state.storage.put('cpBusyRequests', ['accepted-voice-request']);
             await this.state.storage.put('cp-acceptance:accepted-voice-request', { terminal: false,
@@ -76,7 +77,7 @@ function existingUxWorkerdBundle() {
             await this.state.storage.put('launching', [item]);
             return Response.json({ seeded: true });
           }
-          if (path === '/scenario-seed-pending-stop-no-launch') {
+      if (path === '/scenario-seed-pending-stop-no-launch') {
             if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
             await this.state.storage.put('cpStopWindow', { pending: true, unresolved: true,
               stopConfirmed: false, intentId: 'scenario-stop-window', admissionLaunchKeys: ['[7]'],
@@ -92,6 +93,62 @@ function existingUxWorkerdBundle() {
               snapshotRequestId: 'old-request', profileId: 'workerd-profile',
               botUsername: 'probability_cat_bot',
               msg: { message_id: 7, chat: { id: 42 }, text: 'old task' } });
+            return Response.json({ seeded: true });
+          }
+          if (path === '/scenario-seed-abandonable-stop-window') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            const launchKey = '[7]';
+            await this.state.storage.put('buf', [{ text: 'retained fixture draft', msg: { message_id: 8,
+              chat: { id: 42 }, text: 'retained fixture draft' } }]);
+            await this.state.storage.put('busy', true);
+            await this.state.storage.put('busyChatId', 42);
+            await this.state.storage.put('busyThread', null);
+            await this.state.storage.put('busySince', Date.now() - 16 * 60_000);
+            await this.state.storage.put('launching', [{ text: 'old fixture launch', msg: { message_id: 7, chat: { id: 42 }, text: 'old fixture launch' } }]);
+            await this.state.storage.put('cpScope', { chatId: 42, threadId: null, profileId: 'workerd-profile' });
+            await this.state.storage.put('cpStopWindow', { pending: true, unresolved: true, stopConfirmed: false,
+              intentId: 'fixture-window-1234', chatId: 42, threadId: null, admissionLaunchKeys: [launchKey],
+              admissionRequestIds: ['fixture-old-request'], tasks: [{ requestId: 'fixture-old-request', userTaskId: 'ut-fixture-old' }] });
+            await this.state.storage.put('cpUnresolvedLaunches', [launchKey]);
+            await this.state.storage.put('cpBusyRequests', ['fixture-old-request']);
+            await this.state.storage.put('cp-acceptance:fixture-old-request', { receipt: { requestId: 'fixture-old-request',
+              userTaskId: 'ut-fixture-old', profileId: 'workerd-profile', durable: true }, terminal: false });
+            await this.state.storage.put('cp-launch:' + launchKey, { msg: { message_id: 7, chat: { id: 42 }, text: 'old fixture' } });
+            return Response.json({ seeded: true });
+          }
+          if (path === '/scenario-seed-terminal-stop-window') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            await this.state.storage.put('buf', [{ text: 'retained terminal draft', msg: { message_id: 8,
+              chat: { id: 42 }, text: 'retained terminal draft' } }]);
+            await this.state.storage.put('busy', true);
+            await this.state.storage.put('busyChatId', 42);
+            await this.state.storage.put('cpScope', { chatId: 42, threadId: null, profileId: 'workerd-profile' });
+            await this.state.storage.put('cpStopWindow', { pending: true, unresolved: false,
+              intentId: 'terminal-window-5678', chatId: 42, threadId: null,
+              admissionRequestIds: ['terminal-request'], tasks: [{ requestId: 'terminal-request', userTaskId: 'ut-terminal-fixture' }] });
+            await this.state.storage.put('cpUnresolvedLaunches', []);
+            await this.state.storage.put('cpBusyRequests', ['terminal-request']);
+            await this.state.storage.delete('launching');
+            await this.state.storage.put('cp-acceptance:terminal-request', { receipt: { requestId: 'terminal-request',
+              userTaskId: 'ut-terminal-fixture', profileId: 'workerd-profile', durable: true }, terminal: false });
+            return Response.json({ seeded: true });
+          }
+          if (path === '/scenario-seed-lost-busy-stop-window') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            await this.state.storage.put('buf', [{ text: 'retained lost-busy draft', msg: { message_id: 8,
+              chat: { id: 42 }, text: 'retained lost-busy draft' } }]);
+            await this.state.storage.put('cpStopWindow', { pending: true, unresolved: true,
+              intentId: 'lost-busy-window-9012', chatId: 42, threadId: null,
+              admissionRequestIds: ['missing-receipt-request'], tasks: [{ requestId: 'missing-receipt-request' }] });
+            return Response.json({ seeded: true });
+          }
+          if (path === '/scenario-seed-neighbor-window') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            const { chatId } = await request.json();
+            await this.state.storage.put('buf', [{ text: 'neighbor draft', msg: { message_id: 99,
+              chat: { id: chatId }, text: 'neighbor draft' } }]);
+            await this.state.storage.put('cpStopWindow', { pending: true, intentId: 'neighbor-window',
+              chatId, threadId: null });
             return Response.json({ seeded: true });
           }
           return super.fetch(request);
@@ -163,7 +220,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -171,6 +228,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     TG_SLICE_OPEN_SANDBOX: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox',
     TG_SANDBOX_BOT_TOKEN: 'offline-workerd-token', TELEGRAM_API_BASE: 'https://api.telegram.org',
     TELEGRAM_WEBHOOK_SECRET: 'offline-workerd-webhook', TG_SLICE_DELIVERY_PAUSED: 'false',
+    TG_SANDBOX_OPERATOR_TOKEN: 'offline-operator-token', TG_SANDBOX_OPERATOR_RECOVERY: 'enabled',
     TG_SLICE_DELIVERY_CUTOVER_MANIFEST: JSON.stringify({ version: 'tg-delivery-cutover-v1',
       botUsername: 'probability_cat_bot', profileId: 'workerd-profile', cutoverId: 'offline-empty-inventory',
       cutoverAt: 1791190000000, oldTaskIds: [], deliveries: [] }),
@@ -265,6 +323,9 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown',
     });
     if (url.hostname === 'cp.test' && url.pathname === '/stop') return reply({ killed: 0 });
+    if (url.hostname === 'cp.test' && url.pathname === '/status' && boundary === 'operator-stop-window-inspect-cp-unavailable') {
+      return reply({ error: 'injected offline status refusal' }, 503);
+    }
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
         status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
@@ -281,6 +342,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     unexpectedRequests.push({ host: url.hostname, path: url.pathname });
     return reply({ error: 'unconfigured offline transport' }, 500);
   };
+  env.CONTROL_PLANE_SERVICE = { fetch: async request => outboundService(request) };
   const runtimeOptions = { name: 'existing-ux-scenario', modules: true, script, compatibilityDate: '2024-01-01',
     compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS', 'PRODUCTION_USERS'],
     kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
@@ -351,6 +413,145 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     const productionUser = { name: 'Workerd User', salt: saltHex, passwordHash };
     await (await runtime.getKVNamespace('PRODUCTION_USERS')).put('user:workerd-user', JSON.stringify(productionUser));
     let loginPassword = password;
+    if (boundary.startsWith('operator-stop-window')) {
+      const selector = { mode: 'inspect', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42, threadId: null,
+        windowId: 'fixture-window-1234' };
+      expect((await runtime.dispatchFetch('https://worker.test/operator/stop-window', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(selector),
+      })).status).toBe(401);
+      const terminalRelease = boundary === 'operator-stop-window-release-terminal';
+      const lostBusy = boundary === 'operator-stop-window-recovery-lost-busy';
+      const seeded = await (await collector()).fetch(`https://intake/scenario-seed-${terminalRelease ? 'terminal' : lostBusy ? 'lost-busy' : 'abandonable'}-stop-window`, {
+        headers: { 'x-scenario-probe': 'offline-probe' },
+      });
+      expect(seeded.status).toBe(200);
+      if (boundary === 'operator-stop-window-recovery') {
+        const namespace = await runtime.getDurableObjectNamespace('INTAKE');
+        const neighbor = namespace.get(namespace.idFromName('99'));
+        expect((await neighbor.fetch('https://intake/scenario-seed-neighbor-window', {
+          method: 'POST', headers: { 'x-scenario-probe': 'offline-probe', 'content-type': 'application/json' },
+          body: JSON.stringify({ chatId: 99 }),
+        })).status).toBe(200);
+      }
+      const unauthorized = await runtime.dispatchFetch('https://worker.test/operator/stop-window', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(selector),
+      });
+      expect(unauthorized.status).toBe(401);
+      const configuredChatInspect = await runtime.dispatchFetch('https://worker.test/operator/stop-window', {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer offline-operator-token' },
+        body: JSON.stringify({ mode: 'inspect' }),
+      });
+      expect(configuredChatInspect.status).toBe(200);
+      expect(await configuredChatInspect.json()).toMatchObject({ snapshot: { profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
+        windowId: terminalRelease ? 'terminal-window-5678' : lostBusy ? 'lost-busy-window-9012' : 'fixture-window-1234' } });
+      const recoveryNamespace = await runtime.getDurableObjectNamespace('INTAKE');
+      const recoveryStub = recoveryNamespace.get(recoveryNamespace.idFromName('42'));
+      const invokeRecovery = async body => {
+        return runtime.dispatchFetch('https://worker.test/operator/stop-window', { method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer offline-operator-token' },
+          body: JSON.stringify(body) });
+      };
+      if (terminalRelease) {
+        completedTasks.add('ut-terminal-fixture');
+        const releaseSelector = { mode: 'release', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
+          threadId: null, windowId: 'terminal-window-5678' };
+        const released = await invokeRecovery(releaseSelector);
+        expect(released.status).toBe(200);
+        expect(await released.json()).toMatchObject({ released: true, recoveryOutcome: 'verified_terminal', draftPreserved: true,
+          verifiedTasks: [{ requestId: 'terminal-request', userTaskId: 'ut-terminal-fixture', status: 'done' }] });
+        const releasedEntries = await state();
+        expect(releasedEntries.get('buf')[0].text).toBe('retained terminal draft');
+        expect(releasedEntries.get('cp-acceptance:terminal-request').terminal).toBe(true);
+        expect(releasedEntries.get('cpStopWindow')).toMatchObject({ pending: false, recoveryOutcome: 'verified_terminal' });
+        expect(releasedEntries.get('busy')).toBeUndefined();
+        expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
+        expect(cpIntakes).toHaveLength(0);
+        return;
+      }
+      if (boundary === 'operator-stop-window-release-active-refusal') {
+        const terminalSeed = await (await collector()).fetch('https://intake/scenario-seed-terminal-stop-window', {
+          headers: { 'x-scenario-probe': 'offline-probe' },
+        });
+        expect(terminalSeed.status).toBe(200);
+        const activeSelector = { mode: 'release', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
+          threadId: null, windowId: 'terminal-window-5678' };
+        const refused = await invokeRecovery(activeSelector);
+        expect(refused.status).toBe(409);
+        expect(await refused.json()).toMatchObject({ refused: true, reason: 'control_plane_task_not_terminal' });
+        const refusedEntries = await state();
+        expect(refusedEntries.get('buf')[0].text).toBe('retained terminal draft');
+        expect(refusedEntries.get('cpStopWindow')).toMatchObject({ pending: true });
+        expect(refusedEntries.get('busy')).toBe(true);
+        expect(refusedEntries.get('cp-acceptance:terminal-request').terminal).toBe(false);
+        expect(providerMessages.some(body => /отдельный запуск пока заблокирован/.test(body.text || ''))).toBe(true);
+        expect(cpIntakes).toHaveLength(0);
+        return;
+      }
+      if (lostBusy) {
+        const inspectCurrent = await invokeRecovery({ mode: 'inspect', profileId: env.CONTROL_PLANE_PROFILE,
+          chatId: 42, threadId: null });
+        expect(inspectCurrent.status).toBe(200);
+        const lostBusySnapshot = await inspectCurrent.json();
+        expect(lostBusySnapshot.snapshot).toMatchObject({ windowId: 'lost-busy-window-9012',
+          entries: { buf: [{ text: '[redacted 24 characters]' }] } });
+        expect(Object.hasOwn(lostBusySnapshot.snapshot.entries, 'busy')).toBe(false);
+        const loseBusyAbandon = await invokeRecovery({ mode: 'abandon', profileId: env.CONTROL_PLANE_PROFILE,
+          chatId: 42, threadId: null, windowId: 'lost-busy-window-9012', confirmWindowId: 'lost-busy-window-9012',
+          auditReason: 'sandbox_test_fixture_abandoned' });
+        expect(loseBusyAbandon.status).toBe(200);
+        expect(await loseBusyAbandon.json()).toMatchObject({ abandoned: true, draftPreserved: true, cpEvidencePreserved: true });
+        expect((await state()).get('buf')[0].text).toBe('retained lost-busy draft');
+        expect((await state()).get('cp-acceptance:missing-receipt-request')).toBeUndefined();
+        return;
+      }
+      let inspect = await invokeRecovery(selector);
+      expect(inspect.status).toBe(200);
+      const inspection = await inspect.json();
+      expect(inspection.snapshot.entries.buf[0].text).toBe('[redacted 22 characters]');
+      expect(inspection.snapshot.entries['cp-acceptance:fixture-old-request'].receipt.userTaskId).toBe('ut-fixture-old');
+      if (boundary === 'operator-stop-window-inspect-cp-unavailable') {
+        expect(inspection.controlPlane.tasks).toContainEqual(expect.objectContaining({ requestId: 'fixture-old-request',
+          userTaskId: 'ut-fixture-old', status: 'unavailable', httpStatus: 503, errorType: 'control_plane_rejected' }));
+        expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true });
+        return;
+      }
+      expect(inspection.controlPlane.tasks).toContainEqual(expect.objectContaining({ requestId: 'fixture-old-request',
+        userTaskId: 'ut-fixture-old', status: 'active' }));
+      const badSelector = await invokeRecovery({ ...selector, windowId: 'other-window' });
+      expect(badSelector.status).toBe(409);
+      expect(await badSelector.json()).toMatchObject({ refused: true, reason: 'window_identity_changed' });
+      const badConfirmation = await invokeRecovery({ ...selector, mode: 'abandon',
+        confirmWindowId: 'other-window', auditReason: 'sandbox_test_fixture_abandoned' });
+        expect(badConfirmation.status).toBe(400);
+        expect(await badConfirmation.json()).toMatchObject({ error: 'invalid selector' });
+      const abandon = await invokeRecovery({ ...selector, mode: 'abandon',
+        confirmWindowId: selector.windowId, auditReason: 'sandbox_test_fixture_abandoned' });
+      expect(abandon.status).toBe(200);
+      const abandoned = await abandon.json();
+      expect(abandoned).toMatchObject({ abandoned: true, draftPreserved: true, cpEvidencePreserved: true });
+      const entries = (await state());
+      expect(entries.get('buf')[0].text).toBe('retained fixture draft');
+      expect(entries.get('cp-acceptance:fixture-old-request').receipt.userTaskId).toBe('ut-fixture-old');
+      expect(entries.get('cp-launch:[7]')).toBeDefined();
+      expect(entries.get('launching')).toBeDefined();
+      expect(entries.get('cpStopWindow')).toBeUndefined();
+      if (boundary === 'operator-stop-window-recovery') {
+        const namespace = await runtime.getDurableObjectNamespace('INTAKE');
+        const neighbor = namespace.get(namespace.idFromName('99'));
+        const neighborState = await neighbor.fetch('https://intake/scenario-state', { headers: { 'x-scenario-probe': 'offline-probe' } });
+        const neighborEntries = new Map((await neighborState.json()).entries);
+        expect(neighborEntries.get('buf')[0].text).toBe('neighbor draft');
+        expect(neighborEntries.get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'neighbor-window' });
+      }
+      expect(providerMessages.some(body => /снято вручную/.test(body.text || ''))).toBe(true);
+      expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
+      const repeated = await invokeRecovery({ ...selector, mode: 'abandon',
+        confirmWindowId: selector.windowId, auditReason: 'sandbox_test_fixture_abandoned' });
+      expect(await repeated.json()).toMatchObject({ abandoned: true, replay: true });
+      expect(cpIntakes).toHaveLength(0);
+      expect(dispatchCount).toBe(0);
+      return;
+    }
     if (boundary === 'pending-stop-no-launch') {
       const reset = await webhook(message(1, '/pass_reset workerd-user', 43));
       expect(reset.status).toBe(200);

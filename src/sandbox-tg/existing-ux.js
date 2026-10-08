@@ -60,6 +60,35 @@ app.get('/collector-state', async context => {
   return new Response(response.body, { status: response.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 });
 
+// Owner-only recovery for the isolated probability sandbox. The dedicated
+// token is independent of Telegram's webhook secret; no corresponding route is
+// mounted by the production Worker.
+app.post('/operator/stop-window', async context => {
+  const env = executionEnv(context.env);
+  const config = readTgSliceConfig(env);
+  const token = String(env.TG_SANDBOX_OPERATOR_TOKEN ?? '').trim();
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  const source = await context.req.json().catch(() => null);
+  const chatId = source?.chatId ?? (config.allowedChats.length === 1 ? Number(config.allowedChats[0]) : null);
+  const profileId = source?.profileId ?? config.profileId;
+  if (!source || !['inspect', 'release', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
+      (source.threadId != null && (!Number.isSafeInteger(source.threadId) || source.threadId <= 0)) ||
+      profileId !== config.profileId ||
+      (source.windowId != null && typeof source.windowId !== 'string') ||
+      (source.mode !== 'inspect' && typeof source.windowId !== 'string') ||
+      source.mode === 'abandon' && (source.confirmWindowId !== source.windowId ||
+        source.auditReason !== 'sandbox_test_fixture_abandoned')) return context.json({ error: 'invalid selector' }, 400);
+  if (!config.allowedChats.includes(String(chatId))) return context.json({ error: 'owner refused' }, 403);
+  if (env.TG_SANDBOX_OPERATOR_RECOVERY !== 'enabled') return context.json({ error: 'recovery disabled' }, 404);
+  const selector = { ...source, chatId, profileId, threadId: source.threadId ?? null };
+  const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, selector.threadId)));
+  const response = await stub.fetch('https://intake/operator/stop-window', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(selector),
+  });
+  return new Response(response.body, { status: response.status,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+});
+
 app.post('/webhook', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
