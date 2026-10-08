@@ -868,18 +868,25 @@ export async function handleCallbackQuery(cq, env) {
 
   if (/^intake_discard\|\d+$/.test(data || '')) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
-    await answerCallbackQuery(env.BOT_TOKEN, id, '🧹 Очищаю весь ввод…');
+    await answerCallbackQuery(env.BOT_TOKEN, id, '🧹 Очищаю ввод…');
     if (!env.INTAKE) return;
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const response = await stub.fetch('https://intake/discard', { method: 'POST',
       body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
     if (!response?.ok) {
-      await sendT(env, chatId, threadId, '⌛ Не получилось безопасно очистить ввод: запуск или загрузка файла ещё проверяется. Текущая задача не затронута.');
+      const refusal = await response?.json().catch(() => ({})) || {};
+      const message = refusal.reasonCode === 'unresolved_outside_stop_window'
+        ? '⌛ Черновик пока не очищен: обнаружен запуск вне текущего окна остановки. Задача и сохранённый ввод не изменены.'
+        : refusal.reasonCode === 'draft_preparing'
+          ? '⌛ Черновик пока не очищен: вложение ещё подготавливается. Задача и ввод не изменены.'
+          : '⌛ Не получилось безопасно очистить ввод: запуск или загрузка файла ещё проверяется. Текущая задача не затронута.';
+      await sendT(env, chatId, threadId, message);
       return;
     }
     const result = await response.json().catch(() => ({}));
-    if (result.discarded) await sendT(env, chatId, threadId,
-      `🧹 Весь незапущенный ввод очищен (${result.count} блоков/файлов). Текущая задача не затронута — можно начать заново.`);
+    if (result.discarded) await sendT(env, chatId, threadId, result.draftOnly
+      ? `🧹 Черновик очищен (${result.count} сообщений). Статус старой задачи и её данные сверки не изменены.`
+      : `🧹 Весь незапущенный ввод очищен (${result.count} блоков/файлов). Текущая задача не затронута — можно начать заново.`);
     return;
   }
 
