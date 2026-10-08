@@ -9,7 +9,8 @@ import { applySessionNamespace } from '../lib/session-namespace.js';
 import { conversationKey, threadIdOf } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
 import { initTestMode, rememberCallback } from '../lib/test-mode.js';
-import { answerCallbackQuery, sendMessage } from '../lib/telegram.js';
+import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
+import { ControlPlaneClient } from './control-plane-client.js';
 import { cmdLogin } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
@@ -70,13 +71,56 @@ app.post('/webhook', async context => {
   const allowedUsers = String(env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean);
   if (!message?.chat || !sender?.id || (!config.openSandbox &&
       (!config.allowedChats.includes(String(message.chat.id)) || !allowedUsers.includes(String(sender.id))))) return context.json({ error: 'owner refused' }, 403);
-  if (!env.INTAKE || !env.SESSIONS || env.INTAKE_DEBOUNCE === 'off') return context.json({ error: 'collector not configured' }, 503);
-  await createController(env, config).outbox.open();
+  if (!env.SESSIONS) return context.json({ error: 'session store not configured' }, 503);
   const threadId = threadIdOf(message);
   const runtimeEnv = executionEnv(env);
   const command = String(message.text ?? '').trim().split(/\s+/)[0].split('@')[0].toLowerCase();
   let session = await getSession(runtimeEnv.SESSIONS, message.chat.id, threadId);
-  if (session?.controlPlaneProfile && session.controlPlaneProfile !== config.profileId) return context.json({ error: 'profile mismatch' }, 403);
+  if (session?.controlPlaneProfile && session.controlPlaneProfile !== config.profileId
+      && !(session.telegramUserId === String(sender.id) && /^prof-[0-9a-f-]{36}$/.test(session.controlPlaneProfile))) {
+    return context.json({ error: 'profile mismatch' }, 403);
+  }
+
+  const registrationInProgress = session?.registrationStep && session.registrationStep !== 'complete';
+  if (config.openSandbox && session?.registrationStep === 'complete'
+      && session.telegramUserId === String(sender.id) && /^prof-[0-9a-f-]{36}$/.test(session.controlPlaneProfile)) {
+    // Registration identities must never fall through to the legacy login or
+    // shared IntakeBuffer. Per-profile API execution is enabled only once the
+    // CP has quota accounting and the Agent API workspace capability configured.
+    return context.json({ error: 'profile execution is not enabled for this sandbox yet', code: 'PROFILE_EXECUTION_NOT_ENABLED' }, 503);
+  }
+  if (config.openSandbox && message.chat.type === 'private'
+      && (command === '/start' || registrationInProgress)) {
+    const clientConfig = { ...config, telegramUserId: String(sender.id) };
+    const registrationClient = new ControlPlaneClient(clientConfig, {
+      fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
+      logSink: line => console.log(line),
+    });
+    let registration;
+    try { registration = (await registrationClient.registerTelegramUpdate(update)).value; }
+    catch { return context.json({ error: 'registration service unavailable' }, 503); }
+    const completed = registration?.step === 'complete';
+    session = {
+      username: completed ? `telegram-${sender.id}` : null,
+      telegramUserId: String(sender.id),
+      controlPlaneProfile: completed ? registration.profileId : null,
+      registrationStep: completed ? 'complete' : registration?.step,
+      registeredAt: completed ? (session?.registeredAt ?? Date.now()) : null,
+    };
+    await setSession(runtimeEnv.SESSIONS, message.chat.id, session, threadId);
+    const text = String(registration?.message ?? 'Продолжите регистрацию.');
+    if (env.TG_HTTP_TEST_MODE !== 'true') {
+      if (registration?.step === 'profile_name') {
+        await sendMessageWithKeyboard(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text,
+          [[{ text: 'Пропустить', callback_data: 'registration_skip' }]], {}, runtimeEnv);
+      } else await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text);
+    }
+    return context.json({ ok: true, registration, transcript: [text],
+      buttons: registration?.step === 'profile_name' ? [{ text: 'Пропустить', callbackData: 'registration_skip' }] : [] });
+  }
+
+  if (!env.INTAKE || env.INTAKE_DEBOUNCE === 'off') return context.json({ error: 'collector not configured' }, 503);
+  await createController(env, config).outbox.open();
 
   // Older sandbox builds silently assigned every sender the same synthetic
   // `integrator` profile. Keep those sessions inert and let the existing

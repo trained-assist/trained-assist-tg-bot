@@ -73,6 +73,44 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 
+  it('runs two-question registration through the signed sandbox Telegram update handler and returns the Skip button transcript', async () => {
+    const state = fixture();
+    state.env.TG_SLICE_OPEN_SANDBOX = 'true';
+    state.env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
+    state.env.TG_HTTP_TEST_MODE = 'true';
+    const cpUpdates = [];
+    const steps = [
+      { step: 'activity', message: 'Чем вы занимаетесь? Расскажите в паре предложений.' },
+      { step: 'social_url', message: 'Пришлите ссылку на соцсеть. Мы её не проверяем.' },
+      { step: 'profile_name', message: 'Как назвать профиль? /skip', profileId: undefined },
+      { step: 'complete', message: 'Профиль создан. Доступно 100000000 токенов.', profileId: 'prof-12345678-1234-4234-8234-123456789abc' },
+    ];
+    state.env.CONTROL_PLANE_SERVICE = { async fetch(url, init) {
+      cpUpdates.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(init.body) });
+      return Response.json(steps[cpUpdates.length - 1], { status: cpUpdates.length === 4 ? 200 : 202 });
+    } };
+    const sendText = (update_id, text) => state.send({ update_id, message: { ...state.update.message, message_id: update_id + 10, text } });
+    expect((await (await sendText(10, '/start')).json()).registration.step).toBe('activity');
+    expect((await (await sendText(11, 'I build web products and help small companies improve their analytics.')).json()).registration.step).toBe('social_url');
+    const optional = await (await sendText(12, 'https://example.org/profile')).json();
+    expect(optional).toMatchObject({ buttons: [{ text: 'Пропустить', callbackData: 'registration_skip' }] });
+    const skipped = await state.send({ update_id: 13, callback_query: { id: 'skip-1', data: 'registration_skip',
+      from: { id: 7 }, message: { ...state.update.message, message_id: 23, text: null } } });
+    expect(await skipped.json()).toMatchObject({ registration: { step: 'complete', profileId: 'prof-12345678-1234-4234-8234-123456789abc' } });
+    expect(cpUpdates).toHaveLength(4);
+    expect(cpUpdates.map(item => item.body.update.update_id)).toEqual([10, 11, 12, 13]);
+    expect(cpUpdates.every(item => item.headers.get('x-principal') === state.env.CONTROL_PLANE_PRINCIPAL)).toBe(true);
+    expect(state.collectorCalls).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(JSON.parse(await state.env.SESSIONS.get('isolated-ux:1001'))).toMatchObject({
+      telegramUserId: '7', controlPlaneProfile: 'prof-12345678-1234-4234-8234-123456789abc', registrationStep: 'complete',
+    });
+    const task = await state.send({ update_id: 14, message: { ...state.update.message, message_id: 24, text: 'Please research this topic' } });
+    expect(task.status).toBe(503);
+    expect(await task.json()).toMatchObject({ code: 'PROFILE_EXECUTION_NOT_ENABLED' });
+    expect(state.collectorCalls).toEqual([]);
+  });
+
   it('explains profile lookup after an unknown slash command without starting intake', async () => {
     const state = fixture();
     const update = { ...state.update, update_id: 4,
