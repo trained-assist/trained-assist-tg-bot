@@ -6,6 +6,8 @@ Telegram gateway Trained Assist на Cloudflare Worker. Отвечает за we
 
 Для user-originated проверки живого тестового бота, выбора между probability/Shturman lanes, проверки занятости и tail-команд см. [Telegram user E2E runbook](docs/TELEGRAM-USER-E2E.md).
 
+Операционная процедура восстановления зависшего stop-window в изолированном probability sandbox описана в [SANDBOX-STOP-WINDOW-RECOVERY.md](docs/SANDBOX-STOP-WINDOW-RECOVERY.md); production state она не затрагивает.
+
 ## Контракт поведения
 
 - Сохранять requestId, principal/profile, bot, chat/thread и destination до передачи задачи. Квитанция приёма не означает запуска/завершения.

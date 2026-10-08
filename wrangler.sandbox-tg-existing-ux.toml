@@ -75,6 +75,8 @@ MEDIA_PIPELINE = "off"
 TG_ACCEPT_ONLY_ENABLED = "false"
 TG_ACCEPT_ONLY_ENVIRONMENT = "sandbox"
 TG_ACCEPT_ONLY_MODE = "accept-only"
+# Narrow, owner-authenticated stop-window inspection and recovery.
+TG_SANDBOX_OPERATOR_RECOVERY = "enabled"
 # This bot is an isolated profile-login test lane; user profiles gate task input.
 # No chat/Telegram-user allowlist is used for ordinary login E2E scenarios.
 TG_SLICE_OPEN_SANDBOX = "true"
