@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 const PREVIEW_PREFIX = 'ta-tg-staging-';
 const PREVIEW_NAME = /^ta-tg-staging-[a-f0-9]{12}$/;
 const DEFAULT_BRANCH = 'main';
+const EXPECTED_CF_ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function workerNameForBranch(branch) {
@@ -161,6 +162,9 @@ async function main() {
   const event = JSON.parse(await readFile(eventPath, 'utf8'));
   const repository = required(process.env, 'GITHUB_REPOSITORY');
   const accountId = required(process.env, 'CF_ACCOUNT_ID');
+  if (accountId !== EXPECTED_CF_ACCOUNT_ID) {
+    throw new Error('CF_ACCOUNT_ID does not match the trained-assist sandbox account');
+  }
   const context = {
     eventName: required(process.env, 'GITHUB_EVENT_NAME'),
     repository,

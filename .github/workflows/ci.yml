@@ -258,6 +258,15 @@ jobs:
           SUFFIX=$(printf '%s' "$STAGING_BRANCH" | sha256sum | cut -c1-12)
           echo "worker=ta-tg-staging-$SUFFIX" >> "$GITHUB_OUTPUT"
           node scripts/staging/prepare-preview.mjs "ta-tg-staging-$SUFFIX"
+      - name: Verify Cloudflare account
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          if [ "$CF_ACCOUNT_ID" != "d740a05e9442c1d0feacae2dfc673e93" ]; then
+            echo "::error::CF_ACCOUNT_ID does not match the trained-assist sandbox account"
+            exit 1
+          fi
+          echo "Cloudflare account matches the trained-assist sandbox account"
       - name: Deploy isolated staging
         uses: cloudflare/wrangler-action@v3
         with:
