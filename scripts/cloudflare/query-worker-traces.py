@@ -97,7 +97,11 @@ if os.environ.get("CF_GENERATE_HEALTH_TRAFFIC") == "true":
         raise SystemExit("health traffic generation is only allowed for the production bot Worker")
     health_url = "https://trained-assist-tg-bot.skillset-apply.workers.dev/health"
     for _ in range(HEALTH_PROBE_COUNT):
-        request = urllib.request.Request(health_url, method="GET")
+        request = urllib.request.Request(
+            health_url,
+            headers={"User-Agent": "trained-assist-trace-probe/1.0"},
+            method="GET",
+        )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 health = json.load(response)
