@@ -32,6 +32,17 @@ class FailureRecordTest(unittest.TestCase):
         self.assertIsNone(MODULE.failure_record({"$metadata": {"message": "ordinary line"}}))
         self.assertIsNone(MODULE.failure_record({"source": {"event": "tg.intake.accepted"}}))
 
+    def test_reads_only_allowlisted_reconcile_status(self):
+        record = MODULE.failure_record({"source": {
+            "event": "tg.reconcile.status_observed", "profileId": "sandbox-profile",
+            "userTaskId": "ut-123", "status": "active", "stage": "executing",
+            "generation": 2, "answer": "private result", "chatId": 123,
+        }})
+        self.assertEqual(record, {
+            "event": "tg.reconcile.status_observed", "profileId": "sandbox-profile",
+            "userTaskId": "ut-123", "status": "active", "stage": "executing", "generation": 2,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()
