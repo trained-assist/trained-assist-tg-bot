@@ -2831,12 +2831,6 @@ export class IntakeBuffer {
     }
   }
 
-  async _ensureAlarmBy(retryAt) {
-    const now = Date.now();
-    const alarmAt = await this.state.storage.getAlarm();
-    if (!alarmAt || alarmAt <= now || alarmAt > retryAt) await this.state.storage.setAlarm(retryAt);
-  }
-
   async alarm() {
     try {
       await this._alarm();

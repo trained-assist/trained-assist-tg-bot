@@ -1,5 +1,6 @@
 name = "trained-assist-tg-ux-sandbox"
 main = "src/sandbox-tg/existing-ux.js"
+workers_dev = true
 compatibility_date = "2026-10-07"
 compatibility_flags = ["nodejs_compat"]
 
