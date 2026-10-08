@@ -13,7 +13,9 @@ routing/recovery scenarios continue running against isolated fixtures.
 
 Cost/lifecycle: one Worker and private Durable Object namespaces per branch;
 existing dedicated staging KV is bound but inaccessible in preview mode. No
-periodic traffic. The owning release must delete its preview after closure using
-wrangler delete --name <computed name> (after checking the exact
-branch/name), retaining required CI evidence first. Main's preview remains for
+periodic traffic. `cleanup-staging-preview.yml` removes the matching preview
+after a same-repository PR closes or a branch is deleted. A daily reconciliation
+removes previews for missing branches after a 24-hour grace period; manual runs
+default to dry-run. Cleanup only accepts the exact `ta-tg-staging-<12 hex>` name
+and never forces deletion through external bindings. Main's preview remains for
 subsequent releases. Existing shared staging and its MediaJob data stay untouched.
