@@ -354,25 +354,16 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       else expect(recoveredState.get('launching')).toHaveLength(1);
       expect(recoveredState.get('buf').map(item => item.text)).toEqual([testText]);
       if (boundary === 'pending-unsupported-cold') {
-        expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+        expect(providerMessages.some(item => item.text.includes('Текст сохранён в отложенной порции'))).toBe(true);
       } else if (boundary === 'pending-stop-no-launch') {
-        expect(providerMessages.some(item => item.text.includes('Это отдельная новая задача'))).toBe(true);
-        const launchBubble = visibleTelegramMessages().find(entry => entry.body.text.includes('Это отдельная новая задача'));
-        expect(latestTelegramButton('ws|auto|')).toBeDefined();
-        const beforeLaunchCount = cpIntakes.length;
-        const runButton = latestTelegramButton('ws|auto|');
-        expect(runButton).toBeDefined();
-        const independentLaunch = await webhook({ update_id: 9, callback_query: { id: 'workerd-independent-launch',
-          from: { id: 43, is_bot: false }, data: runButton.body.reply_markup.inline_keyboard.flat()
-            .find(button => button.callback_data.startsWith('ws|auto|')).callback_data,
-          message: { message_id: runButton.messageId, chat: { id: 42, type: 'private' } } } });
-        expect(independentLaunch.status).toBe(200);
-        expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
-        expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText]);
+        const bubble = latestTelegramButton('input_draft');
+        expect(bubble).toBeDefined();
+        expect(bubble.body.text).toContain('новый запуск не выполнялся');
+        expect(bubble.body.reply_markup.inline_keyboard.flat().some(button => button.callback_data.startsWith('ws|'))).toBe(false);
+        expect(cpIntakes).toEqual([]);
         expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'scenario-stop-window' });
-        expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
         return;
-      } else expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+      } else expect(providerMessages.some(item => item.text.includes('Текст сохранён в отложенной порции'))).toBe(true);
       expect(providerMessages.some(item => item.text.includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
       expect(cpIntakes).toEqual([]);
       expect(legacyRequests).toEqual([]);

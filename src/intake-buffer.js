@@ -134,6 +134,10 @@ function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) 
 // «вообще нет кнопки запустить … хотя я ни разу не нажимал») and the tap queues it
 // for right after the run (/flush busy → launchAfterRelease).
 const STATUS_BTN = [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]];
+// An unresolved stop is an admission barrier: keep the draft inspectable and
+// clearable, but do not expose any launch action until the stop is confirmed.
+const STOP_PENDING_BTN = [[{ text: '📋 Посмотреть input', callback_data: 'input_draft' }],
+  [{ text: '🧹 Очистить весь ввод', callback_data: 'intake_clear' }]];
 // Status overrides that themselves mean "the batch is taken" (📨 dispatching, 📥
 // queued) — even before `busy` is set the launch button must go.
 const TOOK_IT = /^(?:📨|📥)/;
@@ -1178,27 +1182,20 @@ export class IntakeBuffer {
       });
       if (buf === null) return json({ duplicate: true });
 
-      const independentForceLaunch = flush && pendingStopWindow && cpMode && FORCE_RUN_RE.test(text || '');
-      if (((await this.state.storage.get('busy')) === true && !independentForceLaunch)
-          || heldBehindPendingUnsupportedLaunch || (pendingStopWindow && !independentForceLaunch)) {
+      if ((await this.state.storage.get('busy')) === true
+          || heldBehindPendingUnsupportedLaunch || pendingStopWindow) {
         // A run or another launch barrier is still active. Hold new messages,
         // never auto-run them, and ACK them so the user isn't met with silence.
       if (pendingStopWindow) await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
       else await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
-        if (heldBehindPendingUnsupportedLaunch || pendingStopWindow) await sendTracked(this.env, msg.chat?.id,
-          pendingStopWindow && !heldBehindPendingUnsupportedLaunch
-            ? '🕒 Это отдельная новая задача. Старая ещё сверяется; запусти ввод кнопкой, не дожидаясь её.'
-            : '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
+        if (heldBehindPendingUnsupportedLaunch) await sendTracked(this.env, msg.chat?.id,
+          '🕒 Текст сохранён в отложенной порции. Предыдущая задача ещё сверяется; новый запуск не выполнялся.',
           {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
       }
       if (flush) {
         if (this.env.EXECUTION_BACKEND === 'control-plane') {
           if (!FORCE_RUN_RE.test(text || '')) return new Response('Explicit launch word required', { status: 400 });
-          if (pendingStopWindow) {
-            await this.state.storage.put('launchParallel', true);
-            await this.state.storage.delete('stopped');
-          }
           await this._dispatch();
           return json({ flushed: true });
         }
@@ -1847,12 +1844,11 @@ export class IntakeBuffer {
       const stopped = !!(await this.state.storage.get('stopped'));
       const stopPending = this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending === true;
       const busy = !!(await this.state.storage.get('busy'));
-      const canLaunchIndependently = cpMode && stopPending && items.length > 0;
       const stopLaunch = await this.state.storage.get('stopLaunch');
       const resumedHeld = (await this.state.storage.get('resumedHeld')) || 0;
       const n = items.length || count;
       const text = stopPending && items.length
-        ? `⏳ Старая задача ещё сверяется. Этот независимый ввод можно запустить отдельно.`
+        ? `⏳ Текст сохранён (${n} сообщ.). Старая задача ещё сверяется; новый запуск не выполнялся.`
         : (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
         : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
@@ -1864,9 +1860,10 @@ export class IntakeBuffer {
       // release) describes input that has already left for the agent.
       // busy deliberately does NOT mask ▶️ — held input is a batch of its own, and
       // killing the button here left the chat with no way to launch it (issue #303).
-      const keyboard = (queued || stopLaunch) ? CANCEL_BTN
+      const keyboard = stopPending && items.length ? STOP_PENDING_BTN
+        : (queued || stopLaunch) ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
-        : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
+        : busy ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
           ? workStyleKeyboard(draftRevision)
         : LAUNCH_BTN;

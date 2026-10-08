@@ -459,17 +459,20 @@ describe('existing collector control-plane ownership', () => {
     expect(buttons).toEqual(expect.arrayContaining(['intake_stopsupp', 'intake_stopnew']));
   });
 
-  it('offers an independent launch while stop reconciliation is unresolved', async () => {
+  it('keeps pending-stop input inspectable without exposing a launch action', async () => {
     const { owner, storage, source } = await stopFixture();
     await owner.fetch(rpc('/stop', source));
     await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
     await owner._showCollector(42, 1, 2, null, '⛔ Остановлено');
-    expect(send.mock.calls.at(-1)[2]).toBe('⏳ Старая задача ещё сверяется. Этот независимый ввод можно запустить отдельно.');
-    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
+    expect(send.mock.calls.at(-1)[2]).toBe('⏳ Текст сохранён (1 сообщ.). Старая задача ещё сверяется; новый запуск не выполнялся.');
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(callbacks).toContain('input_draft');
+    expect(callbacks).toContain('intake_clear');
+    expect(callbacks.some(data => data.startsWith('ws|') || data === 'intake_run' || data === 'intake_parallel')).toBe(false);
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
-  it('retains stopped task identities across terminal polling and restart; independent input launches without waiting', async () => {
+  it('retains stopped task identities across terminal polling and restart without launching held input', async () => {
     const { owner, storage, env, source } = await stopFixture();
     env.SESSIONS = owner.env.SESSIONS;
     expect((await owner.fetch(rpc('/stop', source))).status).toBe(200);
@@ -485,12 +488,14 @@ describe('existing collector control-plane ownership', () => {
     expect(targets.tasks).toEqual([{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
       profileId: receipt.profileId, receiptId: 'receipt:test' }]);
     expect(targets.unresolved).toBe(true);
-    await restarted.fetch(rpc('/append', { text: 'запускай', msg: { chat: { id: 42 }, message_id: 2, text: 'запускай' }, telegramUpdateId: 102, flush: true }));
-    expect(handleMessage).toHaveBeenCalledTimes(1);
-    expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true });
-    expect(await storage.get('stopped')).toBeUndefined();
-    expect((await storage.get('buf')) || []).toEqual([]);
+    const held = await restarted.fetch(rpc('/append', { text: 'ещё ввод', msg: { chat: { id: 42 }, message_id: 2, text: 'ещё ввод' }, telegramUpdateId: 102 }));
+    expect(await held.json()).toMatchObject({ buffered: 1, held: true });
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('stopped')).toBeDefined();
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['ещё ввод']);
     expect((await storage.get('cpStopWindow')).pending).toBe(true);
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(callbacks.some(data => data.startsWith('ws|') || data === 'intake_run' || data === 'intake_parallel')).toBe(false);
   });
 
   it('stop clears only the local unlaunched draft and keeps old task evidence for reconciliation', async () => {
@@ -1200,7 +1205,7 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('cpBusyRequests')).toEqual([accepted.requestId]);
     expect(await storage.get('launching')).toEqual(media);
     expect((await storage.get('buf')).map(item => item.text)).toEqual(['не добавлять']);
-    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранён в отложенной порции'))).toBe(true);
   });
 
   it('holds text when a cold DO has only the durable unsupported launch checkpoint', async () => {
@@ -1225,7 +1230,7 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('launching')).toBeUndefined();
     expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
-    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранён в отложенной порции'))).toBe(true);
     expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
   });
 
@@ -1275,9 +1280,9 @@ describe('existing collector control-plane ownership', () => {
     expect(await response.json()).toMatchObject({ buffered: 1, held: true });
     expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
     expect(await storage.get('debounceExpiresAt')).toBeUndefined();
-    expect(send.mock.calls.some(call => String(call[2]).includes('Это отдельная новая задача'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Это отдельная новая задача'))).toBe(false);
     expect(send.mock.calls.some(call => call[3] && Array.isArray(call[3]) && call[3].flat()
-      .some(button => button.callback_data.startsWith('ws|answer|')))).toBe(true);
+      .some(button => button.callback_data.startsWith('ws|')))).toBe(false);
     expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
   });
 
