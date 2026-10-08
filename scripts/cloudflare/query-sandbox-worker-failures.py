@@ -21,7 +21,7 @@ API = (
 )
 
 
-def failure_record(event):
+def diagnostic_record(event):
     metadata = event.get("$metadata") or event.get("metadata") or {}
     source = event.get("source")
     message = metadata.get("message")
@@ -36,16 +36,21 @@ def failure_record(event):
         if isinstance(candidate, dict):
             parsed.append(candidate)
 
-    log = next((item for item in parsed if item.get("event") in {
-        "tg.reconcile.failed", "tg.reconcile.status_observed",
-    }), None)
+    allowed_events = {
+        "tg.reconcile.failed",
+        "tg.reconcile.status_observed",
+        "tg.callback.launch_refused",
+        "tg.intake.launch_refused",
+        "tg.intake.callback_refused",
+    }
+    log = next((item for item in parsed if item.get("event") in allowed_events), None)
     if log is None:
         return None
     record = {"event": log["event"]}
     timestamp = event.get("timestamp") or metadata.get("timestamp")
     if isinstance(timestamp, (int, float)):
         record["timestamp"] = timestamp
-    for key in ("profileId", "userTaskId", "boundary", "failure", "status", "stage", "generation", "errorType"):
+    for key in ("profileId", "userTaskId", "boundary", "failure", "status", "stage", "generation", "errorType", "reasonCode", "endpoint"):
         value = log.get(key)
         if isinstance(value, (str, int)) and len(str(value)) <= 200:
             record[key] = value
@@ -101,13 +106,18 @@ def main():
         print(json.dumps({"errors": result.get("errors", [])}), file=sys.stderr)
         raise SystemExit(1)
     events = result.get("result", {}).get("events", {}).get("events", [])
-    failures = [record for event in events if (record := failure_record(event))]
+    diagnostics = [record for event in events if (record := diagnostic_record(event))]
+    callback_refusals = [record for record in diagnostics if record["event"] in {
+        "tg.callback.launch_refused", "tg.intake.launch_refused", "tg.intake.callback_refused",
+    }]
+    reconciliation = [record for record in diagnostics if record["event"].startswith("tg.reconcile.")]
     print(json.dumps({
         "worker": WORKER,
         "windowHours": 24,
         "returnedEventCount": len(events),
         "truncated": result.get("result", {}).get("truncated", False),
-        "reconciliationFailures": failures,
+        "callbackRefusals": callback_refusals,
+        "reconciliationEvents": reconciliation,
     }, indent=2))
 
 
