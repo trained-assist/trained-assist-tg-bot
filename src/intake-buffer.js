@@ -1255,7 +1255,7 @@ export class IntakeBuffer {
       else await this._showHeldNotice(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
         if (heldBehindPendingUnsupportedLaunch || pendingStopWindow) await sendTracked(this.env, msg.chat?.id,
           pendingStopWindow && !heldBehindPendingUnsupportedLaunch
-            ? '🕒 Это отдельная новая задача. Старая ещё сверяется; запусти ввод кнопкой, не дожидаясь её.'
+            ? '🕒 Текст сохранил отдельно. Старая задача всё ещё сверяется. Кнопки в сообщении выше запустят этот ввод отдельной задачей.'
             : '🕒 Текст сохранил в отдельной отложенной порции. Предыдущая ещё сверяется с запуском; новую задачу не запускал. После сверки можно будет запустить этот текст.',
           {}, threadIdOf(msg)).catch(() => null);
         return json({ buffered: buf.length, held: true });
@@ -1290,9 +1290,15 @@ export class IntakeBuffer {
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
       const authorized = await this._exclusive(async () => {
         if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return false;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' &&
-            (this.cpDispatches || (await this._activeUnresolvedLaunches()).length)) return false;
-        if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return false;
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          const stopWindow = await this.state.storage.get('cpStopWindow');
+          const unresolved = await this._activeUnresolvedLaunches();
+          const belongsToPendingStop = parallel && stopWindow?.pending === true
+            && Array.isArray(stopWindow.admissionLaunchKeys)
+            && unresolved.every(key => stopWindow.admissionLaunchKeys.includes(key));
+          if (this.cpDispatches || (unresolved.length && !belongsToPendingStop)) return false;
+          if (stopWindow?.pending && !parallel) return false;
+        }
         if (styleLaunch) {
           await this.state.storage.put('launchWorkStyle', styleLaunch[1]);
           await this.state.storage.put('launchWorkStyleSource', 'explicit');
@@ -1319,7 +1325,12 @@ export class IntakeBuffer {
         // Set the intent BEFORE the self-heal: if the hold turns out to be stale
         // (run already dead), the released window dispatches — still in parallel mode.
         if (parallel) await this.state.storage.put('launchParallel', true);
-        if (!(await this._pollRunFinishedIfIdle(since, { launch: true }))) {
+        // A tap on the separately-owned draft must not reconcile or release the
+        // old stop window. Dispatch this explicit parallel batch in its own
+        // session while preserving the old task's pending evidence.
+        const stopWindowPending = this.env.EXECUTION_BACKEND === 'control-plane'
+          && (await this.state.storage.get('cpStopWindow'))?.pending === true;
+        if ((stopWindowPending && parallel) || !(await this._pollRunFinishedIfIdle(since, { launch: true }))) {
           // Only promise a queued launch when there IS held input to launch after
           // the run. A stale/duplicate tap on a run that already swallowed its own
           // batch has nothing to queue — arm nothing and stay silent (дыра №4):
@@ -1944,7 +1955,9 @@ export class IntakeBuffer {
           await this.state.storage.put(`cp-unknown-dismiss:${token}`, { ...unknownDismiss, messageId: null });
         }
       }
-      const keyboard = (queued || stopLaunch) ? CANCEL_BTN
+      // A pending stop belongs to the old run. Its stale queue/stop action must
+      // not hide controls for this distinct, still-unlaunched draft.
+      const keyboard = (queued || stopLaunch) && !canLaunchIndependently ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
@@ -1975,8 +1988,10 @@ export class IntakeBuffer {
           if (cpMode && batch?.batchId) await this.state.storage.put('collectorBatchId', batch.batchId);
           return prevId;
         }
-        // A transient edit error must not create a duplicate control message.
-        if (!/message to edit not found/i.test(edited?.description || '')) {
+        // During unresolved stop, the user needs a visible launch control for the
+        // independent draft. If Telegram cannot edit the prior collector, publish
+        // a fresh one (the old bubble is neutralized below when the send succeeds).
+        if (!canLaunchIndependently && !/message to edit not found/i.test(edited?.description || '')) {
           await this._scheduleReceipt();
           return prevId;
         }

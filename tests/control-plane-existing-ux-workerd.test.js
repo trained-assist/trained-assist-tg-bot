@@ -78,7 +78,20 @@ function existingUxWorkerdBundle() {
           }
           if (path === '/scenario-seed-pending-stop-no-launch') {
             if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
-            await this.state.storage.put('cpStopWindow', { pending: true, intentId: 'scenario-stop-window' });
+            await this.state.storage.put('cpStopWindow', { pending: true, unresolved: true,
+              stopConfirmed: false, intentId: 'scenario-stop-window', admissionLaunchKeys: ['[7]'],
+              admissionRequestIds: ['old-request'], tasks: [{ requestId: 'old-request', userTaskId: 'ut-workerd-old' }] });
+            await this.state.storage.put('busy', true);
+            await this.state.storage.put('busyChatId', 42);
+            await this.state.storage.put('busySince', Date.now() - 60000);
+            await this.state.storage.put('cpBusyRequests', ['old-request']);
+            await this.state.storage.put('cp-acceptance:old-request', { receipt: { requestId: 'old-request',
+              userTaskId: 'ut-workerd-old', profileId: 'workerd-profile' }, terminal: false });
+            await this.state.storage.put('cpUnresolvedLaunches', ['[7]']);
+            await this.state.storage.put('cp-launch:[7]', { userDismissed: false,
+              snapshotRequestId: 'old-request', profileId: 'workerd-profile',
+              botUsername: 'probability_cat_bot',
+              msg: { message_id: 7, chat: { id: 42 }, text: 'old task' } });
             return Response.json({ seeded: true });
           }
           return super.fetch(request);
@@ -359,6 +372,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     }
     if (boundary === 'pending-unsupported-cold' || boundary === 'pending-unsupported-launching' ||
         boundary === 'pending-unsupported-launching-lost-busy' || boundary === 'pending-stop-no-launch') {
+      if (boundary === 'pending-stop-no-launch') admittedTasks.set('workerd-profile:old-request', {
+        envelope: { profileId: 'workerd-profile', requestId: 'old-request' }, taskId: 'ut-workerd-old' });
       const seedPath = boundary === 'pending-unsupported-cold'
         ? 'scenario-seed-pending-unsupported'
         : boundary === 'pending-unsupported-launching-lost-busy'
@@ -378,8 +393,9 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect(await acceptedText.json()).toMatchObject({ ok: true, buffered: 1 });
       const recoveredState = await state();
       if (boundary === 'pending-unsupported-cold') expect(recoveredState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
+      else if (boundary === 'pending-stop-no-launch') expect(recoveredState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
       else expect(recoveredState.get('cpUnresolvedLaunches')).toBeUndefined();
-      if (boundary === 'pending-unsupported-launching-lost-busy' || boundary === 'pending-stop-no-launch') expect(recoveredState.get('busy')).toBeUndefined();
+      if (boundary === 'pending-unsupported-launching-lost-busy') expect(recoveredState.get('busy')).toBeUndefined();
       else expect(recoveredState.get('busy')).toBe(true);
       if (boundary === 'pending-unsupported-cold' || boundary === 'pending-stop-no-launch') expect(recoveredState.get('launching')).toBeUndefined();
       else expect(recoveredState.get('launching')).toHaveLength(1);
@@ -387,8 +403,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       if (boundary === 'pending-unsupported-cold') {
         expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
       } else if (boundary === 'pending-stop-no-launch') {
-        expect(providerMessages.some(item => item.text.includes('Это отдельная новая задача'))).toBe(true);
-        const launchBubble = visibleTelegramMessages().find(entry => entry.body.text.includes('Это отдельная новая задача'));
+        expect(providerMessages.some(item => item.text.includes('Текст сохранил отдельно'))).toBe(true);
         expect(latestTelegramButton('ws|auto|')).toBeDefined();
         const beforeLaunchCount = cpIntakes.length;
         const runButton = latestTelegramButton('ws|auto|');
@@ -400,7 +415,16 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(independentLaunch.status).toBe(200);
         expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
         expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText]);
-        expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'scenario-stop-window' });
+        expect(providerMessages.some(item => item.text.includes('Запускаю параллельно — новая сессия'))).toBe(true);
+        expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes.at(-1).requestId}`).taskId).not.toBe('ut-workerd-old');
+        const launchedState = await state();
+        expect(launchedState.get('cpStopWindow')).toMatchObject({ pending: true,
+          intentId: 'scenario-stop-window', admissionLaunchKeys: ['[7]'],
+          admissionRequestIds: ['old-request'], tasks: [{ requestId: 'old-request', userTaskId: 'ut-workerd-old' }] });
+        expect(launchedState.get('cpUnresolvedLaunches')).toEqual(['[7]']);
+        const sessionRecords = [...launchedState].filter(([key]) => key.startsWith('cp-session:')).map(([, value]) => value);
+        expect(sessionRecords).toHaveLength(1);
+        expect(sessionRecords[0].sessionId).not.toBe('workerd-source-session');
         expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
         return;
       } else expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
