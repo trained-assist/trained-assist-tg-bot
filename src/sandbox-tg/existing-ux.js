@@ -89,7 +89,8 @@ app.post('/webhook', async context => {
     // CP has quota accounting and the Agent API workspace capability configured.
     return context.json({ error: 'profile execution is not enabled for this sandbox yet', code: 'PROFILE_EXECUTION_NOT_ENABLED' }, 503);
   }
-  if (config.openSandbox && message.chat.type === 'private' && (command === '/start' || registrationInProgress || !session)) {
+  if (config.openSandbox && message.chat.type === 'private'
+      && (command === '/start' || registrationInProgress)) {
     const clientConfig = { ...config, telegramUserId: String(sender.id) };
     const registrationClient = new ControlPlaneClient(clientConfig, {
       fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
