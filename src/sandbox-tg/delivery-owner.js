@@ -1,4 +1,4 @@
-import { readTgSliceConfig, TgSliceConfigError } from './config.js';
+import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
 import { isTestChat } from '../lib/test-mode.js';
 
@@ -28,7 +28,7 @@ export function cutoverManifest(env, config = readTgSliceConfig(env)) {
       manifest.deliveries.some(record => !exact(record, ['deliveryId', 'userTaskId', 'destination', 'priorStatus', 'providerMessageId', 'attempts',
         ...(Object.hasOwn(record ?? {}, 'history') ? ['history'] : []), ...(Object.hasOwn(record ?? {}, 'observedProviderMessageIds') ? ['observedProviderMessageIds'] : [])]) ||
         !reference(record.deliveryId) || !manifest.oldTaskIds.includes(record.userTaskId) ||
-        !exact(record.destination, ['chatId', 'threadId']) || !Number.isSafeInteger(record.destination.chatId) || !config.allowedChats.includes(String(record.destination.chatId)) ||
+        !exact(record.destination, ['chatId', 'threadId']) || !Number.isSafeInteger(record.destination.chatId) || !chatAllowed(config, record.destination.chatId) ||
         (record.destination.threadId !== null && (!Number.isSafeInteger(record.destination.threadId) || record.destination.threadId <= 0)) ||
         !['pending', 'retrying', 'sending', 'sent', 'dead', 'unknown', 'quarantined'].includes(record.priorStatus) ||
         (record.providerMessageId !== null && (!Number.isSafeInteger(record.providerMessageId) || record.providerMessageId <= 0)) ||
@@ -131,7 +131,7 @@ export class TgDeliveryOwner {
           const records = [...(await this.state.storage.list({ prefix: 'delivery:' })).values()].filter(record => record.userTaskId === body.taskId);
           const receipt = records.find(record => record.deliveryId.startsWith('receipt:')) ?? records.find(record => record.deliveryId === body.taskId);
           const terminal = records.filter(record => record.deliveryId.startsWith('terminal:')).sort((first, second) => generation(second) - generation(first))[0];
-          if (records.some(record => !config.allowedChats.includes(String(record.destination.chatId)))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
+          if (records.some(record => !chatAllowed(config, record.destination.chatId))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
           return Response.json({ receipt: summary(receipt), terminal: summary(terminal) });
         }
         if (route === '/drain') {
@@ -145,7 +145,7 @@ export class TgDeliveryOwner {
 
   async enqueue(input, config) {
     const deliveryId = input.deliveryId ?? input.userTaskId;
-    if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !config.allowedChats.includes(String(input.destination?.chatId)) ||
+    if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !chatAllowed(config, input.destination?.chatId) ||
         !['message', 'launch'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
     const payload = { deliveryId, userTaskId: input.userTaskId, conversationId: input.conversationId ?? null,
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
@@ -174,7 +174,7 @@ export class TgDeliveryOwner {
       const records = [...(await storage.list({ prefix: 'delivery:' })).values()].sort((first, second) => first.createdAt - second.createdAt);
       const record = records.find(item => ['pending', 'retrying'].includes(item.status) && (item.nextAttemptAt ?? 0) <= Date.now());
       if (!record) return null;
-      if (!config.allowedChats.includes(String(record.destination.chatId))) throw new Error();
+      if (!chatAllowed(config, record.destination.chatId)) throw new Error();
       const claimed = { ...record, status: 'sending', attempts: record.attempts + 1, dispatchedAt: Date.now() };
       await storage.put(key(record.deliveryId), claimed);
       return claimed;

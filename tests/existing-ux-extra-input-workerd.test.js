@@ -12,7 +12,7 @@ const answer = 'Offline aggregate fixture: preserved first and additional input.
 
 function bundle() {
   return buildSync({ stdin: { resolveDir: process.cwd(), contents: `
-    import worker, { IntakeBuffer as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
+    import worker, { IntakeBufferReset as RealIntakeBuffer, TgDeliveryOwner } from './src/sandbox-tg/existing-ux.js';
     export default worker;
     export { TgDeliveryOwner };
     export class IntakeBuffer extends RealIntakeBuffer {
@@ -39,6 +39,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     CONTROL_PLANE_SESSION_ID: 'extra-input-session', TG_SLICE_ALLOWED_CHATS: '42', TG_SLICE_ALLOWED_USERS: '43',
     TG_SANDBOX_BOT_TOKEN: 'offline-extra-input-token', TELEGRAM_WEBHOOK_SECRET: 'offline-extra-input-webhook',
     TG_SLICE_STOP_ENABLED: 'false', TG_SLICE_DELIVERY_PAUSED: 'false', EXECUTION_BACKEND: 'control-plane',
+    SESSION_NAMESPACE: 'integrator-existing-ux-v1',
     AGENT_URL: 'https://legacy.test', TELEGRAM_API_BASE: 'https://api.telegram.org',
     TG_SLICE_DELIVERY_CUTOVER_MANIFEST: JSON.stringify({ version: 'tg-delivery-cutover-v1',
       botUsername: 'probability_cat_bot', profileId: 'extra-input-profile', cutoverId: 'offline-extra-input',
@@ -138,6 +139,10 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
   };
   try {
     runtime = new Miniflare(options);
+    await (await runtime.getKVNamespace('SESSIONS')).put('integrator-existing-ux-v1:42', JSON.stringify({
+      username: 'extra-input-user', controlPlaneProfile: 'extra-input-profile',
+      activeSessionId: 'extra-input-session', lastSessionId: 'extra-input-session',
+    }));
     const first = message(200, '[Offline fixture] Preserve this first instruction and value 150.');
     const extra = message(201, 'Additional input: also preserve value 275. Reply using both values; no files.');
     await sendUpdate(first);

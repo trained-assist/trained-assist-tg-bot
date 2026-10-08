@@ -217,7 +217,11 @@ export async function cmdLogin(msg, env) {
     );
   }
 
-  const user = await getUser(env.USERS, username);
+  // UX sandbox profiles are authored through the existing production admin flow.
+  // Check the sandbox-local copy first (created by sandbox /pass_reset), then
+  // read the production registry without ever writing to it.
+  const user = await getUser(env.USERS, username) ||
+    (env.LOGIN_USERS ? await getUser(env.LOGIN_USERS, username) : null);
   if (!user) {
     return sendIn(env, chatId, threadId, '❌ Пользователь не найден.');
   }
@@ -236,6 +240,7 @@ export async function cmdLogin(msg, env) {
   // the flaky-count dependency. Reversible: /all_off turns it back off.
   await setSession(env.SESSIONS, chatId, {
     username, name: user.name, telegramUserId: from?.id,
+    ...(env.CONTROL_PLANE_PROFILE ? { controlPlaneProfile: env.CONTROL_PLANE_PROFILE } : {}),
     ...(isGroup ? { allMsgMode: true } : {}),
   }, threadId);
   return sendIn(env, chatId, threadId,

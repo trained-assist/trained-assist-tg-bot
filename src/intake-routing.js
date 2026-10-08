@@ -22,10 +22,8 @@ export function hasIntakeContent(msg) {
   return !!(msg && (msg.text || msg.photo || msg.voice || msg.audio || msg.document || msg.video));
 }
 
-/** True when a message should be routed through the intake accumulator. */
-export function shouldDebounce(msg, env) {
-  if (env.INTAKE_DEBOUNCE === 'off') return false; // kill-switch; default ON
-  if (!env.INTAKE) return false;                   // binding missing → fail open
+/** True when user content belongs in intake; deployment faults never bypass it. */
+export function shouldDebounce(msg, _env) {
   const text = msg.text;
   if (text && text.startsWith('/')) return false;  // commands bypass
   // Media WITHOUT text (photo/voice/doc/audio/video) MUST also accumulate — the

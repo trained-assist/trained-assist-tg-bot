@@ -8,6 +8,17 @@ deployed bot and got a visible response.
 
 ## Before sending
 
+### Deploying the isolated probability sandbox
+
+To deploy the exact `main` revision to the probability test bot, use the
+GitHub Actions workflow **Deploy Telegram sandbox** with branch `main` and
+target `probability-sandbox`. The target defaults to `skip`; the workflow is
+limited to `trained-assist-tg-ux-sandbox`, verifies Cloudflare identity before
+deployment, then checks the active deployment metadata and public `/health`.
+It uses the repository's `CF_API_TOKEN` and `CF_ACCOUNT_ID` secrets without
+printing their values. This deploy/health check is not Telegram scenario
+acceptance; continue with the lane and live-input procedure below.
+
 1. Choose an unclaimed lane in [architecture sandbox issue #185](https://github.com/trained-assist/trained-agent-architecture/issues/185). Available ingress lanes:
 
    | Bot | Worker | Wrangler config |

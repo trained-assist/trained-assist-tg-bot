@@ -7,6 +7,7 @@ describe('isUserMgmtCommand', () => {
     ['/listusers'],
     ['/deluser bob'],
     ['/resetpass alice'],
+    ['/pass_reset alice'],
     ['/um'],
     ['/stats'],
   ])('returns true for admin command: %s', (text) => {
@@ -16,6 +17,7 @@ describe('isUserMgmtCommand', () => {
   it.each([
     ['/start'],
     ['/login user pass'],
+    ['/pass_resetter alice'],
     ['/logout'],
     ['/status'],
     ['hello'],

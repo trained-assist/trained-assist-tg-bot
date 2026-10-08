@@ -1,9 +1,13 @@
 name = "trained-assist-tg-ux-sandbox"
 main = "src/sandbox-tg/existing-ux.js"
-compatibility_date = "2024-01-01"
+workers_dev = true
+compatibility_date = "2026-10-07"
 compatibility_flags = ["nodejs_compat"]
 
 [observability]
+enabled = true
+
+[observability.traces]
 enabled = true
 
 [triggers]
@@ -45,6 +49,12 @@ id = "915ffeedb74440538009bdc1bd00d381"
 binding = "SESSIONS"
 id = "915ffeedb74440538009bdc1bd00d381"
 
+# Read existing profile records created by the production admin flow. Runtime
+# login only reads this namespace; sandbox password resets are written to TG_SLICE.
+[[kv_namespaces]]
+binding = "PRODUCTION_USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
 [[services]]
 binding = "CONTROL_PLANE_SERVICE"
 service = "trained-assist-cp-telegram-ux-v1-sandbox"
@@ -53,6 +63,9 @@ service = "trained-assist-cp-telegram-ux-v1-sandbox"
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
 TG_SLICE_DELIVERY_PAUSED = "false"
+# In explicitly allowlisted test chats, keep normal intake/CP behavior but capture outbound
+# Telegram effects in Workers Logs. Other sandbox users retain ordinary bot delivery.
+TG_HTTP_TEST_MODE = "true"
 TG_SLICE_REQUEST_TIMEOUT_MS = "60000"
 TG_SLICE_STOP_ENABLED = "true"
 EXECUTION_BACKEND = "control-plane"
@@ -62,4 +75,6 @@ MEDIA_PIPELINE = "off"
 TG_ACCEPT_ONLY_ENABLED = "false"
 TG_ACCEPT_ONLY_ENVIRONMENT = "sandbox"
 TG_ACCEPT_ONLY_MODE = "accept-only"
-TG_HTTP_TEST_MODE = "true"
+# This bot is an isolated profile-login test lane; user profiles gate task input.
+# No chat/Telegram-user allowlist is used for ordinary login E2E scenarios.
+TG_SLICE_OPEN_SANDBOX = "true"

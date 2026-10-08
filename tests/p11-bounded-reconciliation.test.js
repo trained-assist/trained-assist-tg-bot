@@ -34,6 +34,79 @@ async function fixture(counts = [40, 3]) {
 }
 
 describe('bounded autonomous delivery discovery', () => {
+  it('logs a safe boundary when conversation-index discovery fails', async () => {
+    const { env } = await fixture([]);
+    const log = vi.mocked(console.log);
+    log.mockClear();
+    vi.spyOn(env.TG_SLICE, 'list').mockRejectedValue(new Error('private-chat-id-123 and message text'));
+
+    await worker.scheduled({ cron: '* * * * *' }, env);
+
+    const event = log.mock.calls.map(([line]) => JSON.parse(line))
+      .find(entry => entry.event === 'tg.reconcile.failed');
+    expect(event).toMatchObject({ reason: 'discovery_unavailable', boundary: 'conversation_index_list', failure: 'operation_failed' });
+    expect(JSON.stringify(event)).not.toContain('private-chat-id-123');
+    expect(JSON.stringify(event)).not.toContain('message text');
+  });
+
+  it('correlates a caught Control Plane status rejection without logging response data', async () => {
+    const { env } = await fixture([]);
+    const userTaskId = 'ut-safe-correlation-123';
+    await env.TG_SLICE.put('conv:tg-1001', JSON.stringify({
+      conversationId: 'tg-1001', profileId: env.CONTROL_PLANE_PROFILE,
+      destination: { chatId: 1001, threadId: null }, requestingBot: env.TG_SANDBOX_BOT_USERNAME,
+      turns: [{ kind: 'new', userTaskId, requestId: 'private-request-id', providerAcceptedAt: Date.now() }],
+      cursors: {},
+    }));
+    const original = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input, init) => {
+      if (new URL(input).pathname === '/status') {
+        return Response.json({ error: 'signature_mismatch', text: 'private user message', token: 'private-secret' }, { status: 401 });
+      }
+      return original(input, init);
+    });
+    const log = vi.mocked(console.log);
+    log.mockClear();
+
+    await worker.scheduled({ cron: '* * * * *' }, env);
+
+    const event = log.mock.calls.map(([line]) => JSON.parse(line))
+      .find(entry => entry.event === 'tg.reconcile.failed');
+    expect(event).toMatchObject({ event: 'tg.reconcile.failed', boundary: 'control_plane_status', failure: 'http_401',
+      status: 401, profileId: env.CONTROL_PLANE_PROFILE, userTaskId });
+    expect(JSON.stringify(event)).not.toContain('private-request-id');
+    expect(JSON.stringify(event)).not.toContain('tg-1001');
+    expect(JSON.stringify(event)).not.toContain('private user message');
+    expect(JSON.stringify(event)).not.toContain('private-secret');
+  });
+
+  it('classifies a Control Plane timeout without logging the error message', async () => {
+    const { env } = await fixture([]);
+    const userTaskId = 'ut-safe-timeout-123';
+    await env.TG_SLICE.put('conv:tg-1001', JSON.stringify({
+      conversationId: 'tg-1001', profileId: env.CONTROL_PLANE_PROFILE,
+      destination: { chatId: 1001, threadId: null }, requestingBot: env.TG_SANDBOX_BOT_USERNAME,
+      turns: [{ kind: 'new', userTaskId, providerAcceptedAt: Date.now() }], cursors: {},
+    }));
+    const original = globalThis.fetch;
+    vi.stubGlobal('fetch', (input, init) => {
+      if (new URL(input).pathname === '/status') {
+        return Promise.reject(Object.assign(new Error('private response body'), { name: 'TimeoutError' }));
+      }
+      return original(input, init);
+    });
+    const log = vi.mocked(console.log);
+    log.mockClear();
+
+    await worker.scheduled({ cron: '* * * * *' }, env);
+
+    const event = log.mock.calls.map(([line]) => JSON.parse(line))
+      .find(entry => entry.event === 'tg.reconcile.failed');
+    expect(event).toMatchObject({ boundary: 'control_plane_status', failure: 'timeout',
+      errorType: 'TimeoutError', profileId: env.CONTROL_PLANE_PROFILE, userTaskId });
+    expect(JSON.stringify(event)).not.toContain('private response body');
+  });
+
   it('drains queued records before large finite history discovery and never requests event pages', async () => {
     const { env, client, provider, statuses } = await fixture([1000]);
     const source = await env.TG_SLICE.get('conv:tg-1001-t1');

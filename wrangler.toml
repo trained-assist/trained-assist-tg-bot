@@ -9,6 +9,12 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# Keep production traces available for diagnosis without tracing every invocation.
+# Cloudflare bills stored trace ingestion/storage starting 2026-12-01.
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.05
+
 # Durable recovery queue: two visible attempts, three minutes apart.
 [triggers]
 crons = ["* * * * *"]

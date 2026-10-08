@@ -837,7 +837,8 @@ export async function handleCallbackQuery(cq, env) {
     if (!env.INTAKE) return;
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const response = await stub.fetch('https://intake/dismiss-unknown', { method: 'POST',
-      body: JSON.stringify(callbackSource(cq, env, session)) }).catch(() => null);
+      // The DO verifies the source message and signed-in profile on both backends.
+      body: JSON.stringify({ messageId: message?.message_id, callbackData: data, username: session.username }) }).catch(() => null);
     if (!response?.ok) await sendT(env, chatId, threadId,
       '⌛ Не получилось снять ожидание. Старая задача и её статус не изменены; используй последнее сообщение.');
     return;

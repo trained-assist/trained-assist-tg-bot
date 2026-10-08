@@ -1,0 +1,105 @@
+name: Deploy Telegram sandbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deploy only the isolated probability Telegram sandbox
+        required: true
+        type: choice
+        options:
+          - skip
+          - probability-sandbox
+        default: skip
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    if: ${{ inputs.target != 'skip' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the protected main revision and exact target
+        env:
+          TARGET: ${{ inputs.target }}
+          REF: ${{ github.ref }}
+        run: |
+          test "$REF" = "refs/heads/main"
+          test "$TARGET" = "probability-sandbox"
+          echo "Approved target: trained-assist-tg-ux-sandbox"
+
+  deploy-probability-sandbox:
+    needs: [guard]
+    if: ${{ inputs.target == 'probability-sandbox' && needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Verify the expected Cloudflare account
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          test "$CLOUDFLARE_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
+          npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
+          node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const accounts = Array.isArray(identity.accounts) ? identity.accounts : [];
+          const account = accounts.find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
+          if (identity.loggedIn !== true || identity.email?.toLowerCase() !== 'typeformowner@gmail.com' || !account) {
+            throw new Error('Cloudflare identity/account verification failed; no Worker operation is allowed');
+          }
+          console.log(`Verified ${identity.email} / ${account.id} (${account.name})`);
+          NODE
+
+      - name: Bundle the fixed sandbox Worker
+        run: npx wrangler deploy --dry-run --config wrangler.sandbox-tg-existing-ux.toml
+
+      - name: Deploy only the probability sandbox Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy.ndjson
+        run: npx wrangler deploy --strict --config wrangler.sandbox-tg-existing-ux.toml --message "sandbox-main-${GITHUB_SHA}"
+
+      - name: Verify active deployment and public liveness
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          npx wrangler deployments status --name trained-assist-tg-ux-sandbox --json > "$RUNNER_TEMP/deployment-status.json"
+          cat "$RUNNER_TEMP/deployment-status.json"
+          node --input-type=module - "$RUNNER_TEMP/deployment-status.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const status = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const text = JSON.stringify(status);
+          if (!text.includes(process.env.GITHUB_SHA)) {
+            throw new Error('Active deployment metadata does not identify the checked-out source SHA');
+          }
+          NODE
+          curl --fail --silent --show-error https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/health \
+            | node --input-type=module -e '
+              let input = "";
+              for await (const chunk of process.stdin) input += chunk;
+              const health = JSON.parse(input);
+              if (health.status !== "ok" || health.mode !== "existing-ux-control-plane") process.exit(1);
+              console.log(JSON.stringify({ status: health.status, mode: health.mode }));
+            '
+          {
+            echo "### Telegram sandbox deployment"
+            echo "- Source SHA: \`$GITHUB_SHA\`"
+            echo "- Worker: \`trained-assist-tg-ux-sandbox\`"
+            echo "- Cloudflare identity was verified before deployment."
+            echo "- Worker deployment status and /health smoke passed."
+          } >> "$GITHUB_STEP_SUMMARY"
