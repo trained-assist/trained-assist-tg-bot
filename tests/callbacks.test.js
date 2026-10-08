@@ -226,6 +226,27 @@ describe('callbacks — truthful pending-stop launch refusal', () => {
   });
 });
 
+describe('callbacks — pending-stop draft discard confirmation', () => {
+  it('reports that only the new draft was cleared and older task evidence was retained', async () => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn()
+      .mockResolvedValueOnce(Response.json({ owned: true }))
+      .mockResolvedValueOnce(Response.json({ discarded: true, draftOnly: true, count: 2,
+        pendingWindowPreserved: true })) };
+    const env = { BOT_TOKEN: 'test-token', SESSIONS: {}, EXECUTION_BACKEND: 'control-plane',
+      INTAKE: { idFromName: name => name, get: () => stub } };
+
+    await handleCallbackQuery({ id: 'cq-discard', data: 'intake_discard|4', from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    expect(stub.fetch).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledWith('test-token', 999,
+      '🧹 Черновик очищен (2 сообщений). Статус старой задачи и её данные сверки не изменены.', expect.any(Object));
+  });
+});
+
 
 describe('legacy checklist footer menu', () => {
   it.each([
