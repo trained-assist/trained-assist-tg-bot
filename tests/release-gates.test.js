@@ -25,29 +25,26 @@ it('release graph has unique jobs, valid dependencies and no cycles', () => {
   }
   for (const name of graph.keys()) visit(name);
 });
-it('production deploy is explicit and requires successful CI and staging gate', () => {
+it('production deploy runs from protected main after CI and staging, with dispatch reserved for recovery', () => {
   const graph = jobs();
   expect(graph.get('deploy')).toContain('needs: [ci, staging-gate]');
-  expect(graph.get('deploy')).toContain("github.event_name == 'workflow_dispatch'");
-  expect(graph.get('deploy')).toContain('DEPLOY_PRODUCTION: ${{ github.event.inputs.deploy_production }}');
-  expect(graph.get('deploy')).toContain('id: selection');
-  expect(graph.get('deploy')).toContain('promoted=true');
-  expect(graph.get('deploy')).toContain("if: steps.selection.outputs.promoted == 'true'");
-  expect(graph.get('deploy')).toContain('promoted: ${{ steps.selection.outputs.promoted }}');
+  expect(graph.get('deploy')).toContain("github.event_name == 'push'");
+  expect(graph.get('deploy')).toContain("github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true");
+  expect(graph.get('deploy')).toContain('deployed: ${{ steps.deploy.outputs.deployed }}');
+  expect(graph.get('deploy')).toContain('deployed=true');
   expect(graph.get('deploy')).toContain("needs.ci.result == 'success'");
   expect(graph.get('deploy')).toContain("needs.staging-gate.result == 'success'");
   expect(graph.get('deploy')).toContain('if: always()');
-  expect(graph.get('deploy')).not.toContain("github.event_name == 'push'");
-  expect(graph.get('deploy')).toContain('production stays unchanged');
-  expect(source).toContain('deploy_production:');
-  expect(source).toContain('default: skip');
-  expect(source).toContain('type: choice');
+  expect(source).toContain('recovery_deploy:');
+  expect(source).toContain('default: false');
+  expect(source).toContain('type: boolean');
 });
-it('production smoke only runs after the explicitly requested successful promotion', () => {
+it('production smoke runs only after successful protected-main deployment', () => {
   const graph = jobs();
-  expect(graph.get('smoke-test')).toContain("github.event_name == 'workflow_dispatch'");
+  expect(graph.get('smoke-test')).toContain("github.event_name == 'push'");
+  expect(graph.get('smoke-test')).toContain('inputs.recovery_deploy == true');
   expect(graph.get('smoke-test')).toContain("needs.deploy.result == 'success'");
-  expect(graph.get('smoke-test')).toContain("needs.deploy.outputs.promoted == 'true'");
+  expect(graph.get('smoke-test')).toContain("needs.deploy.outputs.deployed == 'true'");
   expect(graph.get('smoke-test')).toContain('if: always()');
 });
 it('staging acceptance remains required and validates the deployed revision', () => {
