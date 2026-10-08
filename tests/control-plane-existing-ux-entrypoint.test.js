@@ -73,6 +73,19 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 
+  it('explains profile lookup after an unknown slash command without starting intake', async () => {
+    const state = fixture();
+    const update = { ...state.update, update_id: 4,
+      message: { ...state.update.message, text: '/listuser' } };
+    const response = await state.send(update);
+    expect(await response.json()).toMatchObject({ ok: true, authenticated: false, unknownCommand: true });
+    expect(sendMessage).toHaveBeenCalledWith(state.env.TG_SANDBOX_BOT_TOKEN, 1001,
+      expect.stringContaining('/listusers'));
+    expect(sendMessage).toHaveBeenCalledWith(state.env.TG_SANDBOX_BOT_TOKEN, 1001,
+      expect.stringContaining('/pass_reset username'));
+    expect(state.collectorCalls).toEqual([]);
+  });
+
   it('logs a profile into this chat and then accepts input under that username', async () => {
     const state = fixture();
     const password = 'fixture-pass';
