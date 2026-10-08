@@ -404,17 +404,35 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(providerMessages.some(item => item.text.includes('Текст сохранил в отдельной отложенной порции'))).toBe(true);
       } else if (boundary === 'pending-stop-no-launch') {
         expect(providerMessages.some(item => item.text.includes('Текст сохранил отдельно'))).toBe(true);
-        expect(latestTelegramButton('ws|auto|')).toBeDefined();
+        const firstCollector = latestTelegramButton('ws|auto|');
+        expect(firstCollector).toBeDefined();
+        const firstRevision = (await state()).get('draftRevision');
+        const secondText = 'ещё одно сообщение после остановки';
+        const secondAccepted = await webhook(message(9, secondText));
+        expect(secondAccepted.status).toBe(200);
+        expect(await secondAccepted.json()).toMatchObject({ ok: true, buffered: 2 });
+        const latestCollector = latestTelegramButton('ws|auto|');
+        expect(latestCollector).toBeDefined();
+        expect(latestCollector.messageId).not.toBe(firstCollector.messageId);
+        expect(latestCollector.body.reply_to_message_id).toBe(9);
+        expect(latestCollector.body.text).toContain('независимый ввод');
+        expect(visibleTelegramMessages().find(item => item.messageId === firstCollector.messageId)
+          .body.reply_markup.inline_keyboard).toEqual([]);
+        expect((await state()).get('buf').map(item => item.text)).toEqual([testText, secondText]);
+        expect(cpIntakes).toEqual([]);
+        const staleCallback = await webhook({ update_id: 10, callback_query: { id: 'workerd-stale-independent-launch',
+          from: { id: 43, is_bot: false }, data: `ws|auto|${firstRevision}`,
+          message: { message_id: firstCollector.messageId, chat: { id: 42, type: 'private' } } } });
+        expect(staleCallback.status).toBe(200);
+        expect(cpIntakes).toEqual([]);
         const beforeLaunchCount = cpIntakes.length;
-        const runButton = latestTelegramButton('ws|auto|');
-        expect(runButton).toBeDefined();
-        const independentLaunch = await webhook({ update_id: 9, callback_query: { id: 'workerd-independent-launch',
-          from: { id: 43, is_bot: false }, data: runButton.body.reply_markup.inline_keyboard.flat()
+        const independentLaunch = await webhook({ update_id: 11, callback_query: { id: 'workerd-independent-launch',
+          from: { id: 43, is_bot: false }, data: latestCollector.body.reply_markup.inline_keyboard.flat()
             .find(button => button.callback_data.startsWith('ws|auto|')).callback_data,
-          message: { message_id: runButton.messageId, chat: { id: 42, type: 'private' } } } });
+          message: { message_id: latestCollector.messageId, chat: { id: 42, type: 'private' } } } });
         expect(independentLaunch.status).toBe(200);
         expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
-        expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText]);
+        expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText, secondText]);
         expect(providerMessages.some(item => item.text.includes('Запускаю параллельно — новая сессия'))).toBe(true);
         expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes.at(-1).requestId}`).taskId).not.toBe('ut-workerd-old');
         const launchedState = await state();
