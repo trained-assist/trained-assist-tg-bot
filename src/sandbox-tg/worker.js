@@ -269,6 +269,7 @@ export class TgSliceController {
     };
     for (let step = 0; this.store.kv && step < 6 && performance.now() < deadline; step += 1) {
       let boundary = 'owner_discovery';
+      let userTaskId = null;
       try {
         const cursor = await bounded(() => this.outbox.discovery());
         if (cursor.conversationKey === null) {
@@ -296,8 +297,9 @@ export class TgSliceController {
           turnIndex: entry && cursor.turnIndex + 1 < index.turns.length ? cursor.turnIndex + 1 : 0 };
         boundary = 'owner_advance';
         if (!await bounded(() => this.outbox.advanceDiscovery(cursor.revision, next)) || !entry || entry.kind !== 'new') continue;
+        userTaskId = typeof entry.userTaskId === 'string' ? entry.userTaskId : null;
         boundary = 'control_plane_status';
-        const status = await bounded(() => this.client.status(entry.userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
+        const status = await bounded(() => this.client.status(userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
         if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
         const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
         if (!terminal && !hasUnknownOutcome(status)) continue;
@@ -317,6 +319,8 @@ export class TgSliceController {
           : status !== null ? `http_${status}`
             : error?.name === 'TypeError' ? 'type_error' : 'operation_failed';
         this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable', boundary, failure,
+          profileId: this.profile?.profileId ?? null,
+          ...(userTaskId ? { userTaskId } : {}),
           ...(status === null ? {} : { status }) });
         break;
       }
