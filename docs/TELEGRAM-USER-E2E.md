@@ -109,8 +109,10 @@ to be unresolved. Send one normal text message from Telegram. Passing behavior:
 - the message is visibly stored in the held input (once);
 - the bot says the stop is still unconfirmed and confirms that it retained the
   text as a separate draft;
-- the collector offers an explicit launch action for this draft; an explicit tap
-  creates exactly one independent CP admission in a fresh session;
+- a fresh collector anchored to the latest input offers explicit work-style
+  actions; the previous collector is neutralized and stale revision callbacks are
+  rejected;
+- an explicit tap creates exactly one independent CP admission in a fresh session;
 - the old task's unresolved stop evidence remains unchanged, and the old task is
   not re-admitted or resumed;
 - duplicate/stale taps do not create another admission;
@@ -122,9 +124,12 @@ old stop window; its task uses a distinct session while reconciliation continues
 
 Failing behavior is a response such as “Предыдущая порция ещё сверяется с
 запуском, поэтому текст пока не добавил” or “Связь с исполнителем потеряна”
-when the user's new text is not retained. Capture the outgoing user message and
-the bot reply in Telegram, plus redacted Worker/collector state, then fix the
-bug and repeat the same user-originated scenario after deploying the fix.
+when the user's new text is not retained, or a status points to an older
+collector while the latest input has no visible button. If Telegram collector
+delivery is unknown, the bot must say it could not show the launch button and
+did not launch the draft. Capture the outgoing user message and bot reply in
+Telegram, plus redacted Worker/collector state, then fix the bug and repeat the
+same user-originated scenario after deploying the fix.
 
 ## Record
 

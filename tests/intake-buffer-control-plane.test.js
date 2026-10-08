@@ -1400,17 +1400,59 @@ describe('existing collector control-plane ownership', () => {
   it('keeps new input as an independent draft while a stop window is pending without busy state', async () => {
     const { owner, storage } = fixture();
     await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    let collectorMessageId = 80;
+    const collectorSends = [];
+    send.mockImplementation(async (_token, _chatId, text, keyboardOrExtra, extra) => {
+      if (Array.isArray(keyboardOrExtra)) {
+        const messageId = ++collectorMessageId;
+        collectorSends.push({ messageId, text, keyboard: keyboardOrExtra, extra });
+        return { ok: true, result: { message_id: messageId } };
+      }
+      return { ok: true, result: { message_id: ++collectorMessageId } };
+    });
 
     const response = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
       message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+    const second = await owner.fetch(rpc('/append', { text: 'ещё один текст', msg: {
+      message_id: 9, chat: { id: 42 }, text: 'ещё один текст' }, telegramUpdateId: 109 }));
 
     expect(await response.json()).toMatchObject({ buffered: 1, held: true });
-    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст']);
+    expect(await second.json()).toMatchObject({ buffered: 2, held: true });
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новый текст', 'ещё один текст']);
     expect(await storage.get('debounceExpiresAt')).toBeUndefined();
     expect(send.mock.calls.some(call => String(call[2]).includes('Текст сохранил отдельно'))).toBe(true);
-    expect(send.mock.calls.some(call => call[3] && Array.isArray(call[3]) && call[3].flat()
-      .some(button => button.callback_data.startsWith('ws|answer|')))).toBe(true);
+    expect(collectorSends).toHaveLength(2);
+    expect(collectorSends[0].extra).toMatchObject({ reply_to_message_id: 8 });
+    expect(collectorSends[1].extra).toMatchObject({ reply_to_message_id: 9 });
+    expect(collectorSends[1].keyboard.flat().some(button => button.callback_data.startsWith('ws|answer|'))).toBe(true);
+    expect(await storage.get('collectorMsgId')).toBe(collectorSends[1].messageId);
+    expect(edit).toHaveBeenCalledWith('test-bot-token', 42, collectorSends[0].messageId,
+      '↑ Сообщение выше устарело — новое ниже.', { reply_markup: { inline_keyboard: [] } });
     expect(send.mock.calls.some(call => String(call[2]).includes('Предыдущая порция ещё сверяется с запуском'))).toBe(false);
+  });
+
+  it('does not promise a launch button when Telegram collector delivery is unknown', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    send.mockRejectedValueOnce(new Error('Telegram send timed out'));
+
+    const first = await owner.fetch(rpc('/append', { text: 'новый текст', msg: {
+      message_id: 8, chat: { id: 42 }, text: 'новый текст' }, telegramUpdateId: 108 }));
+
+    expect(await first.json()).toMatchObject({ buffered: 1, held: true });
+    expect(send.mock.calls.some(call => String(call[2]).includes('кнопки запуска не удалось показать'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Кнопки в сообщении выше запустят'))).toBe(false);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'stop-window' });
+    expect([...(await storage.list({ prefix: 'cp-collector-send:' })).values()]).toContainEqual({ state: 'unknown' });
+
+    const second = await owner.fetch(rpc('/append', { text: 'ещё текст', msg: {
+      message_id: 9, chat: { id: 42 }, text: 'ещё текст' }, telegramUpdateId: 109 }));
+
+    expect(await second.json()).toMatchObject({ buffered: 2, held: true });
+    expect(send.mock.calls.some(call => call[3] && Array.isArray(call[3]) && call[3].flat()
+      .some(button => button.callback_data.startsWith('ws|')))).toBe(true);
+    expect(handleMessage).not.toHaveBeenCalled();
   });
 
   it('keeps the pending barrier when unsupported media has a durable CP acceptance', async () => {
