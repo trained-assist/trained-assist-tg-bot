@@ -2355,7 +2355,13 @@ export class IntakeBuffer {
     const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
     const unsupportedMediaRejectedBeforeAdmission = refusedMedia && !acceptance?.receipt?.durable
       && !busyRequests.includes(snapshotRequestId);
-    const knownNoAdmission = error?.code === 'CONTROL_PLANE_NO_ADMISSION';
+    // An explicit CP auth rejection is a definitive pre-admission failure:
+    // the intake endpoint rejects the request before writing a receipt. Keep
+    // the batch for an explicit retry, but do not leave the chat in an
+    // "outcome unknown" state forever. Other HTTP failures remain unknown;
+    // in particular, never infer non-admission from a timeout or 5xx.
+    const knownNoAdmission = error?.code === 'CONTROL_PLANE_NO_ADMISSION' ||
+      error?.name === 'ControlPlaneError' && [401, 403].includes(error.status);
     const confirmedNoAdmission = knownNoAdmission && !acceptance?.receipt?.durable
       && !busyRequests.includes(snapshotRequestId);
     if (confirmedNoAdmission || (error?.code === 'INTAKE_PREPARATION_FAILED' && (!snapshotRequestId || unsupportedMediaRejectedBeforeAdmission))) {
