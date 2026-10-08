@@ -272,6 +272,18 @@ export class IntakeBuffer {
     return batch;
   }
 
+  async _readCollectorDelivery(stopWindow, buf) {
+    const batch = await this.state.storage.get(BATCH_KEY);
+    if (!batch?.batchId) return null;
+    const baseKey = `cp-collector-send:${batch.batchId}`;
+    if (stopWindow?.pending && (buf || []).length) {
+      const revision = await this.state.storage.get('draftRevision');
+      const revisionClaim = await this.state.storage.get(`${baseKey}:r${revision}`);
+      if (revisionClaim) return revisionClaim;
+    }
+    return (await this.state.storage.get(baseKey)) || null;
+  }
+
   /**
    * Следующая пачка: предыдущая ушла в задачу/отменена, время стартуем заново.
    * Возвращает ПРЕДЫДУЩИЙ batchId — его и надо закрыть наружу; новый появляется
@@ -783,7 +795,7 @@ export class IntakeBuffer {
           stopPending: stopWindow?.pending === true,
         } : null,
         collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
-          ? (await this.state.storage.get(`cp-collector-send:${(await this.state.storage.get(BATCH_KEY))?.batchId}`)) || null
+          ? await this._readCollectorDelivery(stopWindow, [...(retryBatch || []), ...(buf || [])])
           : null,
         // A parked batch is an intentional wait for ▶️ (visible, one re-offer) —
         // not a dead-end. `stranded` now means: buffer non-empty, nothing
@@ -1966,9 +1978,21 @@ export class IntakeBuffer {
       if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');
       const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
-      const claimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
+      const baseClaimKey = batch ? `cp-collector-send:${batch.batchId}` : null;
+      // A lost/failed send ACK must not wedge a pending-stop draft forever.
+      // New input bumps draftRevision, so it gets one new safe collector attempt;
+      // callbacks from any older bubble remain revision-bound and are rejected.
+      const claimKey = baseClaimKey && stopPending && items.length
+        ? `${baseClaimKey}:r${draftRevision}` : baseClaimKey;
       if (claimKey && !prevId) {
         const claim = await this.state.storage.get(claimKey);
+        if (!claim && claimKey !== baseClaimKey) {
+          const previousSent = await this.state.storage.get(baseClaimKey);
+          if (previousSent?.state === 'sent' && previousSent.messageId) {
+            prevId = previousSent.messageId;
+            await this.state.storage.put('collectorMsgId', prevId);
+          }
+        }
         if (claim?.state === 'sent' && claim.messageId) {
           prevId = claim.messageId;
           await this.state.storage.put('collectorMsgId', prevId);

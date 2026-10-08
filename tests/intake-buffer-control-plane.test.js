@@ -512,6 +512,36 @@ describe('existing collector control-plane ownership', () => {
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
+  it('recovers a missing pending-stop collector on the next draft revision after an unknown send', async () => {
+    const { owner, storage } = fixture();
+    const batch = await owner._batchIdLocked(42, null);
+    await storage.put('cpStopWindow', { pending: true, intentId: 'stop-window' });
+    await storage.put('buf', [{ text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } }]);
+    await storage.put('draftRevision', 4);
+    await storage.put(`cp-collector-send:${batch.batchId}`, { state: 'unknown' });
+
+    await owner._showCollector(42, 1, 2);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain('ws|auto|4');
+    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'unknown' });
+    expect(await storage.get(`cp-collector-send:${batch.batchId}:r4`)).toEqual({ state: 'sent', messageId: 99 });
+    expect(await storage.get('collectorMsgId')).toBe(99);
+
+    await storage.put('buf', [
+      { text: 'held', msg: { chat: { id: 42 }, message_id: 2, text: 'held' } },
+      { text: 'new', msg: { chat: { id: 42 }, message_id: 3, text: 'new' } },
+    ]);
+    await storage.put('draftRevision', 5);
+    edit.mockResolvedValueOnce({ ok: false, description: "Bad Request: message can't be edited" });
+    await owner._showCollector(42, 2, 3);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain('ws|auto|5');
+    expect(await storage.get(`cp-collector-send:${batch.batchId}:r5`)).toEqual({ state: 'sent', messageId: 99 });
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
   it.each(['queued', 'stopLaunch'])('keeps independent launch controls visible despite stale %s state', async staleState => {
     const { owner, storage, source } = await stopFixture();
     await owner.fetch(rpc('/stop', source));
