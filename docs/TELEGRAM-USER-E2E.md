@@ -107,11 +107,18 @@ Run this only against the sandbox chat while its admission/stop window is known
 to be unresolved. Send one normal text message from Telegram. Passing behavior:
 
 - the message is visibly stored in the held input (once);
-- the bot says the stop is still unconfirmed, acknowledges that it retained the
-  text, and says it did not start another task;
-- the collector exposes no launch action while the stop remains unresolved;
-- no second CP admission or parallel task is created;
+- the bot says the stop is still unconfirmed and confirms that it retained the
+  text as a separate draft;
+- the collector offers an explicit launch action for this draft; an explicit tap
+  creates exactly one independent CP admission in a fresh session;
+- the old task's unresolved stop evidence remains unchanged, and the old task is
+  not re-admitted or resumed;
+- duplicate/stale taps do not create another admission;
 - the unresolved launch/stop evidence remains intact.
+
+The independent launch is opt-in. Ordinary text is held and never starts a
+second task automatically. A button launch must not poll, clear, or release the
+old stop window; its task uses a distinct session while reconciliation continues.
 
 Failing behavior is a response such as “Предыдущая порция ещё сверяется с
 запуском, поэтому текст пока не добавил” or “Связь с исполнителем потеряна”

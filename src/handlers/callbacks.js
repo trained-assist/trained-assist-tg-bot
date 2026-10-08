@@ -682,7 +682,7 @@ export async function handleCallbackQuery(cq, env) {
       const r = await response.json().catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
       // RC-03: an accepted parallel launch says so — it is a DIFFERENT claim
       // from «запущу после текущей» and must not reuse that wording.
-      if (parallel && r?.parallel) {
+      if (r?.parallel) {
         await sendT(env, chatId, threadId, '⚡ Запускаю параллельно — новая сессия, текущая задача не прерывается.');
         return;
       }
