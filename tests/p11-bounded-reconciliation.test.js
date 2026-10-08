@@ -34,6 +34,21 @@ async function fixture(counts = [40, 3]) {
 }
 
 describe('bounded autonomous delivery discovery', () => {
+  it('logs a safe boundary when conversation-index discovery fails', async () => {
+    const { env } = await fixture([]);
+    const log = vi.mocked(console.log);
+    log.mockClear();
+    vi.spyOn(env.TG_SLICE, 'list').mockRejectedValue(new Error('private-chat-id-123 and message text'));
+
+    await worker.scheduled({ cron: '* * * * *' }, env);
+
+    const event = log.mock.calls.map(([line]) => JSON.parse(line))
+      .find(entry => entry.event === 'tg.reconcile.failed');
+    expect(event).toMatchObject({ reason: 'discovery_unavailable', boundary: 'conversation_index_list', failure: 'operation_failed' });
+    expect(JSON.stringify(event)).not.toContain('private-chat-id-123');
+    expect(JSON.stringify(event)).not.toContain('message text');
+  });
+
   it('drains queued records before large finite history discovery and never requests event pages', async () => {
     const { env, client, provider, statuses } = await fixture([1000]);
     const source = await env.TG_SLICE.get('conv:tg-1001-t1');
