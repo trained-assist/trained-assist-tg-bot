@@ -43,7 +43,7 @@ def failure_record(event):
         "timestamp": event.get("timestamp") or metadata.get("timestamp"),
         "event": "tg.reconcile.failed",
     }
-    for key in ("profileId", "userTaskId", "boundary", "status"):
+    for key in ("profileId", "userTaskId", "boundary", "failure", "status"):
         value = log.get(key)
         if isinstance(value, (str, int)) and len(str(value)) <= 200:
             record[key] = value

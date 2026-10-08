@@ -13,7 +13,7 @@ class FailureRecordTest(unittest.TestCase):
     def test_extracts_only_allowlisted_correlation_fields(self):
         record = MODULE.failure_record({
             "timestamp": 123,
-            "$metadata": {"message": '{"event":"tg.reconcile.failed","profileId":"sandbox-profile","userTaskId":"ut-123","boundary":"control_plane_status","status":401,"chatId":"private","requestId":"secret-id"}'},
+            "$metadata": {"message": '{"event":"tg.reconcile.failed","profileId":"sandbox-profile","userTaskId":"ut-123","boundary":"control_plane_status","failure":"http_401","status":401,"chatId":"private","requestId":"secret-id"}'},
             "$workers": {"scriptVersion": {"id": "version-1", "message": "sandbox-main-abc"}},
         })
         self.assertEqual(record, {
@@ -22,6 +22,7 @@ class FailureRecordTest(unittest.TestCase):
             "profileId": "sandbox-profile",
             "userTaskId": "ut-123",
             "boundary": "control_plane_status",
+            "failure": "http_401",
             "status": 401,
             "workerVersionId": "version-1",
             "workerVersionMessage": "sandbox-main-abc",
