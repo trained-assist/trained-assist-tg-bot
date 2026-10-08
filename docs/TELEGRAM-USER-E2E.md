@@ -185,3 +185,13 @@ guard remains unconfirmed; follow-up issue
 tracks reason-coded diagnostics. Do not infer that the draft was launched from
 the callback ACK or from a successful Worker invocation line: confirm a CP
 admission separately before reporting launch success.
+
+The diagnostic implementation now under review emits `tg.intake.callback_refused`
+or `tg.intake.launch_refused` with only a `reasonCode` (and the static endpoint
+path for callback refusal). Possible codes include `callback_in_flight`,
+`callback_no_longer_owned`, `dispatch_in_progress`,
+`unresolved_launch_scope_changed`, and `pending_stop_requires_parallel`. The
+gateway mirrors the code as `tg.callback.launch_refused`; these events contain
+no message text, chat ID, user name, or callback payload. The live reason is
+still pending deployment to the probability sandbox and one tap on its already
+retained draft.

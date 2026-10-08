@@ -198,6 +198,34 @@ describe('callbacks — intake_run while an attachment is still preparing', () =
   });
 });
 
+describe('callbacks — truthful pending-stop launch refusal', () => {
+  it.each([
+    ['callback_no_longer_owned', 'уже устарела', 'текст повторно отправлять не нужно'],
+    ['callback_in_flight', 'уже обрабатывается', 'не отправляй текст заново'],
+    ['dispatch_in_progress', 'уже выполняется или завершается', 'не отправляй текст заново'],
+    ['unresolved_launch_scope_changed', 'Состояние сверки старой задачи изменилось', 'текст повторно отправлять не нужно'],
+    ['pending_stop_requires_parallel', 'Состояние сверки старой задачи изменилось', 'текст повторно отправлять не нужно'],
+  ])('explains %s without asking to resend the retained draft', async (reasonCode, expectedText, noResendText) => {
+    vi.clearAllMocks();
+    const { handleCallbackQuery } = await import('../src/handlers/callbacks.js');
+    const { sendMessage } = await import('../src/lib/telegram.js');
+    const stub = { fetch: vi.fn()
+      .mockResolvedValueOnce(Response.json({ owned: true }))
+      .mockResolvedValueOnce(Response.json({ error: 'launch_refused', reasonCode }, { status: 409 })) };
+    const env = { BOT_TOKEN: 'test-token', SESSIONS: {}, EXECUTION_BACKEND: 'control-plane',
+      INTAKE: { idFromName: name => name, get: () => stub } };
+
+    await handleCallbackQuery({ id: 'cq-refused', data: 'ws|explore|3', from: { id: 999 },
+      message: { chat: { id: 999 }, message_id: 42 } }, env);
+
+    const refusal = sendMessage.mock.calls.find(call => call[2]?.includes(expectedText));
+    expect(refusal).toBeDefined();
+    expect(refusal[2]).toContain(noResendText);
+    expect(refusal[2]).not.toContain('используй текущее сообщение');
+    expect(stub.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 
 describe('legacy checklist footer menu', () => {
   it.each([

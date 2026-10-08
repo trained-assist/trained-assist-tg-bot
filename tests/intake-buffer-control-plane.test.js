@@ -83,6 +83,76 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it.each([
+    ['callback_in_flight', owner => { owner.cpCallbackInFlight = true; }],
+    ['callback_no_longer_owned', owner => { owner._callbackOwned = vi.fn().mockResolvedValue(false); }],
+    ['dispatch_in_progress', owner => { owner.cpDispatches = 1; }],
+    ['unresolved_launch_scope_changed', async (owner, storage) => {
+      await storage.put('cpUnresolvedLaunches', ['[foreign]']);
+      await storage.put('cpStopWindow', { pending: true, admissionLaunchKeys: ['[old]'] });
+    }],
+  ])('reports a safe refusal reason for %s without admitting a task', async (reasonCode, prepare) => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('buf', [{ text: 'held draft', msg: { message_id: 12, chat: { id: 42 }, text: 'held draft' } }]);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+    await storage.put('cpStopWindow', { pending: true, admissionLaunchKeys: [] });
+    await prepare(owner, storage);
+
+    const response = await owner.fetch(rpc('/flush', { parallel: false, messageId: 99,
+      callbackData: 'ws|explore|3', username: 'test-profile' }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: ['callback_in_flight', 'callback_no_longer_owned'].includes(reasonCode) ? 'callback_refused' : 'launch_refused',
+      reasonCode,
+    });
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('buf')).toHaveLength(1);
+  });
+
+  it('reports the ownership change between callback preflight and final launch authorization', async () => {
+    const { owner, storage } = fixture();
+    owner._callbackOwned = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await storage.put('buf', [{ text: 'held draft', msg: { message_id: 12, chat: { id: 42 }, text: 'held draft' } }]);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+    await storage.put('cpStopWindow', { pending: true, admissionLaunchKeys: [] });
+
+    const response = await owner.fetch(rpc('/flush', { parallel: false, messageId: 99,
+      callbackData: 'ws|explore|3', username: 'test-profile' }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'launch_refused', reasonCode: 'callback_no_longer_owned' });
+    expect(owner._callbackOwned).toHaveBeenCalledTimes(2);
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('buf')).toHaveLength(1);
+  });
+
+  it('reports when an unresolved-stop window opens after the launch mode was first read', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('buf', [{ text: 'held draft', msg: { message_id: 12, chat: { id: 42 }, text: 'held draft' } }]);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+    await storage.put('cpStopWindow', { pending: true, admissionLaunchKeys: [] });
+    const get = storage.get.bind(storage);
+    let stopWindowReads = 0;
+    storage.get = async key => {
+      if (key === 'cpStopWindow' && ++stopWindowReads === 1) return undefined;
+      return get(key);
+    };
+
+    const response = await owner.fetch(rpc('/flush', { parallel: false, messageId: 99,
+      callbackData: 'ws|explore|3', username: 'test-profile' }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'launch_refused', reasonCode: 'pending_stop_requires_parallel' });
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await get('buf')).toHaveLength(1);
+  });
+
   it('lets the owner dismiss waiting on one unknown launch without deleting its evidence or retrying it', async () => {
     const { owner, storage, env } = fixture();
     const token = '123e4567-e89b-42d3-a456-426614174000';
