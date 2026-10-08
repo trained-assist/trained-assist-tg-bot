@@ -168,4 +168,4 @@ export default {
 
 export class IntakeBufferReset extends IntakeBuffer {}
 
-export { TgDeliveryOwner, SandboxAcceptOnlyStore };
+export { IntakeBuffer, TgDeliveryOwner, SandboxAcceptOnlyStore };
