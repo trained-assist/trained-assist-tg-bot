@@ -15,6 +15,19 @@ import { conversationKey, threadExtra, threadIdOf } from '../conversation-contex
 import { setGroupHistoryEnabled } from '../group-history.js';
 import { isTestChat, suppress, testChatList } from '../lib/test-mode.js';
 
+const CRM_CATALOG_START_PREFIX = 'crm1_';
+const CRM_CATALOG_START_RE = /^crm1_(build-[a-f0-9]{24})_(co-[a-f0-9]{20})$/;
+
+export function parseCrmCatalogStartPayload(text) {
+  const parts = String(text || '').trim().split(/\s+/);
+  const command = (parts[0] || '').split('@')[0].toLowerCase();
+  const payload = parts[1] || '';
+  if (command !== '/start' || !payload.startsWith(CRM_CATALOG_START_PREFIX)) return { kind: 'none' };
+  if (parts.length !== 2 || payload.length > 64) return { kind: 'invalid' };
+  const match = CRM_CATALOG_START_RE.exec(payload);
+  return match ? { kind: 'catalog_participant', buildId: match[1], companyId: match[2] } : { kind: 'invalid' };
+}
+
 // Topic-aware outbound helpers (issue #255): new messages must carry the forum
 // topic id; threadExtra() is empty without one (private/non-forum unchanged).
 function sendIn(env, chatId, threadId, text, extra = {}) {
@@ -85,7 +98,7 @@ export async function handleCommand(msg, env) {
 
   switch (cmd) {
     case '/restart': return cmdRestart(msg, env);
-    case '/start':   return cmdStart(chatId, env, threadId);
+    case '/start':   return cmdStart(msg, env);
     case '/login':   return cmdLogin(msg, env);
     case '/logout':   return cmdLogout(chatId, env, threadId);
     case '/profile':  return cmdProfile(chatId, env, threadId);
@@ -132,12 +145,32 @@ export async function handleCommand(msg, env) {
   }
 }
 
-async function cmdStart(chatId, env, threadId = null) {
+async function cmdStart(msg, env) {
+  const { chat, text } = msg;
+  const chatId = chat.id;
+  const threadId = threadIdOf(msg);
+  const audience = resolveAudience(env);
+  const payload = audience === 'sales' ? parseCrmCatalogStartPayload(text) : { kind: 'none' };
+  if (payload.kind === 'invalid') {
+    return sendIn(env, chatId, threadId,
+      '⚠️ Ссылка на участника CRM-каталога повреждена или устарела. Открой ссылку заново из каталога.'
+    );
+  }
+
   const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
     return sendIn(env, chatId, threadId,
-      '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
+      payload.kind === 'catalog_participant'
+        ? '👋 Сначала войди: <code>/login username password</code>, затем снова открой ссылку из CRM-каталога.'
+        : '👋 Привет!\n\nЧтобы начать работу:\n<code>/login username password</code>'
     );
+  }
+  if (payload.kind === 'catalog_participant') {
+    // Only the opaque catalog-build and participant IDs cross this transport boundary.
+    // The acting profile comes from the existing Agent session, never from Telegram.
+    return handleMessage({ ...msg,
+      text: `Prepare a CRM deal draft for catalog participant ${payload.companyId} in catalog build ${payload.buildId}. Use the current Agent session profile and declared CRM MCP capabilities. Show the exact review to the user; do not confirm or create the deal.`
+    }, env);
   }
   //
   // Recruiter bot: HH-секция первая (это рабочий домен бота), остальное — поддержка.
@@ -148,7 +181,6 @@ async function cmdStart(chatId, env, threadId = null) {
   // Visibility is decided by the SAME helper the Telegram command menu uses
   // (src/lib/command-visibility.js → registry `audiences`), otherwise /start
   // would list commands the menu itself doesn't show.
-  const audience = resolveAudience(env);
   const hhLines = [];
   const otherLines = [];
   const seen = new Set();
