@@ -110,7 +110,7 @@ const RECEIPT_MS = 1500;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 const WORK_STYLES = ['explore', 'answer', 'auto'];
-function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) {
+function workStyleKeyboard(revision, { busy = false, stopEnabled = true, discardLabel = '🧹 Очистить весь ввод' } = {}) {
   const labels = { explore: '🧭 Изучи и задай вопросы', answer: '📝 Дай полный ответ', auto: '✨ На твоё усмотрение' };
   const styles = WORK_STYLES.map(style => [{ text: labels[style], callback_data: `ws|${style}|${revision}` }]);
   if (busy) {
@@ -119,7 +119,7 @@ function workStyleKeyboard(revision, { busy = false, stopEnabled = true } = {}) 
       { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
     styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
   }
-  styles.push([{ text: '🧹 Очистить весь ввод', callback_data: `intake_discard|${revision}` }]);
+  if (discardLabel !== false) styles.push([{ text: discardLabel, callback_data: `intake_discard|${revision}` }]);
   return styles;
 }
 // Shown INSTEAD of LAUNCH_BTN under the statuses that mean "THIS batch is
@@ -432,12 +432,46 @@ export class IntakeBuffer {
       const source = await request.clone().json().catch(() => ({}));
       const result = await this._exclusive(async () => {
         if (!(await this._callbackOwned(source))) return { refused: true };
-        if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length ||
-            (await this.state.storage.get('launching'))?.length) {
-          return { pending: true };
-        }
         const buf = (await this.state.storage.get('buf')) || [];
         const retry = (await this.state.storage.get('retryBatch')) || [];
+        const stopWindow = await this.state.storage.get('cpStopWindow');
+        if (stopWindow?.pending) {
+          const unresolved = await this._activeUnresolvedLaunches();
+          const oldLaunches = new Set(stopWindow.admissionLaunchKeys || []);
+          const draftIds = new Set(buf.map(item => item.msg?.message_id));
+          const oldLaunchIds = new Set();
+          for (const key of oldLaunches) {
+            try {
+              const ids = JSON.parse(key);
+              if (Array.isArray(ids) && ids.every(Number.isSafeInteger)) ids.forEach(id => oldLaunchIds.add(id));
+            } catch { /* A malformed historical key is preserved; it cannot own the new draft. */ }
+          }
+          for (const key of unresolved) {
+            if (!oldLaunches.has(key)) return { pending: true, reasonCode: 'unresolved_outside_stop_window' };
+          }
+          const launching = (await this.state.storage.get('launching')) || [];
+          const protectedIds = [...retry, ...launching].map(item => item.msg?.message_id);
+          if (this.cpDispatches || !buf.length || launching.some(item => !oldLaunchIds.has(item.msg?.message_id)) ||
+              [...draftIds].some(id => !Number.isSafeInteger(id) || oldLaunchIds.has(id) || protectedIds.includes(id))) {
+            return { pending: true, reasonCode: this.cpDispatches ? 'dispatch_in_progress'
+              : !buf.length ? 'no_unlaunched_draft' : 'draft_identity_or_execution_overlap' };
+          }
+          if (buf.some(item => item.mediaPending || item.preparingAt)) return { pending: true, preparing: true, reasonCode: 'draft_preparing' };
+          const failedKeys = [...(await this.state.storage.list({ prefix: 'failed:' })).keys()];
+          const failedMediaKeys = [...(await this.state.storage.list({ prefix: 'media-failed:' })).keys()];
+          await this.state.storage.delete('buf');
+          for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
+            'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
+            'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
+          await this._bumpDraftRevisionLocked();
+          // The shared busy alarm still owns stop reconciliation. Never delete it here.
+          return { discarded: true, draftOnly: true, count: buf.length, preservedRetryCount: retry.length,
+            pendingWindowPreserved: true, preservedFailedCount: failedKeys.length + failedMediaKeys.length };
+        }
+        if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length ||
+            (await this.state.storage.get('launching'))?.length) {
+          return { pending: true, reasonCode: this.cpDispatches ? 'dispatch_in_progress' : 'unresolved_launch' };
+        }
         if ([...buf, ...retry].some(item => item.mediaPending || item.preparingAt)) return { pending: true, preparing: true };
         const failedKeys = [...(await this.state.storage.list({ prefix: 'failed:' })).keys()];
         const failedMediaKeys = [...(await this.state.storage.list({ prefix: 'media-failed:' })).keys()];
@@ -2168,11 +2202,13 @@ export class IntakeBuffer {
       }
       // A pending stop belongs to the old run. Its stale queue/stop action must
       // not hide controls for this distinct, still-unlaunched draft.
+      const draftOnlyDiscard = stopPending && (await this.state.storage.get('buf') || []).length > 0;
       const keyboard = (queued || stopLaunch) && !canLaunchIndependently ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? STATUS_BTN
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
-          ? workStyleKeyboard(draftRevision)
+          ? workStyleKeyboard(draftRevision, { discardLabel: stopPending
+            ? (draftOnlyDiscard ? '🧹 Очистить этот черновик' : false) : undefined })
         : LAUNCH_BTN;
       if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');

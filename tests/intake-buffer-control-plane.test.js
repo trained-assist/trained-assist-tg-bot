@@ -1586,13 +1586,57 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('retryBatch', items);
     await storage.put('failed:old', { id: 'old', items });
     await storage.put('media-failed:media-old', { msg: { message_id: 7 } });
-    await storage.put('cpStopWindow', { pending: true, tasks: [{ userTaskId: receipt.userTaskId }] });
+    await storage.delete('cpStopWindow');
     expect((await owner.fetch(rpc('/discard', body))).status).toBe(200);
     expect(await storage.get('buf')).toBeUndefined();
     expect(await storage.get('retryBatch')).toBeUndefined();
     expect(await storage.get('failed:old')).toBeUndefined();
     expect(await storage.get('media-failed:media-old')).toBeUndefined();
-    expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, tasks: [{ userTaskId: receipt.userTaskId }] });
+  });
+
+  it('discards only the new draft while preserving an unresolved stop admission and its input evidence', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    const oldItems = [{ text: 'old submitted task', msg: { chat: { id: 42 }, message_id: 7, text: 'old submitted task' } }];
+    const draft = [{ text: 'new draft', msg: { chat: { id: 42 }, message_id: 8, text: 'new draft' } }];
+    const stopWindow = { pending: true, intentId: 'stop-window', admissionLaunchKeys: ['[7]'],
+      tasks: [{ userTaskId: receipt.userTaskId }] };
+    const oldCheckpoint = { msg: { ...oldItems[0].msg, intakeItems: oldItems }, profileId: 'test-profile' };
+    await storage.put('cpStopWindow', stopWindow);
+    await storage.put('cpUnresolvedLaunches', ['[7]']);
+    await storage.put('cp-launch:[7]', oldCheckpoint);
+    await storage.put('launching', oldItems);
+    await storage.put('retryBatch', oldItems);
+    await storage.put('buf', draft);
+    await storage.put('busy', true);
+    await storage.put('busySince', 1234);
+    await storage.setAlarm(987654321);
+    await owner._showCollector(42, 2, 8);
+    const keyboard = send.mock.calls.at(-1)[3].flat();
+    const revision = await storage.get('draftRevision');
+    expect(keyboard.find(button => button.callback_data === `intake_discard|${revision}`).text)
+      .toBe('🧹 Очистить этот черновик');
+    const batchIdBefore = await storage.get('pendingBatch');
+    owner._closePending = vi.fn();
+
+    const response = await owner.fetch(rpc('/discard', { sourceMessageId: 99,
+      callbackData: `intake_discard|${revision}`, username: 'test-profile' }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ discarded: true, draftOnly: true, count: 1,
+      preservedRetryCount: 1, pendingWindowPreserved: true });
+    expect(await storage.get('buf')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toEqual(oldItems);
+    expect(await storage.get('launching')).toEqual(oldItems);
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual(['[7]']);
+    expect(await storage.get('cp-launch:[7]')).toEqual(oldCheckpoint);
+    expect(await storage.get('cpStopWindow')).toEqual(stopWindow);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('busySince')).toBe(1234);
+    expect(await storage.getAlarm()).toBe(987654321);
+    expect(await storage.get('pendingBatch')).toEqual(batchIdBefore);
+    expect(await storage.get('draftRevision')).toBe(revision + 1);
+    expect(owner._closePending).not.toHaveBeenCalled();
   });
 
   it('keeps a preparation-labelled error unknown once a frozen admission snapshot exists', async () => {
