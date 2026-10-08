@@ -268,12 +268,15 @@ export class TgSliceController {
       } finally { clearTimeout(timer); }
     };
     for (let step = 0; this.store.kv && step < 6 && performance.now() < deadline; step += 1) {
+      let boundary = 'owner_discovery';
       try {
         const cursor = await bounded(() => this.outbox.discovery());
         if (cursor.conversationKey === null) {
+          boundary = 'conversation_index_list';
           const page = await bounded(() => this.store.kv.list({ prefix: 'conv:tg-', cursor: cursor.pageCursor ?? undefined, limit: 1 }));
           const nextPageCursor = page.list_complete ? null : page.cursor;
           if (!page.list_complete && (!nextPageCursor || nextPageCursor === cursor.pageCursor)) throw new Error('discovery_pagination');
+          boundary = 'owner_advance';
           await bounded(() => this.outbox.advanceDiscovery(cursor.revision, {
             pageCursor: page.keys.length ? cursor.pageCursor : nextPageCursor,
             conversationKey: page.keys[0]?.name ?? null, nextPageCursor: page.keys.length ? nextPageCursor : null, turnIndex: 0,
@@ -281,6 +284,7 @@ export class TgSliceController {
           if (!page.keys.length && page.list_complete) break;
           continue;
         }
+        boundary = 'conversation_index_read';
         const raw = await bounded(() => this.store.kv.get(cursor.conversationKey));
         let index;
         try { index = JSON.parse(raw); } catch { index = null; }
@@ -290,21 +294,30 @@ export class TgSliceController {
         const entry = valid ? index.turns[cursor.turnIndex] : null;
         const next = { pageCursor: cursor.nextPageCursor, conversationKey: null, nextPageCursor: null,
           turnIndex: entry && cursor.turnIndex + 1 < index.turns.length ? cursor.turnIndex + 1 : 0 };
+        boundary = 'owner_advance';
         if (!await bounded(() => this.outbox.advanceDiscovery(cursor.revision, next)) || !entry || entry.kind !== 'new') continue;
+        boundary = 'control_plane_status';
         const status = await bounded(() => this.client.status(entry.userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
         if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
         const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
         if (!terminal && !hasUnknownOutcome(status)) continue;
         const deliveryId = `${terminal ? 'terminal' : 'unknown'}:${entry.userTaskId}:g${status.generation}`;
+        boundary = 'delivery_owner_read';
         if (await bounded(() => this.outbox.load(deliveryId))) continue;
         const answer = typeof status.result === 'string' ? status.result : status.result?.answer;
         const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? 'Ошибка исполнителя.' : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
+        boundary = 'delivery_owner_enqueue';
         await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
           conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
           requestId: deliveryId, type: 'message', text: terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label }));
         pushed.push({ userTaskId: entry.userTaskId, terminal });
-      } catch {
-        this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable' });
+      } catch (error) {
+        const status = Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : null;
+        const failure = error?.message === 'discovery_deadline' ? 'deadline'
+          : status !== null ? `http_${status}`
+            : error?.name === 'TypeError' ? 'type_error' : 'operation_failed';
+        this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable', boundary, failure,
+          ...(status === null ? {} : { status }) });
         break;
       }
     }
