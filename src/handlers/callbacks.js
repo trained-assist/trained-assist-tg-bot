@@ -59,6 +59,24 @@ function callbackSource(cq, env, session) {
     ? { sourceMessageId: cq.message.message_id, callbackData: cq.data, username: session.username } : {};
 }
 
+function launchRefusalText(reasonCode) {
+  switch (reasonCode) {
+    case 'callback_in_flight':
+      return '⏳ Передача этого ввода уже обрабатывается. Не нажимай кнопку повторно и не отправляй текст заново — дождись результата.';
+    case 'callback_no_longer_owned':
+      return '⌛ Эта кнопка уже устарела. Черновик сохранён, запуск не выполнен. Открой последнее сообщение бота с кнопками; текст повторно отправлять не нужно.';
+    case 'dispatch_in_progress':
+      return '⏳ Передача уже выполняется или завершается. Не нажимай кнопку повторно и не отправляй текст заново — дождись сообщения о результате.';
+    case 'unresolved_launch_scope_changed':
+    case 'pending_stop_requires_parallel':
+      return '⏳ Состояние сверки старой задачи изменилось, этот запуск не принят. Черновик сохранён; текст повторно отправлять не нужно. Проверь последнее сообщение бота.';
+    case 'launch_action_not_supported':
+      return '⌛ Эта кнопка больше не поддерживается. Черновик сохранён; открой последнее сообщение бота с актуальными кнопками.';
+    default:
+      return '⌛ Не удалось подтвердить запуск. Не отправляй текст повторно; проверь последнее сообщение бота и статус задачи.';
+  }
+}
+
 export async function handleCallbackQuery(cq, env) {
   const { id, data, message, from } = cq;
   const initiatedAt = Date.now();
@@ -676,7 +694,10 @@ export async function handleCallbackQuery(cq, env) {
         .catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
       if (!response) return;
       if (env.EXECUTION_BACKEND === 'control-plane' && !response.ok) {
-        await sendT(env, chatId, threadId, '⌛ Передача не подтверждена — используй текущее сообщение.');
+        const refusal = await response.clone().json().catch(() => null);
+        const reasonCode = typeof refusal?.reasonCode === 'string' ? refusal.reasonCode : null;
+        if (reasonCode) console.warn(JSON.stringify({ event: 'tg.callback.launch_refused', reasonCode }));
+        await sendT(env, chatId, threadId, launchRefusalText(reasonCode));
         return;
       }
       const r = await response.json().catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });

@@ -460,16 +460,31 @@ export class IntakeBuffer {
     if (this.env.EXECUTION_BACKEND === 'control-plane' && request.method === 'POST' &&
         ['/flush', '/cancel', '/stop-launch'].includes(url.pathname)) {
       const source = await request.clone().json().catch(() => ({}));
+      let refusalCode = null;
       const allowed = await this._exclusive(async () => {
-        if (this.cpCallbackInFlight || !(await this._callbackOwned(source))) return false;
+        if (this.cpCallbackInFlight) { refusalCode = 'callback_in_flight'; return false; }
+        if (!(await this._callbackOwned(source))) { refusalCode = 'callback_no_longer_owned'; return false; }
         if (url.pathname === '/flush' && !['intake_parallel'].includes(source.callbackData) &&
-            !/^ws\|(explore|answer|auto)\|\d+$/.test(source.callbackData || '')) return false;
-        if (url.pathname === '/cancel' && source.callbackData !== 'intake_cancel') return false;
-        if (url.pathname === '/stop-launch' && source.callbackData !== `intake_stopyes|${source.mode}`) return false;
+            !/^ws\|(explore|answer|auto)\|\d+$/.test(source.callbackData || '')) {
+          refusalCode = 'launch_action_not_supported';
+          return false;
+        }
+        if (url.pathname === '/cancel' && source.callbackData !== 'intake_cancel') {
+          refusalCode = 'cancel_action_not_supported';
+          return false;
+        }
+        if (url.pathname === '/stop-launch' && source.callbackData !== `intake_stopyes|${source.mode}`) {
+          refusalCode = 'stop_action_not_supported';
+          return false;
+        }
         this.cpCallbackInFlight = true;
         return true;
       });
-      if (!allowed) return new Response('Callback ownership mismatch', { status: 409 });
+      if (!allowed) {
+        const reasonCode = refusalCode || 'callback_refused';
+        console.warn(JSON.stringify({ event: 'tg.intake.callback_refused', endpoint: url.pathname, reasonCode }));
+        return Response.json({ error: 'callback_refused', reasonCode }, { status: 409 });
+      }
       try { return await this._fetch(request); } finally { this.cpCallbackInFlight = false; }
     }
     return this._fetch(request);
@@ -1307,16 +1322,21 @@ export class IntakeBuffer {
       const parallel = source.parallel === true || stopWindowPending;
       const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
       // An explicit ▶️ / force word is exactly the action that lifts a ⛔ hold (#1856).
+      let refusalCode = null;
       const authorized = await this._exclusive(async () => {
-        if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) return false;
+        if (this.env.EXECUTION_BACKEND === 'control-plane' && !(await this._callbackOwned(source))) {
+          refusalCode = 'callback_no_longer_owned';
+          return false;
+        }
         if (this.env.EXECUTION_BACKEND === 'control-plane') {
           const stopWindow = await this.state.storage.get('cpStopWindow');
           const unresolved = await this._activeUnresolvedLaunches();
           const belongsToPendingStop = parallel && stopWindow?.pending === true
             && Array.isArray(stopWindow.admissionLaunchKeys)
             && unresolved.every(key => stopWindow.admissionLaunchKeys.includes(key));
-          if (this.cpDispatches || (unresolved.length && !belongsToPendingStop)) return false;
-          if (stopWindow?.pending && !parallel) return false;
+          if (this.cpDispatches) { refusalCode = 'dispatch_in_progress'; return false; }
+          if (unresolved.length && !belongsToPendingStop) { refusalCode = 'unresolved_launch_scope_changed'; return false; }
+          if (stopWindow?.pending && !parallel) { refusalCode = 'pending_stop_requires_parallel'; return false; }
         }
         if (styleLaunch) {
           await this.state.storage.put('launchWorkStyle', styleLaunch[1]);
@@ -1333,7 +1353,11 @@ export class IntakeBuffer {
               retry: JSON.stringify(await this.state.storage.get('retryBatch')) }
           : true;
       });
-      if (!authorized) return new Response('Callback ownership mismatch', { status: 409 });
+      if (!authorized) {
+        const reasonCode = refusalCode || 'launch_refused';
+        console.warn(JSON.stringify({ event: 'tg.intake.launch_refused', reasonCode }));
+        return Response.json({ error: 'launch_refused', reasonCode }, { status: 409 });
+      }
       // Button tap / force word while a run is in flight. Never a second
       // concurrent run (#1527 F1), but never a silent no-op either: the held
       // «▶️ Запустить агента» button used to do nothing mid-run. First self-heal
