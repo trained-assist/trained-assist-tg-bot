@@ -306,6 +306,18 @@ async function handleWebhook(c, pathBotId) {
     return c.json({ error: 'invalid json' }, 400);
   }
 
+  // A dedicated test Worker may opt into a fail-closed Telegram chat allowlist.
+  // This is intentionally separate from TEST_CHAT_IDS: the latter suppresses
+  // delivery for selected chats but does not restrict ingress. Production
+  // Workers leave SANDBOX_REQUIRE_CHAT_ALLOWLIST unset.
+  if (c.env.SANDBOX_REQUIRE_CHAT_ALLOWLIST === 'true') {
+    const allowed = String(c.env.SANDBOX_ALLOWED_CHAT_IDS ?? '')
+      .split(',').map(value => value.trim()).filter(Boolean);
+    if (allowed.length === 0) return c.json({ error: 'sandbox chat allowlist is not configured' }, 503);
+    const incomingChatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
+    if (!allowed.includes(String(incomingChatId ?? ''))) return c.json({ error: 'sandbox chat refused' }, 403);
+  }
+
   // Fire-and-forget — Telegram expects 200 within 5s
   c.executionCtx.waitUntil(dispatch(update, env));
   // Register the Telegram command menu once per isolate (commands-registry.json

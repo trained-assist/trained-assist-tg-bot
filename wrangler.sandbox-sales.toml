@@ -1,0 +1,33 @@
+name = "trained-assist-tg-bot-sales-sandbox"
+main = "src/index.js"
+workers_dev = true
+compatibility_date = "2026-10-08"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# No cron or production route. This Worker is a direct, isolated test ingress.
+
+[vars]
+BOT_USERNAME = "flexi_leads_bot"
+SESSION_NAMESPACE = "sales"
+MEDIA_PIPELINE = "off"
+RECOVERY_IMPORT_LEGACY = "off"
+INTAKE_DEBOUNCE = "off"
+SANDBOX_REQUIRE_CHAT_ALLOWLIST = "true"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "8ee6d1f4c1474a96bdab2f2e9981d88b"
+
+[[kv_namespaces]]
+binding = "USERS"
+id = "ed37494a21b149098c5dc3b0fd94e4c0"
+
+# Secrets are provisioned only on this sandbox Worker:
+#   BOT_TOKEN                    — flexi_leads_bot test token only
+#   TELEGRAM_WEBHOOK_SECRET      — used only for direct signed test deliveries
+#   SANDBOX_ALLOWED_CHAT_IDS     — owner-approved sandbox chat IDs
+# Do not set AGENT_URL/AGENT_SECRET until the sandbox Runner adapter and CRM MCP
+# binding are configured; this Worker has no old-Agent/GCP fallback.
