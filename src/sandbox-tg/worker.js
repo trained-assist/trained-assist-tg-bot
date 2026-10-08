@@ -300,6 +300,8 @@ export class TgSliceController {
         userTaskId = typeof entry.userTaskId === 'string' ? entry.userTaskId : null;
         boundary = 'control_plane_status';
         const status = await bounded(() => this.client.status(userTaskId, { signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))) }));
+        this.log({ event: 'tg.reconcile.status_observed', profileId: this.profile?.profileId ?? null,
+          userTaskId, status: status.status, stage: status.stage ?? null, generation: status.generation });
         if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
         const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
         if (!terminal && !hasUnknownOutcome(status)) continue;

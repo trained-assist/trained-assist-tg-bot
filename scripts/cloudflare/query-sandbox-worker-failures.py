@@ -36,14 +36,16 @@ def failure_record(event):
         if isinstance(candidate, dict):
             parsed.append(candidate)
 
-    log = next((item for item in parsed if item.get("event") == "tg.reconcile.failed"), None)
+    log = next((item for item in parsed if item.get("event") in {
+        "tg.reconcile.failed", "tg.reconcile.status_observed",
+    }), None)
     if log is None:
         return None
-    record = {
-        "timestamp": event.get("timestamp") or metadata.get("timestamp"),
-        "event": "tg.reconcile.failed",
-    }
-    for key in ("profileId", "userTaskId", "boundary", "failure", "status"):
+    record = {"event": log["event"]}
+    timestamp = event.get("timestamp") or metadata.get("timestamp")
+    if isinstance(timestamp, (int, float)):
+        record["timestamp"] = timestamp
+    for key in ("profileId", "userTaskId", "boundary", "failure", "status", "stage", "generation", "errorType"):
         value = log.get(key)
         if isinstance(value, (str, int)) and len(str(value)) <= 200:
             record[key] = value
