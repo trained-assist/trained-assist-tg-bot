@@ -159,3 +159,29 @@ tail` recorded `POST /webhook` and `POST /intake/append` as `Ok`. The bot replie
 Latin test marker, so this run verifies the pending-stop flow and visible
 acknowledgement, not exact input text. The signed Workerd/SQLite regression
 checks the exact stored text, once-only admission, no debounce and no CP launch.
+
+### 2026-10-08 pending-stop callback re-reproduction
+
+After the fresh collector fix was deployed to `@probability_cat_bot`
+(`trained-assist-tg-ux-sandbox`, version
+`45fb884f-6f47-4474-91fd-5580d35cd4b5`, source SHA
+`718c1b06903e1b7d4cc35bdefd4cf6921b537a1b`), the owner sent the harmless text
+`12345` and tapped the visible “Изучи и задай вопросы” action. The bot retained
+the draft and showed “Передача не подтверждена — используй текущее сообщение.”
+The live Wrangler tail recorded `/webhook`, `/intake/snapshot`,
+`/intake/append`, `/intake/callback-owner`, and `/intake/flush`. This proves the
+real Telegram update reached the deployed Worker and that callback processing
+reached the final launch endpoint; it does not prove a CP admission. No launch
+request followed the refusal in the captured trace, and the pending old-stop
+state was not cleared.
+
+The callback preflight passes before `/intake/flush` is called. The final
+endpoint has multiple refusal guards that currently collapse to the same
+non-2xx response (`Callback ownership mismatch`), so Wrangler's tail cannot
+identify which guard rejected this click. Historical Cloudflare Observability
+querying with the local Wrangler token returned HTTP 403. The precise final
+guard remains unconfirmed; follow-up issue
+[#477](https://github.com/trained-assist/trained-assist-tg-bot/issues/477)
+tracks reason-coded diagnostics. Do not infer that the draft was launched from
+the callback ACK or from a successful Worker invocation line: confirm a CP
+admission separately before reporting launch success.
