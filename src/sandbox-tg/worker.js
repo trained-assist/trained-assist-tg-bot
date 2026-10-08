@@ -317,11 +317,14 @@ export class TgSliceController {
         const status = Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : null;
         const failure = error?.message === 'discovery_deadline' ? 'deadline'
           : status !== null ? `http_${status}`
+            : ['TimeoutError', 'AbortError'].includes(error?.name) ? 'timeout'
             : error?.name === 'TypeError' ? 'type_error' : 'operation_failed';
+        const errorType = ['TimeoutError', 'AbortError', 'TypeError', 'ControlPlaneError', 'Error'].includes(error?.name)
+          ? error.name : 'OtherError';
         this.log({ event: 'tg.reconcile.failed', reason: 'discovery_unavailable', boundary, failure,
           profileId: this.profile?.profileId ?? null,
           ...(userTaskId ? { userTaskId } : {}),
-          ...(status === null ? {} : { status }) });
+          ...(status === null ? {} : { status }), errorType });
         break;
       }
     }
