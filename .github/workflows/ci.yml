@@ -5,19 +5,15 @@ on:
     branches: ['**']
   pull_request:
     branches: [main]
-  # Recovery path: GitHub occasionally drops the push event of an auto-merge
-  # (29.09: #308 landed on main, no run, gateway stayed on the old build).
-  # Dispatch is the only production promotion path; the input defaults to no deploy.
+  # Recovery path only: normal production deploys run automatically from a
+  # protected main push after CI, scenario replay, staging deploy and smoke pass.
   workflow_dispatch:
     inputs:
-      deploy_production:
-        description: Select production to promote the verified main revision
+      recovery_deploy:
+        description: Repeat all gates and recover a missed protected-main deployment
         required: true
-        type: choice
-        options:
-          - skip
-          - production
-        default: skip
+        type: boolean
+        default: false
 
 jobs:
   scenario-gate:
@@ -160,9 +156,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: [ci, staging-gate]
-    if: always() && github.ref_name == 'main' && github.event_name == 'workflow_dispatch' && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
+    if: always() && github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
     outputs:
-      promoted: ${{ steps.selection.outputs.promoted }}
+      deployed: ${{ steps.deploy.outputs.deployed }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -170,18 +166,11 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - name: Resolve production selection
-        id: selection
-        env:
-          DEPLOY_PRODUCTION: ${{ github.event.inputs.deploy_production }}
+      - name: Mark protected-main deployment
+        id: deploy
         run: |
-          if [ "$DEPLOY_PRODUCTION" = "production" ]; then
-            echo "Production promotion explicitly selected."
-            echo "promoted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Production promotion not selected ($DEPLOY_PRODUCTION); production stays unchanged."
-            echo "promoted=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Deploying protected main after CI and staging gates."
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
       # ADMIN_GROUP_ID is a Workers secret set once via `wrangler secret put` —
       # it isn't declared in wrangler.toml and deploy doesn't touch it, so it
       # silently went missing and every admin-group command (/adduser etc.)
@@ -189,7 +178,6 @@ jobs:
       # every deploy makes it self-healing instead of a one-off CLI step that
       # nothing reproduces.
       - name: Sync ADMIN_GROUP_ID secret (main)
-        if: steps.selection.outputs.promoted == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -200,7 +188,6 @@ jobs:
       # FREELANCE_BOT_TOKEN is the enable flag: while it is not provisioned the
       # freelance env stays INERT (skipped with a warning, never a failure).
       - name: Deploy enabled Workers (main / recruiter / freelance)
-        if: steps.selection.outputs.promoted == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -289,7 +276,7 @@ jobs:
   smoke-test:
     runs-on: ubuntu-latest
     needs: deploy
-    if: always() && github.ref_name == 'main' && github.event_name == 'workflow_dispatch' && needs.deploy.result == 'success' && needs.deploy.outputs.promoted == 'true'
+    if: always() && github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.deploy.result == 'success' && needs.deploy.outputs.deployed == 'true'
     steps:
       # Same enabled-set as the deploy loop above: main/recruiter always,
       # freelance only once its token is provisioned. Each enabled Worker must
