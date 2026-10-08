@@ -1048,6 +1048,39 @@ describe('existing collector control-plane ownership', () => {
     expect(checkCompleteness).not.toHaveBeenCalled();
   });
 
+  it.each([401, 403])('releases a launch after explicit CP auth rejection %i and preserves input for retry', async status => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', items);
+    handleMessage.mockRejectedValue(Object.assign(new Error(`control plane POST /intake -> ${status}`), {
+      name: 'ControlPlaneError', status,
+    }));
+
+    await owner._dispatch();
+
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpUnresolvedLaunches') ?? []).toEqual([]);
+    expect(await storage.get('launching')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toEqual(items.map(item => ({ ...item, heldWhileBusy: true })));
+    expect(send.mock.calls.some(call => String(call[2]).includes('Запуск не создавал'))).toBe(true);
+    expect(send.mock.calls.some(call => String(call[2]).includes('Подтверждение запуска не получено. Не могу подтвердить'))).toBe(false);
+    expect(checkCompleteness).not.toHaveBeenCalled();
+  });
+
+  it.each([408, 409, 429, 500, 503])('keeps ambiguous CP HTTP %i admission unresolved', async status => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', items);
+    handleMessage.mockRejectedValue(Object.assign(new Error(`control plane -> ${status}`), {
+      name: 'ControlPlaneError', status,
+    }));
+
+    await owner._dispatch();
+
+    expect(await storage.get('busy')).toBe(true);
+    expect((await storage.get('cpUnresolvedLaunches'))).toHaveLength(1);
+    expect(await storage.get('launching')).toEqual(items);
+    expect(await storage.get('retryBatch')).toBeUndefined();
+  });
+
   it('accepts persisted adapter acknowledgement and keeps ownership until task status', async () => {
     const { owner, storage } = fixture();
     await storage.put('buf', items);
