@@ -90,7 +90,14 @@ export class ControlPlaneClient {
     headers.set('x-principal', this.config.principalId);
     if (this.config.principalSignature) headers.set('x-principal-sig', this.config.principalSignature);
     if (this.config.apiKey) headers.set('authorization', `Bearer ${this.config.apiKey}`);
+    if (this.config.telegramUserId) headers.set('x-telegram-user-id', String(this.config.telegramUserId));
     return headers;
+  }
+
+  /** Registration receives the whole update only across this authenticated gateway boundary. */
+  async registerTelegramUpdate(update) {
+    const { status, value } = await this.request('POST', '/registration/telegram/update', { body: { update } });
+    return { status, value };
   }
 
   async request(method, pathname, opts = {}) {
