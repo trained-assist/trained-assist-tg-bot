@@ -38,11 +38,44 @@ The harness reads only environment variables and an optional flat private JSON o
 | `SMOKE_POLL_INTERVAL_MS` | Default 2000, range 100–30000. |
 | `SMOKE_RECONCILIATION_MODE` | Exact enum `manual` (default) or `autonomous`; any other value is blocked before HTTP. Autonomous requires explicit IDs/date and a loaded prepared private `INTEGRATION_UPDATE_FILE`, not newly generated update bytes. |
 
+### Shared sandbox test identity
+
+The Telegram bot repository stores two owner-provided GitHub Actions secrets for
+the shared sandbox test identity:
+
+| Actions secret | Harness binding | Meaning |
+| --- | --- | --- |
+| `TG_STAGING_TEST_CHAT_ID` | `TEST_CHAT_ID` | Sandbox group destination (negative Telegram chat ID) |
+| `TG_STAGING_TEST_USER_ID` | `TEST_USER_ID` | Human sender ID (positive Telegram user ID) |
+
+Use this same sender and destination for the three sandbox bot deployments. The
+group chat ID is the delivery destination; it is not the sender identity. The
+deployed gateway must independently allowlist the chat in
+`TG_SLICE_ALLOWED_CHATS` and map it to the intended CP profile. Saving the IDs
+as GitHub secrets does not deploy either setting or authorize a chat by itself.
+Do not put the actual IDs in this document, logs, workflow artifacts or sample
+command lines.
+
+`telegram-v1-smoke.mjs` reads `TEST_CHAT_ID` and `TEST_USER_ID` from its process
+environment or the private `INTEGRATION_BINDINGS_FILE`; it does not fetch
+GitHub secrets. A GitHub Actions job that invokes the harness must map the two
+secrets to those binding names in its `env`, without echoing them. A local run
+must use an already provisioned private bindings file; `gh secret list` shows
+names only and cannot populate that file.
+
 The private `/tmp/ta-integrator-v1-runtime/client-bindings.json` currently contains principal/signature/profile and webhook secret, but lacks approved bot/chat bindings and may lack the endpoint URLs. It is a starting configuration, not permission to infer a destination. Communication-service bindings in that file are ignored.
 
 ## Run
 
-Only after the parent explicitly clears the delivery pause, completes bot/chat authorization, and deploys the reviewed delivery owner, run with reserved IDs in the private bindings file:
+For the narrower CP-to-Runner auth check, first run the CP repository's
+[sandbox test pass](https://github.com/trained-assist/trained-assist-control-plane/blob/main/docs/PROFILE-RUNTIME-POLICY.md#run-and-inspect-the-cp--runner-sandbox-e2e).
+It deploys only the CP sandbox and verifies Runner `mock-test` → `pong`; it
+does not exercise Telegram ingress or delivery.
+
+Run this Telegram ingress E2E only after the delivery owner is reviewed and
+deployed and its acceptance gate is clear. Reserve explicit update/message IDs
+and a message date, complete bot/chat authorization, and use the private
+bindings file:
 
 ```sh
 INTEGRATION_BINDINGS_FILE=/tmp/ta-integrator-v1-runtime/client-bindings.json \
