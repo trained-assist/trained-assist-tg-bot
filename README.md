@@ -50,6 +50,12 @@ it through a trusted operator; keep the root signing secret out of the gateway.
 The client sends the signature as `x-principal-sig`. Unsigned local fake-control-plane
 fixtures remain supported; a deployed control plane requires its configured auth.
 
+Routing waits for the bounded Communication method through CP. Its separate
+`TG_SLICE_ROUTE_REQUEST_TIMEOUT_MS` defaults to 140 seconds (maximum 180), covering
+CP's 130-second selector deadline. Reads and control calls keep their separate
+`TG_SLICE_REQUEST_TIMEOUT_MS` deadline. This margin does not establish acceptable
+classifier latency; inspect correlated dependency timing in the sandbox.
+
 Reconciliation scans paginated KV keys, reads their values, and delivers stored
 receipts separately from terminal results. Direct and launched-batch indexes persist
 the original chat, thread, and requesting bot. Final replies use `result.answer`
