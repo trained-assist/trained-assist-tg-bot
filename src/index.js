@@ -298,7 +298,7 @@ async function handleWebhook(c, pathBotId) {
   if (secretHeader !== bot.webhookSecret) {
     return c.json({ error: 'unauthorized' }, 401);
   }
-  const env = envForBot(c.env, bot);
+  let env = envForBot(c.env, bot);
   let update;
   try {
     update = await c.req.json();
@@ -316,13 +316,18 @@ async function handleWebhook(c, pathBotId) {
     if (allowed.length === 0) return c.json({ error: 'sandbox chat allowlist is not configured' }, 503);
     const incomingChatId = update?.message?.chat?.id ?? update?.callback_query?.message?.chat?.id;
     if (!allowed.includes(String(incomingChatId ?? ''))) return c.json({ error: 'sandbox chat refused' }, 403);
+    // Sandbox ingress tests exercise the actual handler but must not mutate the
+    // Telegram bot menu or send a reply to Telegram. The configured allowlist is
+    // also the test-mode journal set for this isolated worker.
+    env = { ...env, TEST_CHAT_IDS: incomingChatId == null ? '' : String(incomingChatId) };
   }
 
   // Fire-and-forget — Telegram expects 200 within 5s
   c.executionCtx.waitUntil(dispatch(update, env));
   // Register the Telegram command menu once per isolate (commands-registry.json
   // is the single source of truth — see lib/telegram.js#registerBotCommands).
-  c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
+  if (c.env.SANDBOX_REQUIRE_CHAT_ALLOWLIST !== 'true')
+    c.executionCtx.waitUntil(ensureCommandsRegisteredOnce(env));
   return c.json({ ok: true });
 }
 

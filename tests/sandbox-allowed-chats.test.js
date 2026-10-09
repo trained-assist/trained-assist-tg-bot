@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
+import { afterEach, beforeEach } from 'vitest';
 import worker from '../src/index.js';
+
+const fetchSpy = vi.spyOn(globalThis, 'fetch');
+const logSpy = vi.spyOn(console, 'log');
+beforeEach(() => { fetchSpy.mockReset(); logSpy.mockClear(); });
+afterEach(() => { fetchSpy.mockReset(); logSpy.mockClear(); });
 
 function signedWebhook(update, env, secret = 'test-webhook-secret') {
   const promises = [];
@@ -45,6 +51,7 @@ describe('sales sandbox ingress allowlist', () => {
     expect(config).toContain('BOT_USERNAME = "flexi_leads_bot"');
     expect(config).toContain('SESSION_NAMESPACE = "sales"');
     expect(config).toContain('SANDBOX_REQUIRE_CHAT_ALLOWLIST = "true"');
+    expect(config).not.toMatch(/^TEST_CHAT_IDS\s*=/m);
     expect(config).not.toMatch(/^routes\s*=/m);
     expect(config).not.toMatch(/^crons\s*=/m);
     expect(config).not.toContain('id = "74c1930ed8464f4889c056031f0d42f8"');
@@ -67,10 +74,13 @@ describe('sales sandbox ingress allowlist', () => {
   });
 
   it('admits the approved test chat after validating the Telegram secret', async () => {
+    fetchSpy.mockImplementation(async () => { throw new Error('sandbox Telegram egress forbidden in this test'); });
     const result = await signedWebhook(update(1001), env('1001'));
     expect(result.response.status).toBe(200);
     await Promise.all(result.promises);
-    expect(result.promises).toHaveLength(2);
+    expect(result.promises).toHaveLength(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[test-mode] kind=sendMessage chat=1001'));
   });
 
   it('still rejects an unsigned test update before reading the allowlist', async () => {
