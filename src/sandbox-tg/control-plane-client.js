@@ -1,3 +1,4 @@
+import { controlPlaneRunFailureCode } from '../lib/control-plane-outcome.js';
 // HTTP adapter of the Telegram sandbox slice to the NEW control plane.
 //
 // It repeats the calls of the web slice (web/control-plane-client.ts) one to one:
@@ -287,6 +288,7 @@ export class ControlPlaneClient {
         started_at: numOrNull(run.started_at),
         finished_at: numOrNull(run.finished_at),
         error_class: str(run.error_class),
+        failure_code: controlPlaneRunFailureCode(run),
         lease_until: numOrNull(run.lease_until),
       })),
       updated_at: numOrNull(row.updated_at),

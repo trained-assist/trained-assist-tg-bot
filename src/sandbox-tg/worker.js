@@ -1,3 +1,4 @@
+import { controlPlaneFailureText } from '../lib/control-plane-outcome.js';
 // Controller that glues the slice together: profile mapping, update
 // dedup, batch collection (PR-12), intake/answer against the new
 // control plane, durable ACK + replay, result push + stale button
@@ -309,7 +310,7 @@ export class TgSliceController {
         boundary = 'delivery_owner_read';
         if (await bounded(() => this.outbox.load(deliveryId))) continue;
         const answer = typeof status.result === 'string' ? status.result : status.result?.answer;
-        const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? 'Ошибка исполнителя.' : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
+        const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? controlPlaneFailureText(status) : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
         boundary = 'delivery_owner_enqueue';
         await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
           conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,

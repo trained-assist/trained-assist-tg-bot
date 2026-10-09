@@ -1026,6 +1026,19 @@ describe('existing collector control-plane ownership', () => {
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
+  it('delivers the current rejected-engine failure without disclosing Runner error text', async () => {
+    const { owner } = fixture();
+    await snapshot(owner, receipt, items);
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'failed', generation: 1 }, runs: [{ generation: 1, status: 'failed', error_class: 'runner_rejected',
+      error_text: 'ENGINE_NOT_ALLOWED: this API does not run engine "fixture" private-secret' }] } });
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'Ошибка настройки исполнителя: выбранный движок недоступен. Ввод сохранён.' }));
+    expect(JSON.stringify(enqueue.mock.calls)).not.toContain('private-secret');
+  });
+
   it.each(['enqueue', 'drain'])('keeps terminal ownership after %s ACK loss and retries the identical owner record after restart', async boundary => {
     const { owner, storage, env } = fixture();
     await accept(owner);

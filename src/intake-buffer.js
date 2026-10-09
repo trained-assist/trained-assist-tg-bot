@@ -1,3 +1,4 @@
+import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
@@ -3045,7 +3046,7 @@ export class IntakeBuffer {
         const deliveryId = `terminal:${receipt.userTaskId}:g${row.generation}`;
         const answer = typeof row.result === 'string' ? row.result : row.result?.answer;
         const label = row.status === 'done' ? 'Готово. Текст результата отсутствует.'
-          : row.status === 'failed' ? 'Ошибка исполнителя.' : 'Отменено.';
+          : row.status === 'failed' ? controlPlaneFailureText({ generation: row.generation, runs }) : 'Отменено.';
         const outbox = new TgDeliveryOwnerClient(this.env);
         const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
           conversationId: `${envelope.conversationRef}-b${requestId.slice(-24)}`,
