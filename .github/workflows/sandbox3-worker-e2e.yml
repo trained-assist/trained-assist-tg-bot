@@ -21,6 +21,9 @@ jobs:
     if: ${{ inputs.run_e2e == true && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Require protected main
         env:

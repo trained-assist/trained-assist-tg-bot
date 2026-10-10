@@ -162,7 +162,9 @@ export function captureDeliveredTestMessage(chatId, text, result, buttons = []) 
   const capture = testCaptures.get(Number(chatId));
   if (!capture?.deliverToTelegram) return false;
   capture.entries.push({ kind: 'sendMessage', text: String(text),
+    telegramOk: result?.ok === true,
     ...(Number.isSafeInteger(result?.result?.message_id) ? { messageId: result.result.message_id } : {}),
+    ...(Number.isSafeInteger(result?.error_code) ? { errorCode: result.error_code } : {}),
     ...(Array.isArray(buttons) && buttons.length ? { buttons: buttons.map(row => row.map(button => ({
       text: String(button.text ?? ''), callbackData: button.callback_data ?? null, url: button.url ?? null,
     }))) } : {}),
