@@ -1,5 +1,5 @@
 import { trackUI, forgetUI } from './transient-ui.js';
-import { captureTestMessage, isTestChatCached, suppress, callbackChatId } from './test-mode.js';
+import { captureTestMessage, captureDeliveredTestMessage, isTestChatCached, suppress, callbackChatId } from './test-mode.js';
 import commandsRegistry from '../../commands-registry.json';
 import { resolveAudience } from './audience.js';
 import { isCommandVisible } from './command-visibility.js';
@@ -127,6 +127,7 @@ export async function sendMessage(token, chatId, text, extra = {}) {
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }),
   });
   const data = await res.json();
+  captureDeliveredTestMessage(chatId, text, data, extra.reply_markup?.inline_keyboard ?? []);
   if (!data.ok) {
     // Surface Telegram rejections — silent swallow here is how /start went dark
     // when a raw "<id>" slipped into commands-registry.json (cmdStart's HTML

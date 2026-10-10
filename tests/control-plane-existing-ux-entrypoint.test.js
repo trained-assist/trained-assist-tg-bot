@@ -82,9 +82,13 @@ describe('signed existing-UX ingress', () => {
 
     expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' }, 'wrong')).status).toBe(401);
     expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_missing_chat Must Fail' })).status).toBe(409);
-    const response = await request({ target: 'sandbox', type: 'message', chatId: 1001, text: '/adduser e2e_worker_fixture Worker Fixture' });
+    expect((await request({ target: 'sandbox', type: 'message', chatId: 1001, userId: 0, text: 'bad user' })).status).toBe(400);
+    expect((await request({ target: 'sandbox', type: 'message', chatId: 1001, delivery: 'log', text: 'bad delivery mode' })).status).toBe(400);
+    const response = await request({ target: 'sandbox', type: 'message', chatId: 1001, userId: 7, admin: true,
+      text: '/adduser e2e_worker_fixture Worker Fixture' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: true, chatId: 1001, admission: { ok: true }, collector: {
+    expect(await response.json()).toMatchObject({ ok: true, chatId: 1001, userId: 7, admin: true, delivery: 'capture',
+      admission: { ok: true }, collector: {
       busy: false, pendingCount: 0, stranded: false, collectorMessageId: null, launchingMessageIds: [],
     } });
     const created = JSON.parse(await env.TG_SLICE.get('user:e2e_worker_fixture'));
