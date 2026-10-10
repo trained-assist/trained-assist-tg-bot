@@ -10,11 +10,20 @@ buttons from JSON, then submit a returned button callback the same way.
 
 Use the existing `TG_SANDBOX_CLEANUP_TOKEN` bearer secret. Task execution
 requires a real sandbox `chatId` on each request or the `TG_SANDBOX_E2E_CHAT_ID`
-Worker variable. The update and eventual answer go to that chat. The synthetic
-operator identity is `900000236`. The separate `/operator/test-buffer-message`
-contract check uses the reserved fixture chat `-1000000000236`; never use that
-fake destination for agent runs. The operator API accepts only the sandbox
-lane's configured/open chats. It accepts `message` updates with `text`, or
+Worker variable. By default `delivery` is `capture`: Telegram sends are
+suppressed for deterministic contract checks. Set `"delivery":"telegram"`
+for a real user journey; outgoing messages and the final agent answer then go
+to the same real chat, while immediate replies are also returned in the
+operator transcript. This mode does not set `TEST_CHAT_IDS` and therefore does
+not turn the CP run into `delivery=log`. `userId` can specify the Telegram
+sender id (default `900000236`) so the session and task represent the test
+account. `admin:true` treats the target sandbox chat as the admin chat for
+that one operator-authenticated update, allowing tests to exercise the existing
+`/adduser` flow; it does not change Worker configuration. The separate
+`/operator/test-buffer-message` contract check uses the reserved fixture chat
+`-1000000000236`; never use that fake destination for agent runs. The operator
+API accepts only the sandbox lane's configured/open chats. It accepts `message`
+updates with `text`, or
 `callback` updates with `callbackData`; `messageId` is optional and defaults to
 the current collector button message when one exists. Captured transcript messages include
 a local `messageId`; captured inline keyboards include their `callbackData`.
@@ -29,7 +38,7 @@ Example message:
 curl --fail-with-body -sS https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/test-update \
   -H "Authorization: Bearer ${TG_SANDBOX_CLEANUP_TOKEN}" \
   -H 'Content-Type: application/json' \
-  --data '{"target":"sandbox","chatId":123456789,"type":"message","text":"/adduser e2e_worker_fixture Worker Fixture"}'
+  --data '{"target":"sandbox","chatId":123456789,"userId":123456789,"delivery":"telegram","admin":true,"type":"message","text":"/adduser e2e_worker_fixture Worker Fixture"}'
 ```
 
 Read `transcript[].messageId` and `transcript[].buttons` from the response when
