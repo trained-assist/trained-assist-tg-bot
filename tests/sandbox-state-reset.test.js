@@ -6,7 +6,10 @@ class Storage {
   async get(key) { return this.values.get(key); }
   async put(key, value) { this.values.set(key, value); }
   async delete(key) { this.values.delete(key); }
-  async list({ prefix = '' } = {}) { return new Map([...this.values].filter(([key]) => key.startsWith(prefix))); }
+  async list({ prefix = '', startAfter, limit = 1000 } = {}) {
+    const entries = [...this.values].filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter)).sort(([a], [b]) => a.localeCompare(b));
+    return new Map(entries.slice(0, limit));
+  }
   async getAlarm() { return this.alarm; }
   async deleteAlarm() { this.alarm = null; }
 }
@@ -37,5 +40,13 @@ describe('sandbox-only Intake DO reset', () => {
     expect(clear.status).toBe(409);
     expect(await clear.json()).toEqual({ error: 'active_intake_state' });
     expect((await storage.list()).size).toBe(1);
+  });
+
+  it('clears large Durable Object buffers in pages', async () => {
+    const entries = Object.fromEntries(Array.from({ length: 1201 }, (_, index) => [`old:${String(index).padStart(4, '0')}`, index]));
+    const { instance, storage } = actor(entries);
+    const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
+    expect(await clear.json()).toMatchObject({ ok: true, deletedKeys: 1201 });
+    expect((await storage.list()).size).toBe(0);
   });
 });

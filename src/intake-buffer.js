@@ -874,12 +874,24 @@ export class IntakeBuffer {
         // Only an in-progress launch request is ambiguous before CP has admitted it.
         const launching = await this.state.storage.get('launching');
         const active = Array.isArray(launching) ? launching.length > 0 : !!launching;
-        const entries = await this.state.storage.list();
-        if (url.pathname.endsWith('reset-inspect')) return Response.json({ ok: true, active, keys: entries.size });
+        if (url.pathname.endsWith('reset-inspect')) {
+          const entries = await this.state.storage.list({ limit: 1000 });
+          return Response.json({ ok: true, active, keys: entries.size });
+        }
         if (active) return Response.json({ error: 'active_intake_state' }, { status: 409 });
-        for (const key of entries.keys()) await this.state.storage.delete(key);
+        let deletedKeys = 0;
+        let startAfter;
+        while (true) {
+          const entries = await this.state.storage.list({ limit: 1000, ...(startAfter ? { startAfter } : {}) });
+          const keys = [...entries.keys()];
+          if (!keys.length) break;
+          for (const key of keys) await this.state.storage.delete(key);
+          deletedKeys += keys.length;
+          if (keys.length < 1000) break;
+          startAfter = keys.at(-1);
+        }
         await this.state.storage.deleteAlarm();
-        return Response.json({ ok: true, deletedKeys: entries.size });
+        return Response.json({ ok: true, deletedKeys });
       });
     }
 

@@ -126,13 +126,22 @@ export class SandboxAcceptOnlyStore {
     if (url.hostname !== 'accept-only.internal') return Response.json({ error: 'not_found' }, { status: 404 });
     if (request.method === 'POST' && url.pathname === '/admit') return this.admit(request);
     if (request.method === 'POST' && url.pathname === '/operator/reset-all') {
-      const entries = await this.state.storage.list();
-      for (const key of entries.keys()) await this.state.storage.delete(key);
+      let deletedKeys = 0;
+      let startAfter;
+      while (true) {
+        const entries = await this.state.storage.list({ limit: 1000, ...(startAfter ? { startAfter } : {}) });
+        const keys = [...entries.keys()];
+        if (!keys.length) break;
+        for (const key of keys) await this.state.storage.delete(key);
+        deletedKeys += keys.length;
+        if (keys.length < 1000) break;
+        startAfter = keys.at(-1);
+      }
       await this.state.storage.deleteAlarm?.();
-      return Response.json({ ok: true, deletedKeys: entries.size });
+      return Response.json({ ok: true, deletedKeys });
     }
     if (request.method === 'POST' && url.pathname === '/operator/reset-inspect') {
-      return Response.json({ ok: true, keys: (await this.state.storage.list()).size });
+      return Response.json({ ok: true, keys: (await this.state.storage.list({ limit: 1000 })).size });
     }
     const eventMatch = request.method === 'POST' && /^\/events\/(sbx_[A-Za-z0-9_-]{20,64})$/.exec(url.pathname);
     if (eventMatch) {
