@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { assertSandboxStateEmpty } from './sandbox-buffer-assertions.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
@@ -57,11 +58,7 @@ function assertNoActiveCpState(counts) {
 }
 
 function assertEmpty(cp, tg) {
-  for (const name of CP_STATE_TABLES) assert.equal(Number(cp[name] ?? 0), 0, `CP sandbox not empty: ${name}=${cp[name]}`);
-  for (const name of ['sessionAndRetryKeys', 'sandboxUserKeys', 'intakeBuffers', 'durableObjectKeys', 'acceptOnlyKeys']) {
-    assert.equal(Number(tg[name] ?? 0), 0, `TG sandbox not empty: ${name}=${tg[name]}`);
-  }
-  assert.equal(tg.active, false);
+  assertSandboxStateEmpty(cp, tg, CP_STATE_TABLES);
 }
 
 async function inspect() {
