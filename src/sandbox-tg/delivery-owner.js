@@ -90,11 +90,14 @@ export class TgDeliveryOwner {
         if (JSON.stringify(cutoverManifest(this.env, config)) !== (await this.state.storage.get('cutover'))?.fingerprint) throw new Error();
         if (route === '/open') {
           const marker = await this.state.storage.get('cutover');
+          const deliveryPaused = typeof body.deliveryPaused === 'boolean'
+            ? body.deliveryPaused : this.env.TG_SLICE_DELIVERY_PAUSED !== 'false';
+          const ingressPaused = typeof body.ingressPaused === 'boolean'
+            ? body.ingressPaused : this.env.TG_SLICE_INGRESS_PAUSED === 'true';
           return Response.json({ ready: true, cutoverId: marker.cutoverId, manifestDigest: marker.manifestDigest,
             cutoverAt: marker.cutoverAt, quarantinedTaskCount: marker.quarantinedTaskCount,
             quarantinedDeliveryCount: marker.quarantinedDeliveryCount,
-            paused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
-            ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true' });
+            paused: deliveryPaused, ingressPaused });
         }
         if (route === '/enqueue') return Response.json(await this.enqueue(body, config));
         if (route === '/discovery') {
@@ -136,6 +139,9 @@ export class TgDeliveryOwner {
           return Response.json({ receipt: summary(receipt), terminal: summary(terminal) });
         }
         if (route === '/drain') {
+          const deliveryPaused = typeof body.deliveryPaused === 'boolean'
+            ? body.deliveryPaused : this.env.TG_SLICE_DELIVERY_PAUSED !== 'false';
+          if (deliveryPaused) return Response.json({ drained: 0 });
           const operation = this.sendQueue.then(() => this.drain(config));
           this.sendQueue = operation.catch(() => {});
           return Response.json({ drained: await operation });
@@ -170,7 +176,6 @@ export class TgDeliveryOwner {
   }
 
   async drain(config) {
-    if (this.env.TG_SLICE_DELIVERY_PAUSED !== 'false') return 0;
     const claim = await this.state.storage.transaction(async storage => {
       const records = [...(await storage.list({ prefix: 'delivery:' })).values()].sort((first, second) => first.createdAt - second.createdAt);
       const record = records.find(item => ['pending', 'retrying'].includes(item.status) && (item.nextAttemptAt ?? 0) <= Date.now());
@@ -203,6 +208,7 @@ export class TgDeliveryOwner {
 
 export class TgDeliveryOwnerClient {
   constructor(env, config = readTgSliceConfig(env)) {
+    this.env = env;
     const useV2 = Boolean(env.TG_DELIVERY_OWNER_V2?.idFromName && env.TG_DELIVERY_OWNER_V2?.get);
     const manifest = useV2 ? env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2 : env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST;
     cutoverManifest({ ...env, TG_SLICE_DELIVERY_CUTOVER_MANIFEST: manifest }, config);
@@ -219,12 +225,17 @@ export class TgDeliveryOwnerClient {
     return response.json();
   }
   enqueue(record) { return this.call('enqueue', record); }
-  open() { return this.call('open', {}); }
+  open() { return this.call('open', {
+    deliveryPaused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
+    ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true',
+  }); }
   load(deliveryId) { return this.call('load', { deliveryId }); }
   read(taskId) { return this.call('read', { taskId }); }
   discovery() { return this.call('discovery', {}); }
   async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
-  async drain() { return (await this.call('drain', {})).drained; }
+  async drain() { return (await this.call('drain', {
+    deliveryPaused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
+  })).drained; }
 }
 
 // Preserve the original owner for forensic evidence; an initialized manifest
