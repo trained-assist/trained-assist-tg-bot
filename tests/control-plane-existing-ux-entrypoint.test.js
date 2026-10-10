@@ -62,6 +62,44 @@ describe('signed existing-UX ingress', () => {
     expect(env.SESSIONS.data.size).toBe(0);
   });
 
+  it('drives an authenticated synthetic admin update through the sandbox Worker and namespaces created users', async () => {
+    const { env } = fixture();
+    Object.assign(env, { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
+      TG_SANDBOX_CLEANUP_TOKEN: 'dedicated-sandbox-cleanup-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
+      TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236', SESSION_NAMESPACE: 'integrator-existing-ux-v1',
+      EXECUTION_BACKEND: 'control-plane', TG_SLICE_OPEN_SANDBOX: 'true', TG_SLICE_INGRESS_PAUSED: 'false',
+      TG_SLICE_DELIVERY_PAUSED: 'false' });
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
+      intakeCalls.push({ name, path: new URL(url).pathname });
+      if (new URL(url).pathname === '/debug') return Response.json({ buf: [], busy: false, stranded: false });
+      return Response.json({ ok: true, appended: true });
+    } }) };
+    const request = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }), env);
+
+    expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' }, 'wrong')).status).toBe(401);
+    const response = await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, admission: { ok: true } });
+    const created = JSON.parse(await env.TG_SLICE.get('user:e2e_worker_fixture'));
+    expect(created.name).toBe('Worker Fixture');
+    expect(created.passwordHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
+    expect(intakeCalls).toEqual([]);
+
+    await env.SESSIONS.put('integrator-existing-ux-v1:-1000000000236', JSON.stringify({
+      username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
+    }));
+    const callback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', messageId: 88 });
+    expect(callback.status).toBe(200);
+    expect(await callback.json()).toMatchObject({ ok: true, admission: { ok: true } });
+    expect(handleCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+      message_id: 88, chat: { id: -1000000000236, type: 'supergroup', is_forum: false },
+    }) }), expect.objectContaining({ TG_SLICE_ALLOWED_USERS: '7,900000236' }));
+  });
+
   it('resets all sandbox session and intake state only after owner auth and explicit confirmation', async () => {
     const state = fixture();
     const { env } = state;
@@ -73,6 +111,7 @@ describe('signed existing-UX ingress', () => {
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42:7`, JSON.stringify({ pendingMessage: 'old topic draft' }));
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:retry:42:old`, JSON.stringify({ chatId: 42 }));
     env.TG_SLICE.data.set('sandbox-user:old-user', JSON.stringify({ profileId: 'old-profile' }));
+    env.TG_SLICE.data.set('user:legacy-test-user', JSON.stringify({ name: 'Old sandbox profile' }));
     const resetCalls = [];
     const stateKeys = new Map();
     const activeBuffers = new Set();
@@ -99,7 +138,7 @@ describe('signed existing-UX ingress', () => {
     const inspect = await post({ target: 'sandbox', mode: 'inspect' });
     expect(inspect.status).toBe(200);
     expect(await inspect.json()).toMatchObject({ ok: true, sessionAndRetryKeys: 3, intakeBuffers: 2,
-      sandboxUserKeys: 1, acceptOnlyKeys: 0, active: false });
+      sandboxUserKeys: 2, acceptOnlyKeys: 0, active: false });
     expect(env.SESSIONS.data.size).toBe(3);
     expect(resetCalls).toHaveLength(3);
     activeBuffers.add('42');
@@ -111,8 +150,9 @@ describe('signed existing-UX ingress', () => {
     activeBuffers.delete('42');
     const cleared = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
     expect(cleared.status).toBe(200);
-    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 1, intakeBuffersReset: 2 });
+    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 2, intakeBuffersReset: 2 });
     expect(env.SESSIONS.data.size).toBe(0);
+    expect(env.TG_SLICE.data.size).toBe(0);
     expect(resetCalls.filter(value => value === 'intake:/operator/reset-all')).toHaveLength(2);
     expect(resetCalls).toContain('accept-only:/operator/reset-all');
   });

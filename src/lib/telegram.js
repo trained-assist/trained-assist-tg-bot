@@ -1,5 +1,5 @@
 import { trackUI, forgetUI } from './transient-ui.js';
-import { isTestChatCached, suppress, callbackChatId } from './test-mode.js';
+import { captureTestMessage, isTestChatCached, suppress, callbackChatId } from './test-mode.js';
 import commandsRegistry from '../../commands-registry.json';
 import { resolveAudience } from './audience.js';
 import { isCommandVisible } from './command-visibility.js';
@@ -115,7 +115,12 @@ export async function getRegisteredCommands(token) {
 }
 
 export async function sendMessage(token, chatId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'sendMessage', text);
+  if (isTestChatCached(chatId)) {
+    const result = suppress(chatId, 'sendMessage', text);
+    const keyboard = extra.reply_markup?.inline_keyboard;
+    if (keyboard?.length && result.result?.message_id) captureTestMessage(chatId, result.result.message_id, keyboard);
+    return result;
+  }
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -133,7 +138,7 @@ export async function sendMessage(token, chatId, text, extra = {}) {
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', text);
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', { messageId, text });
   const { lifecycleEnv, ...telegramExtra } = extra;
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',
@@ -150,7 +155,7 @@ export async function editMessage(token, chatId, messageId, text, extra = {}) {
 }
 
 export async function editMessageReplyMarkup(token, chatId, messageId, inlineKeyboard = []) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessageReplyMarkup', `msg=${messageId}`);
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessageReplyMarkup', { messageId, buttons: inlineKeyboard });
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
