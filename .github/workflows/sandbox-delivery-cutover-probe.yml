@@ -1,0 +1,25 @@
+name: Read sandbox delivery cutover state
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Read and validate the sandbox cutover marker
+        env:
+          TG_STAGING_WEBHOOK_SECRET: ${{ secrets.TG_STAGING_WEBHOOK_SECRET }}
+        run: node scripts/cloudflare/sandbox-delivery-cutover-probe.mjs

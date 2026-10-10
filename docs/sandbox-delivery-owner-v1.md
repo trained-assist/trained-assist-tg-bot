@@ -96,6 +96,12 @@ route is internal-operator authenticated by the existing public gate, not a new
 credential authority. DO endpoints are reachable only through the sandbox's
 namespace binding; no public DO forwarding route exists.
 
+The protected-main GitHub Action `Read sandbox delivery cutover state` performs
+this bounded read and prints only the cutover ID/digest, quarantine counts,
+pause state, and `providerCalled: false`. It never invokes `/cron`, sends a
+Telegram request, or accepts a task. Run it before any live sandbox ingress to
+confirm the deployed manifest and pause state.
+
 The reviewed activated sandbox configuration retains `TG_SLICE_DELIVERY_PAUSED = "false"`
 and enables `crons = ["* * * * *"]` only in `wrangler.sandbox-tg.toml`.
 The pause flag exists only in sandbox `[vars]`; do not provision a secret with
