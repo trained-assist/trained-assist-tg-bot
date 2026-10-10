@@ -81,9 +81,10 @@ describe('signed existing-UX ingress', () => {
     }), env);
 
     expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' }, 'wrong')).status).toBe(401);
-    const response = await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' });
+    expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_missing_chat Must Fail' })).status).toBe(409);
+    const response = await request({ target: 'sandbox', type: 'message', chatId: 1001, text: '/adduser e2e_worker_fixture Worker Fixture' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: true, admission: { ok: true }, collector: {
+    expect(await response.json()).toMatchObject({ ok: true, chatId: 1001, admission: { ok: true }, collector: {
       busy: false, pendingCount: 0, stranded: false, collectorMessageId: null, launchingMessageIds: [],
     } });
     const created = JSON.parse(await env.TG_SLICE.get('user:e2e_worker_fixture'));
@@ -91,18 +92,29 @@ describe('signed existing-UX ingress', () => {
     expect(created.passwordHash).toMatch(/^[a-f0-9]{64}$/);
     expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
     expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
-    expect((await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run' })).status).toBe(409);
+    expect((await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', chatId: 1001 })).status).toBe(409);
 
     const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
-      updateId: 91009, messageId: 89 });
+      chatId: -1000000000236, updateId: 91009, messageId: 89 });
     expect(await unauthenticatedCallback.json()).toMatchObject({ ok: true,
       admission: { ok: true, authenticated: false } });
     expect(callbackChatId('sandbox-test-91009')).toBe(-1000000000236);
 
+    await env.SESSIONS.put('integrator-existing-ux-v1:1001', JSON.stringify({
+      username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
+    }));
+    const configuredChatCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
+      chatId: 1001, updateId: 91010, messageId: 90 });
+    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001 });
+    expect(callbackChatId('sandbox-test-91010')).toBe(1001);
+    expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+      message_id: 90, chat: { id: 1001, type: 'private', is_forum: false },
+    }) }), expect.any(Object));
+
     await env.SESSIONS.put('integrator-existing-ux-v1:-1000000000236', JSON.stringify({
       username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
     }));
-    const callback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', messageId: 88 });
+    const callback = await request({ target: 'sandbox', type: 'callback', chatId: -1000000000236, callbackData: 'intake_run', messageId: 88 });
     expect(callback.status).toBe(200);
     expect(await callback.json()).toMatchObject({ ok: true, admission: { ok: true } });
     expect(handleCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
