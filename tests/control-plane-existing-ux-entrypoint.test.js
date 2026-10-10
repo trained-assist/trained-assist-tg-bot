@@ -8,6 +8,7 @@ vi.mock('../src/lib/telegram.js', () => ({ answerCallbackQuery: vi.fn(), sendMes
 import worker from '../src/sandbox-tg/existing-ux.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { answerCallbackQuery, sendMessage } from '../src/lib/telegram.js';
+import { callbackChatId } from '../src/lib/test-mode.js';
 
 function fixture() {
   const collectorCalls = [];
@@ -88,6 +89,12 @@ describe('signed existing-UX ingress', () => {
     expect(created.passwordHash).toMatch(/^[a-f0-9]{64}$/);
     expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
     expect(intakeCalls).toEqual([]);
+
+    const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
+      updateId: 91009, messageId: 89 });
+    expect(await unauthenticatedCallback.json()).toMatchObject({ ok: true,
+      admission: { ok: true, authenticated: false } });
+    expect(callbackChatId('sandbox-test-91009')).toBe(-1000000000236);
 
     await env.SESSIONS.put('integrator-existing-ux-v1:-1000000000236', JSON.stringify({
       username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
