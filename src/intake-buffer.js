@@ -857,6 +857,44 @@ export class IntakeBuffer {
       });
     }
 
+    // The outer sandbox Worker has already authenticated the operator and
+    // enumerated its namespaced KV. This endpoint is only mounted on the
+    // dedicated IntakeBufferReset class, never production's IntakeBuffer.
+    if (['/operator/reset-inspect', '/operator/reset-all'].includes(url.pathname) && request.method === 'POST') {
+      if (this.env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
+          this.env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' ||
+          this.env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' ||
+          this.env.EXECUTION_BACKEND !== 'control-plane') {
+        return Response.json({ error: 'sandbox_identity_mismatch' }, { status: 409 });
+      }
+      return this._exclusive(async () => {
+        // The paired CP preflight refuses while any task/execution is active.
+        // Local `busy`, stop-window and unresolved receipt markers can therefore
+        // be stale remnants from the corrupt sandbox mapping this reset repairs.
+        // Only an in-progress launch request is ambiguous before CP has admitted it.
+        const launching = await this.state.storage.get('launching');
+        const active = Array.isArray(launching) ? launching.length > 0 : !!launching;
+        if (url.pathname.endsWith('reset-inspect')) {
+          const entries = await this.state.storage.list({ limit: 1000 });
+          return Response.json({ ok: true, active, keys: entries.size });
+        }
+        if (active) return Response.json({ error: 'active_intake_state' }, { status: 409 });
+        let deletedKeys = 0;
+        let startAfter;
+        while (true) {
+          const entries = await this.state.storage.list({ limit: 1000, ...(startAfter ? { startAfter } : {}) });
+          const keys = [...entries.keys()];
+          if (!keys.length) break;
+          for (const key of keys) await this.state.storage.delete(key);
+          deletedKeys += keys.length;
+          if (keys.length < 1000) break;
+          startAfter = keys.at(-1);
+        }
+        await this.state.storage.deleteAlarm();
+        return Response.json({ ok: true, deletedKeys });
+      });
+    }
+
     // Sandbox operator recovery. The gateway validates the dedicated operator
     // token before reaching this DO route. CP receipts/checkpoints are preserved;
     // abandon only releases this one IntakeBuffer's local barrier.
