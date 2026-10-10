@@ -88,6 +88,7 @@ export function applyTestDelivery(env, body) {
 // no match = ordinary sends (same fail-safe).
 
 let cached = null;
+const testCaptures = new Map();
 
 export function initTestMode(env) {
   cached = idsFor(env);
@@ -103,9 +104,80 @@ export function isTestChatCached(chatId) {
 // `result` (recordSent/trackUI no-op on a missing message_id — a suppressed
 // message must never be remembered in KV as if it existed).
 export function suppress(chatId, kind, detail) {
-  const text = String(detail ?? '').replace(/\s+/g, ' ').slice(0, 300);
+  const structuredDetail = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : null;
+  const text = String(structuredDetail?.text ?? detail ?? '').replace(/\s+/g, ' ').slice(0, 300);
+  const capture = testCaptures.get(Number(chatId));
+  if (capture) {
+    return capture.record({ kind, text, ...(structuredDetail ? {
+      ...(Number.isSafeInteger(structuredDetail.messageId) ? { messageId: structuredDetail.messageId } : {}),
+      ...(Array.isArray(structuredDetail.buttons) ? { buttons: structuredDetail.buttons } : {}),
+    } : {}) });
+  }
   console.log(`[test-mode] kind=${kind} chat=${chatId} text=${text}${text.length >= 300 ? '…' : ''}`);
   return { ok: true, suppressed: true };
+}
+
+export function beginTestCapture(chatId, { deliverToTelegram = false } = {}) {
+  const id = Number(chatId);
+  if (!Number.isSafeInteger(id) || id === 0 || testCaptures.has(id)) return null;
+  const entries = [];
+  let nextMessageId = 1;
+  const capture = {
+    entries,
+    deliverToTelegram,
+    record(entry) {
+      if (entry.kind === 'sendMessage') {
+        const messageId = nextMessageId++;
+        entries.push({ ...entry, messageId });
+        return { ok: true, suppressed: true, result: { message_id: messageId } };
+      }
+      if (entry.kind === 'editMessage') {
+        const existing = entries.find(item => item.messageId === entry.messageId);
+        if (existing) existing.text = entry.text;
+        else entries.push(entry);
+        return { ok: true, suppressed: true, result: { message_id: entry.messageId } };
+      }
+      if (entry.kind === 'editMessageReplyMarkup') {
+        const existing = entries.find(item => item.messageId === entry.messageId);
+        if (existing) existing.buttons = entry.buttons ?? [];
+        else entries.push(entry);
+        return { ok: true, suppressed: true, result: { message_id: entry.messageId } };
+      }
+      entries.push(entry);
+      return { ok: true, suppressed: true };
+    },
+  };
+  testCaptures.set(id, capture);
+  return () => {
+    if (testCaptures.get(id) !== capture) return [];
+    testCaptures.delete(id);
+    return entries;
+  };
+}
+
+// In the sandbox's real-delivery mode, keep the operator transcript while
+// still sending through Telegram. This lets the E2E harness consume generated
+// credentials and callback IDs without turning the run into delivery=log.
+export function captureDeliveredTestMessage(chatId, text, result, buttons = []) {
+  const capture = testCaptures.get(Number(chatId));
+  if (!capture?.deliverToTelegram) return false;
+  capture.entries.push({ kind: 'sendMessage', text: String(text),
+    ...(Number.isSafeInteger(result?.result?.message_id) ? { messageId: result.result.message_id } : {}),
+    ...(Array.isArray(buttons) && buttons.length ? { buttons: buttons.map(row => row.map(button => ({
+      text: String(button.text ?? ''), callbackData: button.callback_data ?? null, url: button.url ?? null,
+    }))) } : {}),
+  });
+  return true;
+}
+
+export function captureTestMessage(chatId, messageId, buttons = []) {
+  const capture = testCaptures.get(Number(chatId));
+  if (!capture) return false;
+  const message = capture.entries.find(item => item.messageId === messageId);
+  if (message) message.buttons = buttons.map(row => row.map(button => ({
+    text: String(button.text ?? ''), callbackData: button.callback_data ?? null, url: button.url ?? null,
+  })));
+  return true;
 }
 
 // ── callback-ack registry ────────────────────────────────────────────────────

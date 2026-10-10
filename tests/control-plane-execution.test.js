@@ -113,8 +113,20 @@ describe('existing collector control-plane execution boundary', () => {
   it('fails closed for another profile or chat', async () => {
     const state = fixture();
     await expect(runControlPlaneTask(state.env, { ...state.input, userId: 9999 })).rejects.toThrow('chat_refused');
+    await expect(runControlPlaneTask(state.env, { ...state.input, userId: 9999 }))
+      .rejects.toMatchObject({ code: 'CONTROL_PLANE_NO_ADMISSION' });
     state.env.TG_SLICE_CHAT_PROFILES = '1001:foreign-profile';
     await expect(runControlPlaneTask(state.env, state.input)).rejects.toThrow('profile_refused');
     expect(state.calls).toEqual([]);
+  });
+
+  it('honors the explicitly open sandbox lane when its allowlist is empty', async () => {
+    const state = fixture();
+    state.env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
+    state.env.TG_SLICE_OPEN_SANDBOX = 'true';
+    state.env.TG_SLICE_ALLOWED_CHATS = '';
+    const ack = await runControlPlaneTask(state.env, state.input);
+    expect(ack).toMatchObject({ durable: true, controlPlane: true });
+    expect(state.calls.map(call => call.pathname)).toEqual(['/intake', '/route']);
   });
 });

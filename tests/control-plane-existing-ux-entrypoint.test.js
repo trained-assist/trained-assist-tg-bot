@@ -8,6 +8,7 @@ vi.mock('../src/lib/telegram.js', () => ({ answerCallbackQuery: vi.fn(), sendMes
 import worker from '../src/sandbox-tg/existing-ux.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
 import { answerCallbackQuery, sendMessage } from '../src/lib/telegram.js';
+import { callbackChatId } from '../src/lib/test-mode.js';
 
 function fixture() {
   const collectorCalls = [];
@@ -62,6 +63,69 @@ describe('signed existing-UX ingress', () => {
     expect(env.SESSIONS.data.size).toBe(0);
   });
 
+  it('drives an authenticated synthetic admin update through the sandbox Worker and namespaces created users', async () => {
+    const { env } = fixture();
+    Object.assign(env, { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
+      TG_SANDBOX_CLEANUP_TOKEN: 'dedicated-sandbox-cleanup-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
+      TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236', SESSION_NAMESPACE: 'integrator-existing-ux-v1',
+      EXECUTION_BACKEND: 'control-plane', TG_SLICE_OPEN_SANDBOX: 'true', TG_SLICE_INGRESS_PAUSED: 'false',
+      TG_SLICE_DELIVERY_PAUSED: 'false' });
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
+      intakeCalls.push({ name, path: new URL(url).pathname });
+      if (new URL(url).pathname === '/debug') return Response.json({ buf: [], busy: false, stranded: false });
+      return Response.json({ ok: true, appended: true });
+    } }) };
+    const request = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }), env);
+
+    expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' }, 'wrong')).status).toBe(401);
+    expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_missing_chat Must Fail' })).status).toBe(409);
+    expect((await request({ target: 'sandbox', type: 'message', chatId: 1001, userId: 0, text: 'bad user' })).status).toBe(400);
+    expect((await request({ target: 'sandbox', type: 'message', chatId: 1001, delivery: 'log', text: 'bad delivery mode' })).status).toBe(400);
+    const response = await request({ target: 'sandbox', type: 'message', chatId: 1001, userId: 7, admin: true,
+      text: '/adduser e2e_worker_fixture Worker Fixture' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chatId: 1001, userId: 7, admin: true, delivery: 'capture',
+      admission: { ok: true }, collector: {
+      busy: false, pendingCount: 0, stranded: false, collectorMessageId: null, launchingMessageIds: [],
+    } });
+    const created = JSON.parse(await env.TG_SLICE.get('user:e2e_worker_fixture'));
+    expect(created.name).toBe('Worker Fixture');
+    expect(created.passwordHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
+    expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
+    expect((await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', chatId: 1001 })).status).toBe(409);
+
+    const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
+      chatId: -1000000000236, updateId: 91009, messageId: 89 });
+    expect(await unauthenticatedCallback.json()).toMatchObject({ ok: true,
+      admission: { ok: true, authenticated: false } });
+    expect(callbackChatId('sandbox-test-91009')).toBe(-1000000000236);
+
+    await env.SESSIONS.put('integrator-existing-ux-v1:1001', JSON.stringify({
+      username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
+    }));
+    const configuredChatCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
+      chatId: 1001, updateId: 91010, messageId: 90 });
+    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001 });
+    expect(callbackChatId('sandbox-test-91010')).toBe(1001);
+    expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+      message_id: 90, chat: { id: 1001, type: 'private', is_forum: false },
+    }) }), expect.any(Object));
+
+    await env.SESSIONS.put('integrator-existing-ux-v1:-1000000000236', JSON.stringify({
+      username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
+    }));
+    const callback = await request({ target: 'sandbox', type: 'callback', chatId: -1000000000236, callbackData: 'intake_run', messageId: 88 });
+    expect(callback.status).toBe(200);
+    expect(await callback.json()).toMatchObject({ ok: true, admission: { ok: true } });
+    expect(handleCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+      message_id: 88, chat: { id: -1000000000236, type: 'supergroup', is_forum: false },
+    }) }), expect.objectContaining({ TG_SLICE_ALLOWED_USERS: '7,900000236' }));
+  });
+
   it('resets all sandbox session and intake state only after owner auth and explicit confirmation', async () => {
     const state = fixture();
     const { env } = state;
@@ -73,6 +137,7 @@ describe('signed existing-UX ingress', () => {
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42:7`, JSON.stringify({ pendingMessage: 'old topic draft' }));
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:retry:42:old`, JSON.stringify({ chatId: 42 }));
     env.TG_SLICE.data.set('sandbox-user:old-user', JSON.stringify({ profileId: 'old-profile' }));
+    env.TG_SLICE.data.set('user:legacy-test-user', JSON.stringify({ name: 'Old sandbox profile' }));
     const resetCalls = [];
     const stateKeys = new Map();
     const activeBuffers = new Set();
@@ -99,7 +164,7 @@ describe('signed existing-UX ingress', () => {
     const inspect = await post({ target: 'sandbox', mode: 'inspect' });
     expect(inspect.status).toBe(200);
     expect(await inspect.json()).toMatchObject({ ok: true, sessionAndRetryKeys: 3, intakeBuffers: 2,
-      sandboxUserKeys: 1, acceptOnlyKeys: 0, active: false });
+      sandboxUserKeys: 2, acceptOnlyKeys: 0, active: false });
     expect(env.SESSIONS.data.size).toBe(3);
     expect(resetCalls).toHaveLength(3);
     activeBuffers.add('42');
@@ -111,8 +176,9 @@ describe('signed existing-UX ingress', () => {
     activeBuffers.delete('42');
     const cleared = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
     expect(cleared.status).toBe(200);
-    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 1, intakeBuffersReset: 2 });
+    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 2, intakeBuffersReset: 2 });
     expect(env.SESSIONS.data.size).toBe(0);
+    expect(env.TG_SLICE.data.size).toBe(0);
     expect(resetCalls.filter(value => value === 'intake:/operator/reset-all')).toHaveLength(2);
     expect(resetCalls).toContain('accept-only:/operator/reset-all');
   });
@@ -228,6 +294,30 @@ describe('signed existing-UX ingress', () => {
     expect(await state.env.SESSIONS.get('isolated-ux:1001')).toBeNull();
     expect(sendMessage).toHaveBeenCalledWith(state.env.TG_SANDBOX_BOT_TOKEN, 1001,
       expect.stringContaining('/login username password'));
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+  });
+
+  it('answers /help and /status immediately without appending either command to Intake', async () => {
+    const state = fixture();
+    const { env } = state;
+    env.SESSIONS.data.set('isolated-ux:1001', JSON.stringify({ username: 'fixture-user', controlPlaneProfile: env.CONTROL_PLANE_PROFILE }));
+    const statusCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      statusCalls.push({ name, path: new URL(url).pathname });
+      return Response.json({ buf: [{ hasText: true }], retryBatch: [], busy: false, launching: [],
+        controlPlaneBarrier: { busyRequestCount: 0, unresolvedLaunchCount: 0 } });
+    } }) };
+    const help = await state.send({ ...state.update, message: { ...state.update.message, text: '/help' } });
+    expect(await help.json()).toMatchObject({ ok: true, serviceCommand: 'help' });
+    expect(sendMessage).toHaveBeenLastCalledWith(env.TG_SANDBOX_BOT_TOKEN, 1001,
+      'Команды: /help, /status. Сообщение с вопросом отправь обычным текстом.', {});
+    const status = await state.send({ ...state.update, update_id: 2,
+      message: { ...state.update.message, message_id: 12, text: '/status' } });
+    expect(await status.json()).toMatchObject({ ok: true, serviceCommand: 'status', active: false, pending: 1 });
+    expect(sendMessage).toHaveBeenLastCalledWith(env.TG_SANDBOX_BOT_TOKEN, 1001,
+      'Собран ввод: 1 сообщение.', {});
+    expect(statusCalls).toEqual([{ name: '1001', path: '/debug' }]);
+    expect(state.collectorCalls).toEqual([]);
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 

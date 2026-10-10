@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   isTestChat, testChatList, reserveChatId, realChatId, applyTestDelivery,
-  initTestMode, isTestChatCached, suppress, rememberCallback, callbackChatId,
+  beginTestCapture, captureTestMessage, captureDeliveredTestMessage, initTestMode, isTestChatCached, suppress, rememberCallback, callbackChatId,
 } from '../src/lib/test-mode.js';
 import { RunOutbox } from '../src/run-outbox.js';
 
@@ -85,6 +85,32 @@ describe('applyTestDelivery — ОДНО ветвление: флаг + резе
     const body = { userId: TEST, chatId: TEST };
     expect(applyTestDelivery(envOf(''), body)).toBe(false);
     expect(body.chatId).toBe(TEST);
+  });
+});
+
+describe('sandbox Worker test transcript capture', () => {
+  it('captures immediate replies only for the active operator test request', () => {
+    const finish = beginTestCapture(TEST);
+    expect(finish).toBeTypeOf('function');
+    initTestMode(envOf(String(TEST)));
+    expect(suppress(TEST, 'sendMessage', 'profile created')).toMatchObject({ suppressed: true });
+    expect(captureTestMessage(TEST, 1, [[{ text: 'Run', callback_data: 'intake_run' }]])).toBe(true);
+    expect(finish()).toEqual([{ kind: 'sendMessage', text: 'profile created', messageId: 1,
+      buttons: [[{ text: 'Run', callbackData: 'intake_run', url: null }]] }]);
+    expect(console.log).not.toHaveBeenCalled();
+    initTestMode(envOf(''));
+    const secondFinish = beginTestCapture(TEST);
+    expect(secondFinish).toBeTypeOf('function');
+    expect(secondFinish()).toEqual([]);
+  });
+
+  it('records sent messages in real-delivery mode without enabling delivery=log', () => {
+    const finish = beginTestCapture(TEST, { deliverToTelegram: true });
+    initTestMode(envOf(''));
+    expect(isTestChatCached(TEST)).toBe(false);
+    expect(captureDeliveredTestMessage(TEST, 'temporary password', { ok: true, result: { message_id: 45 } })).toBe(true);
+    expect(finish()).toEqual([{ kind: 'sendMessage', text: 'temporary password', messageId: 45 }]);
+    initTestMode(envOf(''));
   });
 });
 

@@ -65,7 +65,7 @@ jobs:
 
   sandbox-validation:
     name: sandbox-validation
-    if: contains(fromJSON('["integration/first-working-version-20261005","integration/tg-existing-ux-new-router-20261005","fix/main-staging-gate-conditions","fix/main-staging-ref-name","fix/main-stage-after-sandbox-skip","fix/main-deploy-after-stage-gate"]'), github.head_ref || github.ref_name) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: contains(fromJSON('["integration/first-working-version-20261005","integration/tg-existing-ux-new-router-20261005","fix/main-staging-gate-conditions","fix/main-staging-ref-name","fix/main-stage-after-sandbox-skip","fix/main-deploy-after-stage-gate","fix/sandbox-buffer-test-ephemeral-session"]'), github.head_ref || github.ref_name) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -121,7 +121,7 @@ jobs:
           needs = json.loads(os.environ['NEEDS_RESULTS'])
           job_results = {name: job['result'] for name, job in needs.items()}
           required = {'ci', 'scenario-gate', 'deploy-staging', 'smoke-test-staging'}
-          sandbox_branches = {'integration/first-working-version-20261005', 'integration/tg-existing-ux-new-router-20261005', 'fix/main-staging-gate-conditions', 'fix/main-staging-ref-name', 'fix/main-stage-after-sandbox-skip', 'fix/main-deploy-after-stage-gate'}
+          sandbox_branches = {'integration/first-working-version-20261005', 'integration/tg-existing-ux-new-router-20261005', 'fix/main-staging-gate-conditions', 'fix/main-staging-ref-name', 'fix/main-stage-after-sandbox-skip', 'fix/main-deploy-after-stage-gate', 'fix/sandbox-buffer-test-ephemeral-session'}
           sandbox = os.environ['HEAD_BRANCH'] in sandbox_branches and os.environ['HEAD_REPO'] == os.environ['REPO']
           if sandbox:
               expected = {'ci': 'success', 'scenario-gate': 'success', 'deploy-staging': 'skipped', 'smoke-test-staging': 'skipped'}
@@ -229,7 +229,7 @@ jobs:
     outputs:
       worker: ${{ steps.preview.outputs.worker }}
     needs: [ci, scenario-gate]
-    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'main' || (github.ref_name != 'integration/first-working-version-20261005' && github.ref_name != 'integration/tg-existing-ux-new-router-20261005' && github.ref_name != 'fix/main-staging-gate-conditions' && github.ref_name != 'fix/main-staging-ref-name' && github.ref_name != 'fix/main-stage-after-sandbox-skip' && github.ref_name != 'fix/main-deploy-after-stage-gate'))
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'main' || (github.ref_name != 'integration/first-working-version-20261005' && github.ref_name != 'integration/tg-existing-ux-new-router-20261005' && github.ref_name != 'fix/main-staging-gate-conditions' && github.ref_name != 'fix/main-staging-ref-name' && github.ref_name != 'fix/main-stage-after-sandbox-skip' && github.ref_name != 'fix/main-deploy-after-stage-gate' && github.ref_name != 'fix/sandbox-buffer-test-ephemeral-session'))
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -264,7 +264,7 @@ jobs:
   smoke-test-staging:
     runs-on: ubuntu-latest
     needs: deploy-staging
-    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'main' || (github.ref_name != 'integration/first-working-version-20261005' && github.ref_name != 'integration/tg-existing-ux-new-router-20261005' && github.ref_name != 'fix/main-staging-gate-conditions' && github.ref_name != 'fix/main-staging-ref-name' && github.ref_name != 'fix/main-stage-after-sandbox-skip' && github.ref_name != 'fix/main-deploy-after-stage-gate'))
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'main' || (github.ref_name != 'integration/first-working-version-20261005' && github.ref_name != 'integration/tg-existing-ux-new-router-20261005' && github.ref_name != 'fix/main-staging-gate-conditions' && github.ref_name != 'fix/main-staging-ref-name' && github.ref_name != 'fix/main-stage-after-sandbox-skip' && github.ref_name != 'fix/main-deploy-after-stage-gate' && github.ref_name != 'fix/sandbox-buffer-test-ephemeral-session'))
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

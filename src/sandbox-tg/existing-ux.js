@@ -1,14 +1,14 @@
 import { Hono } from 'hono';
-import { readTgSliceConfig } from './config.js';
+import { chatAllowed, readTgSliceConfig } from './config.js';
 import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
 import { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
-import { conversationKey, threadIdOf } from '../conversation-context.js';
+import { conversationKey, threadIdOf, threadExtra } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
-import { initTestMode, rememberCallback } from '../lib/test-mode.js';
+import { beginTestCapture, initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { ControlPlaneClient } from './control-plane-client.js';
 import { cmdLogin } from '../handlers/commands.js';
@@ -220,7 +220,7 @@ app.post('/operator/reset-sandbox-state', async context => {
   const acceptOnlyState = await acceptOnlyInspectResponse.json().catch(() => ({}));
   if (!acceptOnlyInspectResponse.ok) return context.json({ error: 'accept_only_inspect_failed' }, 503);
   if (body.mode === 'inspect') {
-    const sandboxUserKeys = await countKvPrefix(env.TG_SLICE, 'sandbox-user:');
+    const sandboxUserKeys = (await listSandboxUserKeys(env.TG_SLICE)).length;
     return context.json({ ok: true, target: 'sandbox', sessionAndRetryKeys: keys.length,
       sandboxUserKeys, intakeBuffers: inspected.length, durableObjectKeys: inspected.reduce((sum, item) => sum + item.keys, 0),
       acceptOnlyKeys: acceptOnlyState.keys ?? null, active: inspected.some(item => item.active) });
@@ -239,13 +239,7 @@ app.post('/operator/reset-sandbox-state', async context => {
   const acceptOnlyVerify = await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' });
   const acceptOnlyVerified = await acceptOnlyVerify.json().catch(() => ({}));
   if (!acceptOnlyVerify.ok || acceptOnlyVerified.keys !== 0) return context.json({ error: 'accept_only_reset_verify_failed' }, 503);
-  const sandboxUserKeys = [];
-  cursor = undefined;
-  do {
-    const page = await env.TG_SLICE.list({ prefix: 'sandbox-user:', ...(cursor ? { cursor } : {}) });
-    sandboxUserKeys.push(...page.keys.map(item => item.name));
-    cursor = page.list_complete === false ? page.cursor : null;
-  } while (cursor);
+  const sandboxUserKeys = await listSandboxUserKeys(env.TG_SLICE);
   for (const key of keys) await env.SESSIONS.delete(key);
   for (const key of sandboxUserKeys) await env.TG_SLICE.delete(key);
   return context.json({ ok: true, target: 'sandbox', sessionsAndRetryKeysDeleted: keys.length,
@@ -265,6 +259,24 @@ async function countKvPrefix(kv, prefix) {
     cursor = page.list_complete === false ? page.cursor : null;
   } while (cursor);
   return count;
+}
+
+async function listKvPrefix(kv, prefix) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await kv.list({ prefix, ...(cursor ? { cursor } : {}) });
+    keys.push(...page.keys.map(item => item.name));
+    cursor = page.list_complete === false ? page.cursor : null;
+  } while (cursor);
+  return keys;
+}
+
+async function listSandboxUserKeys(kv) {
+  const [legacy, namespaced] = await Promise.all([
+    listKvPrefix(kv, 'user:'), listKvPrefix(kv, 'sandbox-user:'),
+  ]);
+  return [...new Set([...legacy, ...namespaced])];
 }
 
 // A signed, isolated message fixture exercises the same webhook ingress and
@@ -319,6 +331,102 @@ app.post('/operator/test-buffer-message', async context => {
   return context.json({ ok: true, updateId: update.update_id, chatId, admitted,
     buffer: { pendingCount: buffer.buf?.length ?? 0, hasText: buffer.buf?.some(item => item.hasText) ?? false,
       busy: buffer.busy, stranded: buffer.stranded }, clearedAfterRead: source.resetAfter === true });
+});
+
+// Owner-authenticated test ingress: submit a Telegram-shaped message or button
+// press to the same webhook handler, then receive its immediate bot replies as
+// JSON. This endpoint exists only on the isolated UX sandbox Worker.
+app.post('/operator/test-update', async context => {
+  const env = executionEnv(context.env);
+  const token = String(env.TG_SANDBOX_CLEANUP_TOKEN ?? '').trim();
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (await env.TG_SLICE.get(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
+  if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
+      env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' || env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' ||
+      env.EXECUTION_BACKEND !== 'control-plane' || env.TG_SLICE_OPEN_SANDBOX !== 'true' ||
+      env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false') {
+    return context.json({ error: 'sandbox_test_api_not_ready' }, 409);
+  }
+  const source = await context.req.json().catch(() => null);
+  if (!source || source.target !== 'sandbox' || !['message', 'callback'].includes(source.type) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin'].includes(key)) ||
+      (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
+      (source.admin !== undefined && typeof source.admin !== 'boolean') ||
+      (source.userId !== undefined && (!Number.isSafeInteger(source.userId) || source.userId < 1)) ||
+      (source.updateId !== undefined && (!Number.isSafeInteger(source.updateId) || source.updateId < 0))) {
+    return context.json({ error: 'invalid_test_update' }, 400);
+  }
+  if (source.type === 'message' && (typeof source.text !== 'string' || !source.text.trim() || source.text.length > 4000) ||
+      source.type === 'message' && source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1) ||
+      source.type === 'callback' && (typeof source.callbackData !== 'string' || !source.callbackData || source.callbackData.length > 64 ||
+        source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1))) return context.json({ error: 'invalid_test_update' }, 400);
+  const config = readTgSliceConfig(env);
+  if (!config.webhookSecret) return context.json({ error: 'sandbox_webhook_not_ready' }, 409);
+  const configuredTestChat = source.chatId ?? env.TG_SANDBOX_E2E_CHAT_ID;
+  if (configuredTestChat === undefined || configuredTestChat === null || configuredTestChat === '') {
+    return context.json({ error: 'sandbox_test_chat_required' }, 409);
+  }
+  const chatId = Number(configuredTestChat);
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  if (!chatAllowed(config, chatId)) return context.json({ error: 'sandbox_test_chat_not_allowed' }, 403);
+  if (!env.INTAKE) return context.json({ error: 'sandbox_intake_not_ready' }, 409);
+  const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
+  const readCollectorState = async () => {
+    const stateResponse = await intake.fetch('https://intake/debug');
+    return stateResponse.ok ? stateResponse.json().catch(() => null) : null;
+  };
+  const before = await readCollectorState();
+  if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
+    return context.json({ error: 'no_current_button_message' }, 409);
+  }
+  const actorId = source.userId ?? 900000236;
+  const updateId = source.updateId ?? Date.now();
+  const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
+  const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
+    chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
+    from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
+    ...(source.type === 'message' ? { text: source.text } : {}) };
+  const update = source.type === 'message' ? { update_id: updateId, message } : {
+    update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
+      message, chat_instance: 'sandbox-test', data: source.callbackData },
+  };
+  if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
+  const deliverToTelegram = source.delivery === 'telegram';
+  const testEnv = { ...context.env, TEST_CHAT_IDS: deliverToTelegram ? '' : String(chatId),
+    TG_SLICE_ALLOWED_CHATS: [...new Set([...config.allowedChats, String(chatId)])].join(','),
+    TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(actorId)])].join(','),
+    ...(source.admin === true ? { ADMIN_GROUP_ID: String(chatId) } : {}) };
+  const capture = beginTestCapture(chatId, { deliverToTelegram });
+  if (!capture) return context.json({ error: 'sandbox_test_api_busy' }, 409);
+  initTestMode(testEnv);
+  let response;
+  let admission;
+  try {
+    response = await app.fetch(new Request('https://sandbox.internal/webhook', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
+      body: JSON.stringify(update),
+    }), testEnv);
+    admission = await response.json().catch(() => ({}));
+  } catch {
+    const transcript = capture();
+    initTestMode(context.env);
+    return context.json({ error: 'synthetic_webhook_failed', transcript }, 503);
+  }
+  const transcript = capture();
+  initTestMode(context.env);
+  if (!response.ok) return context.json({ error: 'synthetic_webhook_failed', status: response.status,
+    code: admission.code ?? null, transcript }, 503);
+  const after = await readCollectorState();
+  const collector = after ? {
+    busy: after.busy === true,
+    pendingCount: (after.buf?.length ?? 0) + (after.retryBatch?.length ?? 0),
+    stranded: after.stranded === true,
+    collectorMessageId: after.collectorMsgId ?? null,
+    launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
+    controlPlaneBarrier: after.controlPlaneBarrier ?? null,
+  } : null;
+  return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
+    admin: source.admin === true, admission, transcript, collector });
 });
 
 app.post('/webhook', async context => {
@@ -418,6 +526,29 @@ app.post('/webhook', async context => {
     return context.json({ ok: true });
   }
 
+  // Exact service commands must bypass Intake: they are immediate replies and
+  // must not wait for the collector's work-style prompt or launch an agent.
+  if (message.text && /^\/help(?:@[a-z0-9_]+)?$/i.test(message.text.trim())) {
+    await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+      'Команды: /help, /status. Сообщение с вопросом отправь обычным текстом.', threadExtra(threadId));
+    return context.json({ ok: true, serviceCommand: 'help' });
+  }
+  if (message.text && /^\/status(?:@[a-z0-9_]+)?$/i.test(message.text.trim())) {
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(message.chat.id, threadId)));
+    const response = await stub.fetch('https://intake/debug');
+    if (!response.ok) return context.json({ error: 'status_unavailable' }, 503);
+    const state = await response.json().catch(() => null);
+    if (!state || typeof state !== 'object') return context.json({ error: 'status_unavailable' }, 503);
+    const pending = [...(Array.isArray(state.buf) ? state.buf : []), ...(Array.isArray(state.retryBatch) ? state.retryBatch : [])]
+      .filter(item => item.hasText || item.mediaPending).length;
+    const barrier = state.controlPlaneBarrier ?? {};
+    const active = state.busy || (Array.isArray(state.launching) && state.launching.length > 0) ||
+      Number(barrier.busyRequestCount ?? 0) > 0 || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+    const text = active ? 'Сейчас обрабатываю задачу.'
+      : pending > 0 ? `Собран ввод: ${pending} ${pending === 1 ? 'сообщение' : 'сообщений'}.` : 'Активных задач и несобранного ввода нет.';
+    await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text, threadExtra(threadId));
+    return context.json({ ok: true, serviceCommand: 'status', active, pending });
+  }
   if (!session?.username || session.username === 'integrator') {
     if (update.callback_query) {
       await answerCallbackQuery(env.TG_SANDBOX_BOT_TOKEN, update.callback_query.id,

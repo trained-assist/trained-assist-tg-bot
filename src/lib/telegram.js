@@ -1,5 +1,5 @@
 import { trackUI, forgetUI } from './transient-ui.js';
-import { isTestChatCached, suppress, callbackChatId } from './test-mode.js';
+import { captureTestMessage, captureDeliveredTestMessage, isTestChatCached, suppress, callbackChatId } from './test-mode.js';
 import commandsRegistry from '../../commands-registry.json';
 import { resolveAudience } from './audience.js';
 import { isCommandVisible } from './command-visibility.js';
@@ -115,13 +115,19 @@ export async function getRegisteredCommands(token) {
 }
 
 export async function sendMessage(token, chatId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'sendMessage', text);
+  if (isTestChatCached(chatId)) {
+    const result = suppress(chatId, 'sendMessage', text);
+    const keyboard = extra.reply_markup?.inline_keyboard;
+    if (keyboard?.length && result.result?.message_id) captureTestMessage(chatId, result.result.message_id, keyboard);
+    return result;
+  }
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }),
   });
   const data = await res.json();
+  captureDeliveredTestMessage(chatId, text, data, extra.reply_markup?.inline_keyboard ?? []);
   if (!data.ok) {
     // Surface Telegram rejections — silent swallow here is how /start went dark
     // when a raw "<id>" slipped into commands-registry.json (cmdStart's HTML
@@ -133,7 +139,7 @@ export async function sendMessage(token, chatId, text, extra = {}) {
 }
 
 export async function editMessage(token, chatId, messageId, text, extra = {}) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', text);
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessage', { messageId, text });
   const { lifecycleEnv, ...telegramExtra } = extra;
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
     method: 'POST',
@@ -150,7 +156,7 @@ export async function editMessage(token, chatId, messageId, text, extra = {}) {
 }
 
 export async function editMessageReplyMarkup(token, chatId, messageId, inlineKeyboard = []) {
-  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessageReplyMarkup', `msg=${messageId}`);
+  if (isTestChatCached(chatId)) return suppress(chatId, 'editMessageReplyMarkup', { messageId, buttons: inlineKeyboard });
   const res = await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -1,6 +1,6 @@
 import { conversationKey } from '../conversation-context.js';
 import { assembleInput } from '../input-assembly.js';
-import { readTgSliceConfig } from '../sandbox-tg/config.js';
+import { chatAllowed, readTgSliceConfig } from '../sandbox-tg/config.js';
 import { ControlPlaneClient } from '../sandbox-tg/control-plane-client.js';
 import { KvConversationStore, ConversationIndex } from '../sandbox-tg/conversation.js';
 import { TgDeliveryOwnerClient } from '../sandbox-tg/delivery-owner.js';
@@ -31,9 +31,9 @@ async function digest(value) {
 
 export async function runControlPlaneTask(env, input) {
   const config = readTgSliceConfig(env);
-  if (!env.INTAKE || !env.TG_SLICE || !input.requestId || !input.sessionId) throw new Error('control_plane_execution_not_configured');
-  if (!config.allowedChats.includes(String(input.userId))) throw new Error('control_plane_chat_refused');
-  if (config.chatProfiles[String(input.userId)] && config.chatProfiles[String(input.userId)] !== config.profileId) throw new Error('control_plane_profile_refused');
+  if (!env.INTAKE || !env.TG_SLICE || !input.requestId || !input.sessionId) throw Object.assign(new Error('control_plane_execution_not_configured'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
+  if (!chatAllowed(config, input.userId)) throw Object.assign(new Error('control_plane_chat_refused'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
+  if (config.chatProfiles[String(input.userId)] && config.chatProfiles[String(input.userId)] !== config.profileId) throw Object.assign(new Error('control_plane_profile_refused'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
   if (input.fileRefs?.length || input.fileBase64 || input.inputItems?.some(item => item.msg?.fileRef || item.msg?.transcriptRef || item.msg?.photo || item.msg?.document || item.msg?.voice || item.msg?.audio || item.msg?.video)) {
     throw Object.assign(new Error('Вложения сохранены в накопителе, но их передача новому исполнителю ещё не подключена.'), { code: 'INTAKE_PREPARATION_FAILED' });
   }
@@ -43,7 +43,7 @@ export async function runControlPlaneTask(env, input) {
   const inputItems = input.inputItems?.length
     ? input.inputItems.map(item => ({ text: assembleInput([item], false).task, artifactRefs: [] }))
     : [{ text: input.task ?? '', artifactRefs: [] }];
-  if (!inputItems.some(item => item.text)) throw new Error('control_plane_empty_input');
+  if (!inputItems.some(item => item.text)) throw Object.assign(new Error('control_plane_empty_input'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
   const envelope = {
     contractVersion: 1, requestId, profileId: config.profileId,
     conversationRef: conversationId, sessionId: config.sessionId,
