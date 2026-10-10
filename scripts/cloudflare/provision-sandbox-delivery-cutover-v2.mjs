@@ -122,12 +122,12 @@ async function inventoryAndBuild() {
   requireValue(operatorToken.length >= 32, 'sandbox_cutover_read_token_missing');
   let pauseResponse;
   try {
-    pauseResponse = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover', {
+    pauseResponse = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover-v1', {
       headers: { authorization: `Bearer ${operatorToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000),
     });
   } catch { throw new Error('sandbox_delivery_pause_probe_unreachable'); }
   const pauseState = await pauseResponse.json().catch(() => ({}));
-  requireValue(pauseResponse.ok && pauseState.ready === true && pauseState.paused === true,
+  requireValue(pauseResponse.ok && pauseState.ready === true && pauseState.paused === true && pauseState.ingressPaused === true,
     'sandbox_delivery_not_paused');
 
   const cutoverAt = Date.now();
