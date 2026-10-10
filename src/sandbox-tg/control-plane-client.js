@@ -1,3 +1,4 @@
+import { controlPlaneRunFailureCode } from '../lib/control-plane-outcome.js';
 // HTTP adapter of the Telegram sandbox slice to the NEW control plane.
 //
 // It repeats the calls of the web slice (web/control-plane-client.ts) one to one:
@@ -102,7 +103,7 @@ export class ControlPlaneClient {
 
   async request(method, pathname, opts = {}) {
     const url = this.url(pathname, opts.query);
-    const timeout = AbortSignal.timeout(this.config.requestTimeoutMs);
+    const timeout = AbortSignal.timeout(opts.timeoutMs ?? this.config.requestTimeoutMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
     const res = await this.fetchImpl(url, {
       method,
@@ -199,7 +200,8 @@ export class ControlPlaneClient {
   }
 
   async route(userTaskId) {
-    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true } });
+    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true },
+      timeoutMs: this.config.routeRequestTimeoutMs ?? 140000 });
     return value;
   }
 
@@ -287,6 +289,7 @@ export class ControlPlaneClient {
         started_at: numOrNull(run.started_at),
         finished_at: numOrNull(run.finished_at),
         error_class: str(run.error_class),
+        failure_code: controlPlaneRunFailureCode(run),
         lease_until: numOrNull(run.lease_until),
       })),
       updated_at: numOrNull(row.updated_at),

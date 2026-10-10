@@ -41,6 +41,61 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 
+  it('uses a dedicated operator token for cutover reads without relying on the Telegram webhook secret', async () => {
+    const state = fixture();
+    state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
+    expect((await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${state.env.TELEGRAM_WEBHOOK_SECRET}` },
+    }), state.env)).status).toBe(401);
+    const response = await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${state.env.TG_SANDBOX_CUTOVER_READ_TOKEN}` },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true });
+    expect(state.collectorCalls).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects authenticated sandbox ingress while the cutover inventory is being replaced', async () => {
+    const state = fixture();
+    state.env.TG_SLICE_INGRESS_PAUSED = 'true';
+    const response = await state.send();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: 'sandbox ingress paused' });
+    expect(state.collectorCalls).toEqual([]);
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('prefers the independent V2 durable owner and its separate immutable manifest', async () => {
+    const state = fixture();
+    state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
+    state.env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2 = JSON.stringify({
+      version: 'tg-delivery-cutover-v1', botUsername: 'probability_cat_bot', profileId: 'profile-1',
+      cutoverId: 'existing-ux-v2-fixture', cutoverAt: Date.now(), oldTaskIds: ['ut-legacy'],
+      deliveries: [{ deliveryId: 'ut-legacy', userTaskId: 'ut-legacy', destination: { chatId: 1001, threadId: null },
+        priorStatus: 'sent', providerMessageId: 123, attempts: 1 }],
+    });
+    let v1Calls = 0;
+    let v2Calls = 0;
+    state.env.TG_DELIVERY_OWNER = { idFromName: name => name, get: () => ({ fetch: async () => {
+      v1Calls += 1;
+      return Response.json({ ready: false }, { status: 503 });
+    } }) };
+    state.env.TG_DELIVERY_OWNER_V2 = { idFromName: name => name, get: () => ({ fetch: async () => {
+      v2Calls += 1;
+      return Response.json({ ready: true, cutoverId: 'existing-ux-v2-fixture', manifestDigest: 'a'.repeat(64),
+        cutoverAt: Date.now(), quarantinedTaskCount: 1, quarantinedDeliveryCount: 1, paused: true });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${state.env.TG_SANDBOX_CUTOVER_READ_TOKEN}` },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ cutoverId: 'existing-ux-v2-fixture', quarantinedTaskCount: 1 });
+    expect(v2Calls).toBe(1);
+    expect(v1Calls).toBe(0);
+  });
+
   it('protects operator reconciliation and reuses the scheduled controller', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/cron'), state.env)).status).toBe(401);

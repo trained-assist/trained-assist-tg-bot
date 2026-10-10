@@ -87,6 +87,7 @@ export function readTgSliceConfig(env) {
     allowedChats,
     chatProfiles,
     requestTimeoutMs: num(env, 'TG_SLICE_REQUEST_TIMEOUT_MS', 5000, 100, 60000),
+    routeRequestTimeoutMs: num(env, 'TG_SLICE_ROUTE_REQUEST_TIMEOUT_MS', 140000, 100, 180000),
     pollIntervalMs: num(env, 'TG_SLICE_POLL_INTERVAL_MS', 250, 10, 10000),
     batchWindowMs: num(env, 'TG_SLICE_BATCH_WINDOW_MS', 3000, 0, 60000),
     maxBatchItems: num(env, 'TG_SLICE_MAX_BATCH_ITEMS', 20, 1, 100),

@@ -87,24 +87,51 @@ Missing/conflicting manifests and unmarked existing owner records fail closed.
 No manifest replacement, migration, unquarantine, reset or deletion endpoint is
 exposed. Restarts verify the identical canonical manifest without reimporting.
 
-After reviewed code/bindings deployment **with delivery paused**, call the signed
-read-only `GET /delivery-cutover` using the existing webhook-secret header. It
-returns cutover ID, canonical SHA256 digest, quarantine counts and pause state;
-it sends nothing. Check the manifest proof and `/deliveries/:taskId` quarantine
+After reviewed code/bindings deployment **with delivery paused**, call the
+read-only `GET /operator/delivery-cutover` with the dedicated
+`TG_SANDBOX_CUTOVER_READ_TOKEN` bearer. It returns cutover ID, canonical SHA256
+digest, quarantine counts and pause state; it sends nothing. This credential is
+separate from the Telegram webhook secret and has no task or delivery mutation
+route. Check the manifest proof and `/deliveries/:taskId` quarantine
 projections before restoring the signed webhook or allowing any drain. This
-route is internal-operator authenticated by the existing public gate, not a new
-credential authority. DO endpoints are reachable only through the sandbox's
-namespace binding; no public DO forwarding route exists.
+route is limited to the existing-UX sandbox Worker. DO endpoints are reachable
+only through the sandbox's namespace binding; no public DO forwarding route
+exists.
 
-The reviewed activated sandbox configuration retains `TG_SLICE_DELIVERY_PAUSED = "false"`
-and enables `crons = ["* * * * *"]` only in `wrangler.sandbox-tg.toml`.
-The pause flag exists only in sandbox `[vars]`; do not provision a secret with
-the same name. The manifest is a separate secret binding, never a checked-in
-variable. `TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret.
-Parent alone owns explicit activation after review/inventory. No new runtime
-binding, manifest, webhook operation or deployment is performed by this patch.
-Preserve parent's pause commit and unrelated integration history when composing;
-do not force-push or replace that branch with this older source base.
+The protected-main GitHub Action `Read sandbox delivery cutover state` performs
+this bounded read using the dedicated GitHub secret `TG_SANDBOX_CUTOVER_READ_TOKEN`
+and prints only the cutover ID/digest, quarantine counts, pause state, and
+`providerCalled: false`. It never invokes `/cron`, sends a Telegram request, or
+accepts a task. Run it before any live sandbox ingress to confirm the deployed
+manifest and pause state.
+
+The probability sandbox remains fail-closed until the exact historical task and
+delivery inventory is reviewed: `TG_SLICE_DELIVERY_PAUSED = "true"` and
+`crons = []` in `wrangler.sandbox-tg-existing-ux.toml`. The pause flag exists
+only in sandbox `[vars]`; do not provision a secret with the same name. The
+manifest is a separate secret binding, never a checked-in variable.
+`TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret. Parent
+alone owns explicit activation after review/inventory.
+
+### Immutable empty-marker recovery (2026-10-10)
+
+The deployed V1 owner reported a valid but empty cutover inventory (`0` tasks,
+`0` deliveries) even though read-only source inventory found 53 canonical CP
+tasks and four sent legacy KV delivery records. Keep V1 paused and untouched;
+its manifest fingerprint cannot be replaced safely. The sandbox now also pauses
+new webhook intake while reconciliation is reviewed. `TgDeliveryOwnerV2` uses
+an independent SQLite Durable Object namespace and the separate secret
+`TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2`. The protected-main
+`Prepare isolated sandbox delivery cutover V2` workflow derives the V2 manifest
+from the canonical CP task table, exact legacy KV delivery records, receipt
+indexes, and the approved test-chat GitHub secret. It refuses a chat mismatch,
+incomplete receipt index, malformed record, cross-profile CP row, or inventory
+over the manifest cap; it writes only the V2 Worker secret and does not deploy.
+Deploy the reviewed main Worker only after that job reports the complete
+inventory. Then run `Read sandbox delivery cutover state` and verify the V2
+quarantine counts while both ingress and outgoing delivery remain paused. Do
+not resume the sandbox until the historical duplicate-message evidence has
+been reconciled against this inventory.
 
 ## Autonomous scheduled reconciliation
 

@@ -92,7 +92,9 @@ export class TgDeliveryOwner {
           const marker = await this.state.storage.get('cutover');
           return Response.json({ ready: true, cutoverId: marker.cutoverId, manifestDigest: marker.manifestDigest,
             cutoverAt: marker.cutoverAt, quarantinedTaskCount: marker.quarantinedTaskCount,
-            quarantinedDeliveryCount: marker.quarantinedDeliveryCount, paused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false' });
+            quarantinedDeliveryCount: marker.quarantinedDeliveryCount,
+            paused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
+            ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true' });
         }
         if (route === '/enqueue') return Response.json(await this.enqueue(body, config));
         if (route === '/discovery') {
@@ -201,9 +203,13 @@ export class TgDeliveryOwner {
 
 export class TgDeliveryOwnerClient {
   constructor(env, config = readTgSliceConfig(env)) {
-    cutoverManifest(env, config);
-    if (!env.TG_DELIVERY_OWNER?.idFromName || !env.TG_DELIVERY_OWNER?.get) throw new TgSliceConfigError('durable delivery owner required', 'TG_DELIVERY_OWNER');
-    this.stub = env.TG_DELIVERY_OWNER.get(env.TG_DELIVERY_OWNER.idFromName(`sandbox-delivery-v1:${config.botUsername}`));
+    const useV2 = Boolean(env.TG_DELIVERY_OWNER_V2?.idFromName && env.TG_DELIVERY_OWNER_V2?.get);
+    const manifest = useV2 ? env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2 : env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST;
+    cutoverManifest({ ...env, TG_SLICE_DELIVERY_CUTOVER_MANIFEST: manifest }, config);
+    const namespace = useV2 ? env.TG_DELIVERY_OWNER_V2 : env.TG_DELIVERY_OWNER;
+    if (!namespace?.idFromName || !namespace?.get) throw new TgSliceConfigError('durable delivery owner required', useV2 ? 'TG_DELIVERY_OWNER_V2' : 'TG_DELIVERY_OWNER');
+    const version = useV2 ? 'v2' : 'v1';
+    this.stub = namespace.get(namespace.idFromName(`sandbox-delivery-${version}:${config.botUsername}`));
   }
   async call(route, body) {
     const response = await this.stub.fetch(new Request(`https://delivery-owner.internal/${route}`, {
@@ -219,4 +225,12 @@ export class TgDeliveryOwnerClient {
   discovery() { return this.call('discovery', {}); }
   async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
   async drain() { return (await this.call('drain', {})).drained; }
+}
+
+// Preserve the original owner for forensic evidence; an initialized manifest
+// is immutable, so a corrected cutover starts in its own SQLite DO namespace.
+export class TgDeliveryOwnerV2 extends TgDeliveryOwner {
+  constructor(state, env) {
+    super(state, { ...env, TG_SLICE_DELIVERY_CUTOVER_MANIFEST: env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2 });
+  }
 }
