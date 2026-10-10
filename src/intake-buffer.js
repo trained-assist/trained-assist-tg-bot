@@ -873,10 +873,14 @@ export class IntakeBuffer {
         // be stale remnants from the corrupt sandbox mapping this reset repairs.
         // Only an in-progress launch request is ambiguous before CP has admitted it.
         const launching = await this.state.storage.get('launching');
-        const active = Array.isArray(launching) ? launching.length > 0 : !!launching;
+        const busySince = await this.state.storage.get('busySince');
+        const hasLaunching = Array.isArray(launching) ? launching.length > 0 : !!launching;
+        const staleLaunching = hasLaunching && this.cpDispatches === 0 && Number.isFinite(busySince) &&
+          Date.now() - busySince >= SANDBOX_ABANDON_STALE_AFTER_MS;
+        const active = this.cpDispatches > 0 || (hasLaunching && !staleLaunching);
         if (url.pathname.endsWith('reset-inspect')) {
           const entries = await this.state.storage.list({ limit: 1000 });
-          return Response.json({ ok: true, active, keys: entries.size });
+          return Response.json({ ok: true, active, staleLaunching, keys: entries.size });
         }
         if (active) return Response.json({ error: 'active_intake_state' }, { status: 409 });
         let deletedKeys = 0;
@@ -891,7 +895,7 @@ export class IntakeBuffer {
           startAfter = keys.at(-1);
         }
         await this.state.storage.deleteAlarm();
-        return Response.json({ ok: true, deletedKeys });
+        return Response.json({ ok: true, deletedKeys, staleLaunchingRecovered: staleLaunching });
       });
     }
 
