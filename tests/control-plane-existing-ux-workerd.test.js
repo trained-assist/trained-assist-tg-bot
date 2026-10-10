@@ -27,6 +27,13 @@ function existingUxWorkerdBundle() {
       export class IntakeBuffer extends RealIntakeBuffer {
         async fetch(request) {
           const path = new URL(request.url).pathname;
+          if (path === '/scenario-seed-test-callback') {
+            if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
+            const { messageId, revision } = await request.json();
+            await this.state.storage.put('collectorMsgId', messageId);
+            await this.state.storage.put('collectorDraftRevision', revision);
+            return Response.json({ seeded: true });
+          }
           if (path === '/scenario-cleanup-prepare') {
             if (request.headers.get('x-scenario-probe') !== 'offline-probe') return new Response(null, { status: 401 });
             const { intent, alarmAt, busy, stopWindow } = await request.json();
@@ -432,10 +439,15 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       ] });
       expect(await (await runtime.getKVNamespace('SESSIONS')).get('integrator-existing-ux-v1:42', 'json'))
         .toMatchObject({ username: 'e2e_worker_fixture', controlPlaneProfile: 'workerd-profile' });
+      const intakeNamespace = await runtime.getDurableObjectNamespace('INTAKE');
+      await (await intakeNamespace.get(intakeNamespace.idFromName('42'))).fetch('https://intake/scenario-seed-test-callback', {
+        method: 'POST', headers: { 'x-scenario-probe': 'offline-probe', 'content-type': 'application/json' },
+        body: JSON.stringify({ messageId: 501, revision: 1 }),
+      });
       const callback = await operatorRequest({ target: 'sandbox', type: 'callback', chatId: 42, userId: 7,
-        callbackData: 'intake_run', updateId: 91003, messageId: 501 });
+        callbackData: 'auto', updateId: 91003, messageId: 501 });
       const callbackBody = await callback.json();
-      expect(callbackBody).toMatchObject({ ok: true, admission: { ok: true } });
+      expect(callbackBody).toMatchObject({ ok: true, callbackData: 'ws|auto|1', admission: { ok: true } });
       expect(callbackBody.admission).not.toHaveProperty('unsupported');
       return;
     }

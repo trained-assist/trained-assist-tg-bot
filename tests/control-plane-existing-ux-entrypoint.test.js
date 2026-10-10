@@ -71,9 +71,10 @@ describe('signed existing-UX ingress', () => {
       EXECUTION_BACKEND: 'control-plane', TG_SLICE_OPEN_SANDBOX: 'true', TG_SLICE_INGRESS_PAUSED: 'false',
       TG_SLICE_DELIVERY_PAUSED: 'false' });
     const intakeCalls = [];
+    const collectorState = { buf: [], busy: false, stranded: false, collectorMsgId: null, collectorDraftRevision: null };
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
       intakeCalls.push({ name, path: new URL(url).pathname });
-      if (new URL(url).pathname === '/debug') return Response.json({ buf: [], busy: false, stranded: false });
+      if (new URL(url).pathname === '/debug') return Response.json(collectorState);
       return Response.json({ ok: true, appended: true });
     } }) };
     const request = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
@@ -97,8 +98,10 @@ describe('signed existing-UX ingress', () => {
     expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
     expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
     expect((await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', chatId: 1001 })).status).toBe(409);
+    expect(await (await request({ target: 'sandbox', type: 'callback', callbackData: 'auto',
+      chatId: 1001, messageId: 89 })).json()).toMatchObject({ error: 'no_current_button_revision' });
 
-    const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
+    const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_cancel',
       chatId: -1000000000236, updateId: 91009, messageId: 89 });
     expect(await unauthenticatedCallback.json()).toMatchObject({ ok: true,
       admission: { ok: true, authenticated: false } });
@@ -107,21 +110,22 @@ describe('signed existing-UX ingress', () => {
     await env.SESSIONS.put('integrator-existing-ux-v1:1001', JSON.stringify({
       username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
     }));
+    Object.assign(collectorState, { collectorMsgId: 90, collectorDraftRevision: 4 });
     const configuredChatCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
       chatId: 1001, updateId: 91010, messageId: 90 });
-    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001 });
+    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001, callbackData: 'ws|auto|4' });
     expect(callbackChatId('sandbox-test-91010')).toBe(1001);
-    expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+    expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'ws|auto|4', message: expect.objectContaining({
       message_id: 90, chat: { id: 1001, type: 'private', is_forum: false },
     }) }), expect.any(Object));
 
     await env.SESSIONS.put('integrator-existing-ux-v1:-1000000000236', JSON.stringify({
       username: 'e2e_worker_fixture', controlPlaneProfile: env.CONTROL_PLANE_PROFILE,
     }));
-    const callback = await request({ target: 'sandbox', type: 'callback', chatId: -1000000000236, callbackData: 'intake_run', messageId: 88 });
+    const callback = await request({ target: 'sandbox', type: 'callback', chatId: -1000000000236, callbackData: 'explore', messageId: 88 });
     expect(callback.status).toBe(200);
-    expect(await callback.json()).toMatchObject({ ok: true, admission: { ok: true } });
-    expect(handleCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ data: 'intake_run', message: expect.objectContaining({
+    expect(await callback.json()).toMatchObject({ ok: true, callbackData: 'ws|explore|4', admission: { ok: true } });
+    expect(handleCallbackQuery).toHaveBeenCalledWith(expect.objectContaining({ data: 'ws|explore|4', message: expect.objectContaining({
       message_id: 88, chat: { id: -1000000000236, type: 'supergroup', is_forum: false },
     }) }), expect.objectContaining({ TG_SLICE_ALLOWED_USERS: '7,900000236' }));
   });
