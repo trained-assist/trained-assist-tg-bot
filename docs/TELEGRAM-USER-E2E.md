@@ -82,8 +82,11 @@ unique message was stored exactly once.
 Keep its authorization material in the trusted local secret store; never put it
 in chat, a shell transcript, a screenshot, a test fixture, or this document.
 After each terminal scenario, reset the sandbox and verify both stores empty
-before beginning the next one. If a launch remains active or unknown, reset
-preflight refuses; preserve that state until reconciliation makes it terminal.
+before beginning the next one. The manual **Reset and test sandbox intake
+buffers** GitHub Action runs reset → empty-state preflight → fresh-message
+aggregation test → reset, and uploads count-only evidence. If a launch remains
+active or unknown, reset preflight refuses; preserve that state until
+reconciliation makes it terminal.
 
 ## Regression for a stuck pending launch/stop window
 
