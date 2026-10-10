@@ -42,9 +42,12 @@ or deploy any production Worker.
 
 The sandbox3 deploy config preserves its existing `IntakeBuffer` and
 `TgDeliveryOwner` SQLite namespaces. It does not apply a Durable Object
-migration. Operator token and test chat/user IDs are separate Worker secrets;
-the workflow checks the user ID against the tester-owned account before
-provisioning them. To inspect the same state locally, set
+migration. The sandbox3 test destination is the tester's private chat. Before
+the first real-delivery E2E, the tester must open `@ptichka_status_bot` and send
+`/start` once; Telegram does not allow a bot to initiate a private conversation.
+The workflow pins the dedicated chat ID and sender ID to the same tester-owned
+account. Operator token and test chat/user IDs are separate Worker secrets.
+To inspect the same state locally, set
 `TG_SANDBOX_TARGET=sandbox3` and use `TG_SANDBOX3_OPERATOR_TOKEN` with
 `tools/sandbox-buffer-cycle.mjs inspect|reset`.
 

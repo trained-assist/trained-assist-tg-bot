@@ -54,13 +54,14 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          TG_STAGING_TEST_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_STAGING_TEST_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: |
           set -euo pipefail
           test "$CLOUDFLARE_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
+          test "$TG_SANDBOX3_CHAT_ID" = "1714048"
           test "$TG_STAGING_TEST_USER_ID" = "1714048"
-          [[ "$TG_STAGING_TEST_CHAT_ID" =~ ^-?[1-9][0-9]*$ ]]
+          [[ "$TG_SANDBOX3_CHAT_ID" =~ ^[1-9][0-9]*$ ]]
           npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
           node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
           import { readFileSync } from 'node:fs';
@@ -88,7 +89,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
-          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: |
           set -euo pipefail
@@ -188,7 +189,7 @@ jobs:
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
-          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
           TG_SANDBOX_E2E_DELIVERY: telegram
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
@@ -199,7 +200,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
-          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: node tools/sandbox-buffer-cycle.mjs test-buffers | tee sandbox3-buffer-scenario.json
 
@@ -210,7 +211,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
-          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
           GITHUB_SHA: ${{ github.sha }}
         run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
