@@ -58,10 +58,20 @@ jobs:
           TG_STAGING_TEST_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: |
           set -euo pipefail
-          test "$CLOUDFLARE_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
-          test "$TG_SANDBOX3_CHAT_ID" = "1714048"
-          test "$TG_STAGING_TEST_USER_ID" = "1714048"
-          [[ "$TG_SANDBOX3_CHAT_ID" =~ ^[1-9][0-9]*$ ]]
+          check_equal() {
+            local name="$1" actual="$2" expected="$3"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Configuration mismatch: $name"
+              return 1
+            fi
+          }
+          check_equal CLOUDFLARE_ACCOUNT_ID "$CLOUDFLARE_ACCOUNT_ID" "d740a05e9442c1d0feacae2dfc673e93"
+          check_equal TG_SANDBOX3_CHAT_ID "$TG_SANDBOX3_CHAT_ID" "1714048"
+          check_equal TG_STAGING_TEST_USER_ID "$TG_STAGING_TEST_USER_ID" "1714048"
+          if [[ ! "$TG_SANDBOX3_CHAT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Configuration mismatch: TG_SANDBOX3_CHAT_ID format"
+            exit 1
+          fi
           npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
           node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
           import { readFileSync } from 'node:fs';
