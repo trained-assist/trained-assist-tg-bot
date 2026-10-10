@@ -57,6 +57,22 @@ app.get('/operator/delivery-cutover', async context => {
   }
 });
 
+// During V2 provisioning, read the immutable V1 owner explicitly. The normal
+// operator route follows the active V2 binding and cannot serve as a V1
+// preflight after that binding is deployed without its manifest yet.
+app.get('/operator/delivery-cutover-v1', async context => {
+  const token = String(context.env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  try {
+    const config = readTgSliceConfig(context.env);
+    const env = { ...context.env, TG_DELIVERY_OWNER_V2: undefined,
+      TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2: undefined };
+    return context.json(await createController(env, config).outbox.open());
+  } catch {
+    return context.json({ error: 'delivery owner refused' }, 503);
+  }
+});
+
 app.get('/collector-state', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
