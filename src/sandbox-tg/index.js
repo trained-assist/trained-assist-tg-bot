@@ -100,4 +100,4 @@ export default {
   },
 };
 
-export { TgDeliveryOwner } from './delivery-owner.js';
+export { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';

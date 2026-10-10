@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { readTgSliceConfig } from './config.js';
 import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
-import { TgDeliveryOwner } from './delivery-owner.js';
+import { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
@@ -104,6 +104,7 @@ app.post('/webhook', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
   if (!config.webhookSecret || context.req.header('x-telegram-bot-api-secret-token') !== config.webhookSecret) return context.json({ error: 'unsigned update refused' }, 401);
+  if (context.env.TG_SLICE_INGRESS_PAUSED === 'true') return context.json({ error: 'sandbox ingress paused' }, 503);
   const update = await context.req.json().catch(() => null);
   if (!Number.isSafeInteger(update?.update_id)) return context.json({ error: 'bad update' }, 400);
   const message = update.message ?? update.callback_query?.message;
@@ -259,4 +260,4 @@ export default {
 
 export class IntakeBufferReset extends IntakeBuffer {}
 
-export { IntakeBuffer, TgDeliveryOwner, SandboxAcceptOnlyStore };
+export { IntakeBuffer, TgDeliveryOwner, TgDeliveryOwnerV2, SandboxAcceptOnlyStore };
