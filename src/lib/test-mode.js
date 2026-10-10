@@ -90,6 +90,17 @@ export function applyTestDelivery(env, body) {
 let cached = null;
 const testCaptures = new Map();
 
+function telegramFailureClass(description) {
+  const text = String(description ?? '').toLowerCase();
+  if (text.includes('chat not found')) return 'chat_not_found';
+  if (text.includes('bot was blocked')) return 'bot_blocked';
+  if (text.includes('message thread not found')) return 'thread_not_found';
+  if (text.includes("can't parse entities") || text.includes('cant parse entities')) return 'message_format_rejected';
+  if (text.includes('not enough rights') || text.includes('need administrator rights')) return 'bot_permissions';
+  if (text.includes('too many requests')) return 'rate_limited';
+  return 'telegram_rejected';
+}
+
 export function initTestMode(env) {
   cached = idsFor(env);
 }
@@ -164,7 +175,10 @@ export function captureDeliveredTestMessage(chatId, text, result, buttons = []) 
   capture.entries.push({ kind: 'sendMessage', text: String(text),
     telegramOk: result?.ok === true,
     ...(Number.isSafeInteger(result?.result?.message_id) ? { messageId: result.result.message_id } : {}),
-    ...(Number.isSafeInteger(result?.error_code) ? { errorCode: result.error_code } : {}),
+    ...(result?.ok === true ? {} : {
+      ...(Number.isSafeInteger(result?.error_code) ? { errorCode: result.error_code } : {}),
+      errorClass: telegramFailureClass(result?.description),
+    }),
     ...(Array.isArray(buttons) && buttons.length ? { buttons: buttons.map(row => row.map(button => ({
       text: String(button.text ?? ''), callbackData: button.callback_data ?? null, url: button.url ?? null,
     }))) } : {}),

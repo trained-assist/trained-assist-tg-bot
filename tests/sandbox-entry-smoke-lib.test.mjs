@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { runSandboxEntryScenario } from '../tools/sandbox-entry-smoke-lib.mjs';
 
 const response = (text, admission, collector = null, delivery = 'capture') => ({ ok: true, delivery,
-  transcript: [{ text }], admission, collector });
+  transcript: [{ text }, ...(delivery === 'telegram' ? [{ kind: 'sendMessage', telegramOk: true, messageId: 1 }] : [])], admission, collector });
 
 describe('sandbox new-user entry scenario', () => {
   it('checks immediate help/status and refuses to queue an anonymous question', async () => {
@@ -48,5 +48,13 @@ describe('sandbox new-user entry scenario', () => {
     expect(calls).toHaveLength(3);
     expect(calls.every(body => body.target === 'sandbox3' && body.chatId === -1001234567890
       && body.userId === 1714048 && body.delivery === 'telegram')).toBe(true);
+  });
+
+  it('fails immediately with a sanitized Telegram delivery class', async () => {
+    await expect(runSandboxEntryScenario(async () => ({ ok: true, delivery: 'telegram',
+      admission: { serviceCommand: 'help' }, transcript: [{ kind: 'sendMessage', telegramOk: false,
+        errorCode: 400, errorClass: 'chat_not_found' }] }),
+    { target: 'sandbox3', chatId: -1001234567890, userId: 1714048, delivery: 'telegram' }))
+      .rejects.toThrow('telegram_send_not_confirmed:chat_not_found');
   });
 });

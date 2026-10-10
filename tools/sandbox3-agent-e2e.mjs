@@ -65,8 +65,8 @@ function assertDelivered(response) {
   assert.equal(response.delivery, 'telegram', 'real_telegram_delivery_not_enabled');
   const sent = response.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
   if (!sent.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0)) {
-    const code = sent.find(item => Number.isSafeInteger(item.errorCode))?.errorCode ?? 'unknown';
-    throw new Error(`telegram_send_not_confirmed:${code}`);
+    const reason = sent.find(item => typeof item.errorClass === 'string')?.errorClass ?? 'unknown';
+    throw new Error(`telegram_send_not_confirmed:${reason}`);
   }
 }
 
