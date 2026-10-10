@@ -232,6 +232,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
     CONTROL_PLANE_PROFILE: 'workerd-profile', TG_SLICE_ALLOWED_CHATS: '42', TG_SLICE_ALLOWED_USERS: '43',
+    TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
     TG_SLICE_OPEN_SANDBOX: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox',
     TG_SANDBOX_BOT_TOKEN: 'offline-workerd-token', TELEGRAM_API_BASE: 'https://api.telegram.org',
     TELEGRAM_WEBHOOK_SECRET: 'offline-workerd-webhook', TG_SLICE_DELIVERY_PAUSED: 'false',
@@ -245,6 +246,10 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     SESSION_NAMESPACE: 'integrator-existing-ux-v1', TG_SANDBOX_CLEANUP_TOKEN: 'offline-cleanup-token',
     TG_SANDBOX_TEST_API_ENABLED: 'true', TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236',
     TG_SLICE_INGRESS_PAUSED: 'false' });
+  if (boundary === 'operator-test-api') {
+    env.CONTROL_PLANE_URL = 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev';
+    env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
+  }
   const providerMessages = [];
   const providerEdits = [];
   const telegramTimeline = [];

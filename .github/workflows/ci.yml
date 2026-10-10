@@ -86,6 +86,7 @@ jobs:
         run: |
           npx wrangler deploy --dry-run --config wrangler.sandbox-tg.toml --outdir .wrangler/sandbox-ci
           npx wrangler deploy --dry-run --config wrangler.sandbox-tg-existing-ux.toml --outdir .wrangler/sandbox-ci-existing-ux
+          npx wrangler deploy --dry-run --config wrangler.sandbox-tg-sandbox3.toml --outdir .wrangler/sandbox-ci-sandbox3
           git rev-parse HEAD > .wrangler/sandbox-ci/source-sha.txt
       - name: Save sandbox bundle and tested revision
         uses: actions/upload-artifact@v4
@@ -94,6 +95,7 @@ jobs:
           path: |
             .wrangler/sandbox-ci/
             .wrangler/sandbox-ci-existing-ux/
+            .wrangler/sandbox-ci-sandbox3/
           include-hidden-files: true
           if-no-files-found: error
 

@@ -62,6 +62,17 @@ export function readTgSliceConfig(env) {
     throw new TgSliceConfigError('TG_SLICE_EVENT_TRANSPORT must be auto|events-endpoint|status-history', 'TG_SLICE_EVENT_TRANSPORT');
   }
   const allowedChats = parseChatList(env['TG_SLICE_ALLOWED_CHATS']);
+  const e2eChatId = String(env.TG_SANDBOX_E2E_CHAT_ID ?? '').trim();
+  if (e2eChatId) {
+    if (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || !/^-?[1-9]\d*$/.test(e2eChatId)) {
+      throw new TgSliceConfigError('TG_SANDBOX_E2E_CHAT_ID must be a nonzero numeric sandbox chat', 'TG_SANDBOX_E2E_CHAT_ID');
+    }
+    if (!allowedChats.includes(e2eChatId)) allowedChats.push(e2eChatId);
+  }
+  const e2eUserId = String(env.TG_SANDBOX_E2E_USER_ID ?? '').trim();
+  if (e2eUserId && (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || !/^[1-9]\d*$/.test(e2eUserId))) {
+    throw new TgSliceConfigError('TG_SANDBOX_E2E_USER_ID must be a positive numeric sandbox user', 'TG_SANDBOX_E2E_USER_ID');
+  }
   const openSandbox = env.TG_SLICE_OPEN_SANDBOX === 'true';
   if (openSandbox && env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox') {
     throw new TgSliceConfigError('TG_SLICE_OPEN_SANDBOX is permitted only for a sandbox Worker', 'TG_ACCEPT_ONLY_ENVIRONMENT');
@@ -85,6 +96,7 @@ export function readTgSliceConfig(env) {
     telegramApiBase: stripTrailingSlash(String(env['TELEGRAM_API_BASE'] ?? 'https://api.telegram.org')),
     webhookSecret: String(env['TELEGRAM_WEBHOOK_SECRET'] ?? '').trim() || null,
     allowedChats,
+    e2eUserId: e2eUserId || null,
     chatProfiles,
     requestTimeoutMs: num(env, 'TG_SLICE_REQUEST_TIMEOUT_MS', 5000, 100, 60000),
     routeRequestTimeoutMs: num(env, 'TG_SLICE_ROUTE_REQUEST_TIMEOUT_MS', 140000, 100, 180000),

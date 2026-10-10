@@ -9,6 +9,7 @@ import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js
 import { controlPlaneClient, publishRoutingDegradation } from './lib/control-plane-execution.js';
 import { isTerminalTaskStatus } from './sandbox-tg/contract.js';
 import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
+import { sandboxOperatorLane } from './sandbox-tg/operator-lane.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -863,10 +864,7 @@ export class IntakeBuffer {
     // enumerated its namespaced KV. This endpoint is only mounted on the
     // dedicated IntakeBufferReset class, never production's IntakeBuffer.
     if (['/operator/reset-inspect', '/operator/reset-all'].includes(url.pathname) && request.method === 'POST') {
-      if (this.env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
-          this.env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' ||
-          this.env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' ||
-          this.env.EXECUTION_BACKEND !== 'control-plane') {
+      if (!sandboxOperatorLane(this.env)) {
         return Response.json({ error: 'sandbox_identity_mismatch' }, { status: 409 });
       }
       return this._exclusive(async () => {

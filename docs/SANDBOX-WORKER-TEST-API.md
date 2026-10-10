@@ -1,6 +1,6 @@
 # Sandbox Worker test API
 
-The probability sandbox Worker exposes `/operator/test-update` so automated
+The isolated probability and sandbox3 Workers expose `/operator/test-update` so automated
 tests can submit the same message or button callback shape handled by the
 Telegram webhook. It internally signs the update and dispatches it through the
 normal sandbox webhook; it does not create a second bot implementation. The
@@ -8,9 +8,11 @@ operator API is enabled only in the isolated sandbox Worker. Use it as the
 default sandbox E2E client: submit input over HTTP, read bot messages and
 buttons from JSON, then submit a returned button callback the same way.
 
-Use the existing `TG_SANDBOX_CLEANUP_TOKEN` bearer secret. Task execution
-requires a real sandbox `chatId` on each request or the `TG_SANDBOX_E2E_CHAT_ID`
-Worker variable. By default `delivery` is `capture`: Telegram sends are
+Use `TG_SANDBOX_CLEANUP_TOKEN` for Probability or the separate
+`TG_SANDBOX3_OPERATOR_TOKEN` for sandbox3. Task execution requires a real
+sandbox `chatId` on each request or the pinned `TG_SANDBOX_E2E_CHAT_ID` Worker
+secret. Sandbox3 additionally pins `TG_SANDBOX_E2E_USER_ID` and rejects any
+other chat/user pair. By default `delivery` is `capture`: Telegram sends are
 suppressed for deterministic contract checks. Set `"delivery":"telegram"`
 for a real user journey; outgoing messages and the final agent answer then go
 to the same real chat, while immediate replies are also returned in the
@@ -21,8 +23,9 @@ account. `admin:true` treats the target sandbox chat as the admin chat for
 that one operator-authenticated update, allowing tests to exercise the existing
 `/adduser` flow; it does not change Worker configuration. The separate
 `/operator/test-buffer-message` contract check uses the reserved fixture chat
-`-1000000000236`; never use that fake destination for agent runs. The operator
-API accepts only the sandbox lane's configured/open chats. It accepts `message`
+`-1000000000236` in Probability, or the pinned sandbox3 chat with an ephemeral
+session; never use a fake destination for agent runs. The operator API accepts
+only the sandbox lane's configured chats. It accepts `message`
 updates with `text`, or
 `callback` updates with `callbackData`; `messageId` is optional and defaults to
 the current collector button message when one exists. Captured transcript messages include
@@ -78,4 +81,8 @@ Sandbox user records use the existing `user:` keys in the isolated sandbox KV
 and are removed by the full sandbox reset (which also clears older
 `sandbox-user:` fixtures). The message/callback endpoint is operator-only;
 it adds the fixed synthetic actor and chat to the normal webhook's allowlists
-for that internal dispatch only. Production Worker routing is unchanged.
+for that internal dispatch only. The sandbox3 reset preserves the deployed
+`IntakeBuffer` SQLite class and also checks a legacy Intake namespace if one is
+explicitly bound. The protected `GET /operator/test-delivery/:taskId` endpoint
+reads only delivery metadata for the pinned sandbox3 chat; it never returns
+message text or triggers a send. Production Worker routing is unchanged.

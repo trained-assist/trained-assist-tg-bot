@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { runSandboxEntryScenario } from '../tools/sandbox-entry-smoke-lib.mjs';
 
-const response = (text, admission, collector = null) => ({ ok: true, delivery: 'capture',
+const response = (text, admission, collector = null, delivery = 'capture') => ({ ok: true, delivery,
   transcript: [{ text }], admission, collector });
 
 describe('sandbox new-user entry scenario', () => {
@@ -33,5 +33,20 @@ describe('sandbox new-user entry scenario', () => {
     ];
     await expect(runSandboxEntryScenario(async () => replies.shift()))
       .rejects.toThrow('anonymous_question_was_added_to_intake');
+  });
+
+  it('uses the pinned sandbox3 identity and real Telegram delivery when requested', async () => {
+    const calls = [];
+    const replies = [
+      response('Команды: /help, /status', { serviceCommand: 'help' }, null, 'telegram'),
+      response('idle', { serviceCommand: 'status', active: false, pending: 0 }, null, 'telegram'),
+      response('Для входа: /login username password', { authenticated: false },
+        { pendingCount: 0, busy: false }, 'telegram'),
+    ];
+    await runSandboxEntryScenario(async (path, body) => { calls.push(body); return replies.shift(); },
+      { target: 'sandbox3', chatId: -1001234567890, userId: 1714048, delivery: 'telegram' });
+    expect(calls).toHaveLength(3);
+    expect(calls.every(body => body.target === 'sandbox3' && body.chatId === -1001234567890
+      && body.userId === 1714048 && body.delivery === 'telegram')).toBe(true);
   });
 });

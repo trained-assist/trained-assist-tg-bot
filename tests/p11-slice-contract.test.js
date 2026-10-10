@@ -43,6 +43,17 @@ describe('config — production-bot guard + env-only', () => {
     expect(chatAllowed(config, -100999)).toBe(true);
     expect(readTgSliceConfig(makeEnv({})).openSandbox).toBe(false);
   });
+  it('adds only the pinned E2E identity to an explicit sandbox allowlist', () => {
+    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SLICE_ALLOWED_CHATS: '1001',
+      TG_SANDBOX_E2E_CHAT_ID: '1714048', TG_SANDBOX_E2E_USER_ID: '1714048' });
+    const config = readTgSliceConfig(env);
+    expect(config.allowedChats).toEqual(['1001', '1714048']);
+    expect(config.e2eUserId).toBe('1714048');
+    expect(chatAllowed(config, 1714048)).toBe(true);
+    expect(chatAllowed(config, 1714049)).toBe(false);
+    expect(() => readTgSliceConfig(makeEnv({ TG_SANDBOX_E2E_CHAT_ID: '1714048' }))).toThrow(/sandbox chat/i);
+    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_E2E_USER_ID: '0' }))).toThrow(/sandbox user/i);
+  });
   it('auth scheme depends on bearer key', () => {
     expect(authScheme(readTgSliceConfig(makeEnv({ CONTROL_PLANE_API_KEY: '' })))).toBe('x-principal');
     expect(authScheme(readTgSliceConfig(makeEnv({ CONTROL_PLANE_API_KEY: 'ak_test' })))).toBe('x-principal+bearer');

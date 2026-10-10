@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { IntakeBufferReset } from '../src/sandbox-tg/existing-ux.js';
+import { IntakeBuffer, IntakeBufferReset } from '../src/sandbox-tg/existing-ux.js';
 
 class Storage {
   constructor(entries = {}) { this.values = new Map(Object.entries(entries)); this.alarm = 1234; }
@@ -18,6 +18,7 @@ function actor(entries = {}) {
   const storage = new Storage(entries);
   const state = { storage, blockConcurrencyWhile: operation => operation() };
   const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
+    CONTROL_PLANE_URL: 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev',
     SESSION_NAMESPACE: 'integrator-existing-ux-v1', EXECUTION_BACKEND: 'control-plane', SESSIONS: {} };
   return { instance: new IntakeBufferReset(state, env), storage };
 }
@@ -69,5 +70,24 @@ describe('sandbox-only Intake DO reset', () => {
     const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
     expect(await clear.json()).toMatchObject({ ok: true, deletedKeys: 1201 });
     expect((await storage.list()).size).toBe(0);
+  });
+
+  it('allows the existing sandbox3 IntakeBuffer class only for its exact CP identity', async () => {
+    const storage = new Storage({ buf: [{ text: 'stale sandbox3 input' }] });
+    const state = { storage, blockConcurrencyWhile: operation => operation() };
+    const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
+      CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1', SESSION_NAMESPACE: 'integrator-sandbox3-v1',
+      EXECUTION_BACKEND: 'control-plane' };
+    const intake = new IntakeBuffer(state, env);
+    const inspected = await intake.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }));
+    expect(await inspected.json()).toMatchObject({ ok: true, active: false, keys: 1 });
+    const reset = await intake.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
+    expect(await reset.json()).toMatchObject({ ok: true, deletedKeys: 1 });
+    expect((await storage.list()).size).toBe(0);
+
+    const foreignEnv = { ...env, CONTROL_PLANE_URL: 'https://other-cp.invalid' };
+    const foreign = new IntakeBuffer(state, foreignEnv);
+    expect((await foreign.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }))).status).toBe(409);
   });
 });
