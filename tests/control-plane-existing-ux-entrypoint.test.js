@@ -231,6 +231,30 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 
+  it('answers /help and /status immediately without appending either command to Intake', async () => {
+    const state = fixture();
+    const { env } = state;
+    env.SESSIONS.data.set('isolated-ux:1001', JSON.stringify({ username: 'fixture-user', controlPlaneProfile: env.CONTROL_PLANE_PROFILE }));
+    const statusCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      statusCalls.push({ name, path: new URL(url).pathname });
+      return Response.json({ buf: [{ hasText: true }], retryBatch: [], busy: false, launching: [],
+        controlPlaneBarrier: { busyRequestCount: 0, unresolvedLaunchCount: 0 } });
+    } }) };
+    const help = await state.send({ ...state.update, message: { ...state.update.message, text: '/help' } });
+    expect(await help.json()).toMatchObject({ ok: true, serviceCommand: 'help' });
+    expect(sendMessage).toHaveBeenLastCalledWith(env.TG_SANDBOX_BOT_TOKEN, 1001,
+      'Команды: /help, /status. Сообщение с вопросом отправь обычным текстом.', {});
+    const status = await state.send({ ...state.update, update_id: 2,
+      message: { ...state.update.message, message_id: 12, text: '/status' } });
+    expect(await status.json()).toMatchObject({ ok: true, serviceCommand: 'status', active: false, pending: 1 });
+    expect(sendMessage).toHaveBeenLastCalledWith(env.TG_SANDBOX_BOT_TOKEN, 1001,
+      'Собран ввод: 1 сообщение.', {});
+    expect(statusCalls).toEqual([{ name: '1001', path: '/debug' }]);
+    expect(state.collectorCalls).toEqual([]);
+    expect(handleCallbackQuery).not.toHaveBeenCalled();
+  });
+
   it('runs two-question registration through the signed sandbox Telegram update handler and returns the Skip button transcript', async () => {
     const state = fixture();
     state.env.TG_SLICE_OPEN_SANDBOX = 'true';
