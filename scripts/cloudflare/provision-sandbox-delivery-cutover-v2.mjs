@@ -62,8 +62,9 @@ export function buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, re
     requireValue(REFERENCE.test(taskId) && REFERENCE.test(deliveryId)
       && row.key === `delivery:${deliveryId}` && row.key.slice('delivery:'.length) === deliveryId,
     'cutover_legacy_delivery_identity_invalid');
-    requireValue(destinationChat === chatId && (threadId === null || Number.isSafeInteger(threadId) && threadId > 0),
-      'cutover_legacy_delivery_destination_mismatch');
+    requireValue(Number.isSafeInteger(destinationChat) && destinationChat !== 0
+      && (threadId === null || Number.isSafeInteger(threadId) && threadId > 0),
+    'cutover_legacy_delivery_destination_invalid');
     requireValue(STATUSES.has(status) && Number.isInteger(attempts) && attempts >= 0 && attempts <= 20,
       'cutover_legacy_delivery_state_invalid');
     requireValue(providerMessageId === null || Number.isSafeInteger(providerMessageId) && providerMessageId > 0,
@@ -72,7 +73,7 @@ export function buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, re
     knownRecords.add(deliveryId);
     oldTaskIds.add(taskId);
     const entry = { deliveryId, userTaskId: taskId,
-      destination: { chatId, threadId }, priorStatus: status, providerMessageId, attempts };
+      destination: { chatId: destinationChat, threadId }, priorStatus: status, providerMessageId, attempts };
     const history = historyOf(record.history);
     const observedProviderMessageIds = observedIdsOf(record.observedProviderMessageIds);
     if (history !== undefined) entry.history = history;
@@ -178,22 +179,27 @@ async function inventoryAndBuild() {
     receiptRows.push({ taskId, deliveryId: (await response.text()).trim() });
   }
 
+  const expectedChatId = Number(process.env.TG_STAGING_TEST_CHAT_ID);
+  const expectedChatDeliveryCount = deliveryRows.filter(row => Number(row.record?.destination?.chatId) === expectedChatId).length;
   const manifest = buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, receiptRows,
     testChatId: process.env.TG_STAGING_TEST_CHAT_ID, cutoverAt });
   return { manifest, digest: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
-    taskCount: taskRows.length, deliveryCount: deliveryRows.length };
+    taskCount: taskRows.length, deliveryCount: deliveryRows.length, receiptCount: receiptRows.length, expectedChatDeliveryCount,
+    foreignHistoricalDestinationCount: deliveryRows.length - expectedChatDeliveryCount };
 }
 
 async function main() {
   requireValue(process.env.GITHUB_REF === 'refs/heads/main', 'protected_main_required');
-  const { manifest, digest, taskCount, deliveryCount } = await inventoryAndBuild();
+  const { manifest, digest, taskCount, deliveryCount, receiptCount, expectedChatDeliveryCount,
+    foreignHistoricalDestinationCount } = await inventoryAndBuild();
   const secretPut = spawnSync('npx', ['wrangler', 'secret', 'put', 'TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2', '--config', CONFIG], {
     input: JSON.stringify(manifest), encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
   if (secretPut.error || secretPut.status !== 0) throw new Error('cutover_manifest_secret_sync_failed');
   console.log(JSON.stringify({ ok: true, mode: 'provision_v2_manifest', cutoverId: manifest.cutoverId,
     manifestDigest: digest, quarantinedTaskCount: manifest.oldTaskIds.length,
-    quarantinedDeliveryCount: deliveryCount, canonicalCpTaskCount: taskCount }));
+    quarantinedDeliveryCount: deliveryCount, legacyReceiptIndexCount: receiptCount, canonicalCpTaskCount: taskCount,
+    expectedChatDeliveryCount, foreignHistoricalDestinationCount }));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
