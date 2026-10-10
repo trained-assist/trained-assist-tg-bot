@@ -35,6 +35,12 @@ jobs:
         run: |
           set -o pipefail
           node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox-empty-preflight.json
+      - name: Verify new-user help, status, and login prompt through the Worker
+        env:
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: |
+          set -o pipefail
+          node tools/sandbox-buffer-cycle.mjs test-user-entry | tee sandbox-user-entry-test.json
       - name: Verify fresh messages aggregate in the sandbox buffer
         env:
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
@@ -49,14 +55,15 @@ jobs:
         run: |
           set -o pipefail
           node tools/sandbox-buffer-cycle.mjs reset | tee sandbox-reset-after.json
-      - name: Upload sanitized sandbox buffer evidence
-        if: always() && hashFiles('sandbox-reset-before.json', 'sandbox-empty-preflight.json', 'sandbox-buffer-test.json', 'sandbox-reset-after.json') != ''
+      - name: Upload sanitized sandbox scenario evidence
+        if: always() && hashFiles('sandbox-reset-before.json', 'sandbox-empty-preflight.json', 'sandbox-user-entry-test.json', 'sandbox-buffer-test.json', 'sandbox-reset-after.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-buffer-cycle-${{ github.run_id }}
           path: |
             sandbox-reset-before.json
             sandbox-empty-preflight.json
+            sandbox-user-entry-test.json
             sandbox-buffer-test.json
             sandbox-reset-after.json
           if-no-files-found: error
