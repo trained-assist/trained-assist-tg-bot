@@ -1,0 +1,9 @@
+# Sandbox buffer test cycle
+
+The `Deploy Telegram sandbox` workflow runs this cycle after a successful deployment of `trained-assist-tg-ux-sandbox`. It has one hard-coded target: the probability Telegram sandbox paired with `trained-assist-cp-telegram-ux-v1-sandbox`. There is no production target or profile filter; stale sandbox profile mappings are why this cycle clears all test state together.
+
+Before the scenario, `tools/sandbox-buffer-cycle.mjs reset` checks CP tasks, executions, deliveries, waiting inputs, and scheduled occurrences. It refuses to clear while CP reports active work. The Telegram operator preflight checks the dedicated session namespace, test-user records, every Intake Durable Object found through session/topic keys or immutable cutover destinations, and the accept-only test store. A pending launch is treated as active; stale `busy`, receipt, and stop-window data are reset once CP confirms no active run.
+
+The reset removes all CP runtime task/history rows and conversations, all sandbox Telegram sessions/retries and test-user records, all reachable sandbox Intake DO state, and accept-only fixtures. Credential principal configuration and immutable delivery-cutover evidence remain. It verifies both stores are empty before injecting two messages through the same signed webhook handler used by Telegram. The second request snapshots the two-item buffer and immediately clears that fixture DO before its debounce alarm can start unrelated work. The workflow clears and verifies both stores again after the scenario, including on failure.
+
+Required GitHub secrets: `CF_API_TOKEN` for the trained-assist Cloudflare account and `TG_SANDBOX_CLEANUP_TOKEN` matching the sandbox Worker secret. The reset API rejects any target other than the literal `sandbox`, and its route is mounted only in the isolated sandbox Worker.
