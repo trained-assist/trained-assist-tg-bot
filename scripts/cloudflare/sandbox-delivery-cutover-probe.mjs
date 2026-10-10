@@ -2,11 +2,11 @@ const baseUrl = 'https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev
 
 export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) {
   const token = String(secret ?? '').trim();
-  if (!token) throw new Error('sandbox_webhook_secret_missing');
+  if (!token) throw new Error('sandbox_cutover_read_token_missing');
   let response;
   try {
-    response = await fetchImpl(`${baseUrl}/delivery-cutover`, {
-      headers: { 'x-telegram-bot-api-secret-token': token },
+    response = await fetchImpl(`${baseUrl}/operator/delivery-cutover`, {
+      headers: { authorization: `Bearer ${token}` },
       redirect: 'error',
       signal: AbortSignal.timeout(15_000),
     });
@@ -34,7 +34,7 @@ export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) 
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  readSandboxDeliveryCutover({ secret: process.env.TG_STAGING_WEBHOOK_SECRET })
+  readSandboxDeliveryCutover({ secret: process.env.TG_SANDBOX_CUTOVER_READ_TOKEN })
     .then(result => console.log(JSON.stringify(result)))
     .catch(error => {
       console.error(error.message);

@@ -12,8 +12,8 @@ describe('sandbox delivery cutover probe', () => {
       return Response.json(ready);
     } });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/delivery-cutover');
-    expect(calls[0].options.headers).toEqual({ 'x-telegram-bot-api-secret-token': 'secret-value' });
+    expect(calls[0].url).toBe('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover');
+    expect(calls[0].options.headers).toEqual({ authorization: 'Bearer secret-value' });
     expect(calls[0].options.redirect).toBe('error');
     expect(result).toEqual({ ok: true, worker: 'trained-assist-tg-ux-sandbox', cutoverId: ready.cutoverId,
       manifestDigest: ready.manifestDigest, quarantinedTaskCount: 2, quarantinedDeliveryCount: 3,
