@@ -105,15 +105,13 @@ and prints only the cutover ID/digest, quarantine counts, pause state, and
 accepts a task. Run it before any live sandbox ingress to confirm the deployed
 manifest and pause state.
 
-The reviewed activated sandbox configuration retains `TG_SLICE_DELIVERY_PAUSED = "false"`
-and enables `crons = ["* * * * *"]` only in `wrangler.sandbox-tg.toml`.
-The pause flag exists only in sandbox `[vars]`; do not provision a secret with
-the same name. The manifest is a separate secret binding, never a checked-in
-variable. `TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret.
-Parent alone owns explicit activation after review/inventory. No new runtime
-binding, manifest, webhook operation or deployment is performed by this patch.
-Preserve parent's pause commit and unrelated integration history when composing;
-do not force-push or replace that branch with this older source base.
+The probability sandbox remains fail-closed until the exact historical task and
+delivery inventory is reviewed: `TG_SLICE_DELIVERY_PAUSED = "true"` and
+`crons = []` in `wrangler.sandbox-tg-existing-ux.toml`. The pause flag exists
+only in sandbox `[vars]`; do not provision a secret with the same name. The
+manifest is a separate secret binding, never a checked-in variable.
+`TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret. Parent
+alone owns explicit activation after review/inventory.
 
 ## Autonomous scheduled reconciliation
 

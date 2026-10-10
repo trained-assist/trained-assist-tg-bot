@@ -25,5 +25,7 @@ describe('sandbox delivery cutover probe', () => {
       .rejects.toThrow('sandbox_delivery_cutover_not_ready:401');
     await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, paused: 'false' }) }))
       .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');
+    await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, paused: false }) }))
+      .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');
   });
 });
