@@ -22,10 +22,13 @@ describe('sandbox delivery cutover V2 manifest inventory', () => {
     expect(manifest.deliveries[0].destination).toEqual({ chatId: -123, threadId: null });
   });
 
-  it('refuses cross-chat, cross-profile, and unmatched receipt evidence', () => {
+  it('preserves historical destinations and refuses cross-profile or unmatched receipt evidence', () => {
     const build = overrides => buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, receiptRows: [],
       testChatId: '-123', cutoverAt, ...overrides });
-    expect(() => build({ testChatId: '-999' })).toThrow('cutover_legacy_delivery_destination_mismatch');
+    const crossChatRows = structuredClone(deliveryRows);
+    crossChatRows[1].record.destination.chatId = -999;
+    const multiChat = build({ deliveryRows: crossChatRows });
+    expect(multiChat.deliveries.map(item => item.destination.chatId)).toEqual([-123, -999]);
     expect(() => build({ taskRows: [{ id: 'ut-foreign', profile_id: 'foreign' }] })).toThrow('cutover_cp_task_scope_invalid');
     expect(() => build({ receiptRows: [{ taskId: 'ut-legacy', deliveryId: 'receipt:missing' }] }))
       .toThrow('cutover_receipt_index_unmatched');
