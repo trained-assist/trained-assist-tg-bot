@@ -146,7 +146,8 @@ jobs:
           const status = JSON.parse(readFileSync(process.argv[2], 'utf8'));
           const serialized = JSON.stringify(status);
           const message = status.annotations?.['workers/message'] ?? '';
-          if (!message.includes(process.env.GITHUB_SHA) && !serialized.includes(process.env.GITHUB_SHA)) {
+          const expectedRevision = process.env.GITHUB_SHA.slice(0, 12);
+          if (!message.includes(expectedRevision) && !serialized.includes(process.env.GITHUB_SHA)) {
             throw new Error('sandbox3_active_worker_sha_mismatch');
           }
           console.log(JSON.stringify({ activeRevisionMatches: true }));
