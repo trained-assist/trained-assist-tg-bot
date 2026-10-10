@@ -25,13 +25,23 @@ function required(name) {
 }
 
 async function workerRequest(path, body) {
-  const response = await fetch(`${TG_ORIGIN}${path}`, {
-    method: 'POST', headers: { authorization: `Bearer ${required(OPERATOR_TOKEN_NAME)}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`tg_sandbox_operator_${path.replaceAll('/', '_')}_${response.status}:${payload.error ?? 'failed'}`);
-  return payload;
+  const readyDeadline = Date.now() + 60_000;
+  while (true) {
+    const response = await fetch(`${TG_ORIGIN}${path}`, {
+      method: 'POST', headers: { authorization: `Bearer ${required(OPERATOR_TOKEN_NAME)}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return payload;
+    // A deploy can reach the health edge before its vars reach every Worker
+    // isolate. This response is sent before update dispatch, so retry is safe.
+    if (path === '/operator/test-update' && response.status === 409
+        && payload.error === 'sandbox_test_api_not_ready' && Date.now() < readyDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+      continue;
+    }
+    throw new Error(`tg_sandbox_operator_${path.replaceAll('/', '_')}_${response.status}:${payload.error ?? 'failed'}`);
+  }
 }
 
 async function d1(sql, params = []) {
