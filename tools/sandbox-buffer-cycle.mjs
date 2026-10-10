@@ -4,8 +4,13 @@ import { assertSandboxStateEventuallyEmpty } from './sandbox-buffer-assertions.m
 import { runSandboxEntryScenario } from './sandbox-entry-smoke-lib.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
-const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
-const TG_ORIGIN = 'https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev';
+const TARGET = process.env.TG_SANDBOX_TARGET === 'sandbox3' ? 'sandbox3' : 'sandbox';
+const DATABASE_ID = TARGET === 'sandbox3' ? '1e1b8108-9186-43e2-8e50-436598233165' : '01d17f46-63e2-46bc-947d-9eda3e0bb697';
+const PROFILE_ID = TARGET === 'sandbox3' ? 'integration-sandbox3-v1' : null;
+const TG_ORIGIN = TARGET === 'sandbox3'
+  ? 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev'
+  : 'https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev';
+const OPERATOR_TOKEN_NAME = TARGET === 'sandbox3' ? 'TG_SANDBOX3_OPERATOR_TOKEN' : 'TG_SANDBOX_CLEANUP_TOKEN';
 const CP_STATE_TABLES = [
   'durable_tasks', 'conversations', 'executions', 'task_events', 'task_signals', 'awaiting_inputs',
   'deliveries', 'task_artifacts', 'credential_completions', 'pending_inputs', 'gtd_records', 'gtd_outcomes',
@@ -21,7 +26,7 @@ function required(name) {
 
 async function workerRequest(path, body) {
   const response = await fetch(`${TG_ORIGIN}${path}`, {
-    method: 'POST', headers: { authorization: `Bearer ${required('TG_SANDBOX_CLEANUP_TOKEN')}`, 'content-type': 'application/json' },
+    method: 'POST', headers: { authorization: `Bearer ${required(OPERATOR_TOKEN_NAME)}`, 'content-type': 'application/json' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
   });
   const payload = await response.json().catch(() => ({}));
@@ -52,6 +57,14 @@ async function cpInventory() {
   return counts;
 }
 
+async function assertSandboxScope() {
+  if (TARGET !== 'sandbox3') return;
+  for (const table of ['durable_tasks', 'conversations', 'schedules', 'gtd_records']) {
+    const [foreign] = await d1(`SELECT COUNT(*) AS n FROM "${table}" WHERE profile_id IS NULL OR profile_id != ?`, [PROFILE_ID]);
+    assert.equal(Number(foreign.n), 0, `refusing to clear non-sandbox3 ${table}`);
+  }
+}
+
 function assertNoActiveCpState(counts) {
   for (const name of ['nonterminal_tasks', 'active_executions', 'active_deliveries', 'awaiting_inputs', 'pending_inputs', 'pending_schedule_occurrences']) {
     assert.equal(Number(counts[name]), 0, `refusing reset: ${name}=${counts[name]}`);
@@ -63,10 +76,11 @@ async function inspect() {
   const healthBody = await health.json().catch(() => ({}));
   assert.equal(health.ok, true, 'TG sandbox worker is not live');
   assert.equal(healthBody.mode, 'existing-ux-control-plane');
+  await assertSandboxScope();
   const tableNames = new Set((await d1("SELECT name FROM sqlite_master WHERE type='table'")).map(row => row.name));
   for (const table of CP_STATE_TABLES) assert(tableNames.has(table), `CP state table missing: ${table}`);
   const [cpCounts] = await d1(`SELECT ${CP_STATE_TABLES.map(name => `(SELECT COUNT(*) FROM "${name}") AS "${name}"`).join(', ')}`);
-  const tg = await workerRequest('/operator/reset-sandbox-state', { target: 'sandbox', mode: 'inspect' });
+  const tg = await workerRequest('/operator/reset-sandbox-state', { target: TARGET, mode: 'inspect' });
   return { cp: cpCounts, tg };
 }
 
@@ -87,7 +101,7 @@ async function reset() {
   // Clear the TG alarms/buffers first while its operator lock blocks fresh
   // webhooks. CP has already passed the all-profile no-active-run preflight.
   const tgClear = await workerRequest('/operator/reset-sandbox-state', {
-    target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE',
+    target: TARGET, mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE',
   });
   const statements = [
     // Remove direct and non-cascading task dependants before deleting roots.
@@ -113,14 +127,14 @@ async function reset() {
   ];
   for (const sql of statements) await d1(sql);
   await inspectUntilEmpty();
-  console.log(JSON.stringify({ ok: true, target: 'sandbox', cpRuntimeRowsDeleted: state.cp,
+  console.log(JSON.stringify({ ok: true, target: TARGET, cpRuntimeRowsDeleted: state.cp,
     tgStateDeleted: tgClear, cpEmpty: true, tgEmpty: true }));
 }
 
 async function testBuffers() {
-  const first = await workerRequest('/operator/test-buffer-message', { target: 'sandbox', text: 'sandbox-buffer-test first part' });
+  const first = await workerRequest('/operator/test-buffer-message', { target: TARGET, text: 'sandbox-buffer-test first part' });
   assert.deepEqual(first.buffer, { pendingCount: 1, hasText: true, busy: false, stranded: false });
-  const second = await workerRequest('/operator/test-buffer-message', { target: 'sandbox', text: 'sandbox-buffer-test second part', resetAfter: true });
+  const second = await workerRequest('/operator/test-buffer-message', { target: TARGET, text: 'sandbox-buffer-test second part', resetAfter: true });
   assert.deepEqual(second.buffer, { pendingCount: 2, hasText: true, busy: false, stranded: false });
   assert.equal(second.clearedAfterRead, true);
   console.log(JSON.stringify({ ok: true, scenario: 'fresh-message-buffer-aggregation',
@@ -128,7 +142,14 @@ async function testBuffers() {
 }
 
 async function testUserEntry() {
-  const report = await runSandboxEntryScenario((path, body) => workerRequest(path, body));
+  const identity = TARGET === 'sandbox3' ? {
+    target: TARGET, chatId: Number(required('TG_SANDBOX_E2E_CHAT_ID')),
+    userId: Number(required('TG_SANDBOX_E2E_USER_ID')),
+    delivery: process.env.TG_SANDBOX_E2E_DELIVERY === 'telegram' ? 'telegram' : 'capture',
+  } : { target: TARGET };
+  if (TARGET === 'sandbox3' && (!Number.isSafeInteger(identity.chatId) || identity.chatId === 0
+      || !Number.isSafeInteger(identity.userId) || identity.userId <= 0)) throw new Error('sandbox3_test_identity_invalid');
+  const report = await runSandboxEntryScenario((path, body) => workerRequest(path, body), identity);
   console.log(JSON.stringify(report));
 }
 

@@ -27,6 +27,27 @@ printing their values. After deployment, require
 buffers empty before a scenario. The deployment workflow also runs buffer
 contract checks and resets state after them.
 
+### Deploying the isolated sandbox3 Worker
+
+Use the manual workflow **Sandbox3 Telegram worker E2E** from protected `main`
+with `run_e2e=true`. It verifies the Cloudflare account and pinned test-user
+ID, deploys only `trained-assist-tg-sandbox3` with ingress and delivery paused,
+checks the isolated CP lane and existing V1 delivery-owner state, and clears
+CP plus Telegram intake state before enabling traffic. It then exercises help,
+status, anonymous login guidance, message aggregation, temporary profile login,
+one real Runner answer, and delivery into the pinned sandbox Telegram chat.
+The workflow cleans CP and Telegram intake state after the task reaches a
+terminal result and uploads sanitized evidence. It does not use the Telegram UI
+or deploy any production Worker.
+
+The sandbox3 deploy config preserves its existing `IntakeBuffer` and
+`TgDeliveryOwner` SQLite namespaces. It does not apply a Durable Object
+migration. Operator token and test chat/user IDs are separate Worker secrets;
+the workflow checks the user ID against the tester-owned account before
+provisioning them. To inspect the same state locally, set
+`TG_SANDBOX_TARGET=sandbox3` and use `TG_SANDBOX3_OPERATOR_TOKEN` with
+`tools/sandbox-buffer-cycle.mjs inspect|reset`.
+
 1. Use the isolated probability sandbox for the standard user journey:
 
    | Bot | Worker | Wrangler config |

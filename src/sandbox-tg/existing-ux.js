@@ -14,6 +14,7 @@ import { ControlPlaneClient } from './control-plane-client.js';
 import { cmdLogin } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
+import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
 
 const app = new Hono();
 
@@ -59,11 +60,16 @@ app.get('/delivery-cutover', async context => {
 });
 
 app.get('/operator/delivery-cutover', async context => {
-  const token = String(context.env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = target === 'sandbox3'
+    ? sandboxOperatorToken(env, target)
+    : String(env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   try {
-    const config = readTgSliceConfig(context.env);
-    return context.json(await createController(context.env, config).outbox.open());
+    const config = readTgSliceConfig(env);
+    return context.json(await createController(env, config).outbox.open());
   } catch {
     return context.json({ error: 'delivery owner refused' }, 503);
   }
@@ -73,15 +79,43 @@ app.get('/operator/delivery-cutover', async context => {
 // operator route follows the active V2 binding and cannot serve as a V1
 // preflight after that binding is deployed without its manifest yet.
 app.get('/operator/delivery-cutover-v1', async context => {
-  const token = String(context.env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = target === 'sandbox3'
+    ? sandboxOperatorToken(env, target)
+    : String(env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   try {
-    const config = readTgSliceConfig(context.env);
-    const env = { ...context.env, TG_DELIVERY_OWNER_V2: undefined,
+    const config = readTgSliceConfig(env);
+    const v1Env = { ...env, TG_DELIVERY_OWNER_V2: undefined,
       TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2: undefined };
-    return context.json(await createController(env, config).outbox.open());
+    return context.json(await createController(v1Env, config).outbox.open());
   } catch {
     return context.json({ error: 'delivery owner refused' }, 503);
+  }
+});
+
+// Bounded E2E observation for the pinned sandbox identity. This performs a
+// read only from the delivery owner and never returns message text.
+app.get('/operator/test-delivery/:taskId', async context => {
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true'
+      || !sandboxOperatorResetChat(env, target)) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  const taskId = context.req.param('taskId');
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return context.json({ error: 'invalid_task_id' }, 400);
+  try {
+    const config = readTgSliceConfig(env);
+    const result = await createController(env, config).outbox.read(taskId);
+    const records = [result.receipt, result.terminal].filter(Boolean);
+    if (records.some(record => String(record.chatId) !== String(env.TG_SANDBOX_E2E_CHAT_ID ?? '')))
+      return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
+    return context.json({ taskId, receipt: result.receipt, terminal: result.terminal });
+  } catch {
+    return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
   }
 });
 
@@ -134,13 +168,13 @@ app.post('/operator/stop-window', async context => {
 // mappings. The caller must preflight and clear the paired CP sandbox as well.
 app.post('/operator/reset-sandbox-state', async context => {
   const env = executionEnv(context.env);
-  const token = String(env.TG_SANDBOX_CLEANUP_TOKEN ?? '').trim();
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' ||
-      env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' || env.EXECUTION_BACKEND !== 'control-plane' ||
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
       !env.SESSIONS || !env.INTAKE || !env.TG_SLICE) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   const body = await context.req.json().catch(() => null);
-  if (!body || body.target !== 'sandbox' || !['inspect', 'clear'].includes(body.mode) ||
+  if (!body || body.target !== target || !['inspect', 'clear'].includes(body.mode) ||
       (body.mode === 'clear' && body.confirm !== 'CLEAR_ALL_SANDBOX_STATE') ||
       Object.keys(body).some(key => !['target', 'mode', 'confirm'].includes(key))) return context.json({ error: 'explicit_sandbox_confirmation_required' }, 400);
   const lockKey = `sandbox-state-reset:${env.SESSION_NAMESPACE}`;
@@ -173,6 +207,9 @@ app.post('/operator/reset-sandbox-state', async context => {
     cursor = page.list_complete === false ? page.cursor : null;
     if (cursor && cursor === page.cursor && page.keys.length === 0) throw new Error('session_kv_pagination_stalled');
   } while (cursor);
+
+  const pinnedTestChat = sandboxOperatorResetChat(env, target);
+  if (pinnedTestChat) chatIds.add(pinnedTestChat);
 
   // A prior cutover can name a chat whose KV login expired or was already
   // deleted. Include those old destinations so their Intake DO is reset too.
@@ -208,43 +245,53 @@ app.post('/operator/reset-sandbox-state', async context => {
   ]);
   const inspected = [];
   for (const selector of buffers) {
-    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(selector.chatId, selector.threadId)));
-    const response = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
-    const state = await response.json().catch(() => ({}));
-    if (!response.ok) return context.json({ error: 'intake_reset_inspect_failed', ...selector }, 503);
-    if (state.active && body.mode === 'clear') return context.json({ error: 'active_intake_state', ...selector }, 409);
-    inspected.push({ selector, stub, keys: state.keys ?? 0, active: state.active === true });
+    for (const [bindingName, namespace] of [['intake', env.INTAKE], ['legacyIntake', env.LEGACY_INTAKE]]) {
+      if (!namespace) continue;
+      const stub = namespace.get(namespace.idFromName(conversationKey(selector.chatId, selector.threadId)));
+      const response = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
+      const state = await response.json().catch(() => ({}));
+      if (!response.ok) return context.json({ error: 'intake_reset_inspect_failed', binding: bindingName, ...selector }, 503);
+      if (state.active && body.mode === 'clear') return context.json({ error: 'active_intake_state', binding: bindingName, ...selector }, 409);
+      inspected.push({ selector, binding: bindingName, stub, keys: state.keys ?? 0, active: state.active === true });
+    }
   }
-  const acceptOnly = env.SANDBOX_ACCEPT_ONLY.get(env.SANDBOX_ACCEPT_ONLY.idFromName('sandbox-accept-only-v1'));
-  const acceptOnlyInspectResponse = await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' });
-  const acceptOnlyState = await acceptOnlyInspectResponse.json().catch(() => ({}));
-  if (!acceptOnlyInspectResponse.ok) return context.json({ error: 'accept_only_inspect_failed' }, 503);
+  const acceptOnly = env.SANDBOX_ACCEPT_ONLY
+    ? env.SANDBOX_ACCEPT_ONLY.get(env.SANDBOX_ACCEPT_ONLY.idFromName('sandbox-accept-only-v1')) : null;
+  const acceptOnlyInspectResponse = acceptOnly
+    ? await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' }) : null;
+  const acceptOnlyState = acceptOnlyInspectResponse
+    ? await acceptOnlyInspectResponse.json().catch(() => ({})) : { keys: 0 };
+  if (acceptOnlyInspectResponse && !acceptOnlyInspectResponse.ok) return context.json({ error: 'accept_only_inspect_failed' }, 503);
   if (body.mode === 'inspect') {
     const sandboxUserKeys = (await listSandboxUserKeys(env.TG_SLICE)).length;
-    return context.json({ ok: true, target: 'sandbox', sessionAndRetryKeys: keys.length,
-      sandboxUserKeys, intakeBuffers: inspected.length, durableObjectKeys: inspected.reduce((sum, item) => sum + item.keys, 0),
+    return context.json({ ok: true, target, sessionAndRetryKeys: keys.length,
+      sandboxUserKeys, intakeBuffers: buffers.length, intakeNamespaces: [...new Set(inspected.map(item => item.binding))],
+      durableObjectKeys: inspected.reduce((sum, item) => sum + item.keys, 0),
       acceptOnlyKeys: acceptOnlyState.keys ?? null, active: inspected.some(item => item.active) });
   }
   for (const { selector, stub } of inspected) {
     const response = await stub.fetch('https://intake/operator/reset-all', { method: 'POST' });
     if (!response.ok) return context.json({ error: 'intake_reset_failed', ...selector, status: response.status }, 503);
   }
-  const acceptOnlyResponse = await acceptOnly.fetch('https://accept-only.internal/operator/reset-all', { method: 'POST' });
-  if (!acceptOnlyResponse.ok) return context.json({ error: 'accept_only_reset_failed', status: acceptOnlyResponse.status }, 503);
+  const acceptOnlyResponse = acceptOnly
+    ? await acceptOnly.fetch('https://accept-only.internal/operator/reset-all', { method: 'POST' }) : null;
+  if (acceptOnlyResponse && !acceptOnlyResponse.ok) return context.json({ error: 'accept_only_reset_failed', status: acceptOnlyResponse.status }, 503);
   for (const { selector, stub } of inspected) {
     const response = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.active || result.keys !== 0) return context.json({ error: 'intake_reset_verify_failed', ...selector }, 503);
   }
-  const acceptOnlyVerify = await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' });
-  const acceptOnlyVerified = await acceptOnlyVerify.json().catch(() => ({}));
-  if (!acceptOnlyVerify.ok || acceptOnlyVerified.keys !== 0) return context.json({ error: 'accept_only_reset_verify_failed' }, 503);
+  const acceptOnlyVerify = acceptOnly
+    ? await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' }) : null;
+  const acceptOnlyVerified = acceptOnlyVerify ? await acceptOnlyVerify.json().catch(() => ({})) : { keys: 0 };
+  if (acceptOnlyVerify && (!acceptOnlyVerify.ok || acceptOnlyVerified.keys !== 0)) return context.json({ error: 'accept_only_reset_verify_failed' }, 503);
   const sandboxUserKeys = await listSandboxUserKeys(env.TG_SLICE);
   for (const key of keys) await env.SESSIONS.delete(key);
   for (const key of sandboxUserKeys) await env.TG_SLICE.delete(key);
-  return context.json({ ok: true, target: 'sandbox', sessionsAndRetryKeysDeleted: keys.length,
-    sandboxUserKeysDeleted: sandboxUserKeys.length, intakeBuffersReset: inspected.length,
-    durableObjectKeysDeleted: inspected.reduce((sum, item) => sum + item.keys, 0), acceptOnlyReset: true });
+  return context.json({ ok: true, target, sessionsAndRetryKeysDeleted: keys.length,
+    sandboxUserKeysDeleted: sandboxUserKeys.length, intakeBuffersReset: buffers.length,
+    intakeNamespacesReset: [...new Set(inspected.map(item => item.binding))],
+    durableObjectKeysDeleted: inspected.reduce((sum, item) => sum + item.keys, 0), acceptOnlyReset: Boolean(acceptOnly) });
   } finally {
     if (body.mode === 'clear') await env.TG_SLICE.delete(lockKey);
   }
@@ -284,40 +331,48 @@ async function listSandboxUserKeys(kv) {
 // write-only webhook secret or sending anything to a real chat.
 app.post('/operator/test-buffer-message', async context => {
   const env = executionEnv(context.env);
-  const token = String(env.TG_SANDBOX_CLEANUP_TOKEN ?? '').trim();
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
   if (await env.TG_SLICE?.get?.(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
-  if (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' ||
-      env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' || env.EXECUTION_BACKEND !== 'control-plane' ||
-      env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false' || !env.TG_SANDBOX_BUFFER_TEST_CHAT_ID) {
+  const configuredBufferChatId = target === 'sandbox3'
+    ? sandboxOperatorResetChat(env, target) : env.TG_SANDBOX_BUFFER_TEST_CHAT_ID;
+  const configuredBufferUserId = target === 'sandbox3'
+    ? env.TG_SANDBOX_E2E_USER_ID : '900000236';
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false' || !configuredBufferChatId) {
     return context.json({ error: 'sandbox_buffer_test_not_ready' }, 409);
   }
   const config = readTgSliceConfig(env);
   const source = await context.req.json().catch(() => null);
-  if (!source || source.target !== 'sandbox' || typeof source.text !== 'string' || !source.text.trim() ||
+  if (!source || source.target !== target || typeof source.text !== 'string' || !source.text.trim() ||
       !source.text.startsWith('sandbox-buffer-test ') || source.text.length > 2000 ||
       (source.resetAfter !== undefined && typeof source.resetAfter !== 'boolean') ||
       Object.keys(source).some(key => !['target', 'text', 'resetAfter'].includes(key))) {
     return context.json({ error: 'invalid_test_message' }, 400);
   }
-  const chatId = Number(env.TG_SANDBOX_BUFFER_TEST_CHAT_ID);
-  if (!Number.isSafeInteger(chatId) || chatId >= 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
-  const userId = 900000236;
+  const chatId = Number(configuredBufferChatId);
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || (target === 'sandbox' && chatId >= 0)) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  const userId = Number(configuredBufferUserId);
+  if (!Number.isSafeInteger(userId) || userId <= 0) return context.json({ error: 'invalid_sandbox_test_user' }, 409);
   // This synthetic webhook must exercise the real ingress and Intake DO without
   // writing its fixture login into the shared sandbox KV. KV deletes are
   // eventually visible, which otherwise leaves one test session behind and
   // makes the next clean-state gate wait or fail.
   const sessionStore = createEphemeralSessionStore();
   const runtimeEnv = executionEnv({ ...context.env, SESSIONS: sessionStore, TG_HTTP_TEST_MODE: 'true' });
+  const testEnv = executionEnv({ ...context.env, SESSIONS: sessionStore, TG_HTTP_TEST_MODE: 'true',
+    TG_SLICE_ALLOWED_CHATS: [...new Set([...config.allowedChats, String(chatId)])].join(','),
+    TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(userId)])].join(',') });
   await setSession(runtimeEnv.SESSIONS, chatId, { username: 'sandbox-buffer-test',
     telegramUserId: String(userId), controlPlaneProfile: config.profileId });
   const update = { update_id: Date.now(), message: { message_id: Date.now() % 1_000_000_000,
-    date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'supergroup', is_forum: false },
+    date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
     from: { id: userId, is_bot: false, first_name: 'Sandbox' }, text: source.text } };
   const response = await app.fetch(new Request('https://sandbox.internal/webhook', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
     body: JSON.stringify(update),
-  }), { ...context.env, SESSIONS: sessionStore, TG_HTTP_TEST_MODE: 'true', TEST_CHAT_IDS: String(chatId) });
+  }), { ...testEnv, TG_HTTP_TEST_MODE: 'true', TEST_CHAT_IDS: String(chatId) });
   const admitted = await response.json().catch(() => ({}));
   if (!response.ok || admitted.ok !== true) return context.json({ error: 'synthetic_webhook_failed', status: response.status, code: admitted.code ?? null }, 503);
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
@@ -338,17 +393,16 @@ app.post('/operator/test-buffer-message', async context => {
 // JSON. This endpoint exists only on the isolated UX sandbox Worker.
 app.post('/operator/test-update', async context => {
   const env = executionEnv(context.env);
-  const token = String(env.TG_SANDBOX_CLEANUP_TOKEN ?? '').trim();
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
   if (await env.TG_SLICE.get(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
-  if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
-      env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' || env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' ||
-      env.EXECUTION_BACKEND !== 'control-plane' || env.TG_SLICE_OPEN_SANDBOX !== 'true' ||
+  if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !target ||
       env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false') {
     return context.json({ error: 'sandbox_test_api_not_ready' }, 409);
   }
   const source = await context.req.json().catch(() => null);
-  if (!source || source.target !== 'sandbox' || !['message', 'callback'].includes(source.type) ||
+  if (!source || source.target !== target || !['message', 'callback'].includes(source.type) ||
       Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin'].includes(key)) ||
       (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
       (source.admin !== undefined && typeof source.admin !== 'boolean') ||
@@ -368,7 +422,9 @@ app.post('/operator/test-update', async context => {
   }
   const chatId = Number(configuredTestChat);
   if (!Number.isSafeInteger(chatId) || chatId === 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
-  if (!chatAllowed(config, chatId)) return context.json({ error: 'sandbox_test_chat_not_allowed' }, 403);
+  const actorId = source.userId ?? 900000236;
+  if (!sandboxOperatorChatAllowed(env, config, target, chatId) ||
+      !sandboxOperatorUserAllowed(env, target, actorId)) return context.json({ error: 'sandbox_test_identity_not_allowed' }, 403);
   if (!env.INTAKE) return context.json({ error: 'sandbox_intake_not_ready' }, 409);
   const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
   const readCollectorState = async () => {
@@ -386,7 +442,6 @@ app.post('/operator/test-update', async context => {
   }
   const callbackData = callbackShortcut
     ? `ws|${callbackShortcut}|${before.collectorDraftRevision}` : source.callbackData;
-  const actorId = source.userId ?? 900000236;
   const updateId = source.updateId ?? Date.now();
   const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
   const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
@@ -449,6 +504,7 @@ app.post('/webhook', async context => {
   const message = update.message ?? update.callback_query?.message;
   const sender = update.callback_query?.from ?? message?.from;
   const allowedUsers = String(env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean);
+  if (config.e2eUserId && !allowedUsers.includes(config.e2eUserId)) allowedUsers.push(config.e2eUserId);
   if (!message?.chat || !sender?.id || (!config.openSandbox &&
       (!config.allowedChats.includes(String(message.chat.id)) || !allowedUsers.includes(String(sender.id))))) return context.json({ error: 'owner refused' }, 403);
   if (!env.SESSIONS) return context.json({ error: 'session store not configured' }, 503);
