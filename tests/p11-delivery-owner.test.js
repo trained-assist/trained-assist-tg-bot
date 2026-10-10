@@ -19,6 +19,24 @@ async function fixture(overrides = {}) {
 }
 
 describe('sandbox durable single delivery owner', () => {
+  it('uses the current Worker pause flags even when the existing Durable Object has stale env', async () => {
+    const { env, client } = await fixture();
+    const calls = vi.fn(async () => Response.json({ ok: true, result: { message_id: 1365 } }));
+    vi.stubGlobal('fetch', calls);
+
+    const pausedClient = new TgDeliveryOwnerClient({ ...env,
+      TG_SLICE_DELIVERY_PAUSED: 'true', TG_SLICE_INGRESS_PAUSED: 'true' });
+    expect(await pausedClient.open()).toMatchObject({ paused: true, ingressPaused: true });
+    expect(await pausedClient.drain()).toBe(0);
+    expect(calls).not.toHaveBeenCalled();
+
+    const liveClient = new TgDeliveryOwnerClient({ ...env,
+      TG_SLICE_DELIVERY_PAUSED: 'false', TG_SLICE_INGRESS_PAUSED: 'false' });
+    expect(await liveClient.open()).toMatchObject({ paused: false, ingressPaused: false });
+    expect(await liveClient.drain()).toBe(1);
+    expect(calls).toHaveBeenCalledTimes(1);
+  });
+
   it('reproduces original two-drain duplicate even with strong memory KV and stored attempt one', async () => {
     const kv = new MemKV();
     const release = deferred();
