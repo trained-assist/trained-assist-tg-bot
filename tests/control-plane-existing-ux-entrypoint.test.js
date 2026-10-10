@@ -29,6 +29,39 @@ function fixture() {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('keeps synthetic buffer-test sessions out of the shared sandbox KV', async () => {
+    const state = fixture();
+    const { env } = state;
+    env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
+    env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
+    env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
+    env.TG_SANDBOX_BUFFER_TEST_CHAT_ID = '-1000000000236';
+    env.SESSION_NAMESPACE = 'integrator-existing-ux-v1';
+    env.EXECUTION_BACKEND = 'control-plane';
+    env.TG_SLICE_OPEN_SANDBOX = 'true';
+    env.TG_SLICE_INGRESS_PAUSED = 'false';
+    env.TG_SLICE_DELIVERY_PAUSED = 'false';
+    env.INTAKE_DEBOUNCE = 'on';
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
+      intakeCalls.push({ name, path: new URL(url).pathname });
+      if (new URL(url).pathname === '/debug') return Response.json({ buf: [{ hasText: true }, { hasText: true }], busy: false, stranded: false });
+      if (new URL(url).pathname === '/append') return Response.json({ ok: true });
+      if (new URL(url).pathname === '/operator/reset-all') return Response.json({ ok: true });
+      return Response.json({ error: 'unexpected_intake_path' }, 404);
+    } }) };
+
+    const response = await worker.fetch(new Request('https://worker/operator/test-buffer-message', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX_CLEANUP_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'sandbox', text: 'sandbox-buffer-test ephemeral session', resetAfter: true }),
+    }), env);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, buffer: { pendingCount: 2 }, clearedAfterRead: true });
+    expect(intakeCalls.map(call => call.path)).toEqual(['/append', '/debug', '/operator/reset-all']);
+    expect(env.SESSIONS.data.size).toBe(0);
+  });
+
   it('resets all sandbox session and intake state only after owner auth and explicit confirmation', async () => {
     const state = fixture();
     const { env } = state;
