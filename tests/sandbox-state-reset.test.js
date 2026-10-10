@@ -35,11 +35,32 @@ describe('sandbox-only Intake DO reset', () => {
   });
 
   it('refuses to clear while a launch is still in progress', async () => {
-    const { instance, storage } = actor({ launching: [{ text: 'request not yet admitted' }] });
+    const { instance, storage } = actor({ launching: [{ text: 'request not yet admitted' }], busySince: Date.now() });
     const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
     expect(clear.status).toBe(409);
     expect(await clear.json()).toEqual({ error: 'active_intake_state' });
-    expect((await storage.list()).size).toBe(1);
+    expect((await storage.list()).size).toBe(2);
+  });
+
+  it('lets the paired sandbox reset clear a launch checkpoint older than the CP safety window', async () => {
+    const { instance, storage } = actor({ launching: [{ text: 'old sandbox launch' }], busySince: Date.now() - 16 * 60_000,
+      cpUnresolvedLaunches: ['[113,114]'], 'cp-launch:[113,114]': { snapshotRequestId: 'old-request' }, alarm: 7 });
+    const inspect = await instance.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }));
+    expect(await inspect.json()).toMatchObject({ active: false, staleLaunching: true });
+    const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
+    expect(await clear.json()).toMatchObject({ ok: true, staleLaunchingRecovered: true });
+    expect((await storage.list()).size).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
+  });
+
+  it('still refuses reset when a CP request is currently in flight, even with an old timestamp', async () => {
+    const { instance, storage } = actor({ launching: [{ text: 'request still dispatching' }], busySince: Date.now() - 16 * 60_000 });
+    instance.cpDispatches = 1;
+    const inspect = await instance.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }));
+    expect(await inspect.json()).toMatchObject({ active: true, staleLaunching: false });
+    const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
+    expect(clear.status).toBe(409);
+    expect((await storage.list()).size).toBe(2);
   });
 
   it('clears large Durable Object buffers in pages', async () => {
