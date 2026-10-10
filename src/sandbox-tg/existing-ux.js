@@ -356,14 +356,24 @@ app.post('/operator/test-update', async context => {
   if (source.type === 'message' && (typeof source.text !== 'string' || !source.text.trim() || source.text.length > 4000) ||
       source.type === 'message' && source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1) ||
       source.type === 'callback' && (typeof source.callbackData !== 'string' || !source.callbackData || source.callbackData.length > 64 ||
-        !Number.isSafeInteger(source.messageId) || source.messageId < 1)) return context.json({ error: 'invalid_test_update' }, 400);
+        source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1))) return context.json({ error: 'invalid_test_update' }, 400);
   const config = readTgSliceConfig(env);
   if (!config.webhookSecret) return context.json({ error: 'sandbox_webhook_not_ready' }, 409);
   const chatId = Number(env.TG_SANDBOX_BUFFER_TEST_CHAT_ID);
   if (!Number.isSafeInteger(chatId) || chatId >= 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  if (!env.INTAKE) return context.json({ error: 'sandbox_intake_not_ready' }, 409);
+  const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
+  const readCollectorState = async () => {
+    const stateResponse = await intake.fetch('https://intake/debug');
+    return stateResponse.ok ? stateResponse.json().catch(() => null) : null;
+  };
+  const before = await readCollectorState();
+  if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
+    return context.json({ error: 'no_current_button_message' }, 409);
+  }
   const actorId = 900000236;
   const updateId = source.updateId ?? Date.now();
-  const messageId = source.messageId ?? updateId % 1_000_000_000;
+  const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
   const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
     chat: { id: chatId, type: 'supergroup', is_forum: false },
     from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
@@ -396,7 +406,16 @@ app.post('/operator/test-update', async context => {
   initTestMode(context.env);
   if (!response.ok) return context.json({ error: 'synthetic_webhook_failed', status: response.status,
     code: admission.code ?? null, transcript }, 503);
-  return context.json({ ok: true, updateId, messageId, admission, transcript });
+  const after = await readCollectorState();
+  const collector = after ? {
+    busy: after.busy === true,
+    pendingCount: (after.buf?.length ?? 0) + (after.retryBatch?.length ?? 0),
+    stranded: after.stranded === true,
+    collectorMessageId: after.collectorMsgId ?? null,
+    launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
+    controlPlaneBarrier: after.controlPlaneBarrier ?? null,
+  } : null;
+  return context.json({ ok: true, updateId, messageId, admission, transcript, collector });
 });
 
 app.post('/webhook', async context => {

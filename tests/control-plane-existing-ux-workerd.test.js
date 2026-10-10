@@ -416,9 +416,11 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       const createdBody = await created.json();
       expect(createdBody).toMatchObject({ ok: true, admission: { ok: true }, transcript: [expect.objectContaining({
         kind: 'sendMessage', messageId: expect.any(Number), text: expect.stringContaining('e2e_worker_fixture'),
-      })] });
+      })], collector: expect.objectContaining({ busy: false, pendingCount: 0, stranded: false,
+        collectorMessageId: null, launchingMessageIds: [] }) });
       const password = /Пароль: <code>([^<]+)<\/code>/.exec(createdBody.transcript[0].text)?.[1];
       expect(password).toBeTruthy();
+      expect((await operatorRequest({ target: 'sandbox', type: 'callback', callbackData: 'intake_run' })).status).toBe(409);
       expect(await (await runtime.getKVNamespace('TG_SLICE')).get('user:e2e_worker_fixture', 'json'))
         .toMatchObject({ name: 'Worker Fixture', passwordHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
       const login = await operatorRequest({ target: 'sandbox', type: 'message', text: `/login e2e_worker_fixture ${password}`, updateId: 91002, messageId: 102 });
