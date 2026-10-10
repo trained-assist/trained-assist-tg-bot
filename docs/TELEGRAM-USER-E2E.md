@@ -82,8 +82,11 @@ unique message was stored exactly once.
 Keep its authorization material in the trusted local secret store; never put it
 in chat, a shell transcript, a screenshot, a test fixture, or this document.
 After each terminal scenario, reset the sandbox and verify both stores empty
-before beginning the next one. If a launch remains active or unknown, reset
-preflight refuses; preserve that state until reconciliation makes it terminal.
+before beginning the next one. The manual **Reset and test sandbox intake
+buffers** GitHub Action runs reset → empty-state preflight → fresh-message
+aggregation test → reset, and uploads count-only evidence. If a launch remains
+active or unknown, reset preflight refuses; preserve that state until
+reconciliation makes it terminal.
 
 ## Regression for a stuck pending launch/stop window
 
@@ -204,3 +207,33 @@ The full reset ran after both task scenarios. Final sandbox inspect reported
 empty CP and Telegram buffers. The final anonymous-command check also left both
 stores empty. Temporary passwords and literal chat IDs were kept out of logs
 and this record.
+
+### 2026-10-10 revision-bound work-style buttons
+
+After PR [#511](https://github.com/trained-assist/trained-assist-tg-bot/pull/511)
+merged, the sandbox was deployed from source SHA
+`b0400203f8ccb4ee9dc55e8595f842c6eb8f77dc` (Worker version
+`04d2bab8-877b-46bb-b3ee-a2af813fd13e`). The owner-provided test account used
+the Worker API; its literal sender ID is intentionally omitted.
+
+- With the `auto` work-style button, Worker resolved the shortcut to
+  `ws|auto|1`. Intake logged one accepted CP request; CP recorded one `done`
+  task and a successful `cloudflare-workflows` execution. The saved answer was
+  exactly `BUTTON_OK_20261010_1639`.
+- With the `answer` work-style button, Worker resolved the shortcut to
+  `ws|answer|1`. CP recorded one `done` task and a successful execution; the
+  saved answer was exactly `ANSWER_MODE_OK_20261010_1644`.
+- In both runs, delivery-owner enqueue, drain, and load completed. A following
+  `/status` reported no active task or pending input, confirming Intake had
+  released its delivery barrier. The reset removed both tasks, their execution
+  records, the temporary login, and all Telegram and CP sandbox state; final
+  inspection reported both stores empty.
+
+The same source SHA reached production through main's normal CI, mandatory
+scenario gate, isolated staging deployment/smoke, and production smoke. The
+production Worker reported that exact `buildSha`, `/debug/whoami` identified
+`@super_personal_assistant_bot`, and an unsigned webhook probe returned `401`.
+These are production deployment and identity checks, not a production
+user-originated question/answer scenario: `/operator/test-update` is sandbox
+only by design, so this run did not inject synthetic user input into the
+production webhook.

@@ -1,0 +1,53 @@
+name: Reset and test sandbox intake buffers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trained-assist-sandbox-buffer-cycle
+  cancel-in-progress: false
+
+jobs:
+  buffer-cycle:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reset sandbox CP and Telegram Intake state before the scenario
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox-reset-before.json
+      - name: Require empty CP and Telegram buffers before the scenario
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox-empty-preflight.json
+      - name: Verify fresh messages aggregate in the sandbox buffer
+        run: node tools/sandbox-buffer-cycle.mjs test-buffers | tee sandbox-buffer-test.json
+      - name: Reset sandbox CP and Telegram Intake state after the scenario
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox-reset-after.json
+      - name: Upload sanitized sandbox buffer evidence
+        if: always() && hashFiles('sandbox-reset-before.json', 'sandbox-empty-preflight.json', 'sandbox-buffer-test.json', 'sandbox-reset-after.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-buffer-cycle-${{ github.run_id }}
+          path: |
+            sandbox-reset-before.json
+            sandbox-empty-preflight.json
+            sandbox-buffer-test.json
+            sandbox-reset-after.json
+          if-no-files-found: error
+          retention-days: 30
