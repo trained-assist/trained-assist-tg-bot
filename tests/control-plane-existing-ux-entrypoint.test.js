@@ -83,12 +83,15 @@ describe('signed existing-UX ingress', () => {
     expect((await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' }, 'wrong')).status).toBe(401);
     const response = await request({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: true, admission: { ok: true } });
+    expect(await response.json()).toMatchObject({ ok: true, admission: { ok: true }, collector: {
+      busy: false, pendingCount: 0, stranded: false, collectorMessageId: null, launchingMessageIds: [],
+    } });
     const created = JSON.parse(await env.TG_SLICE.get('user:e2e_worker_fixture'));
     expect(created.name).toBe('Worker Fixture');
     expect(created.passwordHash).toMatch(/^[a-f0-9]{64}$/);
     expect(await env.TG_SLICE.get('sandbox-user:e2e_worker_fixture')).toBeNull();
-    expect(intakeCalls).toEqual([]);
+    expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
+    expect((await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run' })).status).toBe(409);
 
     const unauthenticatedCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
       updateId: 91009, messageId: 89 });
