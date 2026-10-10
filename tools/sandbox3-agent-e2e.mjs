@@ -126,8 +126,11 @@ async function main() {
     updateId: updateId++, text, ...extra,
   });
 
-  const created = await sendMessage(`/adduser ${username} Sandbox E2E`, { admin: true });
-  assertDelivered(created);
+  // Keep the generated password inside the Actions process; never send it to
+  // the shared test chat. The actual login reply and task answer use Telegram.
+  const created = await sendMessage(`/adduser ${username} Sandbox E2E`, { admin: true, delivery: 'capture' });
+  assert.equal(created.ok, true, 'sandbox_test_profile_not_created');
+  assert.equal(created.delivery, 'capture', 'sandbox_test_profile_creation_must_stay_private');
   const createdText = created.transcript.map(item => String(item.text ?? '')).join('\n');
   assert(createdText.includes(username), 'sandbox_test_profile_not_created');
   const passwordMatch = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(createdText);
