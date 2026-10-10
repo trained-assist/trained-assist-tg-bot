@@ -29,6 +29,61 @@ function fixture() {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('resets all sandbox session and intake state only after owner auth and explicit confirmation', async () => {
+    const state = fixture();
+    const { env } = state;
+    env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
+    env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
+    env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
+    env.SESSION_NAMESPACE = 'integrator-existing-ux-v1';
+    env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42`, JSON.stringify({ username: 'old-test-user' }));
+    env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42:7`, JSON.stringify({ pendingMessage: 'old topic draft' }));
+    env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:retry:42:old`, JSON.stringify({ chatId: 42 }));
+    env.TG_SLICE.data.set('sandbox-user:old-user', JSON.stringify({ profileId: 'old-profile' }));
+    const resetCalls = [];
+    const stateKeys = new Map();
+    const activeBuffers = new Set();
+    const makeStub = (kind, name) => ({ async fetch(url) {
+      const path = new URL(url).pathname;
+      resetCalls.push(`${kind}:${path}`);
+      if (!stateKeys.has(name)) stateKeys.set(name, kind === 'intake' ? 3 : 0);
+      if (path.endsWith('reset-inspect')) return Response.json(kind === 'intake'
+        ? { ok: true, active: activeBuffers.has(name), keys: stateKeys.get(name) } : { ok: true, keys: stateKeys.get(name) });
+      if (path.endsWith('reset-all')) {
+        const deletedKeys = stateKeys.get(name);
+        stateKeys.set(name, 0);
+        return Response.json({ ok: true, deletedKeys });
+      }
+      return Response.json({ ok: true });
+    } });
+    env.INTAKE = { idFromName: name => name, get: name => makeStub('intake', name) };
+    env.SANDBOX_ACCEPT_ONLY = { idFromName: name => name, get: name => makeStub('accept-only', name) };
+    const post = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/reset-sandbox-state', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }), env);
+    expect((await post({ target: 'sandbox', mode: 'inspect' }, 'wrong-token')).status).toBe(401);
+    expect((await post({ target: 'production', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' })).status).toBe(400);
+    const inspect = await post({ target: 'sandbox', mode: 'inspect' });
+    expect(inspect.status).toBe(200);
+    expect(await inspect.json()).toMatchObject({ ok: true, sessionAndRetryKeys: 3, intakeBuffers: 2,
+      sandboxUserKeys: 1, acceptOnlyKeys: 0, active: false });
+    expect(env.SESSIONS.data.size).toBe(3);
+    expect(resetCalls).toHaveLength(3);
+    activeBuffers.add('42');
+    expect((await post({ target: 'sandbox', mode: 'inspect' })).status).toBe(200);
+    const blocked = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: 'active_intake_state', chatId: '42' });
+    expect(resetCalls.some(value => value === 'intake:/operator/reset-all')).toBe(false);
+    activeBuffers.delete('42');
+    const cleared = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 1, intakeBuffersReset: 2 });
+    expect(env.SESSIONS.data.size).toBe(0);
+    expect(resetCalls.filter(value => value === 'intake:/operator/reset-all')).toHaveLength(2);
+    expect(resetCalls).toContain('accept-only:/operator/reset-all');
+  });
+
   it('protects delivery-owner readiness and reads it without reconciling deliveries', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/delivery-cutover'), state.env)).status).toBe(401);

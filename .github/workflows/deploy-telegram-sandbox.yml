@@ -106,3 +106,38 @@ jobs:
             echo "- Cloudflare identity was verified before deployment."
             echo "- Worker deployment status and /health smoke passed."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require all sandbox buffers empty before starting tests
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset
+
+      - name: Run existing-UX Worker contract tests
+        run: npx vitest run tests/control-plane-existing-ux-entrypoint.test.js tests/control-plane-existing-ux-workerd.test.js --silent
+
+      - name: Recheck and clear both sandboxes before fresh-message scenario
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset
+
+      - name: Test fresh messages aggregate in the sandbox buffer
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs test-buffers
+
+      - name: Clear all sandbox state after the buffer scenario
+        if: always()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset
+
+      - name: Require empty CP and Telegram buffers after cleanup
+        if: always()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs inspect

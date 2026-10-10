@@ -125,6 +125,15 @@ export class SandboxAcceptOnlyStore {
     const url = new URL(request.url);
     if (url.hostname !== 'accept-only.internal') return Response.json({ error: 'not_found' }, { status: 404 });
     if (request.method === 'POST' && url.pathname === '/admit') return this.admit(request);
+    if (request.method === 'POST' && url.pathname === '/operator/reset-all') {
+      const entries = await this.state.storage.list();
+      for (const key of entries.keys()) await this.state.storage.delete(key);
+      await this.state.storage.deleteAlarm?.();
+      return Response.json({ ok: true, deletedKeys: entries.size });
+    }
+    if (request.method === 'POST' && url.pathname === '/operator/reset-inspect') {
+      return Response.json({ ok: true, keys: (await this.state.storage.list()).size });
+    }
     const eventMatch = request.method === 'POST' && /^\/events\/(sbx_[A-Za-z0-9_-]{20,64})$/.exec(url.pathname);
     if (eventMatch) {
       let body;
