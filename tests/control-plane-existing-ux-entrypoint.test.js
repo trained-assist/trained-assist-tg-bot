@@ -56,6 +56,21 @@ describe('signed existing-UX ingress', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  it('keeps a read-only V1 operator path available while V2 is deployed but unprovisioned', async () => {
+    const state = fixture();
+    state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
+    state.env.TG_SLICE_INGRESS_PAUSED = 'true';
+    state.env.TG_DELIVERY_OWNER_V2 = { idFromName: name => name, get: () => ({ fetch: async () => {
+      throw new Error('V2 manifest is not provisioned');
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/delivery-cutover-v1', {
+      headers: { authorization: `Bearer ${state.env.TG_SANDBOX_CUTOVER_READ_TOKEN}` },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true, paused: false, ingressPaused: true });
+    expect(state.collectorCalls).toEqual([]);
+  });
+
   it('rejects authenticated sandbox ingress while the cutover inventory is being replaced', async () => {
     const state = fixture();
     state.env.TG_SLICE_INGRESS_PAUSED = 'true';

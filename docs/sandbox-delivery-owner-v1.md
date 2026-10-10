@@ -124,14 +124,19 @@ an independent SQLite Durable Object namespace and the separate secret
 `TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2`. The protected-main
 `Prepare isolated sandbox delivery cutover V2` workflow derives the V2 manifest
 from the canonical CP task table, exact legacy KV delivery records, receipt
-indexes, and the approved test-chat GitHub secret. It refuses a chat mismatch,
-incomplete receipt index, malformed record, cross-profile CP row, or inventory
-over the manifest cap; it writes only the V2 Worker secret and does not deploy.
+indexes, and the approved test-chat GitHub secret. It refuses an incomplete
+receipt index, malformed record, cross-profile CP row, or inventory over the
+manifest cap. It preserves each historical delivery's exact destination,
+including older sandbox chats, as quarantined evidence; the test-chat match and
+nonmatching counts are reported without exposing chat IDs. It writes only the
+V2 Worker secret and does not deploy.
 Deploy the reviewed main Worker only after that job reports the complete
 inventory. Then run `Read sandbox delivery cutover state` and verify the V2
 quarantine counts while both ingress and outgoing delivery remain paused. Do
 not resume the sandbox until the historical duplicate-message evidence has
-been reconciled against this inventory.
+been reconciled against this inventory. The generator's SHA256 is over the
+same canonical manifest bytes used by the Durable Object marker. It refuses to
+run again once V2 has initialized, since the manifest is immutable.
 
 ## Autonomous scheduled reconciliation
 

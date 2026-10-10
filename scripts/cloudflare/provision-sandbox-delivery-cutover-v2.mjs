@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { cutoverManifest } from '../../src/sandbox-tg/delivery-owner.js';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
@@ -12,6 +13,18 @@ const STATUSES = new Set(['pending', 'retrying', 'sending', 'sent', 'dead', 'unk
 
 function requireValue(condition, code) {
   if (!condition) throw new Error(code);
+}
+
+export function sandboxDeliveryCutoverManifestDigest(manifest) {
+  const canonical = cutoverManifest({ TG_SLICE_DELIVERY_CUTOVER_MANIFEST: JSON.stringify(manifest) }, {
+    botUsername: BOT_USERNAME, profileId: PROFILE_ID, openSandbox: true, allowedChats: [],
+  });
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+export function assertSandboxDeliveryCutoverV2Uninitialized({ status, body }) {
+  requireValue(status === 503 && body?.error === 'delivery owner refused',
+    status === 200 && body?.ready === true ? 'sandbox_v2_cutover_already_initialized' : 'sandbox_v2_cutover_state_unexpected');
 }
 
 function historyOf(value) {
@@ -62,8 +75,9 @@ export function buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, re
     requireValue(REFERENCE.test(taskId) && REFERENCE.test(deliveryId)
       && row.key === `delivery:${deliveryId}` && row.key.slice('delivery:'.length) === deliveryId,
     'cutover_legacy_delivery_identity_invalid');
-    requireValue(destinationChat === chatId && (threadId === null || Number.isSafeInteger(threadId) && threadId > 0),
-      'cutover_legacy_delivery_destination_mismatch');
+    requireValue(Number.isSafeInteger(destinationChat) && destinationChat !== 0
+      && (threadId === null || Number.isSafeInteger(threadId) && threadId > 0),
+    'cutover_legacy_delivery_destination_invalid');
     requireValue(STATUSES.has(status) && Number.isInteger(attempts) && attempts >= 0 && attempts <= 20,
       'cutover_legacy_delivery_state_invalid');
     requireValue(providerMessageId === null || Number.isSafeInteger(providerMessageId) && providerMessageId > 0,
@@ -72,7 +86,7 @@ export function buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, re
     knownRecords.add(deliveryId);
     oldTaskIds.add(taskId);
     const entry = { deliveryId, userTaskId: taskId,
-      destination: { chatId, threadId }, priorStatus: status, providerMessageId, attempts };
+      destination: { chatId: destinationChat, threadId }, priorStatus: status, providerMessageId, attempts };
     const history = historyOf(record.history);
     const observedProviderMessageIds = observedIdsOf(record.observedProviderMessageIds);
     if (history !== undefined) entry.history = history;
@@ -122,13 +136,22 @@ async function inventoryAndBuild() {
   requireValue(operatorToken.length >= 32, 'sandbox_cutover_read_token_missing');
   let pauseResponse;
   try {
-    pauseResponse = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover', {
+    pauseResponse = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover-v1', {
       headers: { authorization: `Bearer ${operatorToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000),
     });
   } catch { throw new Error('sandbox_delivery_pause_probe_unreachable'); }
   const pauseState = await pauseResponse.json().catch(() => ({}));
-  requireValue(pauseResponse.ok && pauseState.ready === true && pauseState.paused === true,
+  requireValue(pauseResponse.ok && pauseState.ready === true && pauseState.paused === true && pauseState.ingressPaused === true,
     'sandbox_delivery_not_paused');
+
+  let v2Response;
+  try {
+    v2Response = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${operatorToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000),
+    });
+  } catch { throw new Error('sandbox_v2_cutover_probe_unreachable'); }
+  const v2State = await v2Response.json().catch(() => ({}));
+  assertSandboxDeliveryCutoverV2Uninitialized({ status: v2Response.status, body: v2State });
 
   const cutoverAt = Date.now();
   const d1 = await cfJson(`${base}/d1/database/${DATABASE_ID}/query`, {
@@ -178,22 +201,27 @@ async function inventoryAndBuild() {
     receiptRows.push({ taskId, deliveryId: (await response.text()).trim() });
   }
 
+  const expectedChatId = Number(process.env.TG_STAGING_TEST_CHAT_ID);
+  const expectedChatDeliveryCount = deliveryRows.filter(row => Number(row.record?.destination?.chatId) === expectedChatId).length;
   const manifest = buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, receiptRows,
     testChatId: process.env.TG_STAGING_TEST_CHAT_ID, cutoverAt });
-  return { manifest, digest: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
-    taskCount: taskRows.length, deliveryCount: deliveryRows.length };
+  return { manifest, digest: sandboxDeliveryCutoverManifestDigest(manifest),
+    taskCount: taskRows.length, deliveryCount: deliveryRows.length, receiptCount: receiptRows.length, expectedChatDeliveryCount,
+    foreignHistoricalDestinationCount: deliveryRows.length - expectedChatDeliveryCount };
 }
 
 async function main() {
   requireValue(process.env.GITHUB_REF === 'refs/heads/main', 'protected_main_required');
-  const { manifest, digest, taskCount, deliveryCount } = await inventoryAndBuild();
+  const { manifest, digest, taskCount, deliveryCount, receiptCount, expectedChatDeliveryCount,
+    foreignHistoricalDestinationCount } = await inventoryAndBuild();
   const secretPut = spawnSync('npx', ['wrangler', 'secret', 'put', 'TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2', '--config', CONFIG], {
     input: JSON.stringify(manifest), encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
   if (secretPut.error || secretPut.status !== 0) throw new Error('cutover_manifest_secret_sync_failed');
   console.log(JSON.stringify({ ok: true, mode: 'provision_v2_manifest', cutoverId: manifest.cutoverId,
     manifestDigest: digest, quarantinedTaskCount: manifest.oldTaskIds.length,
-    quarantinedDeliveryCount: deliveryCount, canonicalCpTaskCount: taskCount }));
+    quarantinedDeliveryCount: deliveryCount, legacyReceiptIndexCount: receiptCount, canonicalCpTaskCount: taskCount,
+    expectedChatDeliveryCount, foreignHistoricalDestinationCount }));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
