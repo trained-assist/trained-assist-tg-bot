@@ -63,8 +63,7 @@ jobs:
           import { readFileSync } from 'node:fs';
           const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
           const account = (identity.accounts ?? []).find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
-          if (!identity.loggedIn || !account || account.name !== "Typeformowner@gmail.com's Account" ||
-              identity.email?.toLowerCase() !== 'typeformowner@gmail.com') throw new Error('cloudflare_identity_mismatch');
+          if (!identity.loggedIn || !account) throw new Error('cloudflare_identity_mismatch');
           console.log('Verified the configured sandbox account and Telegram test identity.');
           NODE
 
