@@ -53,6 +53,16 @@ describe('sandbox-only Intake DO reset', () => {
     expect(await storage.getAlarm()).toBeNull();
   });
 
+  it('still refuses reset when a CP request is currently in flight, even with an old timestamp', async () => {
+    const { instance, storage } = actor({ launching: [{ text: 'request still dispatching' }], busySince: Date.now() - 16 * 60_000 });
+    instance.cpDispatches = 1;
+    const inspect = await instance.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }));
+    expect(await inspect.json()).toMatchObject({ active: true, staleLaunching: false });
+    const clear = await instance.fetch(new Request('https://intake/operator/reset-all', { method: 'POST' }));
+    expect(clear.status).toBe(409);
+    expect((await storage.list()).size).toBe(2);
+  });
+
   it('clears large Durable Object buffers in pages', async () => {
     const entries = Object.fromEntries(Array.from({ length: 1201 }, (_, index) => [`old:${String(index).padStart(4, '0')}`, index]));
     const { instance, storage } = actor(entries);

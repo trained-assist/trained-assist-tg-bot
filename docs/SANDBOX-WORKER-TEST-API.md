@@ -47,6 +47,14 @@ IDs. Omit them for automatic IDs. Do not replay an update as a retry: this
 endpoint exercises webhook ingress and does not promise idempotency for
 synthetic updates.
 
+Before clearing the sandbox, the reset workflow checks the paired Control Plane
+database for active tasks, executions, deliveries, or pending input. It then
+clears every sandbox session and Intake buffer. A saved `launching` checkpoint
+blocks cleanup while its dispatch is in flight; if it has remained unresolved
+for 15 minutes and the Control Plane preflight is empty, the sandbox reset
+clears that stale checkpoint along with the rest of the test state. Production
+Intake state does not use this reset path.
+
 Sandbox user records use the existing `user:` keys in the isolated sandbox KV
 and are removed by the full sandbox reset (which also clears older
 `sandbox-user:` fixtures). The message/callback endpoint is operator-only;
