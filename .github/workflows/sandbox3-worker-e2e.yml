@@ -1,0 +1,209 @@
+name: Sandbox3 Telegram worker E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: Run the isolated sandbox3 Worker to CP to Runner to Telegram scenario
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trained-assist-sandbox3-worker-e2e
+  cancel-in-progress: false
+
+jobs:
+  sandbox3-e2e:
+    if: ${{ inputs.run_e2e == true && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Require protected main
+        env:
+          REF: ${{ github.ref }}
+        run: test "$REF" = "refs/heads/main"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: trained-assist/trained-assist-control-plane
+          ref: main
+          token: ${{ secrets.GH_PAT }}
+          path: control-plane
+          persist-credentials: false
+          sparse-checkout: tools/sandbox3-lane-preflight.mjs
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: Verify exact sandbox account and pinned Telegram identity
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_STAGING_TEST_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_STAGING_TEST_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: |
+          set -euo pipefail
+          test "$CLOUDFLARE_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
+          test "$TG_STAGING_TEST_USER_ID" = "1714048"
+          [[ "$TG_STAGING_TEST_CHAT_ID" =~ ^-?[1-9][0-9]*$ ]]
+          npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
+          node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const account = (identity.accounts ?? []).find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
+          if (!identity.loggedIn || !account || account.name !== "Typeformowner@gmail.com's Account" ||
+              identity.email?.toLowerCase() !== 'typeformowner@gmail.com') throw new Error('cloudflare_identity_mismatch');
+          console.log('Verified the configured sandbox account and Telegram test identity.');
+          NODE
+
+      - name: Validate sandbox3 Worker bundle
+        run: npx wrangler deploy --dry-run --config wrangler.sandbox-tg-sandbox3.toml
+
+      - name: Deploy sandbox3 with ingress and delivery paused
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-paused.ndjson
+        run: >-
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
+          --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true
+          --message "sandbox3-e2e-paused-${GITHUB_SHA}"
+
+      - name: Install pinned test identity and dedicated operator secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$TG_SANDBOX3_OPERATOR_TOKEN"
+          printf '%s' "$TG_SANDBOX3_OPERATOR_TOKEN" | npx wrangler secret put TG_SANDBOX3_OPERATOR_TOKEN --config wrangler.sandbox-tg-sandbox3.toml
+          printf '%s' "$TG_SANDBOX_E2E_CHAT_ID" | npx wrangler secret put TG_SANDBOX_E2E_CHAT_ID --config wrangler.sandbox-tg-sandbox3.toml
+          printf '%s' "$TG_SANDBOX_E2E_USER_ID" | npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
+
+      - name: Verify CP sandbox bindings, principals and empty task store
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: node control-plane/tools/sandbox3-lane-preflight.mjs | tee sandbox3-lane-preflight.json
+
+      - name: Read the existing sandbox3 delivery owner without sending
+        env:
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: |
+          node --input-type=module <<'NODE'
+          const response = await fetch('https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/operator/delivery-cutover-v1', {
+            headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+          });
+          const state = await response.json().catch(() => ({}));
+          if (!response.ok || state.ready !== true || state.paused !== true || state.ingressPaused !== true) {
+            throw new Error('sandbox3_v1_delivery_owner_not_safely_paused');
+          }
+          console.log(JSON.stringify({ ready: state.ready, paused: state.paused, ingressPaused: state.ingressPaused }));
+          NODE
+
+      - name: Reset CP and both Telegram intake buffers before tests
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox3-reset-before.json
+
+      - name: Enable sandbox3 ingress and delivery after clean preflight
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-live.ndjson
+        run: >-
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
+          --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
+          --message "sandbox3-e2e-live-${GITHUB_SHA}"
+
+      - name: Verify clean state before starting scenarios
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox3-preflight-empty.json
+
+      - name: Test real Worker help, status and anonymous-login prompt
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+          TG_SANDBOX_E2E_DELIVERY: telegram
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs test-user-entry | tee sandbox3-user-entry.json
+
+      - name: Test fresh input aggregation in the real sandbox3 Intake DO
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: node tools/sandbox-buffer-cycle.mjs test-buffers | tee sandbox3-buffer-scenario.json
+
+      - name: Test profile login, Runner answer and delivery into the pinned Telegram chat
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
+
+      - name: Clear test state after terminal E2E
+        if: always()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox3-reset-after.json
+
+      - name: Require empty CP and Telegram intake state at exit
+        if: always()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox3-final-state.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandbox3-worker-e2e-${{ github.run_id }}
+          path: |
+            sandbox3-lane-preflight.json
+            sandbox3-reset-before.json
+            sandbox3-preflight-empty.json
+            sandbox3-user-entry.json
+            sandbox3-buffer-scenario.json
+            sandbox3-agent-e2e.json
+            sandbox3-agent-e2e-evidence.json
+            sandbox3-reset-after.json
+            sandbox3-final-state.json
+          if-no-files-found: ignore

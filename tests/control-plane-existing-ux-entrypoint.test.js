@@ -27,21 +27,36 @@ function fixture() {
   return { env, update, send, collectorCalls };
 }
 
+function configureProbabilityOperator(env) {
+  Object.assign(env, { CONTROL_PLANE_URL: 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev',
+    TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
+    TG_SANDBOX_CLEANUP_TOKEN: 'dedicated-sandbox-cleanup-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
+    SESSION_NAMESPACE: 'integrator-existing-ux-v1', EXECUTION_BACKEND: 'control-plane',
+    TG_SLICE_OPEN_SANDBOX: 'true', TG_SLICE_INGRESS_PAUSED: 'false', TG_SLICE_DELIVERY_PAUSED: 'false' });
+}
+
+function configureSandbox3Operator(env) {
+  Object.assign(env, { CONTROL_PLANE_URL: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
+    CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1', CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1',
+    TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+    TG_SANDBOX3_OPERATOR_TOKEN: 'dedicated-sandbox3-operator-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
+    TG_SANDBOX_E2E_CHAT_ID: '1714048', TG_SANDBOX_E2E_USER_ID: '1714048',
+    SESSION_NAMESPACE: 'integrator-sandbox3-v1', EXECUTION_BACKEND: 'control-plane',
+    TG_SLICE_OPEN_SANDBOX: 'false', TG_SLICE_INGRESS_PAUSED: 'false', TG_SLICE_DELIVERY_PAUSED: 'false' });
+  env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify({ version: 'tg-delivery-cutover-v1',
+    botUsername: 'ptichka_status_bot', profileId: 'integration-sandbox3-v1', cutoverId: 'sandbox3-fixture',
+    cutoverAt: Date.now(), oldTaskIds: [], deliveries: [] });
+}
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
   it('keeps synthetic buffer-test sessions out of the shared sandbox KV', async () => {
     const state = fixture();
     const { env } = state;
-    env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
-    env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
-    env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
+    configureProbabilityOperator(env);
     env.TG_SANDBOX_BUFFER_TEST_CHAT_ID = '-1000000000236';
     env.SESSION_NAMESPACE = 'integrator-existing-ux-v1';
-    env.EXECUTION_BACKEND = 'control-plane';
-    env.TG_SLICE_OPEN_SANDBOX = 'true';
-    env.TG_SLICE_INGRESS_PAUSED = 'false';
-    env.TG_SLICE_DELIVERY_PAUSED = 'false';
     env.INTAKE_DEBOUNCE = 'on';
     const intakeCalls = [];
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
@@ -65,11 +80,8 @@ describe('signed existing-UX ingress', () => {
 
   it('drives an authenticated synthetic admin update through the sandbox Worker and namespaces created users', async () => {
     const { env } = fixture();
-    Object.assign(env, { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'probability_cat_bot',
-      TG_SANDBOX_CLEANUP_TOKEN: 'dedicated-sandbox-cleanup-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
-      TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236', SESSION_NAMESPACE: 'integrator-existing-ux-v1',
-      EXECUTION_BACKEND: 'control-plane', TG_SLICE_OPEN_SANDBOX: 'true', TG_SLICE_INGRESS_PAUSED: 'false',
-      TG_SLICE_DELIVERY_PAUSED: 'false' });
+    configureProbabilityOperator(env);
+    Object.assign(env, { TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236' });
     const intakeCalls = [];
     const collectorState = { buf: [], busy: false, stranded: false, collectorMsgId: null, collectorDraftRevision: null };
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
@@ -133,10 +145,7 @@ describe('signed existing-UX ingress', () => {
   it('resets all sandbox session and intake state only after owner auth and explicit confirmation', async () => {
     const state = fixture();
     const { env } = state;
-    env.TG_ACCEPT_ONLY_ENVIRONMENT = 'sandbox';
-    env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
-    env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
-    env.SESSION_NAMESPACE = 'integrator-existing-ux-v1';
+    configureProbabilityOperator(env);
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42`, JSON.stringify({ username: 'old-test-user' }));
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:42:7`, JSON.stringify({ pendingMessage: 'old topic draft' }));
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:retry:42:old`, JSON.stringify({ chatId: 42 }));
@@ -187,6 +196,111 @@ describe('signed existing-UX ingress', () => {
     expect(resetCalls).toContain('accept-only:/operator/reset-all');
   });
 
+  it('enables the Worker test API only for the pinned sandbox3 identity, CP, and user', async () => {
+    const { env } = fixture();
+    configureSandbox3Operator(env);
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
+      intakeCalls.push({ name, path: new URL(url).pathname, body: options?.body ? JSON.parse(options.body) : null });
+      return Response.json({ buf: [], retryBatch: [], busy: false, launching: [] });
+    } }) };
+    const request = (body, token = env.TG_SANDBOX3_OPERATOR_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+
+    expect((await request({ target: 'sandbox', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' })).status).toBe(400);
+    expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' },
+      'dedicated-sandbox-cleanup-token')).status).toBe(401);
+    expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714049, userId: 1714048, text: '/help' })).status).toBe(403);
+    expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714049, text: '/help' })).status).toBe(403);
+    const response = await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048,
+      delivery: 'capture', text: '/help' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chatId: 1714048, userId: 1714048, delivery: 'capture',
+      admission: { ok: true } });
+    expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
+
+    env.CONTROL_PLANE_URL = 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev';
+    env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
+    expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' },
+      'dedicated-sandbox-cleanup-token')).status).toBe(409);
+  });
+
+  it('includes the pinned sandbox3 E2E chat in guarded reset even when no KV session remains', async () => {
+    const { env } = fixture();
+    configureSandbox3Operator(env);
+    env.SESSIONS.data.clear();
+    env.TG_SLICE.data.clear();
+    const inspectedNames = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      const path = new URL(url).pathname;
+      if (path === '/operator/reset-inspect') inspectedNames.push(name);
+      if (path === '/operator/reset-inspect') return Response.json({ ok: true, active: false, keys: 0 });
+      if (path === '/operator/reset-all') return Response.json({ ok: true, deletedKeys: 0 });
+      return Response.json({ ok: true, keys: 0 });
+    } }) };
+    const legacyCalls = [];
+    let legacyKeys = 2;
+    env.LEGACY_INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      legacyCalls.push({ name, path: new URL(url).pathname });
+      if (new URL(url).pathname === '/operator/reset-inspect') return Response.json({ ok: true, active: false, keys: legacyKeys });
+      if (new URL(url).pathname === '/operator/reset-all') {
+        const deletedKeys = legacyKeys;
+        legacyKeys = 0;
+        return Response.json({ ok: true, deletedKeys });
+      }
+      return Response.json({ ok: true, keys: legacyKeys });
+    } }) };
+    env.SANDBOX_ACCEPT_ONLY = { idFromName: name => name, get: () => ({ async fetch(url) {
+      if (new URL(url).pathname === '/operator/reset-inspect') return Response.json({ ok: true, keys: 0 });
+      return Response.json({ ok: true });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/reset-sandbox-state', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'sandbox3', mode: 'inspect' }),
+    }), env);
+    expect(response.status).toBe(200);
+    expect(inspectedNames).toEqual(['1714048']);
+    expect(legacyCalls.map(call => call.path)).toEqual(['/operator/reset-inspect']);
+    expect(await response.json()).toMatchObject({ ok: true, target: 'sandbox3', active: false, intakeNamespaces: ['intake', 'legacyIntake'] });
+    const cleared = await worker.fetch(new Request('https://worker/operator/reset-sandbox-state', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'sandbox3', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' }),
+    }), env);
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ ok: true, target: 'sandbox3', intakeBuffersReset: 1,
+      intakeNamespacesReset: ['intake', 'legacyIntake'] });
+    expect(legacyCalls.map(call => call.path)).toEqual(['/operator/reset-inspect', '/operator/reset-inspect', '/operator/reset-all', '/operator/reset-inspect']);
+  });
+
+  it('reads only delivery metadata for the pinned sandbox3 chat', async () => {
+    const { env } = fixture();
+    configureSandbox3Operator(env);
+    const calls = [];
+    env.TG_DELIVERY_OWNER = { idFromName: name => name, get: () => ({ async fetch(request) {
+      const body = await request.json();
+      calls.push({ path: new URL(request.url).pathname, body });
+      return Response.json({ receipt: null, terminal: { deliveryId: 'terminal:task-1:g1', userTaskId: body.taskId,
+        status: 'sent', attempts: 1, providerMessageId: 123, generation: 1, chatId: 1714048, threadId: null } });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/test-delivery/task-1', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ taskId: 'task-1', terminal: { status: 'sent', chatId: 1714048,
+      providerMessageId: 123 } });
+    expect(calls).toEqual([{ path: '/read', body: { taskId: 'task-1' } }]);
+    env.TG_DELIVERY_OWNER.get = () => ({ fetch: async () => Response.json({ receipt: null, terminal: {
+      status: 'sent', chatId: -1001234567890,
+    } }) });
+    const foreign = await worker.fetch(new Request('https://worker/operator/test-delivery/task-1', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+    }), env);
+    expect(foreign.status).toBe(409);
+    expect(await foreign.json()).toMatchObject({ error: 'sandbox_test_delivery_identity_mismatch' });
+  });
+
   it('protects delivery-owner readiness and reads it without reconciling deliveries', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/delivery-cutover'), state.env)).status).toBe(401);
@@ -201,6 +315,7 @@ describe('signed existing-UX ingress', () => {
 
   it('uses a dedicated operator token for cutover reads without relying on the Telegram webhook secret', async () => {
     const state = fixture();
+    configureProbabilityOperator(state.env);
     state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
     expect((await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
       headers: { authorization: `Bearer ${state.env.TELEGRAM_WEBHOOK_SECRET}` },
@@ -216,6 +331,7 @@ describe('signed existing-UX ingress', () => {
 
   it('keeps a read-only V1 operator path available while V2 is deployed but unprovisioned', async () => {
     const state = fixture();
+    configureProbabilityOperator(state.env);
     state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
     state.env.TG_SLICE_INGRESS_PAUSED = 'true';
     state.env.TG_DELIVERY_OWNER_V2 = { idFromName: name => name, get: () => ({ fetch: async () => {
@@ -242,6 +358,7 @@ describe('signed existing-UX ingress', () => {
 
   it('prefers the independent V2 durable owner and its separate immutable manifest', async () => {
     const state = fixture();
+    configureProbabilityOperator(state.env);
     state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
     state.env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2 = JSON.stringify({
       version: 'tg-delivery-cutover-v1', botUsername: 'probability_cat_bot', profileId: 'profile-1',

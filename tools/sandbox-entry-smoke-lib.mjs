@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 
-export async function runSandboxEntryScenario(workerRequest) {
-  // This isolated non-execution scenario uses the reserved fixture destination.
-  // All updates are captured; a test regression must never route a model run here.
-  const chatId = -1000000000236;
-  const userId = 900000236;
+export async function runSandboxEntryScenario(workerRequest, {
+  target = 'sandbox', chatId = -1000000000236, userId = 900000236, delivery = 'capture',
+} = {}) {
+  // This pre-login scenario cannot start a model run. The caller chooses a
+  // reserved fixture identity or the pinned real-delivery sandbox identity.
   const send = text => workerRequest('/operator/test-update', {
-    target: 'sandbox', type: 'message', delivery: 'capture', chatId, userId, text,
+    target, type: 'message', delivery, chatId, userId, text,
   });
 
   const help = await send('/help');
   assert.equal(help.ok, true);
-  assert.equal(help.delivery, 'capture');
+  assert.equal(help.delivery, delivery);
   assert(help.transcript?.some(item => item.text?.includes('Команды: /help, /status')),
     'help_command_reply_missing');
 
