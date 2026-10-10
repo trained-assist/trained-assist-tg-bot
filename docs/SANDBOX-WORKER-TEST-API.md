@@ -51,8 +51,15 @@ Example callback:
 curl --fail-with-body -sS https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/test-update \
   -H "Authorization: Bearer ${TG_SANDBOX_CLEANUP_TOKEN}" \
   -H 'Content-Type: application/json' \
-  --data '{"target":"sandbox","chatId":123456789,"type":"callback","callbackData":"intake_run"}'
+  --data '{"target":"sandbox","chatId":123456789,"type":"callback","callbackData":"auto"}'
 ```
+
+For the CP collector, `auto`, `explore`, and `answer` select the corresponding
+work-style button on the current collector message. The Worker resolves the
+shortcut to that draft's revision-bound callback (`ws|<style>|<revision>`),
+matching the real inline keyboard. `intake_run` is retained as an alias for
+`auto` for older test clients. Raw callback payloads remain available for
+testing other buttons.
 
 Optional `updateId` and message `messageId` fields let tests choose fixture
 IDs. Omit them for automatic IDs. Do not replay an update as a retry: this

@@ -379,6 +379,13 @@ app.post('/operator/test-update', async context => {
   if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
     return context.json({ error: 'no_current_button_message' }, 409);
   }
+  const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
+    ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
+  if (callbackShortcut && !Number.isSafeInteger(before?.collectorDraftRevision)) {
+    return context.json({ error: 'no_current_button_revision' }, 409);
+  }
+  const callbackData = callbackShortcut
+    ? `ws|${callbackShortcut}|${before.collectorDraftRevision}` : source.callbackData;
   const actorId = source.userId ?? 900000236;
   const updateId = source.updateId ?? Date.now();
   const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
@@ -388,7 +395,7 @@ app.post('/operator/test-update', async context => {
     ...(source.type === 'message' ? { text: source.text } : {}) };
   const update = source.type === 'message' ? { update_id: updateId, message } : {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
-      message, chat_instance: 'sandbox-test', data: source.callbackData },
+      message, chat_instance: 'sandbox-test', data: callbackData },
   };
   if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
   const deliverToTelegram = source.delivery === 'telegram';
@@ -422,11 +429,13 @@ app.post('/operator/test-update', async context => {
     pendingCount: (after.buf?.length ?? 0) + (after.retryBatch?.length ?? 0),
     stranded: after.stranded === true,
     collectorMessageId: after.collectorMsgId ?? null,
+    collectorDraftRevision: after.collectorDraftRevision ?? null,
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
   } : null;
   return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
-    admin: source.admin === true, admission, transcript, collector });
+    admin: source.admin === true, callbackData: source.type === 'callback' ? callbackData : undefined,
+    admission, transcript, collector });
 });
 
 app.post('/webhook', async context => {

@@ -1,10 +1,16 @@
-# Telegram user-originated end-to-end test
+# User end-to-end test
 
-Use this procedure when the question is whether the product works for a person
-who sends a message to the bot. A signed fixture sent directly to `/webhook`, a
-Worker `/health` response, and a local Durable Object test are useful component
-checks; none of them proves that a real Telegram user's message reached the
-deployed bot and got a visible response.
+Use the Worker test API for routine sandbox user scenarios. It submits a
+Telegram-shaped update through the deployed sandbox Worker's signed webhook
+handler, using the test account's real `chatId` and `userId`. With
+`delivery:"telegram"`, normal bot replies and the final answer go to that real
+chat while immediate replies are also returned in the operator transcript.
+This exercises intake, Control Plane, runner, and delivery without using the
+Telegram UI.
+
+Use the manual Telegram procedure below only when the question specifically
+concerns Telegram's own webhook ingress or client behavior. `/health` proves
+liveness only.
 
 ## Before sending
 
@@ -16,41 +22,27 @@ target `probability-sandbox`. The target defaults to `skip`; the workflow is
 limited to `trained-assist-tg-ux-sandbox`, verifies Cloudflare identity before
 deployment, then checks the active deployment metadata and public `/health`.
 It uses the repository's `CF_API_TOKEN` and `CF_ACCOUNT_ID` secrets without
-printing their values. This deploy/health check is not Telegram scenario
-acceptance; continue with the lane and live-input procedure below.
+printing their values. After deployment, require
+`node tools/sandbox-buffer-cycle.mjs inspect` to report both CP and Telegram
+buffers empty before a scenario. The deployment workflow also runs buffer
+contract checks and resets state after them.
 
-1. Choose an unclaimed lane in [architecture sandbox issue #185](https://github.com/trained-assist/trained-agent-architecture/issues/185). Available ingress lanes:
+1. Use the isolated probability sandbox for the standard user journey:
 
    | Bot | Worker | Wrangler config |
    |---|---|---|
    | `@probability_cat_bot` | `trained-assist-tg-ux-sandbox` | `wrangler.sandbox-tg-existing-ux.toml` |
-   | `@Shturman_bot` | `trained-assist-tg-shturman-sandbox` | `wrangler.sandbox-tg-shturman.toml` |
 
-   Both gateways currently bind to the same Control Plane Worker/Task Store and
-   Runner route. They are separate Telegram/chat intake lanes, not isolated
-   end-to-end stacks. Claim one lane before use; if it is claimed or occupied,
-   choose the other. The configured Telegram account/chat allowlist still
-   applies, but a tester does not need to enter API keys or Cloudflare
-   credentials into Telegram.
-2. Check actual occupancy, not `/health` alone. `/health` is liveness only.
-   The protected `/collector-state` reports `busy`, `buf`, `launching`,
-   `retryBatch`, and unresolved CP/stop barriers. Treat the lane as occupied if
-   it has an active claim, a task/launch in progress, pending buffered input,
-   unresolved launch, or pending stop. Do not clear state to free a lane; ask the
-   owner/engineering session to inspect it.
-   The gateway's `TG_SLICE_ALLOWED_CHATS` and `TG_SLICE_ALLOWED_USERS` are
-   Cloudflare secrets, not checked-in values. Do not infer the test destination
-   from an old chat ID, bot token, another project, or a synthetic fixture. If
-   the owner has not provided the intended chat, ask them to open the chosen
-   bot's private chat and send `/start` (or a harmless unique test message).
-   Then inspect the matching Worker's protected/authorized Telegram update
-   evidence and confirm the received `message.chat.id` and `message.from.id`
-   against the configured allowlists without printing secret values. A private
-   chat ID is not a credential, but keep it in the trusted local test bindings
-   unless a shared runbook genuinely needs the literal value. For a group or
-   forum topic, confirm the chat ID and `message_thread_id` separately.
-3. An engineering session can tail that exact Worker before sending. From the
-   TG bot checkout, use the matching command:
+   Both gateways share the sandbox Control Plane and runner. Use the tester's
+   explicitly provided real chat and sender IDs; never reuse an old ID or the
+   reserved fake buffer-test destination. Keep literal IDs in local test
+   bindings, not in shared docs.
+2. Check occupancy with `node tools/sandbox-buffer-cycle.mjs inspect`, not just
+   `/health`. Do not reset while CP reports active work. After a task is
+   terminal, reset the sandbox with `node tools/sandbox-buffer-cycle.mjs reset`
+   and verify both stores empty before starting the next scenario.
+3. Tail that exact Worker while the scenario runs. From the TG bot checkout,
+   use the matching command:
 
    ```bash
    npx wrangler tail trained-assist-tg-ux-sandbox --config wrangler.sandbox-tg-existing-ux.toml
@@ -58,48 +50,40 @@ acceptance; continue with the lane and live-input procedure below.
    ```
 
    Wrangler needs an authenticated Cloudflare operator session; the tester does
-   not. I can run the tail and correlate evidence without asking the user to
-   operate Wrangler. Tail logs are corroborating ingress evidence, not a
-   substitute for the user's chat.
-4. After confirming the destination and that it is idle, send one ordinary,
-   harmless text with a unique marker, for example:
-   `USER-E2E-<date-time>: reply only “received”; do not start a task.` Do not use
-   launch words, callbacks, attachments, voice messages, or sensitive content
-   in the basic ingress test.
+   not. The HTTP test API and exact request examples are documented in
+   [SANDBOX-WORKER-TEST-API.md](SANDBOX-WORKER-TEST-API.md).
 
-## No-login HTTP test API status
+## Worker test API modes
 
-The first code slice of issue #402 adds a disabled-by-default accept-only API;
-see [SANDBOX-ACCEPT-ONLY-API.md](SANDBOX-ACCEPT-ONLY-API.md). It accepts and
-stores a bounded synthetic request and exposes ticket-scoped receipt replay,
-but does not run the classifier, Control Plane, Runner, or Telegram delivery.
-Both checked-in sandbox configs keep the feature disabled, and this change does
-not deploy it. This is not a full task E2E and does not replace a user-originated
-Telegram test. The public `/health` route remains liveness only;
-`/webhook`, `/collector-state`, and delivery routes remain protected. Never send
-raw unsigned webhook updates or remove those checks.
+`/operator/test-update` is owner-authenticated and mounted only in the isolated
+sandbox Worker. It dispatches a Telegram-shaped update through the same signed
+webhook handler. `delivery:"capture"` is the default for contract checks and
+suppresses sends. `delivery:"telegram"` keeps normal delivery on and tees
+immediate replies into the response; use it for task scenarios. `userId` binds
+the session to the real test account. Operator requests can exercise sandbox
+user management without changing Worker configuration. Never expose the
+operator endpoint in production or remove the webhook signature check.
 
 ## Evidence to collect
 
-For the same message and timestamp, check all three layers:
+For each Worker-driven scenario, check these layers:
 
-1. **Telegram client:** the outgoing message appears in the intended bot chat
-   under the user's account.
-2. **Gateway:** the deployed Worker logs show the webhook request was handled.
-   If the tail has no event, check the Cloudflare log view for the same Worker
-   and time before concluding that the webhook was not delivered.
-3. **User-visible result:** a new bot message appears after the test input.
-   Record its exact text and whether it is an acknowledgement, a refusal, or a
-   task result. A generic error response is evidence of a broken user path even
-   when the Worker accepted the webhook.
+1. **Worker:** the API accepted each message/callback and the tail shows intake
+   admission, CP receipt, and delivery-owner enqueue/drain/load.
+2. **Control Plane:** one durable task contains the submitted input, its
+   execution reaches terminal success, and the saved result matches the request.
+3. **Delivery:** the Intake barrier clears only after the delivery owner reports
+   the terminal Telegram message as sent. Immediate replies include Telegram's
+   accepted message IDs in the API transcript; verify the final result through
+   the CP result and delivery-owner/Intake completion path.
 
-When diagnosing intake state, use the test environment's existing protected
-collector-state tooling and verify the unique message was stored exactly once.
+When diagnosing intake state, use the protected operator API and verify each
+unique message was stored exactly once.
 Keep its authorization material in the trusted local secret store; never put it
 in chat, a shell transcript, a screenshot, a test fixture, or this document.
-Check that a harmless ingress test did not call CP admission or start a task.
-Do not clear a pending/unknown launch as part of the test: preserve that state
-until its owner has reviewed the evidence.
+After each terminal scenario, reset the sandbox and verify both stores empty
+before beginning the next one. If a launch remains active or unknown, reset
+preflight refuses; preserve that state until reconciliation makes it terminal.
 
 ## Regression for a stuck pending launch/stop window
 
@@ -195,3 +179,28 @@ gateway mirrors the code as `tg.callback.launch_refused`; these events contain
 no message text, chat ID, user name, or callback payload. The live reason is
 still pending deployment to the probability sandbox and one tap on its already
 retained draft.
+
+### 2026-10-10 Worker-driven user scenarios
+
+After PR [#509](https://github.com/trained-assist/trained-assist-tg-bot/pull/509)
+was merged and sandbox deploy run `38066516981` passed, the owner-authenticated
+Worker API was exercised in `delivery:"telegram"` mode for `@kobzevvv` against
+`@probability_cat_bot`:
+
+- Created a temporary sandbox login, authenticated it using the supplied
+  Telegram sender ID, submitted `Reply with exactly this word: READY.`, and
+  launched through the Worker's normal intake route. CP recorded one terminal
+  `done` task and a successful `cloudflare-workflows` execution; its result
+  matched `READY`. The delivery owner completed the terminal send before Intake
+  released its busy barrier.
+- Submitted two messages (`The task has two parts.` and `Reply only with the
+  exact word BATCHED.`) and launched once. A single CP task retained both parts,
+  completed successfully, and returned a result containing `BATCHED`. Intake
+  returned to idle after delivery.
+- Before login, `/help` and `/status` responded; a plain question prompted for
+  login and left the buffer empty.
+
+The full reset ran after both task scenarios. Final sandbox inspect reported
+empty CP and Telegram buffers. The final anonymous-command check also left both
+stores empty. Temporary passwords and literal chat IDs were kept out of logs
+and this record.
