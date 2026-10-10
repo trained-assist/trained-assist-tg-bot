@@ -412,7 +412,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       });
       expect((await operatorRequest({ target: 'sandbox', type: 'message', chatId: 42, text: '/adduser e2e_worker_fixture Worker Fixture', updateId: 91001, messageId: 101 }, 'wrong-token')).status).toBe(401);
       expect((await operatorRequest({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_missing_chat Must Fail', updateId: 91000, messageId: 100 })).status).toBe(409);
-      const created = await operatorRequest({ target: 'sandbox', type: 'message', chatId: 42, text: '/adduser e2e_worker_fixture Worker Fixture', updateId: 91001, messageId: 101 });
+      const created = await operatorRequest({ target: 'sandbox', type: 'message', chatId: 42, userId: 7, admin: true,
+        text: '/adduser e2e_worker_fixture Worker Fixture', updateId: 91001, messageId: 101 });
       expect(created.status).toBe(200);
       const createdBody = await created.json();
       expect(createdBody).toMatchObject({ ok: true, admission: { ok: true }, transcript: [expect.objectContaining({
@@ -424,13 +425,15 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect((await operatorRequest({ target: 'sandbox', type: 'callback', chatId: 42, callbackData: 'intake_run' })).status).toBe(409);
       expect(await (await runtime.getKVNamespace('TG_SLICE')).get('user:e2e_worker_fixture', 'json'))
         .toMatchObject({ name: 'Worker Fixture', passwordHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
-      const login = await operatorRequest({ target: 'sandbox', type: 'message', chatId: 42, text: `/login e2e_worker_fixture ${password}`, updateId: 91002, messageId: 102 });
+      const login = await operatorRequest({ target: 'sandbox', type: 'message', chatId: 42, userId: 7,
+        text: `/login e2e_worker_fixture ${password}`, updateId: 91002, messageId: 102 });
       expect(await login.json()).toMatchObject({ ok: true, admission: { authenticated: true }, transcript: [
         expect.objectContaining({ text: expect.stringContaining('Добро пожаловать') }),
       ] });
       expect(await (await runtime.getKVNamespace('SESSIONS')).get('integrator-existing-ux-v1:42', 'json'))
         .toMatchObject({ username: 'e2e_worker_fixture', controlPlaneProfile: 'workerd-profile' });
-      const callback = await operatorRequest({ target: 'sandbox', type: 'callback', chatId: 42, callbackData: 'intake_run', updateId: 91003, messageId: 501 });
+      const callback = await operatorRequest({ target: 'sandbox', type: 'callback', chatId: 42, userId: 7,
+        callbackData: 'intake_run', updateId: 91003, messageId: 501 });
       const callbackBody = await callback.json();
       expect(callbackBody).toMatchObject({ ok: true, admission: { ok: true } });
       expect(callbackBody.admission).not.toHaveProperty('unsupported');

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   isTestChat, testChatList, reserveChatId, realChatId, applyTestDelivery,
-  beginTestCapture, captureTestMessage, initTestMode, isTestChatCached, suppress, rememberCallback, callbackChatId,
+  beginTestCapture, captureTestMessage, captureDeliveredTestMessage, initTestMode, isTestChatCached, suppress, rememberCallback, callbackChatId,
 } from '../src/lib/test-mode.js';
 import { RunOutbox } from '../src/run-outbox.js';
 
@@ -102,6 +102,15 @@ describe('sandbox Worker test transcript capture', () => {
     const secondFinish = beginTestCapture(TEST);
     expect(secondFinish).toBeTypeOf('function');
     expect(secondFinish()).toEqual([]);
+  });
+
+  it('records sent messages in real-delivery mode without enabling delivery=log', () => {
+    const finish = beginTestCapture(TEST, { deliverToTelegram: true });
+    initTestMode(envOf(''));
+    expect(isTestChatCached(TEST)).toBe(false);
+    expect(captureDeliveredTestMessage(TEST, 'temporary password', { ok: true, result: { message_id: 45 } })).toBe(true);
+    expect(finish()).toEqual([{ kind: 'sendMessage', text: 'temporary password', messageId: 45 }]);
+    initTestMode(envOf(''));
   });
 });
 

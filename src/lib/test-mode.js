@@ -117,13 +117,14 @@ export function suppress(chatId, kind, detail) {
   return { ok: true, suppressed: true };
 }
 
-export function beginTestCapture(chatId) {
+export function beginTestCapture(chatId, { deliverToTelegram = false } = {}) {
   const id = Number(chatId);
   if (!Number.isSafeInteger(id) || id === 0 || testCaptures.has(id)) return null;
   const entries = [];
   let nextMessageId = 1;
   const capture = {
     entries,
+    deliverToTelegram,
     record(entry) {
       if (entry.kind === 'sendMessage') {
         const messageId = nextMessageId++;
@@ -152,6 +153,21 @@ export function beginTestCapture(chatId) {
     testCaptures.delete(id);
     return entries;
   };
+}
+
+// In the sandbox's real-delivery mode, keep the operator transcript while
+// still sending through Telegram. This lets the E2E harness consume generated
+// credentials and callback IDs without turning the run into delivery=log.
+export function captureDeliveredTestMessage(chatId, text, result, buttons = []) {
+  const capture = testCaptures.get(Number(chatId));
+  if (!capture?.deliverToTelegram) return false;
+  capture.entries.push({ kind: 'sendMessage', text: String(text),
+    ...(Number.isSafeInteger(result?.result?.message_id) ? { messageId: result.result.message_id } : {}),
+    ...(Array.isArray(buttons) && buttons.length ? { buttons: buttons.map(row => row.map(button => ({
+      text: String(button.text ?? ''), callbackData: button.callback_data ?? null, url: button.url ?? null,
+    }))) } : {}),
+  });
+  return true;
 }
 
 export function captureTestMessage(chatId, messageId, buttons = []) {

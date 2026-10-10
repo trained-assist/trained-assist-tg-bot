@@ -349,7 +349,10 @@ app.post('/operator/test-update', async context => {
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== 'sandbox' || !['message', 'callback'].includes(source.type) ||
-      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId'].includes(key)) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin'].includes(key)) ||
+      (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
+      (source.admin !== undefined && typeof source.admin !== 'boolean') ||
+      (source.userId !== undefined && (!Number.isSafeInteger(source.userId) || source.userId < 1)) ||
       (source.updateId !== undefined && (!Number.isSafeInteger(source.updateId) || source.updateId < 0))) {
     return context.json({ error: 'invalid_test_update' }, 400);
   }
@@ -376,7 +379,7 @@ app.post('/operator/test-update', async context => {
   if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
     return context.json({ error: 'no_current_button_message' }, 409);
   }
-  const actorId = 900000236;
+  const actorId = source.userId ?? 900000236;
   const updateId = source.updateId ?? Date.now();
   const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
   const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
@@ -388,10 +391,12 @@ app.post('/operator/test-update', async context => {
       message, chat_instance: 'sandbox-test', data: source.callbackData },
   };
   if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
-  const testEnv = { ...context.env, TEST_CHAT_IDS: String(chatId),
+  const deliverToTelegram = source.delivery === 'telegram';
+  const testEnv = { ...context.env, TEST_CHAT_IDS: deliverToTelegram ? '' : String(chatId),
     TG_SLICE_ALLOWED_CHATS: [...new Set([...config.allowedChats, String(chatId)])].join(','),
-    TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(actorId)])].join(',') };
-  const capture = beginTestCapture(chatId);
+    TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(actorId)])].join(','),
+    ...(source.admin === true ? { ADMIN_GROUP_ID: String(chatId) } : {}) };
+  const capture = beginTestCapture(chatId, { deliverToTelegram });
   if (!capture) return context.json({ error: 'sandbox_test_api_busy' }, 409);
   initTestMode(testEnv);
   let response;
@@ -420,7 +425,8 @@ app.post('/operator/test-update', async context => {
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
   } : null;
-  return context.json({ ok: true, updateId, messageId, chatId, admission, transcript, collector });
+  return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
+    admin: source.admin === true, admission, transcript, collector });
 });
 
 app.post('/webhook', async context => {
