@@ -264,8 +264,9 @@ app.post('/operator/reset-sandbox-state', async context => {
   if (acceptOnlyInspectResponse && !acceptOnlyInspectResponse.ok) return context.json({ error: 'accept_only_inspect_failed' }, 503);
   if (body.mode === 'inspect') {
     const sandboxUserKeys = (await listSandboxUserKeys(env.TG_SLICE)).length;
+    const conversationIndexKeys = (await listSandboxConversationKeys(env.TG_SLICE)).length;
     return context.json({ ok: true, target, sessionAndRetryKeys: keys.length,
-      sandboxUserKeys, intakeBuffers: buffers.length, intakeNamespaces: [...new Set(inspected.map(item => item.binding))],
+      sandboxUserKeys, conversationIndexKeys, intakeBuffers: buffers.length, intakeNamespaces: [...new Set(inspected.map(item => item.binding))],
       durableObjectKeys: inspected.reduce((sum, item) => sum + item.keys, 0),
       acceptOnlyKeys: acceptOnlyState.keys ?? null, active: inspected.some(item => item.active) });
   }
@@ -286,10 +287,13 @@ app.post('/operator/reset-sandbox-state', async context => {
   const acceptOnlyVerified = acceptOnlyVerify ? await acceptOnlyVerify.json().catch(() => ({})) : { keys: 0 };
   if (acceptOnlyVerify && (!acceptOnlyVerify.ok || acceptOnlyVerified.keys !== 0)) return context.json({ error: 'accept_only_reset_verify_failed' }, 503);
   const sandboxUserKeys = await listSandboxUserKeys(env.TG_SLICE);
+  const conversationIndexKeys = await listSandboxConversationKeys(env.TG_SLICE);
   for (const key of keys) await env.SESSIONS.delete(key);
   for (const key of sandboxUserKeys) await env.TG_SLICE.delete(key);
+  for (const key of conversationIndexKeys) await env.TG_SLICE.delete(key);
   return context.json({ ok: true, target, sessionsAndRetryKeysDeleted: keys.length,
-    sandboxUserKeysDeleted: sandboxUserKeys.length, intakeBuffersReset: buffers.length,
+    sandboxUserKeysDeleted: sandboxUserKeys.length, conversationIndexKeysDeleted: conversationIndexKeys.length,
+    intakeBuffersReset: buffers.length,
     intakeNamespacesReset: [...new Set(inspected.map(item => item.binding))],
     durableObjectKeysDeleted: inspected.reduce((sum, item) => sum + item.keys, 0), acceptOnlyReset: Boolean(acceptOnly) });
   } finally {
@@ -324,6 +328,10 @@ async function listSandboxUserKeys(kv) {
     listKvPrefix(kv, 'user:'), listKvPrefix(kv, 'sandbox-user:'),
   ]);
   return [...new Set([...legacy, ...namespaced])];
+}
+
+async function listSandboxConversationKeys(kv) {
+  return listKvPrefix(kv, 'conv:tg-');
 }
 
 // A signed, isolated message fixture exercises the same webhook ingress and
