@@ -109,7 +109,10 @@ describe('sandbox Worker test transcript capture', () => {
     initTestMode(envOf(''));
     expect(isTestChatCached(TEST)).toBe(false);
     expect(captureDeliveredTestMessage(TEST, 'temporary password', { ok: true, result: { message_id: 45 } })).toBe(true);
-    expect(finish()).toEqual([{ kind: 'sendMessage', text: 'temporary password', messageId: 45 }]);
+    expect(finish()).toEqual([{ kind: 'sendMessage', text: 'temporary password', telegramOk: true, messageId: 45 }]);
+    const failed = beginTestCapture(TEST, { deliverToTelegram: true });
+    expect(captureDeliveredTestMessage(TEST, 'not delivered', { ok: false, error_code: 400 })).toBe(true);
+    expect(failed()).toEqual([{ kind: 'sendMessage', text: 'not delivered', telegramOk: false, errorCode: 400 }]);
     initTestMode(envOf(''));
   });
 });
