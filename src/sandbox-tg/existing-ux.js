@@ -6,7 +6,7 @@ import { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
 import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
-import { conversationKey, threadIdOf } from '../conversation-context.js';
+import { conversationKey, threadIdOf, threadExtra } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
 import { initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
@@ -418,6 +418,29 @@ app.post('/webhook', async context => {
     return context.json({ ok: true });
   }
 
+  // Exact service commands must bypass Intake: they are immediate replies and
+  // must not wait for the collector's work-style prompt or launch an agent.
+  if (message.text && /^\/help(?:@[a-z0-9_]+)?$/i.test(message.text.trim())) {
+    await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+      'Команды: /help, /status. Сообщение с вопросом отправь обычным текстом.', threadExtra(threadId));
+    return context.json({ ok: true, serviceCommand: 'help' });
+  }
+  if (message.text && /^\/status(?:@[a-z0-9_]+)?$/i.test(message.text.trim())) {
+    const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(message.chat.id, threadId)));
+    const response = await stub.fetch('https://intake/debug');
+    if (!response.ok) return context.json({ error: 'status_unavailable' }, 503);
+    const state = await response.json().catch(() => null);
+    if (!state || typeof state !== 'object') return context.json({ error: 'status_unavailable' }, 503);
+    const pending = [...(Array.isArray(state.buf) ? state.buf : []), ...(Array.isArray(state.retryBatch) ? state.retryBatch : [])]
+      .filter(item => item.hasText || item.mediaPending).length;
+    const barrier = state.controlPlaneBarrier ?? {};
+    const active = state.busy || (Array.isArray(state.launching) && state.launching.length > 0) ||
+      Number(barrier.busyRequestCount ?? 0) > 0 || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+    const text = active ? 'Сейчас обрабатываю задачу.'
+      : pending > 0 ? `Собран ввод: ${pending} ${pending === 1 ? 'сообщение' : 'сообщений'}.` : 'Активных задач и несобранного ввода нет.';
+    await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text, threadExtra(threadId));
+    return context.json({ ok: true, serviceCommand: 'status', active, pending });
+  }
   if (!session?.username || session.username === 'integrator') {
     if (update.callback_query) {
       await answerCallbackQuery(env.TG_SANDBOX_BOT_TOKEN, update.callback_query.id,
