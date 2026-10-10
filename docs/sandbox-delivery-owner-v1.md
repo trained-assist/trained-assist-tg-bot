@@ -113,6 +113,26 @@ manifest is a separate secret binding, never a checked-in variable.
 `TG_DELIVERY_OWNER` is a namespace binding, not a variable or secret. Parent
 alone owns explicit activation after review/inventory.
 
+### Immutable empty-marker recovery (2026-10-10)
+
+The deployed V1 owner reported a valid but empty cutover inventory (`0` tasks,
+`0` deliveries) even though read-only source inventory found 53 canonical CP
+tasks and four sent legacy KV delivery records. Keep V1 paused and untouched;
+its manifest fingerprint cannot be replaced safely. The sandbox now also pauses
+new webhook intake while reconciliation is reviewed. `TgDeliveryOwnerV2` uses
+an independent SQLite Durable Object namespace and the separate secret
+`TG_SLICE_DELIVERY_CUTOVER_MANIFEST_V2`. The protected-main
+`Prepare isolated sandbox delivery cutover V2` workflow derives the V2 manifest
+from the canonical CP task table, exact legacy KV delivery records, receipt
+indexes, and the approved test-chat GitHub secret. It refuses a chat mismatch,
+incomplete receipt index, malformed record, cross-profile CP row, or inventory
+over the manifest cap; it writes only the V2 Worker secret and does not deploy.
+Deploy the reviewed main Worker only after that job reports the complete
+inventory. Then run `Read sandbox delivery cutover state` and verify the V2
+quarantine counts while both ingress and outgoing delivery remain paused. Do
+not resume the sandbox until the historical duplicate-message evidence has
+been reconciled against this inventory.
+
 ## Autonomous scheduled reconciliation
 
 The sandbox's exported `scheduled` handler opens the existing durable owner,
