@@ -799,13 +799,14 @@ export class IntakeBuffer {
 
     if (url.pathname === '/debug' && request.method === 'GET') {
       const [buf, retryBatch, retryBatchAttempts, busy, busySince, launching, debounceExpiresAt, gateLevel,
-        receiptDue, collectorMsgId, gateConsulted, gateErrAttempts, parkedAt, parkReoffers] =
+        receiptDue, collectorMsgId, collectorDraftRevision, gateConsulted, gateErrAttempts, parkedAt, parkReoffers] =
         await Promise.all([
           this.state.storage.get('buf'), this.state.storage.get('retryBatch'),
           this.state.storage.get('retryBatchAttempts'), this.state.storage.get('busy'),
           this.state.storage.get('busySince'), this.state.storage.get('launching'),
           this.state.storage.get('debounceExpiresAt'), this.state.storage.get('gateLevel'),
           this.state.storage.get('receiptDue'), this.state.storage.get('collectorMsgId'),
+          this.state.storage.get('collectorDraftRevision'),
           this.state.storage.get('gateConsulted'), this.state.storage.get('gateErrAttempts'),
           this.state.storage.get('parkedAt'), this.state.storage.get('parkReoffers'),
         ]);
@@ -837,6 +838,7 @@ export class IntakeBuffer {
         busy: !!busy, busySince: busySince || null, launching: summarize(launching),
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
         alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
+        collectorDraftRevision: Number.isSafeInteger(collectorDraftRevision) ? collectorDraftRevision : null,
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
         parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
         stopped: (await this.state.storage.get('stopped')) || null,
