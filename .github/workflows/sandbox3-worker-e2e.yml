@@ -107,15 +107,27 @@ jobs:
         env:
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
         run: |
+          set -euo pipefail
           node --input-type=module <<'NODE'
-          const response = await fetch('https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/operator/delivery-cutover-v1', {
-            headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
-          });
-          const state = await response.json().catch(() => ({}));
-          if (!response.ok || state.ready !== true || state.paused !== true || state.ingressPaused !== true) {
+          const url = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/operator/delivery-cutover-v1';
+          let responseOk = false;
+          let state = {};
+          for (let attempt = 0; attempt < 10; attempt += 1) {
+            const response = await fetch(url, {
+              headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+              signal: AbortSignal.timeout(10_000),
+            });
+            responseOk = response.ok;
+            state = await response.json().catch(() => ({}));
+            if (responseOk && state.ready === true && state.paused === true && state.ingressPaused === true) break;
+            await new Promise(resolve => setTimeout(resolve, 2_000));
+          }
+          const summary = { httpOk: responseOk, ready: state.ready === true,
+            paused: state.paused === true, ingressPaused: state.ingressPaused === true };
+          console.log(JSON.stringify(summary));
+          if (!summary.httpOk || !summary.ready || !summary.paused || !summary.ingressPaused) {
             throw new Error('sandbox3_v1_delivery_owner_not_safely_paused');
           }
-          console.log(JSON.stringify({ ready: state.ready, paused: state.paused, ingressPaused: state.ingressPaused }));
           NODE
 
       - name: Reset CP and both Telegram intake buffers before tests
