@@ -11,7 +11,7 @@ enabled = true
 enabled = true
 
 [triggers]
-crons = ["* * * * *"]
+crons = []
 
 [[durable_objects.bindings]]
 name = "TG_DELIVERY_OWNER"
@@ -62,7 +62,7 @@ service = "trained-assist-cp-telegram-ux-v1-sandbox"
 [vars]
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
-TG_SLICE_DELIVERY_PAUSED = "false"
+TG_SLICE_DELIVERY_PAUSED = "true"
 TEST_CHAT_IDS = ""
 # This user-facing test bot must deliver Telegram replies; it is not a log-only lane.
 TG_HTTP_TEST_MODE = "false"

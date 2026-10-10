@@ -18,7 +18,7 @@ export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) 
     || !/^[a-f0-9]{64}$/.test(body.manifestDigest ?? '')
     || !Number.isSafeInteger(body.quarantinedTaskCount)
     || !Number.isSafeInteger(body.quarantinedDeliveryCount)
-    || typeof body.paused !== 'boolean') {
+    || body.paused !== true) {
     throw new Error(`sandbox_delivery_cutover_not_ready:${response.status}`);
   }
   return {
