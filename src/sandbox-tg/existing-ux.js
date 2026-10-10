@@ -26,6 +26,18 @@ function executionEnv(env) {
     CONTROL_PLANE_PROFILE: env.CONTROL_PLANE_PROFILE });
 }
 
+function createEphemeralSessionStore() {
+  const values = new Map();
+  return {
+    async get(key) { return values.get(key) ?? null; },
+    async put(key, value) { values.set(key, value); },
+    async delete(key) { values.delete(key); },
+    async list({ prefix = '' } = {}) {
+      return { keys: [...values.keys()].filter(name => name.startsWith(prefix)).map(name => ({ name })), list_complete: true };
+    },
+  };
+}
+
 app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
 
 app.get('/cron', async context => {
@@ -279,7 +291,12 @@ app.post('/operator/test-buffer-message', async context => {
   const chatId = Number(env.TG_SANDBOX_BUFFER_TEST_CHAT_ID);
   if (!Number.isSafeInteger(chatId) || chatId >= 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
   const userId = 900000236;
-  const runtimeEnv = executionEnv({ ...context.env, TG_HTTP_TEST_MODE: 'true' });
+  // This synthetic webhook must exercise the real ingress and Intake DO without
+  // writing its fixture login into the shared sandbox KV. KV deletes are
+  // eventually visible, which otherwise leaves one test session behind and
+  // makes the next clean-state gate wait or fail.
+  const sessionStore = createEphemeralSessionStore();
+  const runtimeEnv = executionEnv({ ...context.env, SESSIONS: sessionStore, TG_HTTP_TEST_MODE: 'true' });
   await setSession(runtimeEnv.SESSIONS, chatId, { username: 'sandbox-buffer-test',
     telegramUserId: String(userId), controlPlaneProfile: config.profileId });
   const update = { update_id: Date.now(), message: { message_id: Date.now() % 1_000_000_000,
@@ -288,7 +305,7 @@ app.post('/operator/test-buffer-message', async context => {
   const response = await app.fetch(new Request('https://sandbox.internal/webhook', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
     body: JSON.stringify(update),
-  }), { ...context.env, TG_HTTP_TEST_MODE: 'true', TEST_CHAT_IDS: String(chatId) });
+  }), { ...context.env, SESSIONS: sessionStore, TG_HTTP_TEST_MODE: 'true', TEST_CHAT_IDS: String(chatId) });
   const admitted = await response.json().catch(() => ({}));
   if (!response.ok || admitted.ok !== true) return context.json({ error: 'synthetic_webhook_failed', status: response.status, code: admitted.code ?? null }, 503);
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
