@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readSandboxDeliveryCutover } from '../scripts/cloudflare/sandbox-delivery-cutover-probe.mjs';
 
 const ready = { ready: true, cutoverId: 'sandbox-cutover-20261010', manifestDigest: 'a'.repeat(64),
-  quarantinedTaskCount: 2, quarantinedDeliveryCount: 3, paused: true };
+  quarantinedTaskCount: 2, quarantinedDeliveryCount: 3, paused: true, ingressPaused: true };
 
 describe('sandbox delivery cutover probe', () => {
   it('makes one authenticated read and emits only bounded cutover metadata', async () => {
@@ -17,7 +17,7 @@ describe('sandbox delivery cutover probe', () => {
     expect(calls[0].options.redirect).toBe('error');
     expect(result).toEqual({ ok: true, worker: 'trained-assist-tg-ux-sandbox', cutoverId: ready.cutoverId,
       manifestDigest: ready.manifestDigest, quarantinedTaskCount: 2, quarantinedDeliveryCount: 3,
-      paused: true, providerCalled: false });
+      paused: true, ingressPaused: true, providerCalled: false });
   });
 
   it('fails closed on auth failure or malformed manifest evidence', async () => {
@@ -26,6 +26,8 @@ describe('sandbox delivery cutover probe', () => {
     await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, paused: 'false' }) }))
       .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');
     await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, paused: false }) }))
+      .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');
+    await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, ingressPaused: false }) }))
       .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');
     await expect(readSandboxDeliveryCutover({ secret: 'x', fetchImpl: async () => Response.json({ ...ready, quarantinedTaskCount: 0 }) }))
       .rejects.toThrow('sandbox_delivery_cutover_not_ready:200');

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { cutoverManifest } from '../../src/sandbox-tg/delivery-owner.js';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
@@ -12,6 +13,18 @@ const STATUSES = new Set(['pending', 'retrying', 'sending', 'sent', 'dead', 'unk
 
 function requireValue(condition, code) {
   if (!condition) throw new Error(code);
+}
+
+export function sandboxDeliveryCutoverManifestDigest(manifest) {
+  const canonical = cutoverManifest({ TG_SLICE_DELIVERY_CUTOVER_MANIFEST: JSON.stringify(manifest) }, {
+    botUsername: BOT_USERNAME, profileId: PROFILE_ID, openSandbox: true, allowedChats: [],
+  });
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+export function assertSandboxDeliveryCutoverV2Uninitialized({ status, body }) {
+  requireValue(status === 503 && body?.error === 'delivery owner refused',
+    status === 200 && body?.ready === true ? 'sandbox_v2_cutover_already_initialized' : 'sandbox_v2_cutover_state_unexpected');
 }
 
 function historyOf(value) {
@@ -131,6 +144,15 @@ async function inventoryAndBuild() {
   requireValue(pauseResponse.ok && pauseState.ready === true && pauseState.paused === true && pauseState.ingressPaused === true,
     'sandbox_delivery_not_paused');
 
+  let v2Response;
+  try {
+    v2Response = await fetch('https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${operatorToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000),
+    });
+  } catch { throw new Error('sandbox_v2_cutover_probe_unreachable'); }
+  const v2State = await v2Response.json().catch(() => ({}));
+  assertSandboxDeliveryCutoverV2Uninitialized({ status: v2Response.status, body: v2State });
+
   const cutoverAt = Date.now();
   const d1 = await cfJson(`${base}/d1/database/${DATABASE_ID}/query`, {
     method: 'POST', body: JSON.stringify({ sql: 'SELECT id, profile_id FROM durable_tasks', params: [] }),
@@ -183,7 +205,7 @@ async function inventoryAndBuild() {
   const expectedChatDeliveryCount = deliveryRows.filter(row => Number(row.record?.destination?.chatId) === expectedChatId).length;
   const manifest = buildSandboxDeliveryCutoverManifest({ taskRows, deliveryRows, receiptRows,
     testChatId: process.env.TG_STAGING_TEST_CHAT_ID, cutoverAt });
-  return { manifest, digest: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+  return { manifest, digest: sandboxDeliveryCutoverManifestDigest(manifest),
     taskCount: taskRows.length, deliveryCount: deliveryRows.length, receiptCount: receiptRows.length, expectedChatDeliveryCount,
     foreignHistoricalDestinationCount: deliveryRows.length - expectedChatDeliveryCount };
 }
