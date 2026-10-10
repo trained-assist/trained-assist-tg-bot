@@ -57,7 +57,8 @@ jobs:
           const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
           const accounts = Array.isArray(identity.accounts) ? identity.accounts : [];
           const account = accounts.find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
-          if (identity.loggedIn !== true || identity.email?.toLowerCase() !== 'typeformowner@gmail.com' || !account) {
+          if (identity.loggedIn !== true || !account || account.name !== "Typeformowner@gmail.com's Account" ||
+              identity.email && identity.email.toLowerCase() !== 'typeformowner@gmail.com') {
             throw new Error('Cloudflare identity/account verification failed; no Worker operation is allowed');
           }
           console.log(`Verified ${identity.email} / ${account.id} (${account.name})`);
