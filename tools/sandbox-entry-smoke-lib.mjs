@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 
 export async function runSandboxEntryScenario(workerRequest) {
+  // This isolated non-execution scenario uses the reserved fixture destination.
+  // All updates are captured; a test regression must never route a model run here.
+  const chatId = -1000000000236;
+  const userId = 900000236;
   const send = text => workerRequest('/operator/test-update', {
-    target: 'sandbox', type: 'message', delivery: 'capture', text,
+    target: 'sandbox', type: 'message', delivery: 'capture', chatId, userId, text,
   });
 
   const help = await send('/help');
