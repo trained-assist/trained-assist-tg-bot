@@ -145,7 +145,11 @@ async function main() {
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
   const question = await sendMessage(`Reply with exactly this token and nothing else: ${nonce}`);
-  assertDelivered(question, 'question');
+  // The message is acknowledged by the Intake Durable Object, which runs in a
+  // separate Worker isolate; its Telegram sends are not part of this request's
+  // operator transcript. Verify admission here and verify the real terminal
+  // answer through the delivery owner below.
+  assert.equal(question.ok, true, 'sandbox_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
   assert(Number.isSafeInteger(question.collector?.collectorMessageId), 'intake_launch_button_missing');
 
