@@ -87,14 +87,23 @@ Missing/conflicting manifests and unmarked existing owner records fail closed.
 No manifest replacement, migration, unquarantine, reset or deletion endpoint is
 exposed. Restarts verify the identical canonical manifest without reimporting.
 
-After reviewed code/bindings deployment **with delivery paused**, call the signed
-read-only `GET /delivery-cutover` using the existing webhook-secret header. It
-returns cutover ID, canonical SHA256 digest, quarantine counts and pause state;
-it sends nothing. Check the manifest proof and `/deliveries/:taskId` quarantine
+After reviewed code/bindings deployment **with delivery paused**, call the
+read-only `GET /operator/delivery-cutover` with the dedicated
+`TG_SANDBOX_CUTOVER_READ_TOKEN` bearer. It returns cutover ID, canonical SHA256
+digest, quarantine counts and pause state; it sends nothing. This credential is
+separate from the Telegram webhook secret and has no task or delivery mutation
+route. Check the manifest proof and `/deliveries/:taskId` quarantine
 projections before restoring the signed webhook or allowing any drain. This
-route is internal-operator authenticated by the existing public gate, not a new
-credential authority. DO endpoints are reachable only through the sandbox's
-namespace binding; no public DO forwarding route exists.
+route is limited to the existing-UX sandbox Worker. DO endpoints are reachable
+only through the sandbox's namespace binding; no public DO forwarding route
+exists.
+
+The protected-main GitHub Action `Read sandbox delivery cutover state` performs
+this bounded read using the dedicated GitHub secret `TG_SANDBOX_CUTOVER_READ_TOKEN`
+and prints only the cutover ID/digest, quarantine counts, pause state, and
+`providerCalled: false`. It never invokes `/cron`, sends a Telegram request, or
+accepts a task. Run it before any live sandbox ingress to confirm the deployed
+manifest and pause state.
 
 The reviewed activated sandbox configuration retains `TG_SLICE_DELIVERY_PAUSED = "false"`
 and enables `crons = ["* * * * *"]` only in `wrangler.sandbox-tg.toml`.

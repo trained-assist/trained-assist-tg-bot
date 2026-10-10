@@ -46,6 +46,17 @@ app.get('/delivery-cutover', async context => {
   }
 });
 
+app.get('/operator/delivery-cutover', async context => {
+  const token = String(context.env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  try {
+    const config = readTgSliceConfig(context.env);
+    return context.json(await createController(context.env, config).outbox.open());
+  } catch {
+    return context.json({ error: 'delivery owner refused' }, 503);
+  }
+});
+
 app.get('/collector-state', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);

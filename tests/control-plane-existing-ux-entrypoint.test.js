@@ -41,6 +41,21 @@ describe('signed existing-UX ingress', () => {
     expect(handleCallbackQuery).not.toHaveBeenCalled();
   });
 
+  it('uses a dedicated operator token for cutover reads without relying on the Telegram webhook secret', async () => {
+    const state = fixture();
+    state.env.TG_SANDBOX_CUTOVER_READ_TOKEN = 'dedicated-cutover-read-token';
+    expect((await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${state.env.TELEGRAM_WEBHOOK_SECRET}` },
+    }), state.env)).status).toBe(401);
+    const response = await worker.fetch(new Request('https://worker/operator/delivery-cutover', {
+      headers: { authorization: `Bearer ${state.env.TG_SANDBOX_CUTOVER_READ_TOKEN}` },
+    }), state.env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ready: true });
+    expect(state.collectorCalls).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('protects operator reconciliation and reuses the scheduled controller', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/cron'), state.env)).status).toBe(401);
