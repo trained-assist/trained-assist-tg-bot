@@ -8,7 +8,7 @@ import { getSession, setSession, deleteSession } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
 import { conversationKey, threadIdOf, threadExtra } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
-import { initTestMode, rememberCallback } from '../lib/test-mode.js';
+import { beginTestCapture, initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { ControlPlaneClient } from './control-plane-client.js';
 import { cmdLogin } from '../handlers/commands.js';
@@ -220,7 +220,7 @@ app.post('/operator/reset-sandbox-state', async context => {
   const acceptOnlyState = await acceptOnlyInspectResponse.json().catch(() => ({}));
   if (!acceptOnlyInspectResponse.ok) return context.json({ error: 'accept_only_inspect_failed' }, 503);
   if (body.mode === 'inspect') {
-    const sandboxUserKeys = await countKvPrefix(env.TG_SLICE, 'sandbox-user:');
+    const sandboxUserKeys = (await listSandboxUserKeys(env.TG_SLICE)).length;
     return context.json({ ok: true, target: 'sandbox', sessionAndRetryKeys: keys.length,
       sandboxUserKeys, intakeBuffers: inspected.length, durableObjectKeys: inspected.reduce((sum, item) => sum + item.keys, 0),
       acceptOnlyKeys: acceptOnlyState.keys ?? null, active: inspected.some(item => item.active) });
@@ -239,13 +239,7 @@ app.post('/operator/reset-sandbox-state', async context => {
   const acceptOnlyVerify = await acceptOnly.fetch('https://accept-only.internal/operator/reset-inspect', { method: 'POST' });
   const acceptOnlyVerified = await acceptOnlyVerify.json().catch(() => ({}));
   if (!acceptOnlyVerify.ok || acceptOnlyVerified.keys !== 0) return context.json({ error: 'accept_only_reset_verify_failed' }, 503);
-  const sandboxUserKeys = [];
-  cursor = undefined;
-  do {
-    const page = await env.TG_SLICE.list({ prefix: 'sandbox-user:', ...(cursor ? { cursor } : {}) });
-    sandboxUserKeys.push(...page.keys.map(item => item.name));
-    cursor = page.list_complete === false ? page.cursor : null;
-  } while (cursor);
+  const sandboxUserKeys = await listSandboxUserKeys(env.TG_SLICE);
   for (const key of keys) await env.SESSIONS.delete(key);
   for (const key of sandboxUserKeys) await env.TG_SLICE.delete(key);
   return context.json({ ok: true, target: 'sandbox', sessionsAndRetryKeysDeleted: keys.length,
@@ -265,6 +259,24 @@ async function countKvPrefix(kv, prefix) {
     cursor = page.list_complete === false ? page.cursor : null;
   } while (cursor);
   return count;
+}
+
+async function listKvPrefix(kv, prefix) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await kv.list({ prefix, ...(cursor ? { cursor } : {}) });
+    keys.push(...page.keys.map(item => item.name));
+    cursor = page.list_complete === false ? page.cursor : null;
+  } while (cursor);
+  return keys;
+}
+
+async function listSandboxUserKeys(kv) {
+  const [legacy, namespaced] = await Promise.all([
+    listKvPrefix(kv, 'user:'), listKvPrefix(kv, 'sandbox-user:'),
+  ]);
+  return [...new Set([...legacy, ...namespaced])];
 }
 
 // A signed, isolated message fixture exercises the same webhook ingress and
@@ -319,6 +331,71 @@ app.post('/operator/test-buffer-message', async context => {
   return context.json({ ok: true, updateId: update.update_id, chatId, admitted,
     buffer: { pendingCount: buffer.buf?.length ?? 0, hasText: buffer.buf?.some(item => item.hasText) ?? false,
       busy: buffer.busy, stranded: buffer.stranded }, clearedAfterRead: source.resetAfter === true });
+});
+
+// Owner-authenticated test ingress: submit a Telegram-shaped message or button
+// press to the same webhook handler, then receive its immediate bot replies as
+// JSON. This endpoint exists only on the isolated UX sandbox Worker.
+app.post('/operator/test-update', async context => {
+  const env = executionEnv(context.env);
+  const token = String(env.TG_SANDBOX_CLEANUP_TOKEN ?? '').trim();
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (await env.TG_SLICE.get(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
+  if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
+      env.TG_SANDBOX_BOT_USERNAME !== 'probability_cat_bot' || env.SESSION_NAMESPACE !== 'integrator-existing-ux-v1' ||
+      env.EXECUTION_BACKEND !== 'control-plane' || env.TG_SLICE_OPEN_SANDBOX !== 'true' ||
+      env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false') {
+    return context.json({ error: 'sandbox_test_api_not_ready' }, 409);
+  }
+  const source = await context.req.json().catch(() => null);
+  if (!source || source.target !== 'sandbox' || !['message', 'callback'].includes(source.type) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId'].includes(key)) ||
+      (source.updateId !== undefined && (!Number.isSafeInteger(source.updateId) || source.updateId < 0))) {
+    return context.json({ error: 'invalid_test_update' }, 400);
+  }
+  if (source.type === 'message' && (typeof source.text !== 'string' || !source.text.trim() || source.text.length > 4000) ||
+      source.type === 'message' && source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1) ||
+      source.type === 'callback' && (typeof source.callbackData !== 'string' || !source.callbackData || source.callbackData.length > 64 ||
+        !Number.isSafeInteger(source.messageId) || source.messageId < 1)) return context.json({ error: 'invalid_test_update' }, 400);
+  const config = readTgSliceConfig(env);
+  if (!config.webhookSecret) return context.json({ error: 'sandbox_webhook_not_ready' }, 409);
+  const chatId = Number(env.TG_SANDBOX_BUFFER_TEST_CHAT_ID);
+  if (!Number.isSafeInteger(chatId) || chatId >= 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  const actorId = 900000236;
+  const updateId = source.updateId ?? Date.now();
+  const messageId = source.messageId ?? updateId % 1_000_000_000;
+  const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
+    chat: { id: chatId, type: 'supergroup', is_forum: false },
+    from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
+    ...(source.type === 'message' ? { text: source.text } : {}) };
+  const update = source.type === 'message' ? { update_id: updateId, message } : {
+    update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
+      message, chat_instance: 'sandbox-test', data: source.callbackData },
+  };
+  const testEnv = { ...context.env, TEST_CHAT_IDS: String(chatId),
+    TG_SLICE_ALLOWED_CHATS: [...new Set([...config.allowedChats, String(chatId)])].join(','),
+    TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(actorId)])].join(',') };
+  const capture = beginTestCapture(chatId);
+  if (!capture) return context.json({ error: 'sandbox_test_api_busy' }, 409);
+  initTestMode(testEnv);
+  let response;
+  let admission;
+  try {
+    response = await app.fetch(new Request('https://sandbox.internal/webhook', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
+      body: JSON.stringify(update),
+    }), testEnv);
+    admission = await response.json().catch(() => ({}));
+  } catch {
+    const transcript = capture();
+    initTestMode(context.env);
+    return context.json({ error: 'synthetic_webhook_failed', transcript }, 503);
+  }
+  const transcript = capture();
+  initTestMode(context.env);
+  if (!response.ok) return context.json({ error: 'synthetic_webhook_failed', status: response.status,
+    code: admission.code ?? null, transcript }, 503);
+  return context.json({ ok: true, updateId, messageId, admission, transcript });
 });
 
 app.post('/webhook', async context => {

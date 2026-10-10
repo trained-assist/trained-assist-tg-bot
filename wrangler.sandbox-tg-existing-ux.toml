@@ -73,8 +73,8 @@ TG_SANDBOX_BUFFER_TEST_CHAT_ID = "-1000000000236"
 TG_SLICE_ROUTER_ENABLED = "true"
 TG_SLICE_DELIVERY_PAUSED = "false"
 TG_SLICE_INGRESS_PAUSED = "false"
+# Worker-driven tests deliver their real sandbox answers through the configured Telegram bot.
 TEST_CHAT_IDS = ""
-# This user-facing test bot must deliver Telegram replies; it is not a log-only lane.
 TG_HTTP_TEST_MODE = "false"
 TG_SLICE_REQUEST_TIMEOUT_MS = "60000"
 TG_SLICE_STOP_ENABLED = "true"
@@ -90,3 +90,4 @@ TG_SANDBOX_OPERATOR_RECOVERY = "enabled"
 # This bot is an isolated profile-login test lane; user profiles gate task input.
 # No chat/Telegram-user allowlist is used for ordinary login E2E scenarios.
 TG_SLICE_OPEN_SANDBOX = "true"
+TG_SANDBOX_TEST_API_ENABLED = "true"

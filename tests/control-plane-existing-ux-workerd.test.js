@@ -220,7 +220,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -235,7 +235,9 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     EXECUTION_BACKEND: 'control-plane', AGENT_URL: 'https://legacy.test',
     AGENT_SECRET: 'offline-legacy-secret', CONTROL_PLANE_SESSION_ID: 'workerd-source-session',
     TG_SLICE_STOP_ENABLED: 'true', TEST_CHAT_IDS: '', CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'test-signature',
-    SESSION_NAMESPACE: 'integrator-existing-ux-v1' });
+    SESSION_NAMESPACE: 'integrator-existing-ux-v1', TG_SANDBOX_CLEANUP_TOKEN: 'offline-cleanup-token',
+    TG_SANDBOX_TEST_API_ENABLED: 'true', TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236',
+    TG_SLICE_INGRESS_PAUSED: 'false' });
   const providerMessages = [];
   const providerEdits = [];
   const telegramTimeline = [];
@@ -404,6 +406,33 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   };
   try {
     runtime = new Miniflare(runtimeOptions);
+    if (boundary === 'operator-test-api') {
+      const operatorRequest = (body, token = 'offline-cleanup-token') => runtime.dispatchFetch('https://worker.test/operator/test-update', {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect((await operatorRequest({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture', updateId: 91001, messageId: 101 }, 'wrong-token')).status).toBe(401);
+      const created = await operatorRequest({ target: 'sandbox', type: 'message', text: '/adduser e2e_worker_fixture Worker Fixture', updateId: 91001, messageId: 101 });
+      expect(created.status).toBe(200);
+      const createdBody = await created.json();
+      expect(createdBody).toMatchObject({ ok: true, admission: { ok: true }, transcript: [expect.objectContaining({
+        kind: 'sendMessage', messageId: expect.any(Number), text: expect.stringContaining('e2e_worker_fixture'),
+      })] });
+      const password = /Пароль: <code>([^<]+)<\/code>/.exec(createdBody.transcript[0].text)?.[1];
+      expect(password).toBeTruthy();
+      expect(await (await runtime.getKVNamespace('TG_SLICE')).get('user:e2e_worker_fixture', 'json'))
+        .toMatchObject({ name: 'Worker Fixture', passwordHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      const login = await operatorRequest({ target: 'sandbox', type: 'message', text: `/login e2e_worker_fixture ${password}`, updateId: 91002, messageId: 102 });
+      expect(await login.json()).toMatchObject({ ok: true, admission: { authenticated: true }, transcript: [
+        expect.objectContaining({ text: expect.stringContaining('Добро пожаловать') }),
+      ] });
+      expect(await (await runtime.getKVNamespace('SESSIONS')).get('integrator-existing-ux-v1:-1000000000236', 'json'))
+        .toMatchObject({ username: 'e2e_worker_fixture', controlPlaneProfile: 'workerd-profile' });
+      const callback = await operatorRequest({ target: 'sandbox', type: 'callback', callbackData: 'intake_run', updateId: 91003, messageId: 501 });
+      const callbackBody = await callback.json();
+      expect(callbackBody).toMatchObject({ ok: true, admission: { ok: true } });
+      expect(callbackBody.admission).not.toHaveProperty('unsupported');
+      return;
+    }
     const password = 'test-profile-password';
     const salt = new Uint8Array(16).fill(7);
     const passwordKey = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
