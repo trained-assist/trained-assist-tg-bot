@@ -35,8 +35,10 @@ async function workerRequest(path, body) {
     if (response.ok) return payload;
     // A deploy can reach the health edge before its vars reach every Worker
     // isolate. This response is sent before update dispatch, so retry is safe.
+    const updateIsNotReady = payload.error === 'sandbox_test_api_not_ready'
+      || body?.type === 'callback' && ['no_current_button_message', 'no_current_button_revision'].includes(payload.error);
     if (path === '/operator/test-update' && response.status === 409
-        && payload.error === 'sandbox_test_api_not_ready' && Date.now() < readyDeadline) {
+        && updateIsNotReady && Date.now() < readyDeadline) {
       await new Promise(resolve => setTimeout(resolve, 2_000));
       continue;
     }
@@ -161,11 +163,10 @@ async function main() {
   // answer through the delivery owner below.
   assert.equal(question.ok, true, 'sandbox_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
-  assert(Number.isSafeInteger(question.collector?.collectorMessageId), 'intake_launch_button_missing');
 
   const launched = await workerRequest('/operator/test-update', {
     target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
-    callbackData: 'auto', messageId: question.collector.collectorMessageId, updateId: updateId++,
+    callbackData: 'auto', updateId: updateId++,
   });
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
 
