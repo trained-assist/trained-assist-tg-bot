@@ -63,8 +63,11 @@ async function d1(sql, params = []) {
 function assertDelivered(response) {
   assert.equal(response.ok, true, 'worker_update_not_accepted');
   assert.equal(response.delivery, 'telegram', 'real_telegram_delivery_not_enabled');
-  assert(response.transcript?.some(item => item.kind === 'sendMessage' && Number.isSafeInteger(item.messageId) && item.messageId > 0),
-    'telegram_send_not_confirmed');
+  const sent = response.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
+  if (!sent.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0)) {
+    const code = sent.find(item => Number.isSafeInteger(item.errorCode))?.errorCode ?? 'unknown';
+    throw new Error(`telegram_send_not_confirmed:${code}`);
+  }
 }
 
 async function waitForTask() {
