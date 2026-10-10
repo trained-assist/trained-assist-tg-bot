@@ -7,6 +7,7 @@ import { applyTestDelivery, isTestChat, reserveChatId } from './test-mode.js';
 import { controlPlaneClient, runControlPlaneTask } from './control-plane-execution.js';
 import { getSession } from './kv.js';
 import { controlPlaneStopDisabled, controlPlaneStopDisabledError } from './control-plane-stop-gate.js';
+import { chatAllowed } from '../sandbox-tg/config.js';
 // HTTP client for trained-assist-agent
 
 // The REAL model input of a dispatched run (agent-side: system prompt +
@@ -375,7 +376,7 @@ async function stopControlPlaneTasks(env, { username, chatId, threadId }) {
   const client = controlPlaneClient(env);
   const profileId = client.config.profileId;
   const session = await getSession(env.SESSIONS, chatId, threadId);
-  if (!env.INTAKE || !client.config.allowedChats.includes(String(chatId))
+  if (!env.INTAKE || !chatAllowed(client.config, chatId)
     || (client.config.chatProfiles[String(chatId)] && client.config.chatProfiles[String(chatId)] !== profileId)
     || session?.username !== username || session.controlPlaneProfile !== profileId) throw controlPlaneStopError();
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
