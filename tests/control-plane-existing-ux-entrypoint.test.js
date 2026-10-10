@@ -151,6 +151,7 @@ describe('signed existing-UX ingress', () => {
     env.SESSIONS.data.set(`${env.SESSION_NAMESPACE}:retry:42:old`, JSON.stringify({ chatId: 42 }));
     env.TG_SLICE.data.set('sandbox-user:old-user', JSON.stringify({ profileId: 'old-profile' }));
     env.TG_SLICE.data.set('user:legacy-test-user', JSON.stringify({ name: 'Old sandbox profile' }));
+    env.TG_SLICE.data.set('conv:tg-old-conversation', JSON.stringify({ chatId: 42 }));
     const resetCalls = [];
     const stateKeys = new Map();
     const activeBuffers = new Set();
@@ -177,7 +178,7 @@ describe('signed existing-UX ingress', () => {
     const inspect = await post({ target: 'sandbox', mode: 'inspect' });
     expect(inspect.status).toBe(200);
     expect(await inspect.json()).toMatchObject({ ok: true, sessionAndRetryKeys: 3, intakeBuffers: 2,
-      sandboxUserKeys: 2, acceptOnlyKeys: 0, active: false });
+      sandboxUserKeys: 2, conversationIndexKeys: 1, acceptOnlyKeys: 0, active: false });
     expect(env.SESSIONS.data.size).toBe(3);
     expect(resetCalls).toHaveLength(3);
     activeBuffers.add('42');
@@ -189,7 +190,8 @@ describe('signed existing-UX ingress', () => {
     activeBuffers.delete('42');
     const cleared = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
     expect(cleared.status).toBe(200);
-    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 2, intakeBuffersReset: 2 });
+    expect(await cleared.json()).toMatchObject({ ok: true, sessionsAndRetryKeysDeleted: 3, sandboxUserKeysDeleted: 2,
+      conversationIndexKeysDeleted: 1, intakeBuffersReset: 2 });
     expect(env.SESSIONS.data.size).toBe(0);
     expect(env.TG_SLICE.data.size).toBe(0);
     expect(resetCalls.filter(value => value === 'intake:/operator/reset-all')).toHaveLength(2);
