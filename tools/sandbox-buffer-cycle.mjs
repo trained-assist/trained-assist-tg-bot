@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { assertSandboxStateEmpty } from './sandbox-buffer-assertions.mjs';
+import { assertSandboxStateEventuallyEmpty } from './sandbox-buffer-assertions.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
@@ -57,10 +57,6 @@ function assertNoActiveCpState(counts) {
   }
 }
 
-function assertEmpty(cp, tg) {
-  assertSandboxStateEmpty(cp, tg, CP_STATE_TABLES);
-}
-
 async function inspect() {
   const health = await fetch(`${TG_ORIGIN}/health`, { signal: AbortSignal.timeout(10_000) });
   const healthBody = await health.json().catch(() => ({}));
@@ -71,6 +67,16 @@ async function inspect() {
   const [cpCounts] = await d1(`SELECT ${CP_STATE_TABLES.map(name => `(SELECT COUNT(*) FROM "${name}") AS "${name}"`).join(', ')}`);
   const tg = await workerRequest('/operator/reset-sandbox-state', { target: 'sandbox', mode: 'inspect' });
   return { cp: cpCounts, tg };
+}
+
+async function inspectUntilEmpty() {
+  return assertSandboxStateEventuallyEmpty(async () => {
+    const state = await inspect();
+    assertNoActiveCpState(await cpInventory());
+    return state;
+  }, CP_STATE_TABLES, {
+    onRetry: detail => console.log(JSON.stringify({ waitingForSandboxKvVisibility: true, ...detail })),
+  });
 }
 
 async function reset() {
@@ -105,8 +111,7 @@ async function reset() {
     'DELETE FROM watchdog_health',
   ];
   for (const sql of statements) await d1(sql);
-  const verified = await inspect();
-  assertEmpty(verified.cp, verified.tg);
+  await inspectUntilEmpty();
   console.log(JSON.stringify({ ok: true, target: 'sandbox', cpRuntimeRowsDeleted: state.cp,
     tgStateDeleted: tgClear, cpEmpty: true, tgEmpty: true }));
 }
@@ -123,9 +128,7 @@ async function testBuffers() {
 
 const mode = process.argv[2];
 if (mode === 'inspect') {
-  const state = await inspect();
-  assertNoActiveCpState(await cpInventory());
-  assertEmpty(state.cp, state.tg);
+  await inspectUntilEmpty();
   console.log(JSON.stringify({ ok: true, cpEmpty: true, tgEmpty: true }));
 } else if (mode === 'reset') await reset();
 else if (mode === 'test-buffers') await testBuffers();
