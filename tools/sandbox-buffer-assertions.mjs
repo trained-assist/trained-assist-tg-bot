@@ -26,11 +26,12 @@ export async function assertSandboxStateEventuallyEmpty(readState, cpStateTables
       return { cp, tg };
     } catch (error) {
       const onlyKvVisibilityPending = cpStateTables.every(name => Number(cp[name] ?? 0) === 0) &&
-        Number(tg.sessionAndRetryKeys) > 0 &&
-        ['sandboxUserKeys', 'durableObjectKeys', 'acceptOnlyKeys'].every(name => Number(tg[name] ?? 0) === 0) &&
+        Number(tg.sessionAndRetryKeys) + Number(tg.sandboxUserKeys) > 0 &&
+        ['durableObjectKeys', 'acceptOnlyKeys'].every(name => Number(tg[name] ?? 0) === 0) &&
         tg.active === false;
       if (!onlyKvVisibilityPending || attempt >= maxAttempts) throw error;
-      onRetry({ attempt, remainingSessionKeys: Number(tg.sessionAndRetryKeys), delayMs });
+      onRetry({ attempt, remainingSessionKeys: Number(tg.sessionAndRetryKeys),
+        remainingSandboxUserKeys: Number(tg.sandboxUserKeys), delayMs });
       await sleep(delayMs);
     }
   }
