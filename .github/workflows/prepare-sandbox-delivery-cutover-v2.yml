@@ -1,0 +1,54 @@
+name: Prepare isolated sandbox delivery cutover V2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-delivery-cutover-v2
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Verify the sandbox Cloudflare account
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          test "$CF_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
+          npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
+          node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const account = identity.accounts?.find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
+          if (identity.loggedIn !== true || identity.email?.toLowerCase() !== 'typeformowner@gmail.com' || !account) {
+            throw new Error('sandbox_cloudflare_identity_mismatch');
+          }
+          NODE
+      - name: Build complete pre-cutover inventory and store only the isolated V2 manifest secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_STAGING_TEST_CHAT_ID: ${{ secrets.TG_STAGING_TEST_CHAT_ID }}
+          TG_SANDBOX_CUTOVER_READ_TOKEN: ${{ secrets.TG_SANDBOX_CUTOVER_READ_TOKEN }}
+          GITHUB_REF: ${{ github.ref }}
+        run: node scripts/cloudflare/provision-sandbox-delivery-cutover-v2.mjs
+      - name: Publish sanitized inventory counts
+        if: success()
+        run: |
+          echo "V2 manifest is stored only in the sandbox Worker secret store." >> "$GITHUB_STEP_SUMMARY"
+          echo "The provisioning step reports task, delivery, and receipt counts plus the manifest digest; no task IDs or payloads are emitted." >> "$GITHUB_STEP_SUMMARY"

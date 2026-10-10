@@ -16,8 +16,8 @@ export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) 
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.ready !== true || typeof body.cutoverId !== 'string'
     || !/^[a-f0-9]{64}$/.test(body.manifestDigest ?? '')
-    || !Number.isSafeInteger(body.quarantinedTaskCount)
-    || !Number.isSafeInteger(body.quarantinedDeliveryCount)
+    || !Number.isSafeInteger(body.quarantinedTaskCount) || body.quarantinedTaskCount < 1
+    || !Number.isSafeInteger(body.quarantinedDeliveryCount) || body.quarantinedDeliveryCount < 1
     || body.paused !== true) {
     throw new Error(`sandbox_delivery_cutover_not_ready:${response.status}`);
   }

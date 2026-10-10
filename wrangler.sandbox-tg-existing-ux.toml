@@ -18,6 +18,10 @@ name = "TG_DELIVERY_OWNER"
 class_name = "TgDeliveryOwner"
 
 [[durable_objects.bindings]]
+name = "TG_DELIVERY_OWNER_V2"
+class_name = "TgDeliveryOwnerV2"
+
+[[durable_objects.bindings]]
 name = "INTAKE"
 class_name = "IntakeBufferReset"
 
@@ -41,6 +45,10 @@ deleted_classes = ["IntakeBuffer"]
 tag = "sandbox-accept-only-v1"
 new_sqlite_classes = ["SandboxAcceptOnlyStore"]
 
+[[migrations]]
+tag = "sandbox-delivery-owner-v2"
+new_sqlite_classes = ["TgDeliveryOwnerV2"]
+
 [[kv_namespaces]]
 binding = "TG_SLICE"
 id = "915ffeedb74440538009bdc1bd00d381"
@@ -63,6 +71,7 @@ service = "trained-assist-cp-telegram-ux-v1-sandbox"
 TG_SANDBOX_BOT_USERNAME = "probability_cat_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
 TG_SLICE_DELIVERY_PAUSED = "true"
+TG_SLICE_INGRESS_PAUSED = "true"
 TEST_CHAT_IDS = ""
 # This user-facing test bot must deliver Telegram replies; it is not a log-only lane.
 TG_HTTP_TEST_MODE = "false"
