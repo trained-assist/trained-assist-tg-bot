@@ -372,6 +372,7 @@ app.post('/operator/test-update', async context => {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
       message, chat_instance: 'sandbox-test', data: source.callbackData },
   };
+  if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
   const testEnv = { ...context.env, TEST_CHAT_IDS: String(chatId),
     TG_SLICE_ALLOWED_CHATS: [...new Set([...config.allowedChats, String(chatId)])].join(','),
     TG_SLICE_ALLOWED_USERS: [...new Set([...String(context.env.TG_SLICE_ALLOWED_USERS ?? '').split(',').map(value => value.trim()).filter(Boolean), String(actorId)])].join(',') };
