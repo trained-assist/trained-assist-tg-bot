@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { assertSandboxStateEventuallyEmpty } from './sandbox-buffer-assertions.mjs';
+import { runSandboxEntryScenario } from './sandbox-entry-smoke-lib.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '01d17f46-63e2-46bc-947d-9eda3e0bb697';
@@ -126,10 +127,16 @@ async function testBuffers() {
     firstPendingCount: first.buffer.pendingCount, secondPendingCount: second.buffer.pendingCount }));
 }
 
+async function testUserEntry() {
+  const report = await runSandboxEntryScenario((path, body) => workerRequest(path, body));
+  console.log(JSON.stringify(report));
+}
+
 const mode = process.argv[2];
 if (mode === 'inspect') {
   await inspectUntilEmpty();
   console.log(JSON.stringify({ ok: true, cpEmpty: true, tgEmpty: true }));
 } else if (mode === 'reset') await reset();
 else if (mode === 'test-buffers') await testBuffers();
-else throw new Error('usage: node tools/sandbox-buffer-cycle.mjs inspect|reset|test-buffers');
+else if (mode === 'test-user-entry') await testUserEntry();
+else throw new Error('usage: node tools/sandbox-buffer-cycle.mjs inspect|reset|test-buffers|test-user-entry');
