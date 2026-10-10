@@ -134,7 +134,9 @@ Deploy the reviewed main Worker only after that job reports the complete
 inventory. Then run `Read sandbox delivery cutover state` and verify the V2
 quarantine counts while both ingress and outgoing delivery remain paused. Do
 not resume the sandbox until the historical duplicate-message evidence has
-been reconciled against this inventory.
+been reconciled against this inventory. The generator's SHA256 is over the
+same canonical manifest bytes used by the Durable Object marker. It refuses to
+run again once V2 has initialized, since the manifest is immutable.
 
 ## Autonomous scheduled reconciliation
 

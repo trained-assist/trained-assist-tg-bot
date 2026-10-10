@@ -18,7 +18,7 @@ export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) 
     || !/^[a-f0-9]{64}$/.test(body.manifestDigest ?? '')
     || !Number.isSafeInteger(body.quarantinedTaskCount) || body.quarantinedTaskCount < 1
     || !Number.isSafeInteger(body.quarantinedDeliveryCount) || body.quarantinedDeliveryCount < 1
-    || body.paused !== true) {
+    || body.paused !== true || body.ingressPaused !== true) {
     throw new Error(`sandbox_delivery_cutover_not_ready:${response.status}`);
   }
   return {
@@ -29,6 +29,7 @@ export async function readSandboxDeliveryCutover({ secret, fetchImpl = fetch }) 
     quarantinedTaskCount: body.quarantinedTaskCount,
     quarantinedDeliveryCount: body.quarantinedDeliveryCount,
     paused: body.paused,
+    ingressPaused: body.ingressPaused,
     providerCalled: false,
   };
 }
