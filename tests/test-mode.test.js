@@ -111,8 +111,10 @@ describe('sandbox Worker test transcript capture', () => {
     expect(captureDeliveredTestMessage(TEST, 'temporary password', { ok: true, result: { message_id: 45 } })).toBe(true);
     expect(finish()).toEqual([{ kind: 'sendMessage', text: 'temporary password', telegramOk: true, messageId: 45 }]);
     const failed = beginTestCapture(TEST, { deliverToTelegram: true });
-    expect(captureDeliveredTestMessage(TEST, 'not delivered', { ok: false, error_code: 400 })).toBe(true);
-    expect(failed()).toEqual([{ kind: 'sendMessage', text: 'not delivered', telegramOk: false, errorCode: 400 }]);
+    expect(captureDeliveredTestMessage(TEST, 'not delivered', { ok: false, error_code: 400,
+      description: 'Bad Request: chat not found; private test details' })).toBe(true);
+    expect(failed()).toEqual([{ kind: 'sendMessage', text: 'not delivered', telegramOk: false,
+      errorCode: 400, errorClass: 'chat_not_found' }]);
     initTestMode(envOf(''));
   });
 });
