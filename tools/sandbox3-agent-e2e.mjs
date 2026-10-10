@@ -60,13 +60,14 @@ async function d1(sql, params = []) {
   return result.results ?? [];
 }
 
-function assertDelivered(response) {
+function assertDelivered(response, phase) {
   assert.equal(response.ok, true, 'worker_update_not_accepted');
   assert.equal(response.delivery, 'telegram', 'real_telegram_delivery_not_enabled');
   const sent = response.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
   if (!sent.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0)) {
-    const reason = sent.find(item => typeof item.errorClass === 'string')?.errorClass ?? 'unknown';
-    throw new Error(`telegram_send_not_confirmed:${reason}`);
+    const failed = sent.find(item => item.telegramOk !== true);
+    const reason = failed?.errorClass ?? (failed ? 'send_was_suppressed' : 'no_send_record');
+    throw new Error(`telegram_send_not_confirmed:${phase}:${reason}`);
   }
 }
 
@@ -140,11 +141,11 @@ async function main() {
   assert(passwordMatch?.[1], 'sandbox_test_password_not_returned');
 
   const login = await sendMessage(`/login ${username} ${passwordMatch[1]}`);
-  assertDelivered(login);
+  assertDelivered(login, 'login');
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
   const question = await sendMessage(`Reply with exactly this token and nothing else: ${nonce}`);
-  assertDelivered(question);
+  assertDelivered(question, 'question');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
   assert(Number.isSafeInteger(question.collector?.collectorMessageId), 'intake_launch_button_missing');
 

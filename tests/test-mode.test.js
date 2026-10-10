@@ -117,6 +117,16 @@ describe('sandbox Worker test transcript capture', () => {
       errorCode: 400, errorClass: 'chat_not_found' }]);
     initTestMode(envOf(''));
   });
+
+  it('real-delivery capture overrides a stale test-chat cache for the same chat', () => {
+    initTestMode(envOf(String(TEST)));
+    expect(isTestChatCached(TEST)).toBe(true);
+    const finish = beginTestCapture(TEST, { deliverToTelegram: true });
+    expect(isTestChatCached(TEST)).toBe(false);
+    captureDeliveredTestMessage(TEST, 'answer', { ok: true, result: { message_id: 46 } });
+    expect(finish()).toMatchObject([{ telegramOk: true, messageId: 46 }]);
+    initTestMode(envOf(''));
+  });
 });
 
 describe('модульный кэш для lib/telegram.js (init-точки)', () => {

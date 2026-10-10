@@ -7,7 +7,7 @@ export function assertSandboxStateEmpty(cp, tg, cpStateTables) {
   // intakeBuffers is the number of Durable Objects inspected, including empty
   // objects discovered through the immutable cutover manifest. Only stored
   // keys represent leftover buffered state.
-  for (const name of ['sessionAndRetryKeys', 'sandboxUserKeys', 'durableObjectKeys', 'acceptOnlyKeys']) {
+  for (const name of ['sessionAndRetryKeys', 'sandboxUserKeys', 'conversationIndexKeys', 'durableObjectKeys', 'acceptOnlyKeys']) {
     assert.equal(Number(tg[name] ?? 0), 0, `TG sandbox not empty: ${name}=${tg[name]}`);
   }
   assert.equal(tg.active, false);
@@ -26,12 +26,13 @@ export async function assertSandboxStateEventuallyEmpty(readState, cpStateTables
       return { cp, tg };
     } catch (error) {
       const onlyKvVisibilityPending = cpStateTables.every(name => Number(cp[name] ?? 0) === 0) &&
-        Number(tg.sessionAndRetryKeys) + Number(tg.sandboxUserKeys) > 0 &&
+        Number(tg.sessionAndRetryKeys) + Number(tg.sandboxUserKeys) + Number(tg.conversationIndexKeys ?? 0) > 0 &&
         ['durableObjectKeys', 'acceptOnlyKeys'].every(name => Number(tg[name] ?? 0) === 0) &&
         tg.active === false;
       if (!onlyKvVisibilityPending || attempt >= maxAttempts) throw error;
       onRetry({ attempt, remainingSessionKeys: Number(tg.sessionAndRetryKeys),
-        remainingSandboxUserKeys: Number(tg.sandboxUserKeys), delayMs });
+        remainingSandboxUserKeys: Number(tg.sandboxUserKeys),
+        remainingConversationIndexKeys: Number(tg.conversationIndexKeys ?? 0), delayMs });
       await sleep(delayMs);
     }
   }
