@@ -8,17 +8,20 @@ operator API is enabled only in the isolated sandbox Worker. Use it as the
 default sandbox E2E client: submit input over HTTP, read bot messages and
 buttons from JSON, then submit a returned button callback the same way.
 
-Use the existing `TG_SANDBOX_CLEANUP_TOKEN` bearer secret. The endpoint always
-uses the reserved sandbox test chat `-1000000000236` and synthetic operator
-identity `900000236`. It accepts `message` updates with `text`, or `callback`
-updates with `callbackData`; `messageId` is optional and defaults to the current
-collector button message when one exists. Captured transcript messages include
+Use the existing `TG_SANDBOX_CLEANUP_TOKEN` bearer secret. Task execution
+requires a real sandbox `chatId` on each request or the `TG_SANDBOX_E2E_CHAT_ID`
+Worker variable. The update and eventual answer go to that chat. The synthetic
+operator identity is `900000236`. The separate `/operator/test-buffer-message`
+contract check uses the reserved fixture chat `-1000000000236`; never use that
+fake destination for agent runs. The operator API accepts only the sandbox
+lane's configured/open chats. It accepts `message` updates with `text`, or
+`callback` updates with `callbackData`; `messageId` is optional and defaults to
+the current collector button message when one exists. Captured transcript messages include
 a local `messageId`; captured inline keyboards include their `callbackData`.
 The response also includes a small `collector` snapshot with busy,
 pending count, current collector message ID, and CP receipt counters. For
-asynchronous agent runs, normal sandbox delivery still sends the final answer
-to the configured test chat; inspect CP task state and Worker tail without
-opening Telegram.
+asynchronous agent runs, normal sandbox delivery sends the final answer to the
+same real chat; inspect CP task state and Worker tail without opening Telegram.
 
 Example message:
 
@@ -26,7 +29,7 @@ Example message:
 curl --fail-with-body -sS https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/test-update \
   -H "Authorization: Bearer ${TG_SANDBOX_CLEANUP_TOKEN}" \
   -H 'Content-Type: application/json' \
-  --data '{"target":"sandbox","type":"message","text":"/adduser e2e_worker_fixture Worker Fixture"}'
+  --data '{"target":"sandbox","chatId":123456789,"type":"message","text":"/adduser e2e_worker_fixture Worker Fixture"}'
 ```
 
 Read `transcript[].messageId` and `transcript[].buttons` from the response when
@@ -39,7 +42,7 @@ Example callback:
 curl --fail-with-body -sS https://trained-assist-tg-ux-sandbox.skillset-apply.workers.dev/operator/test-update \
   -H "Authorization: Bearer ${TG_SANDBOX_CLEANUP_TOKEN}" \
   -H 'Content-Type: application/json' \
-  --data '{"target":"sandbox","type":"callback","callbackData":"intake_run"}'
+  --data '{"target":"sandbox","chatId":123456789,"type":"callback","callbackData":"intake_run"}'
 ```
 
 Optional `updateId` and message `messageId` fields let tests choose fixture

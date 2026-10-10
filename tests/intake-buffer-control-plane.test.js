@@ -1205,6 +1205,22 @@ describe('existing collector control-plane ownership', () => {
     expect(checkCompleteness).not.toHaveBeenCalled();
   });
 
+  it('releases a definitively rejected pre-admission sandbox launch instead of retaining an unknown barrier', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', items);
+    handleMessage.mockRejectedValue(Object.assign(new Error('control_plane_chat_refused'), {
+      code: 'CONTROL_PLANE_NO_ADMISSION',
+    }));
+
+    await owner._dispatch();
+
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpUnresolvedLaunches') ?? []).toEqual([]);
+    expect(await storage.get('launching')).toBeUndefined();
+    expect(await storage.get('retryBatch')).toEqual(items.map(item => ({ ...item, heldWhileBusy: true })));
+    expect(send.mock.calls.some(call => String(call[2]).includes('Запуск не создавал'))).toBe(true);
+  });
+
   it.each([408, 409, 429, 500, 503])('keeps ambiguous CP HTTP %i admission unresolved', async status => {
     const { owner, storage } = fixture();
     await storage.put('buf', items);

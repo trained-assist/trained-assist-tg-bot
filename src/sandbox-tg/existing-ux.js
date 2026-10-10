@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { readTgSliceConfig } from './config.js';
+import { chatAllowed, readTgSliceConfig } from './config.js';
 import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
 import { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';
@@ -349,7 +349,7 @@ app.post('/operator/test-update', async context => {
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== 'sandbox' || !['message', 'callback'].includes(source.type) ||
-      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId'].includes(key)) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId'].includes(key)) ||
       (source.updateId !== undefined && (!Number.isSafeInteger(source.updateId) || source.updateId < 0))) {
     return context.json({ error: 'invalid_test_update' }, 400);
   }
@@ -359,8 +359,13 @@ app.post('/operator/test-update', async context => {
         source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1))) return context.json({ error: 'invalid_test_update' }, 400);
   const config = readTgSliceConfig(env);
   if (!config.webhookSecret) return context.json({ error: 'sandbox_webhook_not_ready' }, 409);
-  const chatId = Number(env.TG_SANDBOX_BUFFER_TEST_CHAT_ID);
-  if (!Number.isSafeInteger(chatId) || chatId >= 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  const configuredTestChat = source.chatId ?? env.TG_SANDBOX_E2E_CHAT_ID;
+  if (configuredTestChat === undefined || configuredTestChat === null || configuredTestChat === '') {
+    return context.json({ error: 'sandbox_test_chat_required' }, 409);
+  }
+  const chatId = Number(configuredTestChat);
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return context.json({ error: 'invalid_sandbox_test_chat' }, 409);
+  if (!chatAllowed(config, chatId)) return context.json({ error: 'sandbox_test_chat_not_allowed' }, 403);
   if (!env.INTAKE) return context.json({ error: 'sandbox_intake_not_ready' }, 409);
   const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
   const readCollectorState = async () => {
@@ -375,7 +380,7 @@ app.post('/operator/test-update', async context => {
   const updateId = source.updateId ?? Date.now();
   const messageId = source.messageId ?? (source.type === 'callback' ? before.collectorMsgId : updateId % 1_000_000_000);
   const message = { message_id: messageId, date: Math.floor(Date.now() / 1000),
-    chat: { id: chatId, type: 'supergroup', is_forum: false },
+    chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
     from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
     ...(source.type === 'message' ? { text: source.text } : {}) };
   const update = source.type === 'message' ? { update_id: updateId, message } : {
@@ -415,7 +420,7 @@ app.post('/operator/test-update', async context => {
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
   } : null;
-  return context.json({ ok: true, updateId, messageId, admission, transcript, collector });
+  return context.json({ ok: true, updateId, messageId, chatId, admission, transcript, collector });
 });
 
 app.post('/webhook', async context => {
