@@ -430,6 +430,41 @@ export class IntakeBuffer {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === '/_sandbox-test/seed-capture-collector' && request.method === 'POST') {
+      const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
+      const source = await request.json().catch(() => null);
+      const chatId = Number(this.env.TG_SANDBOX_E2E_CHAT_ID);
+      const target = sandboxOperatorLane(this.env);
+      if (this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || target !== 'sandbox3' || !token ||
+          request.headers.get('authorization') !== `Bearer ${token}` || source?.capture !== true ||
+          !Number.isSafeInteger(source.messageId) || source.messageId <= 0 ||
+          typeof source.username !== 'string' || !source.username || !Number.isSafeInteger(chatId) || chatId === 0 ||
+          !/^[1-9]\d*$/.test(String(this.env.TG_SANDBOX_E2E_USER_ID ?? ''))) {
+        return Response.json({ error: 'sandbox_capture_seed_forbidden' }, { status: 404 });
+      }
+      return this._exclusive(async () => {
+        const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+        const launching = (await this.state.storage.get('launching')) || [];
+        const last = items.at(-1)?.msg || launching.at(-1)?.msg;
+        if (!items.length || last?.chat?.id !== chatId ||
+            (await this.state.storage.get('collectorMsgId')) != null ||
+            (await this.state.storage.get('busy')) || items.some(item => item.mediaPending || item.preparingAt)) {
+          return Response.json({ error: 'sandbox_capture_collector_not_seedable' }, { status: 409 });
+        }
+        const session = await getSession(this.env.SESSIONS, chatId, last ? threadIdOf(last) : null);
+        if (session?.username !== source.username ||
+            String(session?.telegramUserId ?? '') !== String(this.env.TG_SANDBOX_E2E_USER_ID)) {
+          return Response.json({ error: 'sandbox_capture_session_mismatch' }, { status: 409 });
+        }
+        const revision = await this.state.storage.get('draftRevision');
+        if (!Number.isSafeInteger(revision) || revision < 1) {
+          return Response.json({ error: 'sandbox_capture_revision_missing' }, { status: 409 });
+        }
+        await this.state.storage.put('collectorMsgId', source.messageId);
+        await this.state.storage.put('collectorDraftRevision', revision);
+        return Response.json({ seeded: true, draftRevision: revision });
+      });
+    }
     if (this.env.EXECUTION_BACKEND === 'control-plane' && url.pathname === '/discard' && request.method === 'POST') {
       const source = await request.clone().json().catch(() => ({}));
       const result = await this._exclusive(async () => {
