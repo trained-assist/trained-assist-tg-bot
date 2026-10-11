@@ -16,6 +16,7 @@ on:
           - basic
           - multiline
           - history
+          - stop
         default: basic
 
 permissions:
