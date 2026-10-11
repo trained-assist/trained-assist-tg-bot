@@ -35,7 +35,7 @@ app.get('/health', c => {
   const mediaIntake = mode !== MODE.batch
     ? 'disabled'
     : c.env.INGRESS_BUFFER?.fetch && String(c.env.INGRESS_BUFFER_TOKEN ?? '').trim()
-      ? 'ready'
+      ? 'configured'
       : 'not_configured';
   return c.json({ status: 'ok', readiness: missing.length ? 'not_configured' : 'configured', missingBindings: missing, bot: c.env.TG_SANDBOX_BOT_USERNAME, mode, capabilities: { mediaIntake } });
 });
