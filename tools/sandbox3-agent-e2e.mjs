@@ -87,7 +87,7 @@ async function waitForTask() {
   const deadline = Date.now() + 8 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
-    rows = await d1(`SELECT id, status, result_json, generation FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 2`, [PROFILE_ID]);
+    rows = await d1(`SELECT id, status, goal, user_value, result_json, generation FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 2`, [PROFILE_ID]);
     if (rows.length) {
       if (rows.length !== 1) throw new Error('sandbox3_unexpected_task_count');
       if (['failed', 'cancelled'].includes(rows[0].status)) throw new Error(`sandbox3_task_${rows[0].status}`);
@@ -172,6 +172,13 @@ async function main() {
 
   const task = await waitForTask();
   assert(typeof task.goal === 'string' && task.goal.includes(nonce), 'sandbox3_input_not_persisted');
+  assert(typeof task.user_value === 'string' && task.user_value.includes(nonce), 'sandbox3_original_input_not_persisted');
+  const [routingRow] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?', [`routing:${task.id}:${task.generation}`]);
+  assert(routingRow?.payload_json, 'sandbox3_routing_selection_not_persisted');
+  const routing = JSON.parse(routingRow.payload_json);
+  assert.equal(routing.decision?.route, 'agent', 'sandbox3_selector_did_not_select_agent');
+  assert.equal(routing.decision?.reasonCode, 'COMMUNICATION_SELECTED', 'sandbox3_communication_selector_fell_back');
+  assert(routing.continuation, 'sandbox3_agent_continuation_not_requested');
   const executions = await d1(`SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [task.id]);
   assert.equal(executions.length, 1, 'sandbox_task_execution_count_not_one');
   assert.equal(executions[0].status, 'success', 'sandbox_runner_execution_not_successful');
