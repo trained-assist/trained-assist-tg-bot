@@ -87,7 +87,7 @@ async function waitForTask() {
   const deadline = Date.now() + 8 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
-    rows = await d1(`SELECT id, status, goal, user_value, result_json, generation FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 2`, [PROFILE_ID]);
+    rows = await d1(`SELECT id, status, goal, user_value, result_json, generation, delivery_state FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 2`, [PROFILE_ID]);
     if (rows.length) {
       if (rows.length !== 1) throw new Error('sandbox3_unexpected_task_count');
       if (['failed', 'cancelled'].includes(rows[0].status)) throw new Error(`sandbox3_task_${rows[0].status}`);
@@ -117,17 +117,11 @@ async function waitForDelivery(taskId, chatId) {
   throw new Error(`sandbox3_delivery_timeout_${observed?.terminal?.status ?? 'not_enqueued'}`);
 }
 
-async function waitForCpDelivery(taskId) {
-  const deadline = Date.now() + 2 * 60_000;
-  let rows = [];
-  while (Date.now() < deadline) {
-    rows = await d1(`SELECT t.delivery_state, d.status FROM durable_tasks t
-      LEFT JOIN deliveries d ON d.user_task_id = t.id WHERE t.id = ? ORDER BY d.created_at`, [taskId]);
-    if (rows.length && rows.every(row => row.delivery_state === 'delivered' && row.status === 'delivered')) return rows;
-    if (rows.some(row => ['failed', 'unknown'].includes(row.status))) throw new Error('sandbox3_cp_delivery_not_delivered');
-    await new Promise(resolve => setTimeout(resolve, 5_000));
-  }
-  throw new Error(`sandbox3_cp_delivery_timeout_${rows[0]?.delivery_state ?? 'missing'}`);
+async function verifyGatewayOwnedDelivery(taskId, taskDeliveryState) {
+  const [projection] = await d1(`SELECT count(*) AS row_count FROM deliveries WHERE user_task_id = ?`, [taskId]);
+  assert.equal(taskDeliveryState, 'not_required', 'sandbox3_telegram_delivery_is_owned_by_gateway');
+  assert.equal(projection?.row_count, 0, 'sandbox3_unexpected_control_plane_delivery_rows');
+  return { state: taskDeliveryState, rows: projection.row_count };
 }
 
 async function main() {
@@ -195,7 +189,7 @@ async function main() {
   const resultText = typeof task.result_json === 'string' ? task.result_json : JSON.stringify(task.result_json ?? '');
   assert(resultText.toLowerCase().includes(nonce.toLowerCase()), 'sandbox_answer_did_not_match_challenge');
   const terminal = await waitForDelivery(task.id, chatId);
-  const cpDeliveries = await waitForCpDelivery(task.id);
+  const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
 
   const report = {
     ok: true,
@@ -210,8 +204,9 @@ async function main() {
     telegramDeliverySent: terminal.status === 'sent',
     telegramProviderMessageIdPresent: true,
     deliveryAttempts: terminal.attempts,
-    controlPlaneDeliveryRows: cpDeliveries.length,
-    controlPlaneDeliveryTerminal: cpDeliveries.every(row => row.status === 'delivered'),
+    telegramDeliveryOwner: 'sandbox3-intake',
+    controlPlaneDeliveryState: cpDelivery.state,
+    controlPlaneDeliveryRows: cpDelivery.rows,
   };
   await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify(report));
