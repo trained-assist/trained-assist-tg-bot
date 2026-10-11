@@ -924,9 +924,6 @@ export class IntakeBuffer {
           return { refused: true, reason: 'selector_mismatch' };
         }
         if (source?.windowId != null && source.windowId !== stopWindow?.intentId) return { refused: true, reason: 'window_identity_changed' };
-        if (source?.mode === 'reconcile' && source.confirmWindowId !== stopWindow.intentId) {
-          return { refused: true, reason: 'reconcile_confirmation_required' };
-        }
         const refuse = (reason, details = {}) => ({ refused: true, reason, ...details,
           notifyChatId: chatId, notifyThreadId: threadId });
         const entries = {};
@@ -941,7 +938,7 @@ export class IntakeBuffer {
         const snapshot = { version: 1, profileId: source.profileId, chatId, threadId,
           windowId: stopWindow.intentId, capturedAt: Date.now(), entries };
         if (source.mode === 'inspect') return { snapshot };
-        if (source.mode === 'release' || source.mode === 'reconcile') {
+        if (source.mode === 'release') {
           const admissionIds = [...new Set([...(stopWindow.admissionRequestIds || []),
             ...(stopWindow.tasks || []).map(task => task?.requestId).filter(Boolean)])].sort();
           const busyIds = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
@@ -963,29 +960,11 @@ export class IntakeBuffer {
             try { status = await client.status(receipt.userTaskId); }
             catch (error) { return refuse('control_plane_status_unavailable', { snapshot,
               httpStatus: Number.isInteger(error?.status) ? error.status : null }); }
-            const taskMatches = status.id === receipt.userTaskId;
+            const taskMatches = status.id === receipt.userTaskId && isTerminalTaskStatus(status.status);
             const runsTerminal = Array.isArray(status.runs) && status.runs.every(run =>
               ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
             const awaitingClosed = status.awaiting?.status !== 'open';
-            if (source.mode === 'reconcile' && taskMatches && !isTerminalTaskStatus(status.status) &&
-                status.runs?.length > 0 && runsTerminal && awaitingClosed) {
-              let cancellation;
-              try { cancellation = await client.cancel(receipt.userTaskId, { reason: 'sandbox_stop_fixture_recovery' }); }
-              catch (error) { return refuse('control_plane_cancel_unavailable', { snapshot,
-                httpStatus: Number.isInteger(error?.status) ? error.status : null }); }
-              if (cancellation.cancelled !== true || cancellation.stopConfirmed !== true || cancellation.status !== 'cancelled') {
-                return refuse('control_plane_cancel_unconfirmed', { snapshot, taskEvidence: {
-                  taskId: receipt.userTaskId, status: cancellation.status, generation: cancellation.generation,
-                  stopConfirmed: cancellation.stopConfirmed,
-                } });
-              }
-              try { status = await client.status(receipt.userTaskId); }
-              catch (error) { return refuse('control_plane_status_unavailable', { snapshot,
-                httpStatus: Number.isInteger(error?.status) ? error.status : null }); }
-            }
-            const terminalRuns = Array.isArray(status.runs) && status.runs.every(run =>
-              ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
-            if (!taskMatches || !isTerminalTaskStatus(status.status) || !terminalRuns || !awaitingClosed) {
+            if (!taskMatches || !runsTerminal || !awaitingClosed) {
               return refuse('control_plane_task_not_terminal', { snapshot, taskEvidence: {
                 taskId: status.id, status: status.status, generation: status.generation,
                 runs: (status.runs || []).map(run => ({ id: run.id, status: run.status, generation: run.generation,
@@ -999,8 +978,7 @@ export class IntakeBuffer {
           const current = await this.state.storage.get('cpStopWindow');
           if (!current || current.intentId !== source.windowId) return { refused: true, reason: 'window_identity_changed', snapshot };
           await this.state.storage.put('cpStopWindow', { ...current, pending: false, unresolved: false,
-            recoveryOutcome: source.mode === 'reconcile' ? 'reconciled_cancelled' : 'verified_terminal',
-            recoveryAt: Date.now(), verifiedTasks });
+            recoveryOutcome: 'verified_terminal', recoveryAt: Date.now(), verifiedTasks });
           for (const requestId of admissionIds) {
             const key = `cp-acceptance:${requestId}`;
             const record = await this.state.storage.get(key);
@@ -1013,8 +991,7 @@ export class IntakeBuffer {
           await this.state.storage.deleteAlarm();
           await this._bumpDraftRevisionLocked();
           const remainingDraft = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
-          return { released: true, recoveryOutcome: source.mode === 'reconcile' ? 'reconciled_cancelled' : 'verified_terminal',
-            verifiedTasks, draftPreserved: true,
+          return { released: true, recoveryOutcome: 'verified_terminal', verifiedTasks, draftPreserved: true,
             hasDraft: remainingDraft.length > 0, notifyChatId: chatId, notifyThreadId: threadId, snapshot };
         }
         if (source.mode !== 'abandon' || source.confirmWindowId !== stopWindow.intentId ||

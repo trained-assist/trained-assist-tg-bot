@@ -80,12 +80,12 @@ Intake state does not use this reset path.
 If a sandbox3 E2E leaves a task active, run the protected-main
 `Recover and clean sandbox3 stop state` workflow with `run_recovery=true`. It
 requests `/stop` through `/operator/test-update`. If the stop reply is not
-confirmed, the workflow inspects that chat's exact stop window and asks the
-operator recovery route to reconcile it through the normal CP `/cancel` API;
-that path proceeds only when every recorded run is terminal and lease-free,
-then verifies terminal CP state before invoking reset. An active or unknown
-run blocks reconciliation and reset. The workflow checks that both CP and
-Intake state are empty afterward.
+confirmed, the workflow asks the sandbox3 operator route to reconcile that exact
+CP task through the normal CP `/cancel` API; it verifies profile and
+chat/topic-derived conversation identity, and proceeds only when every run is
+terminal and lease-free. The Worker rechecks terminal CP state before reset. An
+active or unknown run blocks reconciliation and reset. The workflow checks
+that both CP and Intake state are empty afterward.
 
 Sandbox user records use the existing `user:` keys in the isolated sandbox KV
 and are removed by the full sandbox reset (which also clears older

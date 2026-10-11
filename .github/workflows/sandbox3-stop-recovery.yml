@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_recovery:
-        description: Stop any active sandbox3 task through the Worker API, then require empty state
+        description: Stop an active sandbox3 task through the Worker API, then require empty state
         required: true
         type: boolean
         default: false
@@ -42,7 +42,7 @@ jobs:
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
           --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
           --message "sandbox3-stop-recovery-${GITHUB_SHA}"
-      - name: Request and confirm sandbox3 active task stop through Worker API
+      - name: Stop through Worker API; reconcile only terminal runs if needed
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

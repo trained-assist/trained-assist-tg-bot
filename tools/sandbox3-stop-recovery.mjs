@@ -76,21 +76,16 @@ async function sendStop(chatId, userId, updateId) {
   return stopReplyConfirmsRequest(text);
 }
 
-async function reconcileTerminalRuns(chatId) {
+async function reconcileTerminalRuns(chatId, taskId) {
   const headers = { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' };
-  const inspect = await fetch(`${TG_ORIGIN}/operator/stop-window`, { method: 'POST', headers,
-    body: JSON.stringify({ mode: 'inspect', profileId: PROFILE_ID, chatId, threadId: null }),
-    signal: AbortSignal.timeout(30_000) });
-  const inspected = await inspect.json().catch(() => ({}));
-  if (!inspect.ok || typeof inspected.snapshot?.windowId !== 'string')
-    throw new Error('sandbox3_stop_window_inspect_failed');
-  const windowId = inspected.snapshot.windowId;
   const response = await fetch(`${TG_ORIGIN}/operator/stop-window`, { method: 'POST', headers,
-    body: JSON.stringify({ mode: 'reconcile', profileId: PROFILE_ID, chatId, threadId: null,
-      windowId, confirmWindowId: windowId }), signal: AbortSignal.timeout(90_000) });
+    body: JSON.stringify({ mode: 'reconcile-task', profileId: PROFILE_ID, chatId, threadId: null, taskId }),
+    signal: AbortSignal.timeout(90_000) });
   const outcome = await response.json().catch(() => ({}));
-  assert(response.ok && outcome.released === true && outcome.recoveryOutcome === 'reconciled_cancelled',
-    'sandbox3_terminal_run_reconciliation_refused');
+  const reason = outcome.reason ?? outcome.error;
+  const reasonCode = typeof reason === 'string' && /^[a-z0-9_:.-]+$/.test(reason) ? reason : 'refused';
+  assert(response.ok && outcome.reconciled === true,
+    `sandbox3_terminal_run_reconciliation_${response.status}_${reasonCode}`);
 }
 
 async function main() {
@@ -111,7 +106,7 @@ async function main() {
   const task = activeTasks[0];
   const updateId = await loginRecoveryProfile(chatId, userId, Date.now());
   const stopConfirmed = await sendStop(chatId, userId, updateId);
-  if (!stopConfirmed) await reconcileTerminalRuns(chatId);
+  if (!stopConfirmed) await reconcileTerminalRuns(chatId, task.id);
 
   const deadline = Date.now() + 120_000;
   let observed = null;
