@@ -335,6 +335,31 @@ describe('signed existing-UX ingress', () => {
     expect(await foreign.json()).toMatchObject({ error: 'sandbox_test_delivery_identity_mismatch' });
   });
 
+  it('reads only delivery metadata for the explicitly selected probability sandbox chat', async () => {
+    const { env } = fixture();
+    configureProbabilityOperator(env);
+    const calls = [];
+    env.TG_DELIVERY_OWNER = { idFromName: name => name, get: () => ({ async fetch(request) {
+      const body = await request.json();
+      calls.push({ path: new URL(request.url).pathname, body });
+      return Response.json({ receipt: null, terminal: { deliveryId: 'terminal:task-2:g1', userTaskId: body.taskId,
+        status: 'sent', attempts: 1, providerMessageId: 456, generation: 1, chatId: 1001, threadId: null } });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/test-delivery/task-2?chatId=1001', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX_CLEANUP_TOKEN}` },
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ taskId: 'task-2', chatId: '1001', terminal: {
+      status: 'sent', chatId: 1001, providerMessageId: 456,
+    } });
+    expect(calls).toEqual([{ path: '/read', body: { taskId: 'task-2' } }]);
+    const foreign = await worker.fetch(new Request('https://worker/operator/test-delivery/task-2?chatId=1002', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX_CLEANUP_TOKEN}` },
+    }), env);
+    expect(foreign.status).toBe(409);
+    expect(await foreign.json()).toMatchObject({ error: 'sandbox_test_delivery_identity_mismatch' });
+  });
+
   it('protects delivery-owner readiness and reads it without reconciling deliveries', async () => {
     const state = fixture();
     expect((await worker.fetch(new Request('https://worker/delivery-cutover'), state.env)).status).toBe(401);
