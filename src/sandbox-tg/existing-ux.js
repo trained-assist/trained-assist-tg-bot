@@ -11,6 +11,7 @@ import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routin
 import { beginTestCapture, initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { ControlPlaneClient } from './control-plane-client.js';
+import { isTerminalTaskStatus } from './contract.js';
 import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
@@ -144,16 +145,71 @@ app.post('/operator/stop-window', async context => {
   const source = await context.req.json().catch(() => null);
   const chatId = source?.chatId ?? (config.allowedChats.length === 1 ? Number(config.allowedChats[0]) : null);
   const profileId = source?.profileId ?? config.profileId;
-  if (!source || !['inspect', 'release', 'reconcile', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
+  if (!source || !['inspect', 'release', 'reconcile-task', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
       (source.threadId != null && (!Number.isSafeInteger(source.threadId) || source.threadId <= 0)) ||
       profileId !== config.profileId ||
       (source.windowId != null && typeof source.windowId !== 'string') ||
-      (source.mode !== 'inspect' && typeof source.windowId !== 'string') ||
-      source.mode === 'reconcile' && source.confirmWindowId !== source.windowId ||
+      (source.mode !== 'inspect' && source.mode !== 'reconcile-task' && typeof source.windowId !== 'string') ||
+      source.mode === 'reconcile-task' && (typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId)) ||
       source.mode === 'abandon' && (source.confirmWindowId !== source.windowId ||
         source.auditReason !== 'sandbox_test_fixture_abandoned')) return context.json({ error: 'invalid selector' }, 400);
-  if (!config.allowedChats.includes(String(chatId))) return context.json({ error: 'owner refused' }, 403);
+  const operatorLane = sandboxOperatorLane(env);
+  const ownerChatAllowed = operatorLane === 'sandbox3'
+    ? sandboxOperatorChatAllowed(env, config, operatorLane, chatId)
+    : config.allowedChats.includes(String(chatId));
+  if (!ownerChatAllowed) return context.json({ error: 'owner refused' }, 403);
   if (env.TG_SANDBOX_OPERATOR_RECOVERY !== 'enabled') return context.json({ error: 'recovery disabled' }, 404);
+  if (source.mode === 'reconcile-task') {
+    if (operatorLane !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true')
+      return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+    const pinnedUserId = String(env.TG_SANDBOX_E2E_USER_ID ?? '').trim();
+    if (!/^[1-9]\d*$/.test(pinnedUserId)) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+    const conversation = `^tg-${pinnedUserId}${source.threadId == null
+      ? '' : `-t${source.threadId}`}-s[0-9a-f]{24}$`;
+    const taskId = source.taskId;
+    const client = new ControlPlaneClient(config, { fetchImpl: env.CONTROL_PLANE_SERVICE
+      ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined });
+    const refused = (reason, details = {}) => context.json({ refused: true, reason, ...details }, 409);
+    let status;
+    try { status = await client.status(taskId); }
+    catch (error) { return context.json({ error: 'control_plane_status_unavailable',
+      httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+    const taskMatches = status.id === taskId && status.profile_id === profileId &&
+      new RegExp(conversation).test(status.conversation_id ?? '');
+    const runsTerminal = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
+      ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
+    const awaitingClosed = status.awaiting?.status !== 'open';
+    if (!taskMatches) return refused('control_plane_task_scope_mismatch');
+    if (!runsTerminal || !awaitingClosed) return refused('control_plane_run_not_terminal', { taskEvidence: {
+      taskId, status: status.status, generation: status.generation,
+      runs: (status.runs || []).map(run => ({ id: run.id, status: run.status, leaseUntil: run.lease_until ?? null })),
+      awaitingStatus: status.awaiting?.status ?? null,
+    } });
+    if (!isTerminalTaskStatus(status.status)) {
+      let cancellation;
+      try { cancellation = await client.cancel(taskId, { reason: 'sandbox_stop_fixture_recovery' }); }
+      catch (error) { return context.json({ error: 'control_plane_cancel_unavailable',
+        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+      if (cancellation.cancelled !== true || cancellation.stopConfirmed !== true || cancellation.status !== 'cancelled') {
+        return refused('control_plane_cancel_unconfirmed', { taskEvidence: {
+          taskId, status: cancellation.status, generation: cancellation.generation,
+          stopConfirmed: cancellation.stopConfirmed,
+        } });
+      }
+      try { status = await client.status(taskId); }
+      catch (error) { return context.json({ error: 'control_plane_status_unavailable',
+        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+    }
+    const verifiedRuns = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
+      ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
+    if (status.id !== taskId || status.profile_id !== profileId || !new RegExp(conversation).test(status.conversation_id ?? '')
+        || !isTerminalTaskStatus(status.status) || !verifiedRuns || status.awaiting?.status === 'open') {
+      return refused('control_plane_task_not_terminal', { taskEvidence: { taskId, status: status.status,
+        generation: status.generation, runsTerminal: verifiedRuns } });
+    }
+    return context.json({ reconciled: true, status: status.status, generation: status.generation,
+      runs: status.runs.map(run => ({ id: run.id, status: run.status, generation: run.generation })) });
+  }
   const selector = { ...source, chatId, profileId, threadId: source.threadId ?? null };
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, selector.threadId)));
   const response = await stub.fetch('https://intake/operator/stop-window', {

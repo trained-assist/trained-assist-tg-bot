@@ -227,7 +227,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-terminal-runs', 'operator-stop-window-reconcile-active-run-refusal', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -246,6 +246,14 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     SESSION_NAMESPACE: 'integrator-existing-ux-v1', TG_SANDBOX_CLEANUP_TOKEN: 'offline-cleanup-token',
     TG_SANDBOX_TEST_API_ENABLED: 'true', TG_SANDBOX_BUFFER_TEST_CHAT_ID: '-1000000000236',
     TG_SLICE_INGRESS_PAUSED: 'false' });
+  if (boundary.startsWith('operator-stop-window-reconcile-task')) {
+    env.TG_SANDBOX_BOT_USERNAME = 'ptichka_status_bot';
+    env.SESSION_NAMESPACE = 'integrator-sandbox3-v1';
+    env.CONTROL_PLANE_URL = 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev';
+    env.CONTROL_PLANE_PROFILE = 'integration-sandbox3-v1';
+    env.TG_SANDBOX_E2E_CHAT_ID = '42';
+    env.TG_SANDBOX_E2E_USER_ID = '43';
+  }
   if (boundary === 'operator-test-api') {
     env.CONTROL_PLANE_URL = 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev';
     env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
@@ -271,6 +279,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   const reply = (data, status = 200) => Response.json(data, { status });
   const outboundService = async request => {
     const url = new URL(request.url);
+    if (url.hostname === 'trained-assist-cp-sandbox3.skillset-apply.workers.dev') url.hostname = 'cp.test';
     const body = request.method === 'POST' ? await request.json() : null;
     if (url.hostname === 'api.telegram.org') {
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/sendMessage`) {
@@ -349,13 +358,19 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     }
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
+        conversation_id: boundary.startsWith('operator-stop-window-reconcile-task')
+          ? boundary === 'operator-stop-window-reconcile-task-scope-mismatch' ? 'tg-99-s0123456789abcdef01234567' : 'tg-43-s0123456789abcdef01234567'
+          : null,
         status: cancelledTasks.has(body.taskId) ? 'cancelled' : completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
           : failedTasks.has(body.taskId) ? 'failed' : 'active', generation: 1,
         result: completedTasks.has(body.taskId) ? { answer: 'Offline engine fixture completed.' } : null },
       runs: dispatchedTasks.has(body.taskId) || boundary.startsWith('operator-stop-window-reconcile') ? [{ id: `run-${body.taskId}`,
         status: cancelledTasks.has(body.taskId) ? 'cancelled' : completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'unknown'
-          : failedTasks.has(body.taskId) ? 'failed' : boundary === 'operator-stop-window-reconcile-active-run-refusal' ? 'running' : 'cancelled',
-        generation: 1, finished_at: boundary === 'operator-stop-window-reconcile-active-run-refusal' ? null : Date.now(), lease_until: null }] : [],
+          : failedTasks.has(body.taskId) ? 'failed' : ['operator-stop-window-reconcile-active-run-refusal',
+            'operator-stop-window-reconcile-task-active-run-refusal'].includes(boundary) ? 'running' : 'cancelled',
+        generation: 1, finished_at: ['operator-stop-window-reconcile-active-run-refusal',
+          'operator-stop-window-reconcile-task-active-run-refusal'].includes(boundary) ? null : Date.now(),
+        lease_until: boundary === 'operator-stop-window-reconcile-task-live-lease-refusal' ? Date.now() : null }] : [],
     });
     if (url.hostname === 'legacy.test') {
       legacyRequests.push(url.pathname);
@@ -364,7 +379,6 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     unexpectedRequests.push({ host: url.hostname, path: url.pathname });
     return reply({ error: 'unconfigured offline transport' }, 500);
   };
-  env.CONTROL_PLANE_SERVICE = { fetch: async request => outboundService(request) };
   const runtimeOptions = { name: 'existing-ux-scenario', modules: true, script, compatibilityDate: '2024-01-01',
     compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS', 'PRODUCTION_USERS'],
     kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
@@ -481,8 +495,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       })).status).toBe(401);
       const terminalRelease = boundary === 'operator-stop-window-release-terminal';
       const lostBusy = boundary === 'operator-stop-window-recovery-lost-busy';
-      const reconcileFixture = boundary.startsWith('operator-stop-window-reconcile');
-      const terminalFixture = terminalRelease || reconcileFixture;
+      const terminalFixture = terminalRelease;
       const seeded = await (await collector()).fetch(`https://intake/scenario-seed-${terminalFixture ? 'terminal' : lostBusy ? 'lost-busy' : 'abandonable'}-stop-window`, {
         headers: { 'x-scenario-probe': 'offline-probe' },
       });
@@ -513,6 +526,29 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
           headers: { 'content-type': 'application/json', authorization: 'Bearer offline-operator-token' },
           body: JSON.stringify(body) });
       };
+      if (boundary.startsWith('operator-stop-window-reconcile-task')) {
+        const taskSelector = { mode: 'reconcile-task', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
+          threadId: null, taskId: 'ut-terminal-fixture' };
+        const outcome = await invokeRecovery(taskSelector);
+        const outcomeBody = await outcome.json();
+        if (['operator-stop-window-reconcile-task-active-run-refusal',
+          'operator-stop-window-reconcile-task-live-lease-refusal'].includes(boundary)) {
+          expect(outcome.status).toBe(409);
+          expect(outcomeBody).toMatchObject({ refused: true, reason: 'control_plane_run_not_terminal' });
+          expect(cpCancels).toHaveLength(0);
+          return;
+        }
+        if (boundary === 'operator-stop-window-reconcile-task-scope-mismatch') {
+          expect(outcome.status).toBe(409);
+          expect(outcomeBody).toMatchObject({ refused: true, reason: 'control_plane_task_scope_mismatch' });
+          expect(cpCancels).toHaveLength(0);
+          return;
+        }
+        expect(outcome.status).toBe(200);
+        expect(outcomeBody).toMatchObject({ reconciled: true, status: 'cancelled' });
+        expect(cpCancels).toEqual([{ taskId: 'ut-terminal-fixture', reason: 'sandbox_stop_fixture_recovery' }]);
+        return;
+      }
       if (terminalRelease) {
         completedTasks.add('ut-terminal-fixture');
         const releaseSelector = { mode: 'release', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
@@ -528,27 +564,6 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(releasedEntries.get('busy')).toBeUndefined();
         expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
         expect(cpIntakes).toHaveLength(0);
-        return;
-      }
-      if (reconcileFixture) {
-        const reconcileSelector = { mode: 'reconcile', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
-          threadId: null, windowId: 'terminal-window-5678', confirmWindowId: 'terminal-window-5678' };
-        const outcome = await invokeRecovery(reconcileSelector);
-        if (boundary === 'operator-stop-window-reconcile-active-run-refusal') {
-          expect(outcome.status).toBe(409);
-          expect(await outcome.json()).toMatchObject({ refused: true, reason: 'control_plane_task_not_terminal' });
-          expect(cpCancels).toHaveLength(0);
-          expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true });
-          return;
-        }
-        expect(outcome.status).toBe(200);
-        expect(await outcome.json()).toMatchObject({ released: true, recoveryOutcome: 'reconciled_cancelled',
-          verifiedTasks: [{ userTaskId: 'ut-terminal-fixture', status: 'cancelled' }] });
-        expect(cpCancels).toEqual([{ taskId: 'ut-terminal-fixture', reason: 'sandbox_stop_fixture_recovery' }]);
-        const entries = await state();
-        expect(entries.get('buf')[0].text).toBe('retained terminal draft');
-        expect(entries.get('cpStopWindow')).toMatchObject({ pending: false, recoveryOutcome: 'reconciled_cancelled' });
-        expect(entries.get('busy')).toBeUndefined();
         return;
       }
       if (boundary === 'operator-stop-window-release-active-refusal') {
