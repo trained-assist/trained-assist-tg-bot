@@ -416,8 +416,10 @@ async function main() {
   const [routingRow] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?', [`routing:${task.id}:${task.generation}`]);
   assert(routingRow?.payload_json, 'sandbox3_routing_selection_not_persisted');
   const routing = JSON.parse(routingRow.payload_json);
-  const providerCode = typeof routing.decision?.providerCode === 'string'
-    && /^[a-z0-9_:-]{1,64}$/.test(routing.decision.providerCode) ? routing.decision.providerCode : 'unknown';
+  const rawProviderCode = routing.decision?.providerCode;
+  const providerCode = rawProviderCode === null ? null
+    : typeof rawProviderCode === 'string' && /^[a-z0-9_:-]{1,64}$/.test(rawProviderCode)
+      ? rawProviderCode : 'unavailable';
   const communicationReasonCode = routing.decision?.reasonCode;
   const communicationOutcome = communicationReasonCode === 'COMMUNICATION_SELECTED' ? 'selected'
     : communicationReasonCode === 'COMMUNICATION_FALLBACK' ? 'agent_fallback' : null;
