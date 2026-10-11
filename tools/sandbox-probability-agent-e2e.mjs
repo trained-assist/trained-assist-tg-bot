@@ -19,13 +19,26 @@ assert(Number.isSafeInteger(chatId) && chatId > 0, 'probability_test_chat_invali
 assert(Number.isSafeInteger(userId) && userId > 0, 'probability_test_user_invalid');
 
 async function workerRequest(path, body) {
-  const response = await fetch(`${TG_ORIGIN}${path}`, {
-    method: 'POST', headers: { authorization: `Bearer ${required('TG_SANDBOX_CLEANUP_TOKEN')}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(180_000),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`probability_worker_${path.replaceAll('/', '_')}_${response.status}:${payload.error ?? 'failed'}`);
-  return payload;
+  const readyDeadline = Date.now() + 60_000;
+  while (true) {
+    const response = await fetch(`${TG_ORIGIN}${path}`, {
+      method: 'POST', headers: { authorization: `Bearer ${required('TG_SANDBOX_CLEANUP_TOKEN')}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(180_000),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return payload;
+    // The callback is a safe retry: Intake returns these refusals before
+    // dispatching the buffered update or creating a CP task. The collector
+    // button can appear shortly after the message enters its Durable Object.
+    const updateIsNotReady = payload.error === 'sandbox_test_api_not_ready'
+      || body?.type === 'callback' && ['no_current_button_message', 'no_current_button_revision'].includes(payload.error);
+    if (path === '/operator/test-update' && response.status === 409
+        && updateIsNotReady && Date.now() < readyDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+      continue;
+    }
+    throw new Error(`probability_worker_${path.replaceAll('/', '_')}_${response.status}:${payload.error ?? 'failed'}`);
+  }
 }
 
 async function d1(sql, params = []) {
