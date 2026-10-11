@@ -172,12 +172,13 @@ async function main() {
   const routing = JSON.parse(routingRow.payload_json);
   const providerCode = typeof routing.decision?.providerCode === 'string'
     && /^[a-z0-9_:-]{1,64}$/.test(routing.decision.providerCode) ? routing.decision.providerCode : 'unknown';
+  const communicationReasonCode = routing.decision?.reasonCode;
+  const communicationOutcome = communicationReasonCode === 'COMMUNICATION_SELECTED' ? 'selected'
+    : communicationReasonCode === 'COMMUNICATION_FALLBACK' ? 'agent_fallback' : null;
   console.log(JSON.stringify({ scenario: 'communication-selector', route: routing.decision?.route ?? null,
-    reasonCode: routing.decision?.reasonCode ?? null, providerCode }));
+    outcome: communicationOutcome, reasonCode: communicationReasonCode ?? null, providerCode }));
   assert.equal(routing.decision?.route, 'agent', 'sandbox3_selector_did_not_select_agent');
-  if (routing.decision?.reasonCode !== 'COMMUNICATION_SELECTED') {
-    throw new Error(`sandbox3_communication_selector_${providerCode}`);
-  }
+  assert(communicationOutcome, `sandbox3_communication_route_${providerCode}`);
   assert(routing.continuation, 'sandbox3_agent_continuation_not_requested');
   const executions = await d1(`SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [task.id]);
   assert.equal(executions.length, 1, 'sandbox_task_execution_count_not_one');
@@ -195,6 +196,9 @@ async function main() {
     ok: true,
     scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
     sourceSha: process.env.GITHUB_SHA ?? null,
+    communicationOutcome,
+    communicationReasonCode,
+    communicationProviderCode: providerCode,
     loginPassed: true,
     questionAccepted: true,
     taskTerminalDone: task.status === 'done',

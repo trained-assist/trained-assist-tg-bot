@@ -100,6 +100,11 @@ For each Worker-driven scenario, check these layers:
    with no CP delivery rows: the sandbox Intake delivery owner owns Telegram
    sends. This matches the CP stop-window contract; a CP delivery row is not
    evidence of the gateway's external Telegram acknowledgement.
+   Communication routing may be `COMMUNICATION_SELECTED` or
+   `COMMUNICATION_FALLBACK` with route `agent`. Selector/provider failure is
+   recorded as diagnostic evidence; agent fallback is valid behavior. It does
+   not waive the task, execution, exact-answer, or terminal Telegram-delivery
+   assertions.
 3. **Delivery:** the Intake barrier clears only after the delivery owner reports
    the terminal Telegram message as sent to the pinned chat and supplies a
    Telegram provider message ID. Immediate replies include Telegram's accepted
