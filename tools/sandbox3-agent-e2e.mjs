@@ -83,11 +83,12 @@ function assertDelivered(response, phase) {
   }
 }
 
-async function waitForTask() {
+async function waitForTask(excludedTaskIds = []) {
   const deadline = Date.now() + 8 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
-    rows = await d1(`SELECT id, status, goal, user_value, result_json, generation, delivery_state FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 2`, [PROFILE_ID]);
+    rows = await d1(`SELECT id, status, goal, user_value, result_json, generation, delivery_state FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 5`, [PROFILE_ID]);
+    rows = rows.filter(row => !excludedTaskIds.includes(row.id));
     if (rows.length) {
       if (rows.length !== 1) throw new Error('sandbox3_unexpected_task_count');
       if (['failed', 'cancelled'].includes(rows[0].status)) throw new Error(`sandbox3_task_${rows[0].status}`);
@@ -128,15 +129,17 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
-  assert(['basic', 'multiline'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'multiline', 'history'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'multiline'
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
-    : `Reply with exactly this token and nothing else: ${nonce}`;
+    : scenario === 'history'
+      ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
+      : `Reply with exactly this token and nothing else: ${nonce}`;
   const expectedLines = scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
-    : [nonce];
+    : scenario === 'history' ? ['READY'] : [nonce];
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
   const sendMessage = (text, extra = {}) => workerRequest('/operator/test-update', {
@@ -246,6 +249,48 @@ async function main() {
   const terminal = await waitForDelivery(task.id, chatId);
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
 
+  let historyEvidence = null;
+  if (scenario === 'history') {
+    const followupPrompt = `What exact token did I ask you to remember? Reply with that token only.`;
+    const followup = await sendMessage(followupPrompt);
+    assert.equal(followup.ok, true, 'sandbox_history_followup_not_accepted');
+    assert.equal(followup.collector?.pendingCount, 1, 'sandbox_history_followup_not_buffered');
+    const followupLaunch = await workerRequest('/operator/test-update', {
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+      callbackData: 'auto', updateId: updateId++,
+    });
+    assert.equal(followupLaunch.ok, true, 'sandbox_history_followup_launch_failed');
+    const followupTask = await waitForTask([task.id]);
+    assert.notEqual(followupTask.id, task.id, 'sandbox_history_followup_reused_task_id');
+    assert(typeof followupTask.goal === 'string' && followupTask.goal.includes(followupPrompt),
+      'sandbox_history_followup_input_not_persisted');
+    const followupExecutions = await d1(`SELECT id, status, session_id, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [followupTask.id]);
+    assert.equal(followupExecutions.length, 1, 'sandbox_history_followup_execution_count_not_one');
+    assert.equal(followupExecutions[0].status, 'success', 'sandbox_history_followup_runner_not_successful');
+    const followupResult = await d1(`SELECT result_json FROM durable_tasks WHERE id = ?`, [followupTask.id]);
+    let followupText = '';
+    const collectFollowupText = value => {
+      if (typeof value === 'string') followupText += `${value}\n`;
+      else if (Array.isArray(value)) value.forEach(collectFollowupText);
+      else if (value && typeof value === 'object') Object.values(value).forEach(collectFollowupText);
+    };
+    collectFollowupText(followupResult[0]?.result_json);
+    assert(followupText.includes(nonce), 'sandbox_history_previous_turn_not_recalled');
+    const followupDelivery = await waitForDelivery(followupTask.id, chatId);
+    const followupRoutingRows = await d1('SELECT payload_json FROM task_events WHERE event_id = ?',
+      [`routing:${followupTask.id}:${followupTask.generation}`]);
+    const followupRouting = JSON.parse(followupRoutingRows[0]?.payload_json ?? 'null');
+    assert(followupRouting?.continuation, 'sandbox_history_continuation_not_requested');
+    historyEvidence = {
+      previousTurnRecalled: true,
+      distinctTaskIds: true,
+      followupExecutionCount: followupExecutions.length,
+      followupDelivered: followupDelivery.status === 'sent',
+      continuationRequested: true,
+    };
+    console.log(JSON.stringify({ scenario: 'conversation-history-followup', ...historyEvidence }));
+  }
+
   const report = {
     ok: true,
     scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
@@ -266,6 +311,7 @@ async function main() {
     telegramDeliveryOwner: 'sandbox3-intake',
     controlPlaneDeliveryState: cpDelivery.state,
     controlPlaneDeliveryRows: cpDelivery.rows,
+    ...(historyEvidence ? { historyEvidence } : {}),
   };
   await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify(report));
