@@ -21,6 +21,7 @@ on:
           - stop
           - retry-mid-run
           - file-intake
+          - playwright-artifact
         default: basic
       delivery_mode:
         description: Capture Worker output without sending Telegram messages, or verify actual Telegram delivery
