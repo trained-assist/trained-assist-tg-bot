@@ -14,6 +14,8 @@ on:
         type: choice
         options:
           - basic
+          - service-reply
+          - capability-reply
           - multiline
           - history
           - stop

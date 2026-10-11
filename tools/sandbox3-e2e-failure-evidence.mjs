@@ -18,7 +18,7 @@ export function summarizeSandbox3E2eFailure(value = {}) {
       id: text(value.task.id, ID),
       status: text(value.task.status),
       generation: integer(value.task.generation),
-      goalContainsNonce: typeof value.task.goalContainsNonce === 'boolean' ? value.task.goalContainsNonce : null,
+      goalContainsExpectedInput: typeof value.task.goalContainsExpectedInput === 'boolean' ? value.task.goalContainsExpectedInput : null,
       inputItemCount: integer(value.task.inputItemCount),
       expectedLineBreaks: integer(value.task.expectedLineBreaks),
       persistedLineBreaks: integer(value.task.persistedLineBreaks),
