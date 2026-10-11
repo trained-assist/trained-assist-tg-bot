@@ -274,6 +274,7 @@ export class ControlPlaneClient {
     const runs = Array.isArray(value.runs) ? value.runs : [];
     return {
       id: str(row.id) ?? userTaskId,
+      profile_id: str(row.profile_id),
       status: str(row.status) ?? 'unknown',
       stage: str(row.stage),
       generation: numOrNull(row.generation) ?? 0,
