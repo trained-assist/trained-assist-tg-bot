@@ -34,9 +34,12 @@ async function workerRequest(path, body) {
     const payload = await response.json().catch(() => ({}));
     if (response.ok) return payload;
     // A deploy can reach the health edge before its vars reach every Worker
-    // isolate. This response is sent before update dispatch, so retry is safe.
-    if (path === '/operator/test-update' && response.status === 409
-        && payload.error === 'sandbox_test_api_not_ready' && Date.now() < readyDeadline) {
+    // isolate. Both readiness errors are returned before fixture/update writes.
+    const readinessRefusal = path === '/operator/test-update'
+      && payload.error === 'sandbox_test_api_not_ready'
+      || path === '/operator/test-buffer-message'
+      && payload.error === 'sandbox_buffer_test_not_ready';
+    if (response.status === 409 && readinessRefusal && Date.now() < readyDeadline) {
       await new Promise(resolve => setTimeout(resolve, 2_000));
       continue;
     }
