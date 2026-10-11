@@ -227,7 +227,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-terminal-runs', 'operator-stop-window-reconcile-active-run-refusal', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -262,6 +262,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   const completedTasks = new Set();
   const unknownTasks = new Set();
   const failedTasks = new Set();
+  const cancelledTasks = new Set();
+  const cpCancels = [];
   let admitted = null;
   let dispatchCount = 0;
   let lostAck = true;
@@ -340,14 +342,20 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     if (url.hostname === 'cp.test' && url.pathname === '/status' && boundary === 'operator-stop-window-inspect-cp-unavailable') {
       return reply({ error: 'injected offline status refusal' }, 503);
     }
+    if (url.hostname === 'cp.test' && url.pathname === '/cancel') {
+      cpCancels.push(body);
+      cancelledTasks.add(body.taskId);
+      return reply({ cancelled: true, stopConfirmed: true, status: 'cancelled', generation: 2, nativeStops: [] });
+    }
     if (url.hostname === 'cp.test' && url.pathname === '/status') return reply({
       taskStore: { id: body.taskId, profile_id: env.CONTROL_PLANE_PROFILE,
-        status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
+        status: cancelledTasks.has(body.taskId) ? 'cancelled' : completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'running'
           : failedTasks.has(body.taskId) ? 'failed' : 'active', generation: 1,
         result: completedTasks.has(body.taskId) ? { answer: 'Offline engine fixture completed.' } : null },
-      runs: dispatchedTasks.has(body.taskId) ? [{ id: `run-${body.taskId}`,
-        status: completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'unknown'
-          : failedTasks.has(body.taskId) ? 'failed' : 'running', generation: 1 }] : [],
+      runs: dispatchedTasks.has(body.taskId) || boundary.startsWith('operator-stop-window-reconcile') ? [{ id: `run-${body.taskId}`,
+        status: cancelledTasks.has(body.taskId) ? 'cancelled' : completedTasks.has(body.taskId) ? 'done' : unknownTasks.has(body.taskId) ? 'unknown'
+          : failedTasks.has(body.taskId) ? 'failed' : boundary === 'operator-stop-window-reconcile-active-run-refusal' ? 'running' : 'cancelled',
+        generation: 1, finished_at: boundary === 'operator-stop-window-reconcile-active-run-refusal' ? null : Date.now(), lease_until: null }] : [],
     });
     if (url.hostname === 'legacy.test') {
       legacyRequests.push(url.pathname);
@@ -473,7 +481,9 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       })).status).toBe(401);
       const terminalRelease = boundary === 'operator-stop-window-release-terminal';
       const lostBusy = boundary === 'operator-stop-window-recovery-lost-busy';
-      const seeded = await (await collector()).fetch(`https://intake/scenario-seed-${terminalRelease ? 'terminal' : lostBusy ? 'lost-busy' : 'abandonable'}-stop-window`, {
+      const reconcileFixture = boundary.startsWith('operator-stop-window-reconcile');
+      const terminalFixture = terminalRelease || reconcileFixture;
+      const seeded = await (await collector()).fetch(`https://intake/scenario-seed-${terminalFixture ? 'terminal' : lostBusy ? 'lost-busy' : 'abandonable'}-stop-window`, {
         headers: { 'x-scenario-probe': 'offline-probe' },
       });
       expect(seeded.status).toBe(200);
@@ -495,7 +505,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       });
       expect(configuredChatInspect.status).toBe(200);
       expect(await configuredChatInspect.json()).toMatchObject({ snapshot: { profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
-        windowId: terminalRelease ? 'terminal-window-5678' : lostBusy ? 'lost-busy-window-9012' : 'fixture-window-1234' } });
+        windowId: terminalFixture ? 'terminal-window-5678' : lostBusy ? 'lost-busy-window-9012' : 'fixture-window-1234' } });
       const recoveryNamespace = await runtime.getDurableObjectNamespace('INTAKE');
       const recoveryStub = recoveryNamespace.get(recoveryNamespace.idFromName('42'));
       const invokeRecovery = async body => {
@@ -518,6 +528,27 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         expect(releasedEntries.get('busy')).toBeUndefined();
         expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
         expect(cpIntakes).toHaveLength(0);
+        return;
+      }
+      if (reconcileFixture) {
+        const reconcileSelector = { mode: 'reconcile', profileId: env.CONTROL_PLANE_PROFILE, chatId: 42,
+          threadId: null, windowId: 'terminal-window-5678', confirmWindowId: 'terminal-window-5678' };
+        const outcome = await invokeRecovery(reconcileSelector);
+        if (boundary === 'operator-stop-window-reconcile-active-run-refusal') {
+          expect(outcome.status).toBe(409);
+          expect(await outcome.json()).toMatchObject({ refused: true, reason: 'control_plane_task_not_terminal' });
+          expect(cpCancels).toHaveLength(0);
+          expect((await state()).get('cpStopWindow')).toMatchObject({ pending: true });
+          return;
+        }
+        expect(outcome.status).toBe(200);
+        expect(await outcome.json()).toMatchObject({ released: true, recoveryOutcome: 'reconciled_cancelled',
+          verifiedTasks: [{ userTaskId: 'ut-terminal-fixture', status: 'cancelled' }] });
+        expect(cpCancels).toEqual([{ taskId: 'ut-terminal-fixture', reason: 'sandbox_stop_fixture_recovery' }]);
+        const entries = await state();
+        expect(entries.get('buf')[0].text).toBe('retained terminal draft');
+        expect(entries.get('cpStopWindow')).toMatchObject({ pending: false, recoveryOutcome: 'reconciled_cancelled' });
+        expect(entries.get('busy')).toBeUndefined();
         return;
       }
       if (boundary === 'operator-stop-window-release-active-refusal') {
