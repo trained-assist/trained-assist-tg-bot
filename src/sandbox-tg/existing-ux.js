@@ -468,7 +468,9 @@ app.post('/operator/test-update', async context => {
     ...(source.admin === true ? { ADMIN_GROUP_ID: String(chatId) } : {}) };
   const capture = beginTestCapture(chatId, { deliverToTelegram });
   if (!capture) return context.json({ error: 'sandbox_test_api_busy' }, 409);
-  initTestMode(testEnv);
+  // TEST_CHAT_IDS is isolate-scoped module state. Keep synthetic request
+  // delivery decisions in this request's capture instead of mutating it.
+  initTestMode(context.env);
   let response;
   let admission;
   try {
