@@ -7,6 +7,7 @@ const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
 const PROFILE_ID = 'integration-sandbox3-v1';
 const TG_ORIGIN = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
+let failureEvidenceWritten = false;
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -90,6 +91,7 @@ async function failedTaskEvidence(task) {
       reasonCode: safeCode(details.reasonCode) ?? safeCode(details.code) ?? null,
       stage: safeCode(details.stage) ?? null,
       errorClass: safeCode(details.errorClass) ?? null,
+      where: safeCode(details.where) ?? null,
     };
   });
   return {
@@ -106,6 +108,7 @@ async function failedTaskEvidence(task) {
 
 async function writeEvidence(report) {
   await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  failureEvidenceWritten = true;
 }
 
 function assertDelivered(response, phase) {
@@ -163,11 +166,17 @@ async function waitForCancelledTask(taskId) {
   const deadline = Date.now() + 2 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
-    rows = await d1('SELECT status FROM durable_tasks WHERE id = ?', [taskId]);
+    rows = await d1('SELECT id, status, generation FROM durable_tasks WHERE id = ?', [taskId]);
     const status = rows[0]?.status;
     if (status === 'cancelled') return status;
     if (status && ['done', 'failed', 'unknown'].includes(status)) throw new Error(`sandbox3_stop_terminal_${status}`);
     await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+  if (rows[0]) {
+    const diagnostic = await failedTaskEvidence(rows[0]);
+    const reasonCode = `sandbox3_stop_terminal_timeout_${safeCode(rows[0].status) ?? 'unknown'}`;
+    await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode, task: diagnostic });
+    console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode, task: diagnostic }));
   }
   throw new Error(`sandbox3_stop_terminal_timeout_${rows[0]?.status ?? 'missing'}`);
 }
@@ -380,7 +389,7 @@ async function main() {
     const stopReply = await sendMessage('/stop');
     assertDelivered(stopReply, 'active-task-stop');
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-    assert(/останов|stopp/.test(stopText), 'sandbox_stop_confirmation_missing');
+    assert(/задача остановлена|task stopped/.test(stopText), 'sandbox_stop_confirmation_missing');
     const terminalStatus = await waitForCancelledTask(active.id);
     const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
@@ -442,9 +451,12 @@ async function main() {
   console.log(JSON.stringify(report));
 }
 
-main().catch(error => {
+main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
   const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
+  if (!failureEvidenceWritten) {
+    await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic', reasonCode: safe });
+  }
   console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode: safe }));
   process.exitCode = 1;
 });
