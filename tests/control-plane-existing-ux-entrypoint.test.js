@@ -3,10 +3,12 @@ import { webcrypto } from 'node:crypto';
 import { MemKV, makeEnv } from './helpers/p11-helpers.js';
 
 vi.mock('../src/handlers/callbacks.js', () => ({ handleCallbackQuery: vi.fn() }));
+vi.mock('../src/lib/stop-chat.js', () => ({ stopChat: vi.fn(), stopReplyText: vi.fn() }));
 vi.mock('../src/lib/telegram.js', () => ({ answerCallbackQuery: vi.fn(), sendMessage: vi.fn(), sendDocument: vi.fn(),
   sendMessageWithKeyboard: vi.fn(), editMessage: vi.fn() }));
 import worker from '../src/sandbox-tg/existing-ux.js';
 import { handleCallbackQuery } from '../src/handlers/callbacks.js';
+import { stopChat, stopReplyText } from '../src/lib/stop-chat.js';
 import { answerCallbackQuery, sendMessage } from '../src/lib/telegram.js';
 import { callbackChatId } from '../src/lib/test-mode.js';
 
@@ -227,6 +229,36 @@ describe('signed existing-UX ingress', () => {
     env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
     expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' },
       'dedicated-sandbox-cleanup-token')).status).toBe(409);
+  });
+
+  it('routes /stop through the existing command handler instead of adding it to Intake', async () => {
+    const { env } = fixture();
+    configureSandbox3Operator(env);
+    env.SESSIONS = new MemKV();
+    await env.SESSIONS.put('integrator-sandbox3-v1:1714048', JSON.stringify({
+      username: 'sandbox_stop_fixture', controlPlaneProfile: 'integration-sandbox3-v1',
+    }));
+    stopChat.mockResolvedValue({ killed: 1, held: 0, cancelled: 0, hadIntent: false, intake: true, error: null });
+    stopReplyText.mockReturnValue('🛑 Задача остановлена.');
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
+      intakeCalls.push({ name, path: new URL(url).pathname });
+      if (new URL(url).pathname === '/debug') return Response.json({ buf: [], retryBatch: [], busy: false, launching: [] });
+      return Response.json({ held: 0, hadIntent: false, clearedDraftCount: 0 });
+    } }) };
+    const request = worker.fetch(new Request('https://worker/operator/test-update', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048,
+        delivery: 'capture', updateId: 91020, text: '/stop' }),
+    }), env);
+    const response = await request;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, admission: { ok: true, serviceCommand: 'stop' } });
+    expect(stopChat).toHaveBeenCalledWith(expect.objectContaining({
+      EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1',
+    }), expect.objectContaining({ username: 'sandbox_stop_fixture', chatId: 1714048 }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.any(String), 1714048, '🛑 Задача остановлена.', expect.any(Object));
+    expect(intakeCalls.map(call => call.path)).not.toContain('/append');
   });
 
   it('includes the pinned sandbox3 E2E chat in guarded reset even when no KV session remains', async () => {
