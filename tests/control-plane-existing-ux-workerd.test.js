@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { webcrypto } from 'node:crypto';
 import { makeEnv } from './helpers/p11-helpers.js';
+import ingressBuffer from '../src/ingress-buffer/worker.js';
 
 function existingUxWorkerdBundle() {
   const sourceRoot = process.env.EXISTING_UX_SCENARIO_SOURCE_ROOT ?? process.cwd();
@@ -227,7 +228,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api', 'operator-file-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -259,6 +260,20 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   if (boundary === 'operator-test-api') {
     env.CONTROL_PLANE_URL = 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev';
     env.TG_SANDBOX_BOT_USERNAME = 'probability_cat_bot';
+  }
+  if (boundary === 'operator-file-test-api') {
+    env.TG_SANDBOX_BOT_USERNAME = 'ptichka_status_bot';
+    env.SESSION_NAMESPACE = 'integrator-sandbox3-v1';
+    env.CONTROL_PLANE_URL = 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev';
+    env.CONTROL_PLANE_PROFILE = 'integration-sandbox3-v1';
+    env.TG_SANDBOX_E2E_CHAT_ID = '42';
+    env.TG_SANDBOX_E2E_USER_ID = '43';
+    env.TG_SANDBOX3_OPERATOR_TOKEN = 'offline-operator-token';
+    env.MEDIA_PIPELINE = 'ingress-buffer';
+    env.INGRESS_BUFFER_TOKEN = 'fixture-ingress-token';
+    env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify({ version: 'tg-delivery-cutover-v1',
+      botUsername: 'ptichka_status_bot', profileId: 'integration-sandbox3-v1', cutoverId: 'offline-sandbox3-fixture',
+      cutoverAt: 1791190000000, oldTaskIds: [], deliveries: [] });
   }
   const providerMessages = [];
   const providerEdits = [];
@@ -385,11 +400,22 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     unexpectedRequests.push({ host: url.hostname, path: url.pathname });
     return reply({ error: 'unconfigured offline transport' }, 500);
   };
+  const artifactObjects = new Map();
+  const artifactBucket = {
+    async head(key) { const item = artifactObjects.get(key); return item ? { size: item.bytes.length,
+      customMetadata: item.customMetadata, httpMetadata: item.httpMetadata } : null; },
+    async put(key, body, options) { const item = { bytes: new Uint8Array(body), customMetadata: options.customMetadata,
+      httpMetadata: options.httpMetadata }; artifactObjects.set(key, item); return { size: item.bytes.length }; },
+    async get(key) { return artifactObjects.get(key) ?? null; },
+  };
   const runtimeOptions = { name: 'existing-ux-scenario', modules: true, script, compatibilityDate: '2024-01-01',
     compatibilityFlags: ['nodejs_compat'], outboundService, kvNamespaces: ['TG_SLICE', 'SESSIONS', 'PRODUCTION_USERS'],
     kvPersist: join(persistRoot, 'kv'), durableObjectsPersist: join(persistRoot, 'do'),
     bindings: Object.fromEntries(Object.entries({ ...env, TEST_CHAT_IDS: '' })
       .filter(([, value]) => typeof value === 'string')),
+    ...(boundary === 'operator-file-test-api' ? { serviceBindings: { INGRESS_BUFFER: request => ingressBuffer.fetch(request, {
+      INGRESS_BUFFER_TOKEN: env.INGRESS_BUFFER_TOKEN, INGRESS_MEDIA_BUCKET: artifactBucket,
+    }) } } : {}),
     durableObjects: { INTAKE: { className: 'IntakeBuffer', useSQLite: true },
       TG_DELIVERY_OWNER: { className: 'TgDeliveryOwner', useSQLite: true } },
   };
@@ -446,6 +472,43 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   };
   try {
     runtime = new Miniflare(runtimeOptions);
+    if (boundary === 'operator-file-test-api') {
+      await (await runtime.getKVNamespace('SESSIONS')).put('integrator-sandbox3-v1:42', JSON.stringify({
+        username: 'sandbox-file-test', telegramUserId: '43', controlPlaneProfile: 'integration-sandbox3-v1',
+      }));
+      const response = await runtime.dispatchFetch('https://worker.test/operator/test-update', {
+        method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'sandbox3', type: 'message', chatId: 42, userId: 43,
+          delivery: 'telegram', text: 'sandbox3-file-test read attachment', fixtureFile: true, updateId: 99001 }),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      const manifest = result.collector.artifacts[0];
+      const intake = await runtime.getDurableObjectNamespace('INTAKE');
+      const stateResponse = await (await intake.get(intake.idFromName('42'))).fetch('https://intake/debug');
+      const stateBody = await stateResponse.json();
+      expect(manifest).toMatchObject({ name: 'sandbox-intake-fixture.txt', ownerProfileId: 'integration-sandbox3-v1', manifestPresent: true });
+      expect(manifest.ref).toMatch(/^[a-f0-9]{64}$/);
+      expect(manifest.version).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.stringify(stateBody)).not.toContain('sandbox3-fixture-');
+      expect(artifactObjects.size).toBe(1);
+      await (await intake.get(intake.idFromName('42'))).fetch('https://intake/scenario-seed-test-callback', {
+        method: 'POST', headers: { 'x-scenario-probe': 'offline-probe', 'content-type': 'application/json' },
+        body: JSON.stringify({ messageId: 501, revision: 1 }),
+      });
+      const launch = await runtime.dispatchFetch('https://worker.test/operator/test-update', {
+        method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'sandbox3', type: 'callback', chatId: 42, userId: 43,
+          callbackData: 'auto', updateId: 99002 }),
+      });
+      expect(launch.status).toBe(200);
+      expect(cpIntakes).toHaveLength(1);
+      expect(cpIntakes[0].inputItems[0].artifacts).toMatchObject([{
+        ref: manifest.ref, version: manifest.version, ownerProfileId: 'integration-sandbox3-v1',
+      }]);
+      expect(cpIntakes[0].inputItems[0].text).toContain('sandbox-intake-fixture.txt');
+      return;
+    }
     if (boundary === 'operator-test-api') {
       const operatorRequest = (body, token = 'offline-cleanup-token') => runtime.dispatchFetch('https://worker.test/operator/test-update', {
         method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),

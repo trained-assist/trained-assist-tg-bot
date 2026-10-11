@@ -1579,6 +1579,20 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.some(call => String(call[2]).includes('вложения пока не поддерживаются'))).toBe(true);
   });
 
+  it('keeps a buffer-backed media manifest in the existing durable draft', async () => {
+    const { owner, storage, env } = fixture();
+    env.MEDIA_PIPELINE = 'ingress-buffer';
+    const artifactManifest = { contractVersion: 1, ref: 'a'.repeat(64), version: 'b'.repeat(64),
+      ownerProfileId: 'test-profile', mediaType: 'text/plain', name: 'brief.txt', sizeBytes: 5, sha256: 'b'.repeat(64) };
+    const response = await owner.fetch(rpc('/append', { text: 'review this', msg: {
+      message_id: 7, chat: { id: 42 }, caption: 'review this',
+      document: { file_name: 'brief.txt', mime_type: 'text/plain', file_size: 5 }, artifactManifest,
+    }, telegramUpdateId: 107 }));
+    expect(await response.json()).toMatchObject({ buffered: 1 });
+    expect(await storage.get('buf')).toMatchObject([{ msg: { artifactManifest } }]);
+    expect(send.mock.calls.some(call => String(call[2]).includes('вложения пока не поддерживаются'))).toBe(false);
+  });
+
   it('refuses a new unsupported attachment without clearing already collected text', async () => {
     const { owner, storage } = fixture();
     const text = { text: 'сохранённый ввод', msg: { message_id: 6, chat: { id: 42 }, text: 'сохранённый ввод' } };

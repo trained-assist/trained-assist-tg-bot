@@ -43,6 +43,10 @@ id = "9fbaf8e6a86f4673bf0990b540e75f6d"
 binding = "CONTROL_PLANE_SERVICE"
 service = "trained-assist-cp-sandbox3"
 
+[[services]]
+binding = "INGRESS_BUFFER"
+service = "trained-assist-ingress-buffer-sandbox"
+
 [vars]
 TG_SANDBOX_BOT_USERNAME = "ptichka_status_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
@@ -53,7 +57,7 @@ TG_SLICE_STOP_ENABLED = "true"
 EXECUTION_BACKEND = "control-plane"
 INTAKE_DEBOUNCE = "on"
 SESSION_NAMESPACE = "integrator-sandbox3-v1"
-MEDIA_PIPELINE = "off"
+MEDIA_PIPELINE = "ingress-buffer"
 CONTROL_PLANE_URL = "https://trained-assist-cp-sandbox3.skillset-apply.workers.dev"
 CONTROL_PLANE_PRINCIPAL = "integration-sandbox3-v1"
 CONTROL_PLANE_PROFILE = "integration-sandbox3-v1"
@@ -65,3 +69,6 @@ TG_SANDBOX_TEST_API_ENABLED = "true"
 TG_SANDBOX_OPERATOR_RECOVERY = "enabled"
 TEST_CHAT_IDS = ""
 TG_HTTP_TEST_MODE = "false"
+
+# Set as a Worker secret after the buffer and CP sandbox3 are configured:
+#   INGRESS_BUFFER_TOKEN

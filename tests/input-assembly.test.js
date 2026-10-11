@@ -59,6 +59,14 @@ describe('renderSnapshotDocument — файл input = текст задачи as
     expect(renderSnapshotDocument(input)).toBe('[Сообщение 1]\nмой голос\n[голосовое]');
   });
 
+  it('includes the immutable artifact name in the same input snapshot', () => {
+    const artifactManifest = { name: 'brief.txt', ref: 'a'.repeat(64), version: 'b'.repeat(64) };
+    const { task, fileRefs } = assembleInput([{ text: 'review this', artifactManifest,
+      msg: { caption: 'review this', document: { file_name: 'brief.txt' }, artifactManifest } }]);
+    expect(task).toBe('[Сообщение 1]\nreview this\nВложение 1: brief.txt');
+    expect(fileRefs).toEqual([]);
+  });
+
   it('draft: document is exactly the assembled task, no heading', () => {
     expect(renderSnapshotDocument({ items: [{ text: 'a', msg: { text: 'a' } }], task: 'a', pending: false })).toBe('a');
   });

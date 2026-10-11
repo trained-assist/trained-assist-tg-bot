@@ -4,9 +4,46 @@ import { threadExtra, threadIdOf } from './conversation-context.js';
 import { sendMessage, sendDocument } from './lib/telegram.js';
 import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/intake-files.js';
 import { transcribeVoice } from './handlers/message.js';
+import { attachmentOf } from './sandbox-tg/batch.js';
+import { readTgSliceConfig } from './sandbox-tg/config.js';
+import { prepareTelegramArtifact } from './sandbox-tg/media-intake.js';
+import { mediaOf } from './media-jobs.js';
 
 
-export async function prepareIntake(msg, env, session, checkpoint = async () => {}) {
+export async function prepareIntake(msg, env, session, checkpoint = async () => {}, fetchImpl = fetch) {
+  if (msg.artifactManifest) return msg;
+  if (env.EXECUTION_BACKEND === 'control-plane' && env.MEDIA_PIPELINE === 'ingress-buffer' && mediaOf(msg)) {
+    const config = readTgSliceConfig(env);
+    const attachment = attachmentOf(msg);
+    const threadId = threadIdOf(msg);
+    const profile = {
+      profileId: config.profileId,
+      // This deterministic source ref lets Telegram redelivery reuse the same
+      // immutable object without persisting Telegram's file_id in the draft.
+      ingressRef: `${config.botUsername}:${msg.chat.id}:${threadId ?? ''}:${msg.message_id}`,
+    };
+    const artifactManifest = await prepareTelegramArtifact({
+      message: msg, attachment, profile, config,
+      buffer: env.INGRESS_BUFFER,
+      bufferToken: env.INGRESS_BUFFER_TOKEN,
+      fetchImpl,
+    });
+    const safePart = part => {
+      if (!part || typeof part !== 'object') return part;
+      const { file_id: _fileId, file_unique_id: _fileUniqueId, ...metadata } = part;
+      return metadata;
+    };
+    const safeMessage = { ...msg, artifactManifest };
+    for (const key of ['voice', 'audio', 'video', 'document']) {
+      if (safeMessage[key]) safeMessage[key] = safePart(safeMessage[key]);
+    }
+    if (Array.isArray(safeMessage.photo)) safeMessage.photo = safeMessage.photo.map(safePart);
+    delete safeMessage.attachmentKey;
+    delete safeMessage.fileRef;
+    delete safeMessage.transcriptRef;
+    delete safeMessage.mediaJob;
+    return safeMessage;
+  }
   if (msg.fileRef?.storage === 'r2') return msg;
   if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
   const MAX_BYTES = 20 * 1024 * 1024;

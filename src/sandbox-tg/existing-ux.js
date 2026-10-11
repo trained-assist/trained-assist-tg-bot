@@ -16,6 +16,8 @@ import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
+import { mediaOf } from '../media-jobs.js';
+import { prepareIntake } from '../intake-preflight.js';
 
 const app = new Hono();
 
@@ -40,7 +42,12 @@ function createEphemeralSessionStore() {
   };
 }
 
-app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
+app.get('/health', context => {
+  const mediaIntake = context.env.MEDIA_PIPELINE !== 'ingress-buffer' ? 'disabled'
+    : context.env.INGRESS_BUFFER?.fetch && String(context.env.INGRESS_BUFFER_TOKEN ?? '').trim()
+      ? 'configured' : 'not_configured';
+  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', capabilities: { mediaIntake } });
+});
 
 app.get('/cron', async context => {
   const config = readTgSliceConfig(context.env);
@@ -478,7 +485,8 @@ app.post('/operator/test-update', async context => {
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== target || !['message', 'callback'].includes(source.type) ||
-      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin'].includes(key)) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin', 'fixtureFile'].includes(key)) ||
+      (source.fixtureFile !== undefined && (target !== 'sandbox3' || source.fixtureFile !== true)) ||
       (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
       (source.admin !== undefined && typeof source.admin !== 'boolean') ||
       (source.userId !== undefined && (!Number.isSafeInteger(source.userId) || source.userId < 1)) ||
@@ -486,6 +494,7 @@ app.post('/operator/test-update', async context => {
     return context.json({ error: 'invalid_test_update' }, 400);
   }
   if (source.type === 'message' && (typeof source.text !== 'string' || !source.text.trim() || source.text.length > 4000) ||
+      source.fixtureFile === true && (source.type !== 'message' || !source.text.startsWith('sandbox3-file-test ')) ||
       source.type === 'message' && source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1) ||
       source.type === 'callback' && (typeof source.callbackData !== 'string' || !source.callbackData || source.callbackData.length > 64 ||
         source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1))) return context.json({ error: 'invalid_test_update' }, 400);
@@ -523,10 +532,21 @@ app.post('/operator/test-update', async context => {
     chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
     from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
     ...(source.type === 'message' ? { text: source.text } : {}) };
+  const fixtureBytes = new TextEncoder().encode('The secret word in this file is LANTERN.\n');
+  const fixtureToken = `sandbox3-fixture-${updateId}`;
   const update = source.type === 'message' ? { update_id: updateId, message } : {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
       message, chat_instance: 'sandbox-test', data: callbackData },
   };
+  if (source.fixtureFile === true) {
+    if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER?.fetch || !String(env.INGRESS_BUFFER_TOKEN ?? '').trim()) {
+      return context.json({ error: 'sandbox_file_fixture_not_ready' }, 409);
+    }
+    message.document = { file_id: fixtureToken, file_unique_id: fixtureToken,
+      file_name: 'sandbox-intake-fixture.txt', mime_type: 'text/plain', file_size: fixtureBytes.byteLength };
+    message.caption = message.text;
+    delete message.text;
+  }
   if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
   const deliverToTelegram = source.delivery === 'telegram';
   const testEnv = { ...context.env, TEST_CHAT_IDS: deliverToTelegram ? '' : String(chatId),
@@ -540,13 +560,32 @@ app.post('/operator/test-update', async context => {
   initTestMode(context.env);
   let response;
   let admission;
+  let fixtureManifest = null;
   try {
+    if (source.fixtureFile === true) {
+      const fileFetch = async (input, init) => {
+        const requestUrl = String(input);
+        if (requestUrl.includes('/getFile?')) return Response.json({ ok: true, result: {
+          file_path: `sandbox3-fixtures/${fixtureToken}.txt`, file_size: fixtureBytes.byteLength,
+        } });
+        if (requestUrl.includes('/file/bot')) return new Response(fixtureBytes, {
+          headers: { 'content-length': String(fixtureBytes.byteLength) },
+        });
+        return fetch(input, init);
+      };
+      const fixtureSession = await getSession(env.SESSIONS, chatId, null);
+      if (!fixtureSession) return context.json({ error: 'sandbox_test_login_required' }, 409);
+      const prepared = await prepareIntake(message, env, fixtureSession, undefined, fileFetch);
+      fixtureManifest = prepared.artifactManifest;
+      update.message = prepared;
+    }
     response = await app.fetch(new Request('https://sandbox.internal/webhook', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
       body: JSON.stringify(update),
     }), testEnv);
     admission = await response.json().catch(() => ({}));
-  } catch {
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'tg.sandbox.test_update_failed', errorName: error?.name ?? 'Error' }));
     const transcript = capture();
     initTestMode(context.env);
     return context.json({ error: 'synthetic_webhook_failed', transcript }, 503);
@@ -564,7 +603,18 @@ app.post('/operator/test-update', async context => {
     collectorDraftRevision: after.collectorDraftRevision ?? null,
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
+    artifacts: (after.buf ?? []).flatMap(item => {
+      const manifest = item.msg?.artifactManifest;
+      return manifest ? [{ name: manifest.name, sizeBytes: manifest.sizeBytes,
+        ownerProfileId: manifest.ownerProfileId, ref: manifest.ref, version: manifest.version,
+        sha256: manifest.sha256, manifestPresent: true }] : [];
+    }),
   } : null;
+  if (collector && fixtureManifest) collector.artifacts = [...collector.artifacts, {
+    name: fixtureManifest.name, sizeBytes: fixtureManifest.sizeBytes,
+    ownerProfileId: fixtureManifest.ownerProfileId, ref: fixtureManifest.ref,
+    version: fixtureManifest.version, sha256: fixtureManifest.sha256, manifestPresent: true,
+  }];
   return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
     admin: source.admin === true, callbackData: source.type === 'callback' ? callbackData : undefined,
     admission, transcript, collector });
@@ -734,10 +784,26 @@ app.post('/webhook', async context => {
     return context.json({ ok: true });
   }
   if (!hasIntakeContent(message)) return context.json({ ok: true, unsupported: true });
+  let intakeMessage = message;
+  if (env.MEDIA_PIPELINE === 'ingress-buffer' && mediaOf(message)) {
+    try {
+      intakeMessage = await prepareIntake(message, runtimeEnv, session);
+    } catch (error) {
+      const reason = error?.retryable === true ? 'media_intake_retryable' : 'media_intake_refused';
+      console.warn(JSON.stringify({ event: 'tg.media.intake_failed', reason }));
+      if (error?.retryable !== true) {
+        const sent = await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+          'Не удалось принять вложение. Уже собранный ввод сохранён; проверь файл и отправь его ещё раз.',
+          threadExtra(threadId));
+        if (sent?.ok) return context.json({ error: reason });
+      }
+      return context.json({ error: reason }, 503);
+    }
+  }
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(message.chat.id, threadId)));
   const flush = FORCE_RUN_RE.test(message.text ?? '') || AUTO_LAUNCH_RE.test(message.text ?? '');
   const response = await stub.fetch('https://intake/append', {
-    method: 'POST', body: JSON.stringify({ text: message.text ?? message.caption, msg: message, flush, telegramUpdateId: update.update_id }),
+    method: 'POST', body: JSON.stringify({ text: intakeMessage.text ?? intakeMessage.caption, msg: intakeMessage, flush, telegramUpdateId: update.update_id }),
   });
   if (!response.ok) return context.json({ error: 'collector admission failed' }, 503);
   return context.json({ ok: true, ...(await response.json()) });
