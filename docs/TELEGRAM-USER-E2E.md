@@ -149,6 +149,24 @@ same user-originated scenario after deploying the fix.
 
 ## Record
 
+### 2026-10-11 sandbox3 baseline: help, intake, login, answer and delivery
+
+GitHub Actions run [38101728592](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38101728592)
+passed against the isolated sandbox3 lane. It began with empty CP and Telegram
+intake stores, checked `/help`, status and anonymous-login prompt, aggregated a
+fresh two-message input, then logged in the pinned test profile and submitted a
+question. Communication selected the agent route (`COMMUNICATION_SELECTED`);
+the CP task completed, exactly one Runner execution succeeded, and its answer
+matched the run's challenge. The sandbox3 Intake delivery owner reported one
+terminal Telegram send to the pinned test chat with a provider message ID.
+CP correctly reported `delivery_state='not_required'` and zero CP delivery
+rows. Both stores were empty again after cleanup. The run used CP build
+`0c1e9c5a2d88f8c3a3aa297d9cd5ddf19edb7b67` and Worker source
+`a292739a68fe65038ccb5ba6c9b82151d4b1c85a`.
+
+This confirms the basic authenticated question-to-answer path on sandbox3; it
+does not certify the remaining user scenarios or production.
+
 Record the date, Worker version, bot username, sender account label, unique
 marker, observed user-visible reply, ingress-log result, stored-once result,
 and whether CP admission occurred. Do not record credentials or unrelated chat
