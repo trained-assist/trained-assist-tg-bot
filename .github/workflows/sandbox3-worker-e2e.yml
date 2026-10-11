@@ -21,6 +21,7 @@ on:
           - stop
           - retry-mid-run
           - file-intake
+          - playwright-artifact
         default: basic
       delivery_mode:
         description: Capture Worker output without sending Telegram messages, or verify actual Telegram delivery
@@ -55,8 +56,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$REF" = "refs/heads/main"
-          if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != file-intake ]]; then
-            echo 'Capture delivery mode currently supports only the file-intake scenario.'
+          if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != file-intake && "$SCENARIO" != playwright-artifact ]]; then
+            echo 'Capture delivery mode currently supports only file-intake and playwright-artifact scenarios.'
             exit 1
           fi
 
@@ -257,7 +258,7 @@ jobs:
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: node tools/sandbox-buffer-cycle.mjs test-buffers | tee sandbox3-buffer-scenario.json
 
-      - name: Test profile login, Runner answer and delivery into the pinned Telegram chat
+      - name: Test profile login, Runner answer/artifact export, and optional Telegram delivery
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

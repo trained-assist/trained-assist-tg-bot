@@ -296,12 +296,14 @@ async function main() {
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
-  assert(deliveryMode !== 'capture' || scenario === 'file-intake', 'capture_mode_only_supports_file_intake');
-  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(deliveryMode !== 'capture' || ['file-intake', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
+  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'file-intake'
     ? 'sandbox3-file-test Read the attached file and reply with only the secret word written in it.'
+    : scenario === 'playwright-artifact'
+    ? `Use the Playwright browser tool, not curl/fetch or memory, to open https://example.com, read its page title, and capture a screenshot. Create browser-check.md with the URL, page title, and this unique marker: ${nonce}. Export both browser-check.md and browser-proof.png as task artifacts. Do not commit or publish anything. In your reply include the exact page title and marker: ${nonce}`
     : scenario === 'retry-mid-run'
     ? `Use your shell tool to run the harmless command \`sleep 20\` and wait for it to finish. Only then reply with exactly this token: ${nonce}`
     : scenario === 'service-reply'
@@ -317,7 +319,8 @@ async function main() {
     : scenario === 'capability-reply' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
-    : scenario === 'history' ? ['READY'] : scenario === 'file-intake' ? ['LANTERN'] : [nonce];
+    : scenario === 'history' ? ['READY'] : scenario === 'file-intake' ? ['LANTERN']
+    : scenario === 'playwright-artifact' ? ['Example Domain', nonce] : [nonce];
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
   const sendMessage = (text, extra = {}) => workerRequest('/operator/test-update', {
@@ -515,6 +518,43 @@ async function main() {
     matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
   } };
   assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
+  let playwrightArtifactEvidence = null;
+  if (scenario === 'playwright-artifact') {
+    const artifacts = await d1(`SELECT artifact_ref, size_bytes, checksum, run_id FROM task_artifacts
+      WHERE user_task_id = ? ORDER BY created_at, artifact_id`, [task.id]);
+    const runEvents = await d1(`SELECT payload_json FROM task_events
+      WHERE user_task_id = ? AND execution_id = ? ORDER BY id`, [task.id, primaryCorrelation.runnerRunId]);
+    const exported = runEvents.flatMap(row => {
+      try {
+        const event = JSON.parse(row.payload_json ?? 'null');
+        const details = event?.payload?.payload && typeof event.payload.payload === 'object' ? event.payload.payload : {};
+        return event?.type === 'artifact_exported' ? [{
+          name: typeof details.sourcePath === 'string' ? details.sourcePath.split('/').pop() : null,
+          size: Number.isSafeInteger(details.size) ? details.size : null,
+          sha256: typeof details.sha256 === 'string' && /^[a-f0-9]{64}$/.test(details.sha256) ? details.sha256 : null,
+        }] : [];
+      } catch { return []; }
+    });
+    const markdown = exported.find(item => item.name === 'browser-check.md');
+    const screenshot = exported.find(item => item.name === 'browser-proof.png');
+    assert(markdown && markdown.size > 0 && markdown.sha256, 'sandbox_playwright_markdown_not_exported');
+    assert(screenshot && screenshot.size > 0 && screenshot.sha256, 'sandbox_playwright_screenshot_not_exported');
+    assert(artifacts.length >= 2, 'sandbox_playwright_artifact_manifest_not_persisted');
+    assert(artifacts.every(item => typeof item.artifact_ref === 'string'
+      && Number.isSafeInteger(item.size_bytes) && item.size_bytes > 0
+      && typeof item.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(item.checksum)
+      && item.run_id === primaryCorrelation.runnerRunId), 'sandbox_playwright_artifact_metadata_invalid');
+    playwrightArtifactEvidence = {
+      browserToolRequested: true,
+      resultTitleAndMarkerPresent: true,
+      expectedArtifactsExported: 2,
+      persistedArtifactManifestCount: artifacts.length,
+      markdownSize: markdown.size,
+      screenshotSize: screenshot.size,
+      contentBytesDownloadedForVerification: false,
+    };
+    console.log(JSON.stringify({ scenario: 'playwright-artifact-export', ...playwrightArtifactEvidence }));
+  }
   const terminal = deliveryMode === 'telegram'
     ? await waitForDelivery(task.id, chatId)
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
@@ -720,6 +760,7 @@ async function main() {
     runnerExecutionCount: executions.length,
     runnerInvoked: expectsAgent,
     answerMatchesChallenge,
+    ...(playwrightArtifactEvidence ? { playwrightArtifactEvidence } : {}),
     telegramDeliverySent: deliveryMode === 'telegram' && terminal.status === 'sent',
     telegramProviderMessageIdPresent: deliveryMode === 'telegram' && Number.isSafeInteger(terminal.providerMessageId),
     deliveryAttempts: terminal.attempts ?? 0,
