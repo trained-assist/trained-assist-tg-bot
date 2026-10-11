@@ -4,12 +4,14 @@ import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 import { summarizeStopDiagnostics } from './sandbox3-stop-diagnostics.mjs';
+import { summarizeSandbox3E2eFailure } from './sandbox3-e2e-failure-evidence.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
 const PROFILE_ID = 'integration-sandbox3-v1';
 const TG_ORIGIN = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 let failureEvidenceWritten = false;
+let failureDiagnostics = { stage: 'startup' };
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -358,6 +360,7 @@ async function main() {
     callbackData: 'auto', updateId: updateId++,
   });
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
+  failureDiagnostics = { stage: 'waiting_for_task' };
 
   let midRunReplayEvidence = null;
   if (scenario === 'retry-mid-run') {
@@ -381,6 +384,10 @@ async function main() {
   }
 
   const task = await waitForTask();
+  failureDiagnostics = { stage: 'task_persisted', task: {
+    id: task.id, status: task.status, generation: task.generation,
+    goalContainsNonce: typeof task.goal === 'string' && task.goal.includes(nonce),
+  } };
   assert(typeof task.goal === 'string' && task.goal.includes(nonce), 'sandbox3_input_not_persisted');
   let storedUserValue;
   try { storedUserValue = JSON.parse(task.user_value ?? 'null'); } catch { storedUserValue = null; }
@@ -394,6 +401,8 @@ async function main() {
   const persistedLineBreaks = (storedInputText.match(/\n/g) ?? []).length;
   console.log(JSON.stringify({ scenario: 'original-input-persistence', inputScenario: scenario,
     originalInputPersisted, expectedLineBreaks, persistedLineBreaks, inputItemCount: storedInputItems.length }));
+  failureDiagnostics.task = { ...failureDiagnostics.task, inputItemCount: storedInputItems.length,
+    expectedLineBreaks, persistedLineBreaks };
   assert(originalInputPersisted, 'sandbox3_original_input_not_persisted');
   const [routingRow] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?', [`routing:${task.id}:${task.generation}`]);
   assert(routingRow?.payload_json, 'sandbox3_routing_selection_not_persisted');
@@ -405,10 +414,26 @@ async function main() {
     : communicationReasonCode === 'COMMUNICATION_FALLBACK' ? 'agent_fallback' : null;
   console.log(JSON.stringify({ scenario: 'communication-selector', route: routing.decision?.route ?? null,
     outcome: communicationOutcome, reasonCode: communicationReasonCode ?? null, providerCode }));
+  failureDiagnostics = { ...failureDiagnostics, stage: 'route_validation', routing: {
+    route: routing.decision?.route,
+    mode: routing.decision?.mode,
+    reasonCode: communicationReasonCode,
+    providerCode,
+    capabilityId: routing.decision?.capabilityId,
+    outcome: routing.decision?.outcome,
+    needsExecutor: routing.decision?.needsExecutor,
+    replyAllowed: routing.decision?.replyAllowed,
+    continuationRequested: Boolean(routing.continuation),
+  } };
   assert.equal(routing.decision?.route, 'agent', 'sandbox3_selector_did_not_select_agent');
   assert(communicationOutcome, `sandbox3_communication_route_${providerCode}`);
   assert(routing.continuation, 'sandbox3_agent_continuation_not_requested');
   const executions = await d1(`SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [task.id]);
+  failureDiagnostics = { ...failureDiagnostics, stage: 'execution_validation', executions: {
+    count: executions.length,
+    items: executions.map(execution => ({ id: execution.id, status: execution.status, engine: execution.engine,
+      generation: execution.generation, runId: execution.session_id })),
+  } };
   assert.equal(executions.length, 1, 'sandbox_task_execution_count_not_one');
   assert.equal(executions[0].status, 'success', 'sandbox_runner_execution_not_successful');
   assert.equal(executions[0].generation, task.generation, 'sandbox_runner_generation_mismatch');
@@ -431,9 +456,18 @@ async function main() {
   const resultText = answerParts.join('\n');
   const escapedLines = expectedLines.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const answerMatchesChallenge = new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
+  failureDiagnostics = { ...failureDiagnostics, stage: 'answer_validation', answer: {
+    matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
+  } };
   assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
   const terminal = await waitForDelivery(task.id, chatId);
+  failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
+    status: terminal.status, attempts: terminal.attempts,
+    providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
+  } };
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
+  failureDiagnostics.delivery = { ...failureDiagnostics.delivery,
+    controlPlaneState: cpDelivery.state, controlPlaneRows: cpDelivery.rows };
 
   let historyEvidence = null;
   if (scenario === 'history') {
@@ -646,8 +680,11 @@ main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
   const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
   if (!failureEvidenceWritten) {
-    await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic', reasonCode: safe });
+    const diagnostics = summarizeSandbox3E2eFailure(failureDiagnostics);
+    await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic',
+      reasonCode: safe, diagnostics });
   }
-  console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode: safe }));
+  console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode: safe,
+    diagnostics: summarizeSandbox3E2eFailure(failureDiagnostics) }));
   process.exitCode = 1;
 });
