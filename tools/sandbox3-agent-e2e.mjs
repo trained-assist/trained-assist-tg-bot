@@ -304,6 +304,8 @@ async function main() {
     updateId: updateId++, text, ...extra,
   });
 
+  const [tasksBeforeServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
+  assert.equal(Number(tasksBeforeServiceCommands.n), 0, 'sandbox3_service_route_preflight_task_store_not_empty');
   // Exercise separate HTTP requests through the live Worker with the same
   // pinned chat. A module-level TEST_CHAT_IDS cache from a prior request must
   // never suppress a later real delivery.
@@ -311,8 +313,12 @@ async function main() {
   assertDelivered(help, 'help-real-delivery');
   const status = await sendMessage('/status');
   assertDelivered(status, 'status-after-help-real-delivery');
+  const [tasksAfterServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
+  assert.equal(Number(tasksAfterServiceCommands.n), 0, 'sandbox3_service_reply_created_control_plane_task');
+  const serviceRouteEvidence = { helpDelivered: true, statusDelivered: true,
+    taskCountBefore: Number(tasksBeforeServiceCommands.n), taskCountAfter: Number(tasksAfterServiceCommands.n) };
   console.log(JSON.stringify({ scenario: 'cross-request-real-delivery',
-    helpDelivered: true, statusDeliveredAfterSeparateWorkerRequest: true }));
+    ...serviceRouteEvidence, statusDeliveredAfterSeparateWorkerRequest: true }));
 
   // Keep the generated password inside the Actions process; never send it to
   // the shared test chat. The actual login reply and task answer use Telegram.
@@ -627,6 +633,7 @@ async function main() {
     telegramDeliveryOwner: 'sandbox3-intake',
     controlPlaneDeliveryState: cpDelivery.state,
     controlPlaneDeliveryRows: cpDelivery.rows,
+    serviceRouteEvidence,
     ...(historyEvidence ? { historyEvidence } : {}),
     ...(stopEvidence ? { stopEvidence } : {}),
     ...(midRunReplayEvidence ? { midRunReplayEvidence } : {}),
