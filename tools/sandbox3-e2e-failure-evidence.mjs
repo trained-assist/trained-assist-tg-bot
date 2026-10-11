@@ -20,6 +20,7 @@ export function summarizeSandbox3E2eFailure(value = {}) {
       generation: integer(value.task.generation),
       goalContainsExpectedInput: typeof value.task.goalContainsExpectedInput === 'boolean' ? value.task.goalContainsExpectedInput : null,
       inputItemCount: integer(value.task.inputItemCount),
+      artifactManifestPersisted: typeof value.task.artifactManifestPersisted === 'boolean' ? value.task.artifactManifestPersisted : null,
       expectedLineBreaks: integer(value.task.expectedLineBreaks),
       persistedLineBreaks: integer(value.task.persistedLineBreaks),
     };
