@@ -208,10 +208,15 @@ async function writeEvidence(report) {
   failureEvidenceWritten = true;
 }
 
-function assertDelivered(response, phase) {
+function assertDelivery(response, phase, deliveryMode) {
   assert.equal(response.ok, true, 'worker_update_not_accepted');
-  assert.equal(response.delivery, 'telegram', 'real_telegram_delivery_not_enabled');
   const sent = response.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
+  assert.equal(response.delivery, deliveryMode, 'sandbox_delivery_mode_mismatch');
+  if (deliveryMode === 'capture') {
+    assert(sent.length > 0, `captured_reply_missing:${phase}`);
+    assert(sent.every(item => item.telegramOk === undefined), `capture_mode_attempted_telegram:${phase}`);
+    return;
+  }
   if (!sent.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0)) {
     const failed = sent.find(item => item.telegramOk !== true);
     const reason = failed?.errorClass ?? (failed ? 'send_was_suppressed' : 'no_send_record');
@@ -229,7 +234,7 @@ async function waitForTask(excludedTaskIds = []) {
       if (rows.length !== 1) throw new Error('sandbox3_unexpected_task_count');
       if (['failed', 'cancelled'].includes(rows[0].status)) {
         const diagnostic = await failedTaskEvidence(rows[0]);
-        await writeEvidence({ ok: false, scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
+        await writeEvidence({ ok: false, scenario: `sandbox3-profile-login-question-runner-answer-${process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram'}`,
           inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic', task: diagnostic });
         console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode: `sandbox3_task_${rows[0].status}`, task: diagnostic }));
         throw new Error(`sandbox3_task_${rows[0].status}`);
@@ -289,6 +294,9 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
+  const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
+  assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
+  assert(deliveryMode !== 'capture' || scenario === 'file-intake', 'capture_mode_only_supports_file_intake');
   assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
@@ -313,7 +321,7 @@ async function main() {
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
   const sendMessage = (text, extra = {}) => workerRequest('/operator/test-update', {
-    target: 'sandbox3', type: 'message', chatId, userId, delivery: 'telegram',
+    target: 'sandbox3', type: 'message', chatId, userId, delivery: deliveryMode,
     updateId: updateId++, text, ...extra,
   });
 
@@ -323,9 +331,9 @@ async function main() {
   // pinned chat. A module-level TEST_CHAT_IDS cache from a prior request must
   // never suppress a later real delivery.
   const help = await sendMessage('/help');
-  assertDelivered(help, 'help-real-delivery');
+  assertDelivery(help, 'help', deliveryMode);
   const status = await sendMessage('/status');
-  assertDelivered(status, 'status-after-help-real-delivery');
+  assertDelivery(status, 'status-after-help', deliveryMode);
   const [tasksAfterServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
   assert.equal(Number(tasksAfterServiceCommands.n), 0, 'sandbox3_service_reply_created_control_plane_task');
   const serviceRouteEvidence = { helpDelivered: true, statusDelivered: true,
@@ -344,12 +352,12 @@ async function main() {
   assert(passwordMatch?.[1], 'sandbox_test_password_not_returned');
 
   const login = await sendMessage(`/login ${username} ${passwordMatch[1]}`);
-  assertDelivered(login, 'login');
+  assertDelivery(login, 'login', deliveryMode);
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
   const questionUpdateId = updateId++;
   const questionUpdate = {
-    target: 'sandbox3', type: 'message', chatId, userId, delivery: 'telegram',
+    target: 'sandbox3', type: 'message', chatId, userId, delivery: deliveryMode,
     updateId: questionUpdateId, text: prompt,
     ...(scenario === 'file-intake' ? { fixtureFile: true } : {}),
   };
@@ -376,7 +384,7 @@ async function main() {
     pendingCountAfterReplay: replay.collector.pendingCount }));
 
   const launched = await workerRequest('/operator/test-update', {
-    target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+    target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
     callbackData: 'auto', updateId: updateId++,
   });
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
@@ -496,7 +504,9 @@ async function main() {
     matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
   } };
   assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
-  const terminal = await waitForDelivery(task.id, chatId);
+  const terminal = deliveryMode === 'telegram'
+    ? await waitForDelivery(task.id, chatId)
+    : { status: 'suppressed', attempts: 0, providerMessageId: null };
   failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
     status: terminal.status, attempts: terminal.attempts,
     providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
@@ -512,7 +522,7 @@ async function main() {
     assert.equal(followup.ok, true, 'sandbox_history_followup_not_accepted');
     assert.equal(followup.collector?.pendingCount, 1, 'sandbox_history_followup_not_buffered');
     const followupLaunch = await workerRequest('/operator/test-update', {
-      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
       callbackData: 'auto', updateId: updateId++,
     });
     assert.equal(followupLaunch.ok, true, 'sandbox_history_followup_launch_failed');
@@ -557,7 +567,7 @@ async function main() {
     assert.equal(stopQuestion.ok, true, 'sandbox_stop_question_not_accepted');
     assert.equal(stopQuestion.collector?.pendingCount, 1, 'sandbox_stop_question_not_buffered');
     const stopLaunch = await workerRequest('/operator/test-update', {
-      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
       callbackData: 'auto', updateId: updateId++,
     });
     assert.equal(stopLaunch.ok, true, 'sandbox_stop_task_launch_failed');
@@ -599,7 +609,7 @@ async function main() {
       const stillPending = await readStopWindow(chatId);
       if (stillPending.pending) {
         freshLaunch = await workerRequest('/operator/test-update', {
-          target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+          target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
           callbackData: 'auto', updateId: updateId++,
         });
         assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
@@ -620,7 +630,7 @@ async function main() {
     const stopResult = await stopOutcome;
     if (stopResult.error) throw stopResult.error;
     const stopReply = stopResult.reply;
-    assertDelivered(stopReply, 'active-task-stop');
+    assertDelivery(stopReply, 'active-task-stop', deliveryMode);
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
     const immediateStopConfirmed = stopReplyConfirmsRequest(stopText);
     const stopCompletion = await waitForStopCompletion(chatId, active.id);
@@ -641,7 +651,7 @@ async function main() {
     }
     if (!freshLaunch) {
       freshLaunch = await workerRequest('/operator/test-update', {
-        target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+        target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
         callbackData: 'auto', updateId: updateId++,
       });
       assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
@@ -684,8 +694,9 @@ async function main() {
 
   const report = {
     ok: true,
-    scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
+    scenario: `sandbox3-profile-login-question-runner-answer-${deliveryMode}`,
     inputScenario: scenario,
+    deliveryMode,
     sourceSha: process.env.GITHUB_SHA ?? null,
     communicationOutcome,
     communicationReasonCode,
@@ -698,10 +709,10 @@ async function main() {
     runnerExecutionCount: executions.length,
     runnerInvoked: expectsAgent,
     answerMatchesChallenge,
-    telegramDeliverySent: terminal.status === 'sent',
-    telegramProviderMessageIdPresent: true,
-    deliveryAttempts: terminal.attempts,
-    telegramDeliveryOwner: 'sandbox3-intake',
+    telegramDeliverySent: deliveryMode === 'telegram' && terminal.status === 'sent',
+    telegramProviderMessageIdPresent: deliveryMode === 'telegram' && Number.isSafeInteger(terminal.providerMessageId),
+    deliveryAttempts: terminal.attempts ?? 0,
+    telegramDeliveryOwner: deliveryMode === 'telegram' ? 'sandbox3-intake' : 'not_used',
     controlPlaneDeliveryState: cpDelivery.state,
     controlPlaneDeliveryRows: cpDelivery.rows,
     serviceRouteEvidence,
