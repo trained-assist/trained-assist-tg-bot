@@ -20,8 +20,8 @@ export async function publishRoutingDegradation(env, receipt, routed, destinatio
     taskAcceptedAt: receipt.providerAcceptedAt, conversationId, userTaskId: receipt.userTaskId,
     destination, requestId: `routing-degraded:${receipt.userTaskId}`, type: 'message',
     text: routed.continuation?.issued === true
-      ? 'Определение маршрута недоступно; запрос сохранён. Готовлю запуск исполнителя.'
-      : 'Определение маршрута недоступно; запрос сохранён, запуск исполнителя не подтверждён.' });
+      ? 'Не удалось определить подходящий сценарий. Передаю задачу на проработку.'
+      : 'Не удалось определить подходящий сценарий. Задача сохранена, запуск исполнителя пока не подтверждён.' });
 }
 
 async function digest(value) {
