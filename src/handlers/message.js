@@ -110,7 +110,11 @@ export async function handleMessage(msg, env, opts = {}) {
   }
 
   try {
-    if (env.EXECUTION_BACKEND === 'control-plane' && (msg.intakeItems || [{ msg }]).some(item => item.msg?.photo || item.msg?.document || item.msg?.voice || item.msg?.audio || item.msg?.video)) {
+    if (env.EXECUTION_BACKEND === 'control-plane' && (msg.intakeItems || [{ msg }]).some(item => {
+      const source = item.msg ?? {};
+      const hasMedia = source.photo || source.document || source.voice || source.audio || source.video;
+      return hasMedia && !item.artifactManifest && !source.artifactManifest;
+    })) {
       throw new Error('Вложения сохранены; передача новому исполнителю ещё не подключена.');
     }
     if (msg.intakeItems) {

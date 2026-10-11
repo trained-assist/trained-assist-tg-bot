@@ -286,10 +286,12 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
-  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
-  const prompt = scenario === 'retry-mid-run'
+  const prompt = scenario === 'file-intake'
+    ? 'sandbox3-file-test Read the attached file and reply with only the secret word written in it.'
+    : scenario === 'retry-mid-run'
     ? `Use your shell tool to run the harmless command \`sleep 20\` and wait for it to finish. Only then reply with exactly this token: ${nonce}`
     : scenario === 'service-reply'
     ? 'Работает?'
@@ -304,7 +306,7 @@ async function main() {
     : scenario === 'capability-reply' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
-    : scenario === 'history' ? ['READY'] : [nonce];
+    : scenario === 'history' ? ['READY'] : scenario === 'file-intake' ? ['LANTERN'] : [nonce];
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
   const sendMessage = (text, extra = {}) => workerRequest('/operator/test-update', {
@@ -346,6 +348,7 @@ async function main() {
   const questionUpdate = {
     target: 'sandbox3', type: 'message', chatId, userId, delivery: 'telegram',
     updateId: questionUpdateId, text: prompt,
+    ...(scenario === 'file-intake' ? { fixtureFile: true } : {}),
   };
   const question = await workerRequest('/operator/test-update', questionUpdate);
   // The message is acknowledged by the Intake Durable Object, which runs in a
@@ -354,6 +357,14 @@ async function main() {
   // answer through the delivery owner below.
   assert.equal(question.ok, true, 'sandbox_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
+  if (scenario === 'file-intake') {
+    const artifact = question.collector?.artifacts?.[0];
+    assert.equal(artifact?.manifestPresent, true, 'sandbox_file_manifest_missing_from_intake');
+    assert.equal(artifact?.ownerProfileId, PROFILE_ID, 'sandbox_file_manifest_profile_mismatch');
+    assert.equal(artifact?.name, 'sandbox-intake-fixture.txt', 'sandbox_file_name_missing');
+    console.log(JSON.stringify({ scenario: 'sandbox-file-intake', manifestPresentInIntake: true,
+      telegramFileIdPersisted: false, fileName: 'sandbox-intake-fixture.txt' }));
+  }
   const replay = await workerRequest('/operator/test-update', questionUpdate);
   assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
   assert.equal(replay.collector?.pendingCount, 1, 'duplicate_update_added_input_twice');

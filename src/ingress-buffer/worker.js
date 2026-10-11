@@ -69,8 +69,10 @@ async function boundedBytes(request) {
 }
 
 function authorized(request, env) {
-  const token = String(env.INGRESS_BUFFER_TOKEN ?? '').trim();
-  return token.length > 0 && request.headers.get('authorization') === `Bearer ${token}`;
+  const supplied = request.headers.get('authorization');
+  const tokens = [env.INGRESS_BUFFER_TOKEN, env.INGRESS_BUFFER_TOKEN_SANDBOX3]
+    .map(value => String(value ?? '').trim()).filter(Boolean);
+  return tokens.some(token => supplied === `Bearer ${token}`);
 }
 
 function manifestFromHeaders(request) {
