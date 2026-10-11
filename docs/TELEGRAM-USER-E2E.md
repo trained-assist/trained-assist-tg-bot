@@ -96,10 +96,15 @@ For each Worker-driven scenario, check these layers:
    admission, CP receipt, and delivery-owner enqueue/drain/load.
 2. **Control Plane:** one durable task contains the submitted input, its
    execution reaches terminal success, and the saved result matches the request.
+   For the sandbox3 Telegram route, CP output has `delivery_state='not_required'`
+   with no CP delivery rows: the sandbox Intake delivery owner owns Telegram
+   sends. This matches the CP stop-window contract; a CP delivery row is not
+   evidence of the gateway's external Telegram acknowledgement.
 3. **Delivery:** the Intake barrier clears only after the delivery owner reports
-   the terminal Telegram message as sent. Immediate replies include Telegram's
-   accepted message IDs in the API transcript; verify the final result through
-   the CP result and delivery-owner/Intake completion path.
+   the terminal Telegram message as sent to the pinned chat and supplies a
+   Telegram provider message ID. Immediate replies include Telegram's accepted
+   message IDs in the API transcript; verify the final answer through the CP
+   result and delivery-owner/Intake completion path.
 
 When diagnosing intake state, use the protected operator API and verify each
 unique message was stored exactly once.
