@@ -8,7 +8,11 @@ chat while immediate replies are also returned in the operator transcript.
 This exercises intake, Control Plane, runner, and delivery without using the
 Telegram UI.
 
-Use the manual Telegram procedure below only when the question specifically
+The **Sandbox3 Telegram worker E2E** workflow offers `basic` and `multiline`
+input scenarios. Both use the same temporary-profile login and real Telegram
+delivery path; the multiline case additionally checks exact line-break
+persistence through the task's saved original input and ordered three-line
+Runner answer. Use the manual Telegram procedure below only when the question specifically
 concerns Telegram's own webhook ingress or client behavior. `/health` proves
 liveness only.
 
@@ -30,7 +34,8 @@ contract checks and resets state after them.
 ### Deploying the isolated sandbox3 Worker
 
 Use the manual workflow **Sandbox3 Telegram worker E2E** from protected `main`
-with `run_e2e=true`. It verifies the Cloudflare account and pinned test-user
+with `run_e2e=true`; select `scenario=basic` for a one-token task or
+`scenario=multiline` for a three-line formatting task. It verifies the Cloudflare account and pinned test-user
 ID, deploys only `trained-assist-tg-sandbox3` with ingress and delivery paused,
 checks the isolated CP lane and existing V1 delivery-owner state, and clears
 CP plus Telegram intake state before enabling traffic. It then exercises help,
@@ -171,6 +176,26 @@ rows. Both stores were empty again after cleanup. The run used CP build
 
 This confirms the basic authenticated question-to-answer path on sandbox3; it
 does not certify the remaining user scenarios or production.
+
+### 2026-10-11 repeated Worker E2E after fallback assertion fix
+
+Runs [38102931588](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38102931588),
+[38103212003](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38103212003),
+and [38103450031](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38103450031)
+passed consecutively on source SHA
+`730356d60a81b3eb70872c2650b49c855af92914`. Each reset CP and Telegram state,
+exercised help/status/anonymous-login, aggregated fresh input, logged in a new
+temporary profile, completed exactly one Runner execution, delivered one
+challenge-matching answer to the pinned private test chat, and verified both
+stores empty after cleanup. Each artifact records delivery owner
+`sandbox3-intake`, CP delivery `not_required`, zero CP delivery rows, and the
+Telegram provider-message-ID presence without storing raw IDs or challenge text.
+
+The classifier was invoked in all three runs but timed out at the configured
+20-second boundary. The intended agent fallback completed the task in every
+run. This confirms fallback resilience, not successful classifier resolution.
+The broader issue #190 scenario matrix and production user-question path remain
+unverified.
 
 Record the date, Worker version, bot username, sender account label, unique
 marker, observed user-visible reply, ingress-log result, stored-once result,
