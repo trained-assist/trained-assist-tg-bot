@@ -5,7 +5,7 @@ describe('sandbox3 E2E failure evidence', () => {
   it('keeps route, Runner, answer and delivery facts without retaining user or model text', () => {
     const result = summarizeSandbox3E2eFailure({
       stage: 'answer_validation',
-      task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsNonce: true,
+      task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsExpectedInput: true,
         inputItemCount: 1, expectedLineBreaks: 0, persistedLineBreaks: 0, goal: 'private prompt' },
       routing: { route: 'agent', mode: 'ai-agent-job', reasonCode: 'COMMUNICATION_FALLBACK',
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
@@ -19,7 +19,7 @@ describe('sandbox3 E2E failure evidence', () => {
 
     expect(result).toEqual({
       stage: 'answer_validation',
-      task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsNonce: true,
+      task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsExpectedInput: true,
         inputItemCount: 1, expectedLineBreaks: 0, persistedLineBreaks: 0 },
       routing: { route: 'agent', mode: 'ai-agent-job', reasonCode: 'COMMUNICATION_FALLBACK',
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
@@ -37,7 +37,7 @@ describe('sandbox3 E2E failure evidence', () => {
     expect(summarizeSandbox3E2eFailure({ stage: 'bad stage with spaces', task: { id: 'secret/token', status: 'running' },
       routing: { route: 'some raw prompt\ntext', reasonCode: 'x'.repeat(100) } })).toEqual({
       stage: 'unknown',
-      task: { id: null, status: 'running', generation: null, goalContainsNonce: null,
+      task: { id: null, status: 'running', generation: null, goalContainsExpectedInput: null,
         inputItemCount: null, expectedLineBreaks: null, persistedLineBreaks: null },
       routing: { route: null, mode: null, reasonCode: null, providerCode: null, capabilityId: null,
         outcome: null, needsExecutor: null, replyAllowed: null, continuationRequested: null },
