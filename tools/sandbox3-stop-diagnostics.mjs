@@ -17,7 +17,7 @@ function summarizeGroup(group) {
   };
 }
 
-export function summarizeStopDiagnostics({ replyConfirmed, inspectStatus, inspectPayload } = {}) {
+export function summarizeStopDiagnostics({ replyConfirmed, inspectStatus, inspectPayload, taskEvidence } = {}) {
   const entries = inspectPayload?.snapshot?.entries;
   const window = entries && typeof entries === 'object' ? entries.cpStopWindow : null;
   const groups = Array.isArray(window?.groups) ? window.groups : [];
@@ -36,6 +36,22 @@ export function summarizeStopDiagnostics({ replyConfirmed, inspectStatus, inspec
       reason: safeCode(window.reason),
       groupCount: groups.length,
       groups: groups.map(summarizeGroup),
+    } : null,
+    task: taskEvidence && typeof taskEvidence === 'object' ? {
+      status: safeCode(taskEvidence.status),
+      generation: Number.isSafeInteger(taskEvidence.generation) ? taskEvidence.generation : null,
+      executions: (Array.isArray(taskEvidence.executions) ? taskEvidence.executions : []).map(execution => ({
+        status: safeCode(execution?.status),
+        engine: safeCode(execution?.engine),
+        generation: Number.isSafeInteger(execution?.generation) ? execution.generation : null,
+      })),
+      events: (Array.isArray(taskEvidence.events) ? taskEvidence.events : []).map(event => ({
+        eventType: safeCode(event?.eventType) ?? 'unknown',
+        reasonCode: safeCode(event?.reasonCode),
+        stage: safeCode(event?.stage),
+        errorClass: safeCode(event?.errorClass),
+        where: safeCode(event?.where),
+      })),
     } : null,
   };
 }
