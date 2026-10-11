@@ -479,6 +479,20 @@ async function main() {
       callbackData: 'auto', updateId: updateId++,
     });
     assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
+    const freshCollector = freshLaunch.collector ?? {};
+    const freshBarrier = freshCollector.controlPlaneBarrier ?? {};
+    const freshLaunchObserved = freshCollector.pendingCount === 0 || freshCollector.busy === true
+      || freshCollector.launchingMessageIds?.length > 0
+      || Number(freshBarrier.busyRequestCount ?? 0) > 0
+      || Number(freshBarrier.unresolvedLaunchCount ?? 0) > 0;
+    console.log(JSON.stringify({ scenario: 'after-stop-launch-accepted',
+      pendingCount: Number.isSafeInteger(freshCollector.pendingCount) ? freshCollector.pendingCount : null,
+      busy: freshCollector.busy === true,
+      launchingCount: Array.isArray(freshCollector.launchingMessageIds) ? freshCollector.launchingMessageIds.length : null,
+      busyRequestCount: Number.isSafeInteger(freshBarrier.busyRequestCount) ? freshBarrier.busyRequestCount : null,
+      unresolvedLaunchCount: Number.isSafeInteger(freshBarrier.unresolvedLaunchCount) ? freshBarrier.unresolvedLaunchCount : null,
+      callbackAccepted: freshLaunch.admission?.ok === true }));
+    assert(freshLaunchObserved, 'sandbox_after_stop_launch_not_dispatched');
     const freshTask = await waitForTask([task.id, active.id]);
     assert(typeof freshTask.goal === 'string' && freshTask.goal.includes(freshPrompt), 'sandbox_after_stop_input_not_persisted');
     const freshExecution = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [freshTask.id]);
