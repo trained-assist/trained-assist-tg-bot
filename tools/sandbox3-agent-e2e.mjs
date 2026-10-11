@@ -79,14 +79,14 @@ function safeCode(value) {
 async function failedTaskEvidence(task) {
   const [executions, events] = await Promise.all([
     d1('SELECT status, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [task.id]),
-    d1('SELECT event_type, payload_json FROM task_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 20', [task.id]),
+    d1('SELECT kind, payload_json FROM task_events WHERE user_task_id = ? ORDER BY created_at DESC LIMIT 20', [task.id]),
   ]);
   const safeEvents = events.map(event => {
     let payload;
     try { payload = JSON.parse(event.payload_json ?? 'null'); } catch { payload = null; }
     const details = payload && typeof payload === 'object' ? payload : {};
     return {
-      eventType: safeCode(event.event_type) ?? 'unknown',
+      eventType: safeCode(event.kind) ?? 'unknown',
       reasonCode: safeCode(details.reasonCode) ?? safeCode(details.code) ?? null,
       stage: safeCode(details.stage) ?? null,
       errorClass: safeCode(details.errorClass) ?? null,
