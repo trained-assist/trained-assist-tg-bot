@@ -82,7 +82,7 @@ async function reconcileTerminalRuns(chatId, taskId) {
     body: JSON.stringify({ mode: 'reconcile-task', profileId: PROFILE_ID, chatId, threadId: null, taskId }),
     signal: AbortSignal.timeout(90_000) });
   const outcome = await response.json().catch(() => ({}));
-  const reason = outcome.reason ?? outcome.error;
+  const reason = outcome.reason ?? outcome.upstreamCode ?? outcome.error;
   const reasonCode = typeof reason === 'string' && /^[a-z0-9_:.-]+$/.test(reason) ? reason : 'refused';
   assert(response.ok && outcome.reconciled === true,
     `sandbox3_terminal_run_reconciliation_${response.status}_${reasonCode}`);
