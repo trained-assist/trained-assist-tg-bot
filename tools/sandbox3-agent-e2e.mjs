@@ -286,19 +286,22 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
-  assert(['basic', 'service-reply', 'multiline', 'history', 'stop', 'retry-mid-run'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'retry-mid-run'
     ? `Use your shell tool to run the harmless command \`sleep 20\` and wait for it to finish. Only then reply with exactly this token: ${nonce}`
     : scenario === 'service-reply'
     ? 'Работает?'
+    : scenario === 'capability-reply'
+    ? 'Что ты умеешь?'
     : scenario === 'multiline'
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
+    : scenario === 'capability-reply' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
     : scenario === 'history' ? ['READY'] : [nonce];
@@ -387,8 +390,9 @@ async function main() {
   }
 
   const task = await waitForTask();
+  const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply';
   const goalContainsExpectedInput = typeof task.goal === 'string'
-    && (scenario === 'service-reply' ? task.goal.includes(prompt) : task.goal.includes(nonce));
+    && (deterministicScenario ? task.goal.includes(prompt) : task.goal.includes(nonce));
   failureDiagnostics = { stage: 'task_persisted', task: {
     id: task.id, status: task.status, generation: task.generation,
     goalContainsExpectedInput,
@@ -430,13 +434,14 @@ async function main() {
     replyAllowed: routing.decision?.replyAllowed,
     continuationRequested: Boolean(routing.continuation),
   } };
-  const expectsAgent = scenario !== 'service-reply';
+  const expectsAgent = !deterministicScenario;
   assert.equal(routing.decision?.route, expectsAgent ? 'agent' : 'deterministic', 'sandbox3_selector_route_mismatch');
   assert(communicationOutcome, `sandbox3_communication_route_${providerCode}`);
   if (expectsAgent) assert(routing.continuation, 'sandbox3_agent_continuation_not_requested');
   else {
-    assert.equal(routing.decision?.capabilityId, 'system_health', 'sandbox3_service_reply_capability_mismatch');
-    assert.equal(Boolean(routing.continuation), false, 'sandbox3_service_reply_unexpected_continuation');
+    const expectedCapability = scenario === 'service-reply' ? 'system_health' : 'catalog.brief';
+    assert.equal(routing.decision?.capabilityId, expectedCapability, 'sandbox3_deterministic_reply_capability_mismatch');
+    assert.equal(Boolean(routing.continuation), false, 'sandbox3_deterministic_reply_unexpected_continuation');
   }
   const executions = await d1(`SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [task.id]);
   failureDiagnostics = { ...failureDiagnostics, stage: 'execution_validation', executions: {
@@ -455,7 +460,7 @@ async function main() {
     primaryCorrelation = runnerCorrelation(task, executions[0]);
     console.log(JSON.stringify({ scenario: 'control-plane-runner-correlation', ...primaryCorrelation }));
   } else {
-    console.log(JSON.stringify({ scenario: 'deterministic-service-answer', capabilityId: 'system_health', runnerExecutions: 0 }));
+    console.log(JSON.stringify({ scenario: 'deterministic-service-answer', capabilityId: routing.decision?.capabilityId, runnerExecutions: 0 }));
   }
   let resultValue = task.result_json;
   if (typeof resultValue === 'string') {
