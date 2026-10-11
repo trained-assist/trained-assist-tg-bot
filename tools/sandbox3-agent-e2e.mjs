@@ -150,6 +150,24 @@ function safeCode(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : null;
 }
 
+function safeEvidenceId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value) ? value : null;
+}
+
+function runnerCorrelation(task, execution) {
+  const correlation = {
+    taskId: safeEvidenceId(task?.id),
+    cpAttemptId: safeEvidenceId(execution?.id),
+    runnerRunId: safeEvidenceId(execution?.session_id),
+    engine: safeCode(execution?.engine),
+    generation: Number.isSafeInteger(execution?.generation) ? execution.generation : null,
+  };
+  if (Object.values(correlation).some(value => value == null)) {
+    throw new Error('sandbox_runner_correlation_missing');
+  }
+  return correlation;
+}
+
 async function failedTaskEvidence(task) {
   const [executions, events] = await Promise.all([
     d1('SELECT status, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [task.id]),
@@ -367,6 +385,8 @@ async function main() {
   assert(typeof executions[0].engine === 'string' && executions[0].engine.length > 0, 'sandbox_runner_engine_missing');
   assert(Number.isSafeInteger(executions[0].generation), 'sandbox_runner_generation_missing');
   assert(typeof executions[0].session_id === 'string' && executions[0].session_id.length > 0, 'sandbox_runner_session_missing');
+  const primaryCorrelation = runnerCorrelation(task, executions[0]);
+  console.log(JSON.stringify({ scenario: 'control-plane-runner-correlation', ...primaryCorrelation }));
   let resultValue = task.result_json;
   if (typeof resultValue === 'string') {
     try { resultValue = JSON.parse(resultValue); } catch { /* retain plain text */ }
@@ -400,9 +420,10 @@ async function main() {
     assert.notEqual(followupTask.id, task.id, 'sandbox_history_followup_reused_task_id');
     assert(typeof followupTask.goal === 'string' && followupTask.goal.includes(followupPrompt),
       'sandbox_history_followup_input_not_persisted');
-    const followupExecutions = await d1(`SELECT id, status, session_id, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [followupTask.id]);
+    const followupExecutions = await d1(`SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at`, [followupTask.id]);
     assert.equal(followupExecutions.length, 1, 'sandbox_history_followup_execution_count_not_one');
     assert.equal(followupExecutions[0].status, 'success', 'sandbox_history_followup_runner_not_successful');
+    const followupCorrelation = runnerCorrelation(followupTask, followupExecutions[0]);
     const followupResult = await d1(`SELECT result_json FROM durable_tasks WHERE id = ?`, [followupTask.id]);
     let followupText = '';
     const collectFollowupText = value => {
@@ -423,6 +444,7 @@ async function main() {
       followupExecutionCount: followupExecutions.length,
       followupDelivered: followupDelivery.status === 'sent',
       continuationRequested: true,
+      followupCorrelation,
     };
     console.log(JSON.stringify({ scenario: 'conversation-history-followup', ...historyEvidence }));
   }
@@ -440,6 +462,10 @@ async function main() {
     });
     assert.equal(stopLaunch.ok, true, 'sandbox_stop_task_launch_failed');
     const active = await waitForActiveTask([task.id]);
+    const [activeExecution] = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
+    assert(activeExecution, 'sandbox_stop_runner_execution_missing');
+    assert.equal(activeExecution.status, 'running', 'sandbox_stop_runner_execution_not_running_before_stop');
+    const activeCorrelation = runnerCorrelation(active, activeExecution);
     const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
     const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
     let freshQuestion = null;
@@ -496,9 +522,11 @@ async function main() {
     const immediateStopConfirmed = stopReplyConfirmsRequest(stopText);
     const stopCompletion = await waitForStopCompletion(chatId, active.id);
     const terminalStatus = stopCompletion.taskStatus;
-    const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
+    const stoppedExecutions = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
     assert.notEqual(stoppedExecutions[0].status, 'running', 'sandbox_stop_execution_still_running');
+    assert.deepEqual(runnerCorrelation(active, stoppedExecutions[0]), activeCorrelation,
+      'sandbox_stop_runner_correlation_changed');
 
     if (!freshQuestion) {
       freshQuestion = await sendMessage(freshPrompt);
@@ -522,9 +550,10 @@ async function main() {
     }
     const freshTask = await waitForTask([task.id, active.id]);
     assert(typeof freshTask.goal === 'string' && freshTask.goal.includes(freshPrompt), 'sandbox_after_stop_input_not_persisted');
-    const freshExecution = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [freshTask.id]);
+    const freshExecution = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [freshTask.id]);
     assert.equal(freshExecution.length, 1, 'sandbox_after_stop_execution_count_not_one');
     assert.equal(freshExecution[0].status, 'success', 'sandbox_after_stop_runner_not_successful');
+    const freshCorrelation = runnerCorrelation(freshTask, freshExecution[0]);
     const freshResult = await d1('SELECT result_json FROM durable_tasks WHERE id = ?', [freshTask.id]);
     assert(String(freshResult[0]?.result_json ?? '').includes(freshToken), 'sandbox_after_stop_answer_mismatch');
     const freshDelivery = await waitForDelivery(freshTask.id, chatId);
@@ -539,6 +568,8 @@ async function main() {
       stoppedExecutionNotRunning: true,
       freshTaskCompleted: true,
       freshAnswerDelivered: freshDelivery.status === 'sent',
+      stoppedTaskCorrelation: activeCorrelation,
+      nextTaskCorrelation: freshCorrelation,
     };
     console.log(JSON.stringify({ scenario: 'active-task-stop-and-next-task', ...stopEvidence }));
   }
@@ -554,6 +585,7 @@ async function main() {
     loginPassed: true,
     questionAccepted: true,
     taskTerminalDone: task.status === 'done',
+    runnerCorrelation: primaryCorrelation,
     runnerExecutionSuccess: executions[0].status === 'success',
     runnerExecutionCount: executions.length,
     answerMatchesChallenge,
