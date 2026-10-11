@@ -11,7 +11,7 @@ import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routin
 import { beginTestCapture, initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { ControlPlaneClient } from './control-plane-client.js';
-import { cmdLogin } from '../handlers/commands.js';
+import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
@@ -621,6 +621,13 @@ app.post('/webhook', async context => {
       : pending > 0 ? `Собран ввод: ${pending} ${pending === 1 ? 'сообщение' : 'сообщений'}.` : 'Активных задач и несобранного ввода нет.';
     await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text, threadExtra(threadId));
     return context.json({ ok: true, serviceCommand: 'status', active, pending });
+  }
+  if (message.text && /^\/(?:stop|стоп)(?:@[a-z0-9_]+)?(?:\s|$)/i.test(message.text.trim())) {
+    // Route explicit stop commands through the same command handler as the main
+    // bot. Letting them fall through to Intake would turn `/stop` into user
+    // task text and leave the active Runner execution untouched.
+    await handleCommand(message, runtimeEnv);
+    return context.json({ ok: true, serviceCommand: 'stop' });
   }
   if (!session?.username || session.username === 'integrator') {
     if (update.callback_query) {
