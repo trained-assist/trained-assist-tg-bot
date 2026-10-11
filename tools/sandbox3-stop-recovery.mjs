@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -42,7 +43,7 @@ async function sendStop(chatId, userId) {
   assert(messages.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0),
     'sandbox3_stop_reply_not_delivered');
   const text = messages.map(item => String(item.text ?? '')).join('\n');
-  assert(/задача остановлена|task stopped/i.test(text), 'sandbox3_stop_not_confirmed_by_worker');
+  assert(stopReplyConfirmsRequest(text), 'sandbox3_stop_not_confirmed_by_worker');
 }
 
 async function main() {
