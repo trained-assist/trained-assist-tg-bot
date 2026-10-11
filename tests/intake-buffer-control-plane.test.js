@@ -1579,14 +1579,28 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.some(call => String(call[2]).includes('вложения пока не поддерживаются'))).toBe(true);
   });
 
-  it('drops a stranded unsupported attachment and starts a fresh batch with the next text', async () => {
+  it('refuses a new unsupported attachment without clearing already collected text', async () => {
     const { owner, storage } = fixture();
-    await storage.put('buf', [{ text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } }]);
+    const text = { text: 'сохранённый ввод', msg: { message_id: 6, chat: { id: 42 }, text: 'сохранённый ввод' } };
+    await storage.put('buf', [text]);
+    const response = await owner.fetch(rpc('/append', { text: '', msg: {
+      message_id: 7, chat: { id: 42 }, document: { file_id: 'document', file_name: 'brief.txt' } }, telegramUpdateId: 107 }));
+    expect(await response.json()).toMatchObject({ refused: true, unsupported: 'media', preservedDraft: true });
+    expect(await storage.get('buf')).toEqual([text]);
+    expect(send.mock.calls.some(call => String(call[2]).includes('уже собранный ввод сохранён'))).toBe(true);
+    expect(handleMessage).not.toHaveBeenCalled();
+  });
+
+  it('removes a stranded unsupported attachment but preserves neighboring text', async () => {
+    const { owner, storage } = fixture();
+    const priorText = { text: 'первый вопрос', msg: { message_id: 6, chat: { id: 42 }, text: 'первый вопрос' } };
+    const unsupported = { text: '', msg: { message_id: 7, chat: { id: 42 }, voice: { file_id: 'voice' } } };
+    await storage.put('buf', [priorText, unsupported]);
     const response = await owner.fetch(rpc('/append', { text: 'новая текстовая задача', msg: {
       message_id: 8, chat: { id: 42 }, text: 'новая текстовая задача' }, telegramUpdateId: 108 }));
-    expect((await response.json()).buffered).toBe(1);
-    expect((await storage.get('buf')).map(item => item.text)).toEqual(['новая текстовая задача']);
-    expect(send.mock.calls.some(call => String(call[2]).includes('Сбросил старую порцию'))).toBe(true);
+    expect((await response.json()).buffered).toBe(2);
+    expect((await storage.get('buf')).map(item => item.text)).toEqual(['первый вопрос', 'новая текстовая задача']);
+    expect(send.mock.calls.some(call => String(call[2]).includes('остальные сообщения'))).toBe(true);
   });
 
   it('offers an owned revision-bound discard action and refuses to discard unresolved dispatch', async () => {
