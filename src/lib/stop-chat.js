@@ -95,7 +95,15 @@ export async function stopChat(env, { username, chatId, threadId = null, replyTo
 
 // One wording for both entry points. `null` = the DO's own «⛔ Остановлено. N
 // ждут» collector already says everything — no second bubble.
-export function stopReplyText({ killed, held, cancelled = 0, hadIntent, clearedDraftCount = 0, error }, { button = false } = {}) {
+export function stopReplyText({ killed, held, cancelled = 0, hadIntent, clearedDraftCount = 0, error, intake = false }, { button = false } = {}) {
+  // In CP mode the Intake DO has already persisted the stop window before the
+  // Runner request. A delayed/lost response is therefore an accepted stop that
+  // the DO alarm will keep reconciling, not an unknown user action. Keep the
+  // conversation held until the worker terminal status arrives.
+  if (error?.pending === true && error?.code === 'CONTROL_PLANE_STOP_PENDING' && intake) {
+    return '🛑 Запрос на остановку принят. Проверяю завершение исполнителя; новый запуск пока не выполняю.'
+      + (clearedDraftCount ? ` Ввод очищен (${clearedDraftCount} блоков/файлов).` : '');
+  }
   if (error) return (killed > 0
     ? '⚠️ Сигнал отправлен, но завершение задачи не подтверждено. Исход неизвестен.'
     : '⚠️ Не удалось подтвердить остановку. Исход неизвестен.')
