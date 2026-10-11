@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
+import { summarizeStopDiagnostics } from './sandbox3-stop-diagnostics.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -56,6 +57,21 @@ async function deliveryRead(taskId) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`sandbox3_delivery_read_${response.status}_${payload.error ?? 'failed'}`);
   return payload;
+}
+
+async function inspectStopDiagnostics(chatId, replyConfirmed) {
+  let response;
+  let payload = {};
+  try {
+    response = await fetch(`${TG_ORIGIN}/operator/stop-window`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'inspect', profileId: PROFILE_ID, chatId, threadId: null }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    payload = await response.json().catch(() => ({}));
+  } catch {}
+  return summarizeStopDiagnostics({ replyConfirmed, inspectStatus: response?.status, inspectPayload: payload });
 }
 
 async function d1(sql, params = []) {
@@ -390,7 +406,14 @@ async function main() {
     const stopReply = await sendMessage('/stop');
     assertDelivered(stopReply, 'active-task-stop');
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-    assert(stopReplyConfirmsRequest(stopText), 'sandbox_stop_confirmation_missing_or_failed');
+    const stopConfirmed = stopReplyConfirmsRequest(stopText);
+    if (!stopConfirmed) {
+      const diagnostics = await inspectStopDiagnostics(chatId, stopConfirmed);
+      await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics });
+      console.error(JSON.stringify({ lane: 'sandbox3', ok: false,
+        reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics }));
+    }
+    assert(stopConfirmed, 'sandbox_stop_confirmation_missing_or_failed');
     const terminalStatus = await waitForCancelledTask(active.id);
     const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
