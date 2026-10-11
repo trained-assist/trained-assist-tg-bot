@@ -104,6 +104,36 @@ describe('sandbox Worker test transcript capture', () => {
     expect(secondFinish()).toEqual([]);
   });
 
+  it('allows concurrent same-chat test updates when their delivery policy matches', () => {
+    const first = beginTestCapture(TEST, { deliverToTelegram: true });
+    const second = beginTestCapture(TEST, { deliverToTelegram: true });
+    expect(first).toBeTypeOf('function');
+    expect(second).toBeTypeOf('function');
+    expect(isTestChatCached(TEST)).toBe(false);
+
+    expect(captureDeliveredTestMessage(TEST, 'stop acknowledgement',
+      { ok: true, result: { message_id: 51 } })).toBe(true);
+    expect(second()).toEqual([{ kind: 'sendMessage', text: 'stop acknowledgement',
+      telegramOk: true, messageId: 51 }]);
+    // Finishing one overlapping webhook must not remove the other webhook's
+    // real-delivery context from this Worker isolate.
+    expect(isTestChatCached(TEST)).toBe(false);
+    expect(captureDeliveredTestMessage(TEST, 'next task acknowledgement',
+      { ok: true, result: { message_id: 52 } })).toBe(true);
+    expect(first()).toEqual([
+      { kind: 'sendMessage', text: 'stop acknowledgement', telegramOk: true, messageId: 51 },
+      { kind: 'sendMessage', text: 'next task acknowledgement', telegramOk: true, messageId: 52 },
+    ]);
+    expect(isTestChatCached(TEST)).toBe(false);
+  });
+
+  it('rejects concurrent same-chat captures with conflicting delivery policies', () => {
+    const finish = beginTestCapture(TEST, { deliverToTelegram: true });
+    expect(beginTestCapture(TEST)).toBeNull();
+    expect(isTestChatCached(TEST)).toBe(false);
+    finish();
+  });
+
   it('records sent messages in real-delivery mode without enabling delivery=log', () => {
     const finish = beginTestCapture(TEST, { deliverToTelegram: true });
     initTestMode(envOf(''));
