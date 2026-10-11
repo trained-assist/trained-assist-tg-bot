@@ -99,6 +99,37 @@ async function waitForTask(excludedTaskIds = []) {
   throw new Error(`sandbox3_task_timeout_${rows[0]?.status ?? 'not_admitted'}`);
 }
 
+async function waitForActiveTask(excludedTaskIds = []) {
+  const deadline = Date.now() + 3 * 60_000;
+  let rows = [];
+  while (Date.now() < deadline) {
+    rows = await d1(`SELECT t.id, t.status AS task_status, e.status AS execution_status
+      FROM durable_tasks t JOIN executions e ON e.task_id = t.id
+      WHERE t.profile_id = ? ORDER BY t.created_at DESC LIMIT 5`, [PROFILE_ID]);
+    rows = rows.filter(row => !excludedTaskIds.includes(row.id));
+    if (rows.length > 1) throw new Error('sandbox3_stop_unexpected_task_count');
+    if (rows[0]?.execution_status === 'running') return rows[0];
+    if (rows[0] && ['done', 'failed', 'cancelled'].includes(rows[0].task_status)) {
+      throw new Error(`sandbox3_stop_task_ended_before_stop_${rows[0].task_status}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+  throw new Error(`sandbox3_stop_runner_never_started_${rows[0]?.task_status ?? 'not_admitted'}`);
+}
+
+async function waitForCancelledTask(taskId) {
+  const deadline = Date.now() + 2 * 60_000;
+  let rows = [];
+  while (Date.now() < deadline) {
+    rows = await d1('SELECT status FROM durable_tasks WHERE id = ?', [taskId]);
+    const status = rows[0]?.status;
+    if (status === 'cancelled') return status;
+    if (status && ['done', 'failed', 'unknown'].includes(status)) throw new Error(`sandbox3_stop_terminal_${status}`);
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+  throw new Error(`sandbox3_stop_terminal_timeout_${rows[0]?.status ?? 'missing'}`);
+}
+
 async function waitForDelivery(taskId, chatId) {
   const deadline = Date.now() + 8 * 60_000;
   let observed;
@@ -129,7 +160,7 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
-  assert(['basic', 'multiline', 'history'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'multiline', 'history', 'stop'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'multiline'
@@ -291,6 +322,57 @@ async function main() {
     console.log(JSON.stringify({ scenario: 'conversation-history-followup', ...historyEvidence }));
   }
 
+  let stopEvidence = null;
+  if (scenario === 'stop') {
+    const stopToken = `STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
+    const stopPrompt = `Use your shell tool to run the harmless command \`sleep 120\` and wait for it to finish. Only then reply with exactly this token: ${stopToken}`;
+    const stopQuestion = await sendMessage(stopPrompt);
+    assert.equal(stopQuestion.ok, true, 'sandbox_stop_question_not_accepted');
+    assert.equal(stopQuestion.collector?.pendingCount, 1, 'sandbox_stop_question_not_buffered');
+    const stopLaunch = await workerRequest('/operator/test-update', {
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+      callbackData: 'auto', updateId: updateId++,
+    });
+    assert.equal(stopLaunch.ok, true, 'sandbox_stop_task_launch_failed');
+    const active = await waitForActiveTask([task.id]);
+    const stopReply = await sendMessage('/stop');
+    assertDelivered(stopReply, 'active-task-stop');
+    const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
+    assert(/останов|stopp/.test(stopText), 'sandbox_stop_confirmation_missing');
+    const terminalStatus = await waitForCancelledTask(active.id);
+    const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
+    assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
+    assert.notEqual(stoppedExecutions[0].status, 'running', 'sandbox_stop_execution_still_running');
+
+    const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
+    const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
+    const freshQuestion = await sendMessage(freshPrompt);
+    assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
+    assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
+    const freshLaunch = await workerRequest('/operator/test-update', {
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+      callbackData: 'auto', updateId: updateId++,
+    });
+    assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
+    const freshTask = await waitForTask([task.id, active.id]);
+    assert(typeof freshTask.goal === 'string' && freshTask.goal.includes(freshPrompt), 'sandbox_after_stop_input_not_persisted');
+    const freshExecution = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [freshTask.id]);
+    assert.equal(freshExecution.length, 1, 'sandbox_after_stop_execution_count_not_one');
+    assert.equal(freshExecution[0].status, 'success', 'sandbox_after_stop_runner_not_successful');
+    const freshResult = await d1('SELECT result_json FROM durable_tasks WHERE id = ?', [freshTask.id]);
+    assert(String(freshResult[0]?.result_json ?? '').includes(freshToken), 'sandbox_after_stop_answer_mismatch');
+    const freshDelivery = await waitForDelivery(freshTask.id, chatId);
+    stopEvidence = {
+      activeTaskObserved: true,
+      stopConfirmedByWorker: true,
+      stoppedTaskTerminalStatus: terminalStatus,
+      stoppedExecutionNotRunning: true,
+      freshTaskCompleted: true,
+      freshAnswerDelivered: freshDelivery.status === 'sent',
+    };
+    console.log(JSON.stringify({ scenario: 'active-task-stop-and-next-task', ...stopEvidence }));
+  }
+
   const report = {
     ok: true,
     scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
@@ -312,6 +394,7 @@ async function main() {
     controlPlaneDeliveryState: cpDelivery.state,
     controlPlaneDeliveryRows: cpDelivery.rows,
     ...(historyEvidence ? { historyEvidence } : {}),
+    ...(stopEvidence ? { stopEvidence } : {}),
   };
   await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify(report));
