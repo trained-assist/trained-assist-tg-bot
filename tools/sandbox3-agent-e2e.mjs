@@ -173,7 +173,7 @@ function runnerCorrelation(task, execution, { requireRunnerRunId = true } = {}) 
 
 async function failedTaskEvidence(task) {
   const [executions, events] = await Promise.all([
-    d1('SELECT status, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [task.id]),
+    d1('SELECT status, engine, generation, error_class, error_text FROM executions WHERE task_id = ? ORDER BY started_at', [task.id]),
     d1('SELECT kind, payload_json FROM task_events WHERE user_task_id = ? ORDER BY created_at DESC LIMIT 20', [task.id]),
   ]);
   const safeEvents = events.map(event => {
@@ -195,6 +195,9 @@ async function failedTaskEvidence(task) {
       status: safeCode(row.status) ?? 'unknown',
       engine: safeCode(row.engine),
       generation: Number.isSafeInteger(row.generation) ? row.generation : null,
+      errorClass: safeCode(row.error_class),
+      runnerErrorCode: typeof row.error_text === 'string'
+        ? safeCode(/^([A-Z][A-Z0-9_]{0,79}):/.exec(row.error_text)?.[1]) : null,
     })),
     events: safeEvents,
   };
