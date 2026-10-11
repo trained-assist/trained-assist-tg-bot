@@ -102,6 +102,12 @@ function telegramFailureClass(description) {
 }
 
 export function initTestMode(env) {
+  // Synthetic operator updates temporarily carry their own TEST_CHAT_IDS in
+  // the request env. Updating this isolate-wide cache while a capture is live
+  // lets that one request change Telegram delivery for unrelated concurrent
+  // Worker requests. The capture itself provides the synthetic request's
+  // delivery policy, so keep the stable Worker cache untouched until it ends.
+  if (testCaptures.size > 0) return;
   cached = idsFor(env);
 }
 

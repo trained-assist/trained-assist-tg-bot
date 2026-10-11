@@ -146,6 +146,23 @@ describe('sandbox Worker test transcript capture', () => {
     expect(isTestChatCached(TEST)).toBe(true);
     initTestMode(envOf(''));
   });
+
+  it('does not let a synthetic request replace the isolate cache used by concurrent Worker requests', () => {
+    initTestMode(envOf(String(CTRL)));
+    const finish = beginTestCapture(TEST);
+
+    // The synthetic endpoint's webhook has TEST_CHAT_IDS=TEST, while the
+    // Worker cache belongs to its configured environment (CTRL).
+    initTestMode(envOf(String(TEST)));
+    expect(isTestChatCached(TEST)).toBe(true); // request-local capture
+    expect(isTestChatCached(CTRL)).toBe(true); // stable Worker configuration
+    expect(isTestChatCached(777000333)).toBe(false);
+
+    finish();
+    expect(isTestChatCached(TEST)).toBe(false);
+    expect(isTestChatCached(CTRL)).toBe(true);
+    initTestMode(envOf(''));
+  });
 });
 
 describe('модульный кэш для lib/telegram.js (init-точки)', () => {
