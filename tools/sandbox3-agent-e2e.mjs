@@ -72,6 +72,42 @@ async function d1(sql, params = []) {
   return result.results ?? [];
 }
 
+function safeCode(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : null;
+}
+
+async function failedTaskEvidence(task) {
+  const [executions, events] = await Promise.all([
+    d1('SELECT status, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [task.id]),
+    d1('SELECT kind, payload_json FROM task_events WHERE user_task_id = ? ORDER BY created_at DESC LIMIT 20', [task.id]),
+  ]);
+  const safeEvents = events.map(event => {
+    let payload;
+    try { payload = JSON.parse(event.payload_json ?? 'null'); } catch { payload = null; }
+    const details = payload && typeof payload === 'object' ? payload : {};
+    return {
+      eventType: safeCode(event.kind) ?? 'unknown',
+      reasonCode: safeCode(details.reasonCode) ?? safeCode(details.code) ?? null,
+      stage: safeCode(details.stage) ?? null,
+      errorClass: safeCode(details.errorClass) ?? null,
+    };
+  });
+  return {
+    status: safeCode(task.status) ?? 'unknown',
+    generation: Number.isSafeInteger(task.generation) ? task.generation : null,
+    executions: executions.map(row => ({
+      status: safeCode(row.status) ?? 'unknown',
+      engine: safeCode(row.engine),
+      generation: Number.isSafeInteger(row.generation) ? row.generation : null,
+    })),
+    events: safeEvents,
+  };
+}
+
+async function writeEvidence(report) {
+  await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+}
+
 function assertDelivered(response, phase) {
   assert.equal(response.ok, true, 'worker_update_not_accepted');
   assert.equal(response.delivery, 'telegram', 'real_telegram_delivery_not_enabled');
@@ -91,7 +127,13 @@ async function waitForTask(excludedTaskIds = []) {
     rows = rows.filter(row => !excludedTaskIds.includes(row.id));
     if (rows.length) {
       if (rows.length !== 1) throw new Error('sandbox3_unexpected_task_count');
-      if (['failed', 'cancelled'].includes(rows[0].status)) throw new Error(`sandbox3_task_${rows[0].status}`);
+      if (['failed', 'cancelled'].includes(rows[0].status)) {
+        const diagnostic = await failedTaskEvidence(rows[0]);
+        await writeEvidence({ ok: false, scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
+          inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic', task: diagnostic });
+        console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode: `sandbox3_task_${rows[0].status}`, task: diagnostic }));
+        throw new Error(`sandbox3_task_${rows[0].status}`);
+      }
       if (rows[0].status === 'done') return rows[0];
     }
     await new Promise(resolve => setTimeout(resolve, 8_000));
@@ -396,7 +438,7 @@ async function main() {
     ...(historyEvidence ? { historyEvidence } : {}),
     ...(stopEvidence ? { stopEvidence } : {}),
   };
-  await writeFile('sandbox3-agent-e2e-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  await writeEvidence(report);
   console.log(JSON.stringify(report));
 }
 
