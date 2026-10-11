@@ -227,7 +227,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 });
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -352,6 +352,10 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     if (url.hostname === 'cp.test' && url.pathname === '/stop') return reply({ killed: 0 });
     if (url.hostname === 'cp.test' && url.pathname === '/status' && boundary === 'operator-stop-window-inspect-cp-unavailable') {
       return reply({ error: 'injected offline status refusal' }, 503);
+    }
+    if (url.hostname === 'cp.test' && url.pathname === '/status'
+        && boundary === 'operator-stop-window-reconcile-task-status-unavailable') {
+      return reply({ error: 'injected offline status refusal', code: 'cp_status_unavailable' }, 503);
     }
     if (url.hostname === 'cp.test' && url.pathname === '/cancel') {
       cpCancels.push(body);
@@ -533,6 +537,13 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
           threadId: null, taskId: 'ut-terminal-fixture' };
         const outcome = await invokeRecovery(taskSelector);
         const outcomeBody = await outcome.json();
+        if (boundary === 'operator-stop-window-reconcile-task-status-unavailable') {
+          expect(outcome.status).toBe(503);
+          expect(outcomeBody).toMatchObject({ error: 'control_plane_status_unavailable',
+            httpStatus: 503, upstreamCode: 'cp_status_unavailable' });
+          expect(cpCancels).toHaveLength(0);
+          return;
+        }
         if (['operator-stop-window-reconcile-task-active-run-refusal',
           'operator-stop-window-reconcile-task-live-lease-refusal'].includes(boundary)) {
           expect(outcome.status).toBe(409);

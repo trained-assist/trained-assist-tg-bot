@@ -170,10 +170,14 @@ app.post('/operator/stop-window', async context => {
     const client = new ControlPlaneClient(config, { fetchImpl: env.CONTROL_PLANE_SERVICE
       ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined });
     const refused = (reason, details = {}) => context.json({ refused: true, reason, ...details }, 409);
+    const upstreamCode = error => {
+      const code = error?.body?.code ?? error?.body?.reasonCode;
+      return typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(code) ? code : null;
+    };
     let status;
     try { status = await client.status(taskId); }
     catch (error) { return context.json({ error: 'control_plane_status_unavailable',
-      httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+      httpStatus: Number.isInteger(error?.status) ? error.status : null, upstreamCode: upstreamCode(error) }, 503); }
     const taskMatches = status.id === taskId && status.profile_id === profileId &&
       new RegExp(conversation).test(status.conversation_id ?? '');
     const runsTerminal = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
@@ -198,7 +202,7 @@ app.post('/operator/stop-window', async context => {
       }
       try { status = await client.status(taskId); }
       catch (error) { return context.json({ error: 'control_plane_status_unavailable',
-        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+        httpStatus: Number.isInteger(error?.status) ? error.status : null, upstreamCode: upstreamCode(error) }, 503); }
     }
     const verifiedRuns = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
       ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
