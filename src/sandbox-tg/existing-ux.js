@@ -97,24 +97,30 @@ app.get('/operator/delivery-cutover-v1', async context => {
   }
 });
 
-// Bounded E2E observation for the pinned sandbox identity. This performs a
-// read only from the delivery owner and never returns message text.
+// Bounded E2E observation for a sandbox delivery. The legacy probability lane
+// supplies its allowed chat explicitly; sandbox3 is pinned to its configured
+// identity. This performs a read only from the delivery owner and never returns
+// message text.
 app.get('/operator/test-delivery/:taskId', async context => {
   const env = executionEnv(context.env);
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true'
-      || !sandboxOperatorResetChat(env, target)) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   const taskId = context.req.param('taskId');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return context.json({ error: 'invalid_task_id' }, 400);
   try {
     const config = readTgSliceConfig(env);
+    const pinnedChat = sandboxOperatorResetChat(env, target);
+    const chatId = context.req.query('chatId') ?? pinnedChat;
+    if (!chatId || !chatAllowed(config, chatId) || (pinnedChat && String(chatId) !== pinnedChat)) {
+      return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
+    }
     const result = await createController(env, config).outbox.read(taskId);
     const records = [result.receipt, result.terminal].filter(Boolean);
-    if (records.some(record => String(record.chatId) !== String(env.TG_SANDBOX_E2E_CHAT_ID ?? '')))
+    if (records.some(record => String(record.chatId) !== String(chatId)))
       return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
-    return context.json({ taskId, receipt: result.receipt, terminal: result.terminal });
+    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal: result.terminal });
   } catch {
     return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
   }

@@ -11,6 +11,11 @@ on:
           - skip
           - probability-sandbox
         default: skip
+      run_agent_e2e:
+        description: Run one bounded Runner task and Telegram reply in the probability sandbox
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -128,6 +133,15 @@ jobs:
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs test-buffers
 
+      - name: Test login, Runner answer and Telegram delivery in the probability sandbox
+        if: ${{ inputs.run_agent_e2e == true }}
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: node tools/sandbox-probability-agent-e2e.mjs
+
       - name: Clear all sandbox state after the buffer scenario
         if: always()
         env:
@@ -141,3 +155,12 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs inspect
+
+      - name: Upload probability sandbox E2E evidence
+        if: ${{ always() && inputs.run_agent_e2e == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: probability-sandbox-agent-e2e-${{ github.run_id }}
+          path: sandbox-probability-agent-e2e-evidence.json
+          if-no-files-found: ignore
+          retention-days: 7
