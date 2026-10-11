@@ -159,6 +159,15 @@ describe('stopChat wiring (#325)', () => {
       .toContain('Нет активной задачи');
   });
 
+  it('reports a persisted CP stop as accepted while worker confirmation is pending', () => {
+    const error = Object.assign(new Error('pending'), { code: 'CONTROL_PLANE_STOP_PENDING', pending: true });
+    const text = stopReplyText({ killed: 0, held: 0, cancelled: 0, hadIntent: false,
+      intake: true, error }, { button: true });
+    expect(text).toContain('Запрос на остановку принят');
+    expect(text).toContain('новый запуск пока не выполняю');
+    expect(text).not.toContain('Исход неизвестен');
+  });
+
   it('never reports stopped when the agent signalled a process but did not confirm exit', async () => {
     stopTask.mockResolvedValueOnce({ killed: 1, confirmed: false });
     const result = await stopChat({ AGENT_URL: 'https://agent', AGENT_SECRET: 's' }, { username: 'owner', chatId: 42 });

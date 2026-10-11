@@ -1093,7 +1093,9 @@ export async function handleCallbackQuery(cq, env) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⛔ Останавливаю…');
     // #1856: same path as /stop — hold the intake queue first, then kill the run.
     const result = await stopChat(env, { username: session.username, chatId, threadId, ...callbackSource(cq, env, session) });
-    const text = env.EXECUTION_BACKEND === 'control-plane' && !result.killed
+    const persistedStopPending = result.intake && result.error?.pending === true
+      && result.error?.code === 'CONTROL_PLANE_STOP_PENDING';
+    const text = env.EXECUTION_BACKEND === 'control-plane' && !result.killed && result.error && !persistedStopPending
       ? '⚠️ Остановка задачи не подтверждена.' : stopReplyText(result, { button: true });
     if (result.error && result.killed === 0 && (result.held || result.hadIntent)) {
       console.warn('[stop] agent stop failed after intake hold:', result.error.message);
