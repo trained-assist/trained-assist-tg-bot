@@ -141,12 +141,31 @@ export function suppress(chatId, kind, detail) {
 
 export function beginTestCapture(chatId, { deliverToTelegram = false } = {}) {
   const id = Number(chatId);
-  if (!Number.isSafeInteger(id) || id === 0 || testCaptures.has(id)) return null;
+  if (!Number.isSafeInteger(id) || id === 0) return null;
+  const current = testCaptures.get(id);
+  if (current) {
+    // Concurrent synthetic updates for one chat are normal (for example, a
+    // new task submitted while /stop is awaiting Runner confirmation). They
+    // may share a transcript only when their delivery policy is identical.
+    // Mixing capture-only and real-delivery requests would suppress or leak
+    // messages across requests, so keep that combination rejected.
+    if (current.deliverToTelegram !== deliverToTelegram) return null;
+    current.references += 1;
+    let finished = false;
+    return () => {
+      if (finished) return [];
+      finished = true;
+      current.references -= 1;
+      if (current.references === 0 && testCaptures.get(id) === current) testCaptures.delete(id);
+      return current.entries;
+    };
+  }
   const entries = [];
   let nextMessageId = 1;
   const capture = {
     entries,
     deliverToTelegram,
+    references: 1,
     record(entry) {
       if (entry.kind === 'sendMessage') {
         const messageId = nextMessageId++;
@@ -170,9 +189,12 @@ export function beginTestCapture(chatId, { deliverToTelegram = false } = {}) {
     },
   };
   testCaptures.set(id, capture);
+  let finished = false;
   return () => {
-    if (testCaptures.get(id) !== capture) return [];
-    testCaptures.delete(id);
+    if (finished) return [];
+    finished = true;
+    capture.references -= 1;
+    if (capture.references === 0 && testCaptures.get(id) === capture) testCaptures.delete(id);
     return entries;
   };
 }
