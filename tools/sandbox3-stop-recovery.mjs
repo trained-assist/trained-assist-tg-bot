@@ -5,6 +5,7 @@ import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
 const PROFILE_ID = 'integration-sandbox3-v1';
+const RECOVERY_USERNAME = 'sandbox3_recovery';
 const TG_ORIGIN = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 
 function required(name) {
@@ -29,16 +30,45 @@ async function d1(sql, params = []) {
   return result.results ?? [];
 }
 
-async function sendStop(chatId, userId) {
+async function sendUpdate(chatId, userId, text, updateId, extra = {}) {
   const response = await fetch(`${TG_ORIGIN}/operator/test-update`, {
     method: 'POST',
     headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' },
     body: JSON.stringify({ target: 'sandbox3', type: 'message', chatId, userId,
-      delivery: 'telegram', updateId: Date.now(), text: '/stop' }),
+      delivery: 'telegram', updateId, text, ...extra }),
     signal: AbortSignal.timeout(180_000),
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`sandbox3_stop_worker_${response.status}_${payload.error ?? 'failed'}`);
+  if (!response.ok) throw new Error(`sandbox3_worker_${response.status}_${payload.error ?? 'failed'}`);
+  return payload;
+}
+
+function passwordFrom(payload) {
+  const messages = payload.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
+  const text = messages.map(item => String(item.text ?? '')).join('\n');
+  return /Пароль:\s*<code>([^<]+)<\/code>/i.exec(text)?.[1] ?? null;
+}
+
+async function loginRecoveryProfile(chatId, userId, updateId) {
+  let credential = await sendUpdate(chatId, userId, `/pass_reset ${RECOVERY_USERNAME}`, updateId++,
+    { delivery: 'capture', admin: true });
+  let password = passwordFrom(credential);
+  if (!password) {
+    credential = await sendUpdate(chatId, userId, `/adduser ${RECOVERY_USERNAME} Sandbox3 Recovery`, updateId++,
+      { delivery: 'capture', admin: true });
+    password = passwordFrom(credential);
+  }
+  assert(password, 'sandbox3_recovery_profile_password_missing');
+  const login = await sendUpdate(chatId, userId, `/login ${RECOVERY_USERNAME} ${password}`, updateId++);
+  const loginMessages = login.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
+  assert(loginMessages.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId)
+    && item.messageId > 0), 'sandbox3_recovery_login_reply_not_delivered');
+  assert.equal(login.admission?.authenticated, true, 'sandbox3_recovery_profile_login_failed');
+  return updateId;
+}
+
+async function sendStop(chatId, userId, updateId) {
+  const payload = await sendUpdate(chatId, userId, '/stop', updateId);
   const messages = payload.transcript?.filter(item => item.kind === 'sendMessage') ?? [];
   assert(messages.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0),
     'sandbox3_stop_reply_not_delivered');
@@ -62,7 +92,8 @@ async function main() {
   }
   assert.equal(activeTasks.length, 1, 'sandbox3_stop_recovery_unexpected_active_task_count');
   const task = activeTasks[0];
-  await sendStop(chatId, userId);
+  const updateId = await loginRecoveryProfile(chatId, userId, Date.now());
+  await sendStop(chatId, userId, updateId);
 
   const deadline = Date.now() + 120_000;
   let observed = null;
