@@ -154,7 +154,7 @@ function safeEvidenceId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value) ? value : null;
 }
 
-function runnerCorrelation(task, execution) {
+function runnerCorrelation(task, execution, { requireRunnerRunId = true } = {}) {
   const correlation = {
     taskId: safeEvidenceId(task?.id),
     cpAttemptId: safeEvidenceId(execution?.id),
@@ -162,7 +162,8 @@ function runnerCorrelation(task, execution) {
     engine: safeCode(execution?.engine),
     generation: Number.isSafeInteger(execution?.generation) ? execution.generation : null,
   };
-  if (Object.values(correlation).some(value => value == null)) {
+  if (correlation.taskId == null || correlation.cpAttemptId == null || correlation.engine == null
+      || correlation.generation == null || (requireRunnerRunId && correlation.runnerRunId == null)) {
     throw new Error('sandbox_runner_correlation_missing');
   }
   return correlation;
@@ -465,7 +466,10 @@ async function main() {
     const [activeExecution] = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert(activeExecution, 'sandbox_stop_runner_execution_missing');
     assert.equal(activeExecution.status, 'running', 'sandbox_stop_runner_execution_not_running_before_stop');
-    const activeCorrelation = runnerCorrelation(active, activeExecution);
+    // CP can expose the active execution before the Runner run ID is attached
+    // to its row. Capture the durable CP attempt and engine now, then require
+    // the complete correlation after stop reaches a terminal execution state.
+    const activeCorrelation = runnerCorrelation(active, activeExecution, { requireRunnerRunId: false });
     const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
     const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
     let freshQuestion = null;
@@ -525,8 +529,11 @@ async function main() {
     const stoppedExecutions = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
     assert.notEqual(stoppedExecutions[0].status, 'running', 'sandbox_stop_execution_still_running');
-    assert.deepEqual(runnerCorrelation(active, stoppedExecutions[0]), activeCorrelation,
-      'sandbox_stop_runner_correlation_changed');
+    const stoppedCorrelation = runnerCorrelation(active, stoppedExecutions[0]);
+    assert.equal(stoppedCorrelation.taskId, activeCorrelation.taskId, 'sandbox_stop_task_correlation_changed');
+    assert.equal(stoppedCorrelation.cpAttemptId, activeCorrelation.cpAttemptId, 'sandbox_stop_attempt_correlation_changed');
+    assert.equal(stoppedCorrelation.engine, activeCorrelation.engine, 'sandbox_stop_engine_correlation_changed');
+    assert.equal(stoppedCorrelation.generation, activeCorrelation.generation, 'sandbox_stop_generation_correlation_changed');
 
     if (!freshQuestion) {
       freshQuestion = await sendMessage(freshPrompt);
@@ -559,6 +566,8 @@ async function main() {
     const freshDelivery = await waitForDelivery(freshTask.id, chatId);
     stopEvidence = {
       activeTaskObserved: true,
+      activeCorrelation,
+      stoppedCorrelation,
       stopConfirmedByWorker: true,
       immediateStopConfirmed,
       inputBufferedWhileStopPending,
