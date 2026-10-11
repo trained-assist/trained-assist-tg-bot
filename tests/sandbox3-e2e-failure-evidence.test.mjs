@@ -14,6 +14,8 @@ describe('sandbox3 E2E failure evidence', () => {
       executions: { count: 1, items: [{ id: 'attempt-1', status: 'success', engine: 'cloudflare-workflows',
         generation: 1, runId: 'run_abc.1', errorClass: null, runnerErrorCode: null, result: 'private model output' }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27, text: 'private model output' },
+      artifactExport: { expectedMarkdownExported: true, expectedScreenshotExported: false,
+        manifestCount: 1, manifestMetadataValid: false, rawArtifactRef: 'private storage key' },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0, chatId: 'private chat' },
     });
@@ -28,6 +30,8 @@ describe('sandbox3 E2E failure evidence', () => {
       executions: { count: 1, items: [{ id: 'attempt-1', status: 'success', engine: 'cloudflare-workflows',
         generation: 1, runIdPresent: true, errorClass: null, runnerErrorCode: null }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27 },
+      artifactExport: { expectedMarkdownExported: true, expectedScreenshotExported: false,
+        manifestCount: 1, manifestMetadataValid: false },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0 },
     });
