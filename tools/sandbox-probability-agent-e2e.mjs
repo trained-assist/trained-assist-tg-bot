@@ -102,22 +102,37 @@ function assertDelivered(response, phase) {
 }
 
 async function main() {
+  await checkpoint('preflight');
   const [before] = await d1('SELECT COUNT(*) AS n FROM durable_tasks');
   assert.equal(Number(before.n), 0, 'probability_cp_task_store_not_empty');
+  evidence.preflightEmpty = true;
   let updateId = Date.now();
   const send = (text, extra = {}) => workerRequest('/operator/test-update', {
     target: 'sandbox', type: 'message', chatId, userId, delivery: 'telegram', updateId: updateId++, text, ...extra,
   });
 
+  phase = 'help_response';
   const help = await send('/help');
-  assert.equal(help.ok, true);
+  assert.equal(help.ok, true, 'probability_help_not_ok');
   assertDelivered(help, 'help');
+  evidence.helpDelivered = true;
+  await checkpoint('help_delivered');
+
+  phase = 'status_response';
   const status = await send('/status');
-  assert.equal(status.ok, true);
+  assert.equal(status.ok, true, 'probability_status_not_ok');
   assertDelivered(status, 'status');
+  evidence.statusDelivered = true;
+  await checkpoint('status_delivered');
+
+  phase = 'service_command_task_check';
   const [afterCommands] = await d1('SELECT COUNT(*) AS n FROM durable_tasks');
   assert.equal(Number(afterCommands.n), 0, 'probability_service_commands_created_task');
+  evidence.serviceCommandTaskCountBefore = Number(before.n);
+  evidence.serviceCommandTaskCountAfter = Number(afterCommands.n);
+  await checkpoint('service_commands_do_not_create_tasks');
 
+  phase = 'create_test_profile';
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   const created = await workerRequest('/operator/test-update', {
     target: 'sandbox', type: 'message', chatId, userId, delivery: 'capture', admin: true,
@@ -128,11 +143,17 @@ async function main() {
   assert(createdText.includes(username), 'probability_test_profile_not_created');
   const password = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(createdText)?.[1];
   assert(password, 'probability_test_password_not_returned');
+  evidence.testProfileCreated = true;
+  await checkpoint('test_profile_created');
 
+  phase = 'login';
   const login = await send(`/login ${username} ${password}`);
   assert.equal(login.admission?.authenticated, true, 'probability_test_login_failed');
   assertDelivered(login, 'login');
+  evidence.loginPassed = true;
+  await checkpoint('login_passed');
 
+  phase = 'question_acceptance';
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = `Reply with exactly this token and nothing else: ${nonce}`;
   const questionId = updateId++;
@@ -141,18 +162,35 @@ async function main() {
   const question = await workerRequest('/operator/test-update', questionInput);
   assert.equal(question.ok, true, 'probability_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'probability_question_not_buffered');
+  evidence.questionAccepted = true;
+  await checkpoint('question_accepted');
+
+  phase = 'duplicate_update_replay';
   const replay = await workerRequest('/operator/test-update', questionInput);
   assert.equal(replay.ok, true, 'probability_duplicate_update_not_acknowledged');
   assert.equal(replay.collector?.pendingCount, 1, 'probability_duplicate_update_added_input_twice');
+  evidence.sameUpdateReplayed = true;
+  await checkpoint('duplicate_update_replayed');
 
+  phase = 'launch_task';
   const launched = await workerRequest('/operator/test-update', {
     target: 'sandbox', type: 'callback', chatId, userId, delivery: 'telegram',
     callbackData: 'auto', updateId: updateId++,
   });
   assert.equal(launched.ok, true, 'probability_task_launch_failed');
+  evidence.taskLaunchAccepted = true;
+  await checkpoint('task_launch_accepted');
+
+  phase = 'wait_task_terminal';
   const task = await waitForTask(nonce);
+  evidence.cpTaskId = task.id;
+  evidence.cpGeneration = task.generation;
   assert(task.goal.includes(prompt), 'probability_original_input_not_persisted');
   assert(Number.isSafeInteger(task.generation) && task.generation > 0, 'probability_task_generation_missing');
+  evidence.taskTerminalDone = true;
+  await checkpoint('task_terminal_done');
+
+  phase = 'check_runner_execution';
   const executions = await d1(`SELECT id, status, session_id, engine, generation FROM executions
     WHERE task_id = ? ORDER BY started_at`, [task.id]);
   assert.equal(executions.length, 1, 'probability_execution_count_not_one');
@@ -160,17 +198,29 @@ async function main() {
   assert.equal(executions[0].generation, task.generation, 'probability_runner_generation_mismatch');
   assert(typeof executions[0].session_id === 'string' && executions[0].session_id.length > 0,
     'probability_runner_id_missing');
+  evidence.runnerExecutionCount = executions.length;
+  evidence.runnerExecutionSuccess = true;
+  evidence.runnerIdPresent = true;
+  await checkpoint('runner_execution_success');
   let result = task.result_json;
   if (typeof result === 'string') {
     try { result = JSON.parse(result); } catch { /* plain text result */ }
   }
   const resultText = typeof result === 'string' ? result : JSON.stringify(result);
   assert(resultText.includes(nonce), 'probability_answer_mismatch');
+  evidence.answerMatchesChallenge = true;
+  await checkpoint('answer_matches_challenge');
+
+  phase = 'check_telegram_delivery';
   const delivery = await waitForDelivery(task.id);
+  evidence.telegramDeliverySent = delivery.status === 'sent';
+  evidence.telegramProviderMessageIdPresent = true;
+  evidence.deliveryAttempts = delivery.attempts;
+  await checkpoint('telegram_delivery_confirmed');
   const [cpDeliveryRows] = await d1('SELECT COUNT(*) AS n FROM deliveries WHERE user_task_id = ?', [task.id]);
   assert.equal(Number(cpDeliveryRows.n), 0, 'probability_unexpected_cp_delivery_owner');
 
-  const report = { ok: true, scenario: 'probability-login-basic-answer-delivery', sourceSha: process.env.GITHUB_SHA ?? null,
+  const report = { ...evidence, ok: true, phase: 'complete', scenario: 'probability-login-basic-answer-delivery', sourceSha: process.env.GITHUB_SHA ?? null,
     helpDelivered: true, statusDelivered: true, serviceCommandTaskCountBefore: Number(before.n),
     serviceCommandTaskCountAfter: Number(afterCommands.n), loginPassed: true, questionAccepted: true,
     sameUpdateReplayed: true, cpTaskId: task.id, cpGeneration: task.generation, taskTerminalDone: true,
@@ -182,8 +232,26 @@ async function main() {
   console.log(JSON.stringify(report));
 }
 
-main().catch(error => {
-  const safe = /^[a-z0-9_:.\-]+$/i.test(error.message) ? error.message : 'probability_agent_e2e_failed';
-  console.error(JSON.stringify({ ok: false, reasonCode: safe }));
+let phase = 'startup';
+const evidence = { ok: false, scenario: 'probability-login-basic-answer-delivery', sourceSha: process.env.GITHUB_SHA ?? null,
+  phase, preflightEmpty: false, helpDelivered: false, statusDelivered: false, loginPassed: false,
+  questionAccepted: false, sameUpdateReplayed: false, taskTerminalDone: false, runnerExecutionSuccess: false,
+  answerMatchesChallenge: false, telegramDeliverySent: false };
+
+async function checkpoint(nextPhase) {
+  phase = nextPhase;
+  evidence.phase = nextPhase;
+  await writeFile('sandbox-probability-agent-e2e-evidence.json', `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({ scenario: evidence.scenario, phase: nextPhase, cpTaskId: evidence.cpTaskId ?? null }));
+}
+
+main().catch(async error => {
+  const message = error instanceof Error ? error.message : '';
+  const safe = /^[a-z0-9_:.\-]+$/i.test(message) ? message : 'probability_assertion_failed';
+  evidence.phase = phase;
+  evidence.reasonCode = safe;
+  try { await writeFile('sandbox-probability-agent-e2e-evidence.json', `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 }); }
+  catch { /* keep sanitized stderr reason when writing the artifact fails */ }
+  console.error(JSON.stringify({ ok: false, scenario: evidence.scenario, phase, reasonCode: safe }));
   process.exitCode = 1;
 });
