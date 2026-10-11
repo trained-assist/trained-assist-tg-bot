@@ -178,7 +178,7 @@ describe('P11 exported Worker composition', () => {
     expect(await health()).toMatchObject({ readiness: 'configured', mode: 'batch', capabilities: { mediaIntake: 'not_configured' } });
     env.INGRESS_BUFFER_TOKEN = 'fixture-buffer-token';
     env.INGRESS_BUFFER = { fetch: vi.fn() };
-    expect(await health()).toMatchObject({ readiness: 'configured', mode: 'batch', capabilities: { mediaIntake: 'ready' } });
+    expect(await health()).toMatchObject({ readiness: 'configured', mode: 'batch', capabilities: { mediaIntake: 'configured' } });
   });
 
   it('deduplicates actual HTTP updates across fresh controllers and sends the receipt with the configured token', async () => {
