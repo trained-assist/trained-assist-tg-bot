@@ -22,6 +22,14 @@ on:
           - retry-mid-run
           - file-intake
         default: basic
+      delivery_mode:
+        description: Capture Worker output without sending Telegram messages, or verify actual Telegram delivery
+        required: true
+        type: choice
+        options:
+          - capture
+          - telegram
+        default: capture
 
 permissions:
   contents: read
@@ -42,7 +50,15 @@ jobs:
       - name: Require protected main
         env:
           REF: ${{ github.ref }}
-        run: test "$REF" = "refs/heads/main"
+          SCENARIO: ${{ inputs.scenario }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+        run: |
+          set -euo pipefail
+          test "$REF" = "refs/heads/main"
+          if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != file-intake ]]; then
+            echo 'Capture delivery mode currently supports only the file-intake scenario.'
+            exit 1
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -102,11 +118,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-paused.ndjson
-        run: >-
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
-          --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true
-          --message "sandbox3-e2e-paused-${GITHUB_SHA}"
+        run: |
+          set -euo pipefail
+          TEST_CHAT_IDS=''
+          if [[ "$DELIVERY_MODE" == capture ]]; then TEST_CHAT_IDS="$TG_SANDBOX3_CHAT_ID"; fi
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
+            --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true \
+            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-paused-${GITHUB_SHA}"
 
       - name: Install pinned test identity and dedicated operator secret
         env:
@@ -171,11 +192,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          DELIVERY_MODE: ${{ inputs.delivery_mode }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-live.ndjson
-        run: >-
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
-          --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
-          --message "sandbox3-e2e-live-${GITHUB_SHA}"
+        run: |
+          set -euo pipefail
+          TEST_CHAT_IDS=''
+          if [[ "$DELIVERY_MODE" == capture ]]; then TEST_CHAT_IDS="$TG_SANDBOX3_CHAT_ID"; fi
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
+            --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false \
+            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-live-${GITHUB_SHA}"
 
       - name: Verify exact active Worker revision and health
         env:
@@ -218,7 +244,7 @@ jobs:
           TG_SANDBOX_TARGET: sandbox3
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
-          TG_SANDBOX_E2E_DELIVERY: telegram
+          TG_SANDBOX_E2E_DELIVERY: ${{ inputs.delivery_mode }}
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs test-user-entry | tee sandbox3-user-entry.json
 
@@ -241,6 +267,7 @@ jobs:
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
           SANDBOX3_E2E_SCENARIO: ${{ inputs.scenario }}
+          SANDBOX3_E2E_DELIVERY_MODE: ${{ inputs.delivery_mode }}
           GITHUB_SHA: ${{ github.sha }}
         run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
 
@@ -254,6 +281,7 @@ jobs:
         run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox3-reset-after.json
 
       - name: Require empty CP and Telegram intake state at exit
+        id: final-state
         if: always()
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -261,6 +289,18 @@ jobs:
           TG_SANDBOX_TARGET: sandbox3
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox3-final-state.json
+
+      - name: Restore normal sandbox delivery policy
+        if: always() && steps.final-state.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-normal-delivery.ndjson
+        run: >-
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
+          --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
+          --var TEST_CHAT_IDS:
+          --message "sandbox3-e2e-restore-delivery-${GITHUB_SHA}"
 
       - uses: actions/upload-artifact@v4
         if: always()

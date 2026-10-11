@@ -34,6 +34,13 @@ The response also includes a small `collector` snapshot with busy,
 pending count, current collector message ID, and CP receipt counters. For
 asynchronous agent runs, normal sandbox delivery sends the final answer to the
 same real chat; inspect CP task state and Worker tail without opening Telegram.
+The protected sandbox3 Worker E2E offers `delivery_mode=capture` for the
+`file-intake` scenario. It temporarily places only the pinned test chat in
+`TEST_CHAT_IDS`, so that CP run uses the reserved log destination and sends no
+messages to Telegram. After terminal completion, the workflow clears CP and
+Intake test state and restores the normal empty `TEST_CHAT_IDS` policy. If
+cleanup cannot prove the state is empty, restoration stays blocked so an
+unresolved run cannot become a real-chat delivery.
 
 Example message:
 
