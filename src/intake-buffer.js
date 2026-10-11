@@ -1397,7 +1397,7 @@ export class IntakeBuffer {
       if (diverted) return diverted;
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const pendingStopWindow = cpMode && (await this.state.storage.get('cpStopWindow'))?.pending === true;
-      const unsupportedMedia = cpMode && !!mediaOf(msg) && !mediaEnabled(this.env);
+      const unsupportedMedia = cpMode && !!mediaOf(msg) && !msg.artifactManifest && !mediaEnabled(this.env);
       let heldBehindPendingUnsupportedLaunch = false;
       const hasUnsupportedUnresolvedLaunch = async () => {
         if (!cpMode || mediaEnabled(this.env)) return false;
@@ -1405,14 +1405,14 @@ export class IntakeBuffer {
         for (const launchKey of unresolved) {
           const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
           const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
-          if (items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) return true;
+          if (items.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef && !item.msg?.artifactManifest)) return true;
         }
         return false;
       };
       const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
-          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef) || await hasUnsupportedUnresolvedLaunch();
+          .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef && !item.msg?.artifactManifest) || await hasUnsupportedUnresolvedLaunch();
       // Refusing a new attachment must never clear text that the user already
       // collected. Keep this separate from recovery of an old, stranded
       // unsupported draft below.
@@ -1437,7 +1437,7 @@ export class IntakeBuffer {
               (await this.state.storage.get('launching'))?.length || (await this.state.storage.get('cpStopWindow'))?.pending) return { state: 'pending' };
           const buf = (await this.state.storage.get('buf')) || [];
           const retry = (await this.state.storage.get('retryBatch')) || [];
-          const supported = item => !mediaOf(item.msg) || !!item.msg?.fileRef;
+          const supported = item => !mediaOf(item.msg) || !!item.msg?.fileRef || !!item.msg?.artifactManifest;
           const keptBuf = buf.filter(supported);
           const keptRetry = retry.filter(supported);
           await this.state.storage.put('buf', keptBuf);
@@ -2687,7 +2687,8 @@ export class IntakeBuffer {
     const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
     const base = items.at(-1)?.msg;
     const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
-    const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg));
+    const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg)
+      && !item.msg?.fileRef && !item.msg?.artifactManifest);
     const snapshotRequestId = checkpoint?.snapshotRequestId;
     const acceptance = snapshotRequestId && await this.state.storage.get(`cp-acceptance:${snapshotRequestId}`);
     const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];

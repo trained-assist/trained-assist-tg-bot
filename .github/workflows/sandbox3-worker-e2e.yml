@@ -20,6 +20,7 @@ on:
           - history
           - stop
           - retry-mid-run
+          - file-intake
         default: basic
 
 permissions:
@@ -112,12 +113,15 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          INGRESS_BUFFER_TOKEN: ${{ secrets.INGRESS_BUFFER_TOKEN_SANDBOX3 }}
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: |
           set -euo pipefail
           test -n "$TG_SANDBOX3_OPERATOR_TOKEN"
+          test -n "$INGRESS_BUFFER_TOKEN"
           printf '%s' "$TG_SANDBOX3_OPERATOR_TOKEN" | npx wrangler secret put TG_SANDBOX3_OPERATOR_TOKEN --config wrangler.sandbox-tg-sandbox3.toml
+          printf '%s' "$INGRESS_BUFFER_TOKEN" | npx wrangler secret put INGRESS_BUFFER_TOKEN --config wrangler.sandbox-tg-sandbox3.toml
           printf '%s' "$TG_SANDBOX_E2E_CHAT_ID" | npx wrangler secret put TG_SANDBOX_E2E_CHAT_ID --config wrangler.sandbox-tg-sandbox3.toml
           printf '%s' "$TG_SANDBOX_E2E_USER_ID" | npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
 

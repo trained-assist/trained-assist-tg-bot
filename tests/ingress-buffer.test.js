@@ -23,6 +23,7 @@ class MemoryR2 {
 }
 
 const token = 'fixture-buffer-token';
+const sandbox3Token = 'fixture-sandbox3-buffer-token';
 const profileId = 'profile-1';
 const ref = 'a'.repeat(64);
 const auth = { authorization: `Bearer ${token}` };
@@ -30,7 +31,7 @@ const auth = { authorization: `Bearer ${token}` };
 describe('passive ingress buffer', () => {
   const call = (path, init = {}, bucket = new MemoryR2(), headers = auth) => worker.fetch(
     new Request(`https://buffer.test${path}`, { ...init, headers: { ...headers, ...init.headers } }),
-    { INGRESS_BUFFER_TOKEN: token, INGRESS_MEDIA_BUCKET: bucket },
+    { INGRESS_BUFFER_TOKEN: token, INGRESS_BUFFER_TOKEN_SANDBOX3: sandbox3Token, INGRESS_MEDIA_BUCKET: bucket },
   );
 
   it('requires the private bearer credential before touching storage', async () => {
@@ -38,6 +39,19 @@ describe('passive ingress buffer', () => {
     const response = await call('/v1/artifacts', { method: 'POST', body: 'x' }, bucket, {});
     expect(response.status).toBe(401);
     expect(bucket.objects.size).toBe(0);
+  });
+
+  it('accepts the additive sandbox3 credential without rotating the shared buffer credential', async () => {
+    const bucket = new MemoryR2();
+    const bytes = new TextEncoder().encode('sandbox3 fixture');
+    const response = await call('/v1/artifacts', { method: 'POST', body: bytes, headers: {
+      authorization: `Bearer ${sandbox3Token}`,
+      'content-type': 'text/plain', 'content-length': String(bytes.byteLength),
+      'x-artifact-owner-profile-id': 'integration-sandbox3-v1', 'x-artifact-ref': ref,
+      'x-artifact-name': encodeURIComponent('fixture.txt'),
+    } }, bucket);
+    expect(response.status).toBe(201);
+    expect(bucket.objects.size).toBe(1);
   });
 
   it('stores, verifies, and serves immutable bytes with manifest-bound metadata', async () => {

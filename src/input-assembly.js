@@ -26,7 +26,10 @@ export function assembleInput(items, batch = true) {
     const caption = (item.text || m.text || m.caption || '').split('\n')
       .filter(line => !/^(photo|voice|audio|document|video):/i.test(line.trim())).join('\n').trim();
     const marker = MEDIA_MARKER(m);
-    const attachLine = m.transcript && marker
+    const artifactManifest = item.artifactManifest ?? m.artifactManifest;
+    const attachLine = artifactManifest
+      ? `Вложение ${index + 1}: ${artifactManifest.name || 'файл'}`
+      : m.transcript && marker
       ? marker
       : (m.fileRef ? `Вложение ${index + 1}: ${m.fileRef.name}` : '');
     const fileRef = (m.transcript && marker && m.fileRef) ? { ...m.fileRef, note: false } : m.fileRef;
