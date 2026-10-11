@@ -284,10 +284,12 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
-  assert(['basic', 'multiline', 'history', 'stop'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'multiline', 'history', 'stop', 'retry-mid-run'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
-  const prompt = scenario === 'multiline'
+  const prompt = scenario === 'retry-mid-run'
+    ? `Use your shell tool to run the harmless command \`sleep 20\` and wait for it to finish. Only then reply with exactly this token: ${nonce}`
+    : scenario === 'multiline'
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
@@ -350,6 +352,27 @@ async function main() {
     callbackData: 'auto', updateId: updateId++,
   });
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
+
+  let midRunReplayEvidence = null;
+  if (scenario === 'retry-mid-run') {
+    const active = await waitForActiveTask();
+    const [beforeReplay] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ? AND goal LIKE ?',
+      [PROFILE_ID, `%${nonce}%`]);
+    assert.equal(Number(beforeReplay.n), 1, 'sandbox3_mid_run_retry_initial_task_count');
+    const replayDuringRun = await workerRequest('/operator/test-update', questionUpdate);
+    assert.equal(replayDuringRun.ok, true, 'sandbox3_mid_run_duplicate_update_not_acknowledged');
+    const [afterReplay] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ? AND goal LIKE ?',
+      [PROFILE_ID, `%${nonce}%`]);
+    const [runCount] = await d1(`SELECT count(*) AS n FROM executions e JOIN durable_tasks t ON t.id = e.task_id
+      WHERE t.profile_id = ? AND t.goal LIKE ?`, [PROFILE_ID, `%${nonce}%`]);
+    assert.equal(Number(afterReplay.n), 1, 'sandbox3_mid_run_retry_created_duplicate_task');
+    assert.equal(Number(runCount.n), 1, 'sandbox3_mid_run_retry_created_duplicate_execution');
+    midRunReplayEvidence = { replayedSameUpdateIdWhileRunnerActive: true,
+      runnerWasActiveAtReplay: active.execution_status === 'running', taskCountAfterReplay: Number(afterReplay.n),
+      executionCountAfterReplay: Number(runCount.n) };
+    assert.equal(midRunReplayEvidence.runnerWasActiveAtReplay, true, 'sandbox3_mid_run_retry_not_during_active_run');
+    console.log(JSON.stringify({ scenario: 'duplicate-telegram-update-replay-during-run', ...midRunReplayEvidence }));
+  }
 
   const task = await waitForTask();
   assert(typeof task.goal === 'string' && task.goal.includes(nonce), 'sandbox3_input_not_persisted');
@@ -606,6 +629,7 @@ async function main() {
     controlPlaneDeliveryRows: cpDelivery.rows,
     ...(historyEvidence ? { historyEvidence } : {}),
     ...(stopEvidence ? { stopEvidence } : {}),
+    ...(midRunReplayEvidence ? { midRunReplayEvidence } : {}),
   };
   await writeEvidence(report);
   console.log(JSON.stringify(report));

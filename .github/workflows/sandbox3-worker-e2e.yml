@@ -17,6 +17,7 @@ on:
           - multiline
           - history
           - stop
+          - retry-mid-run
         default: basic
 
 permissions:
