@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
+import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -389,7 +390,7 @@ async function main() {
     const stopReply = await sendMessage('/stop');
     assertDelivered(stopReply, 'active-task-stop');
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-    assert(/задача остановлена|task stopped/.test(stopText), 'sandbox_stop_confirmation_missing');
+    assert(stopReplyConfirmsRequest(stopText), 'sandbox_stop_confirmation_missing_or_failed');
     const terminalStatus = await waitForCancelledTask(active.id);
     const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
