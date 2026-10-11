@@ -39,6 +39,10 @@ id = "f81925f900dc42fca7bec33d9d422840"
 binding = "SESSIONS"
 id = "9fbaf8e6a86f4673bf0990b540e75f6d"
 
+[[services]]
+binding = "CONTROL_PLANE_SERVICE"
+service = "trained-assist-cp-sandbox3"
+
 [vars]
 TG_SANDBOX_BOT_USERNAME = "ptichka_status_bot"
 TG_SLICE_ROUTER_ENABLED = "true"
