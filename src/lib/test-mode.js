@@ -107,9 +107,11 @@ export function initTestMode(env) {
 
 export function isTestChatCached(chatId) {
   const n = Number(chatId);
-  // A real-delivery capture represents an owner-authorized synthetic update.
-  // Do not let another request's module-level test-chat cache suppress it.
-  if (testCaptures.get(n)?.deliverToTelegram) return false;
+  // Synthetic operator updates are request-scoped. Their delivery policy must
+  // not be copied into the isolate-wide TEST_CHAT_IDS cache: Workers can reuse
+  // one isolate for later, unrelated requests.
+  const capture = testCaptures.get(n);
+  if (capture) return !capture.deliverToTelegram;
   if (!cached) return false;
   return Number.isSafeInteger(n) && n !== 0 && cached.includes(n);
 }
