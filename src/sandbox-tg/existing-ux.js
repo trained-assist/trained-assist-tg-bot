@@ -144,11 +144,12 @@ app.post('/operator/stop-window', async context => {
   const source = await context.req.json().catch(() => null);
   const chatId = source?.chatId ?? (config.allowedChats.length === 1 ? Number(config.allowedChats[0]) : null);
   const profileId = source?.profileId ?? config.profileId;
-  if (!source || !['inspect', 'release', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
+  if (!source || !['inspect', 'release', 'reconcile', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
       (source.threadId != null && (!Number.isSafeInteger(source.threadId) || source.threadId <= 0)) ||
       profileId !== config.profileId ||
       (source.windowId != null && typeof source.windowId !== 'string') ||
       (source.mode !== 'inspect' && typeof source.windowId !== 'string') ||
+      source.mode === 'reconcile' && source.confirmWindowId !== source.windowId ||
       source.mode === 'abandon' && (source.confirmWindowId !== source.windowId ||
         source.auditReason !== 'sandbox_test_fixture_abandoned')) return context.json({ error: 'invalid selector' }, 400);
   if (!config.allowedChats.includes(String(chatId))) return context.json({ error: 'owner refused' }, 403);

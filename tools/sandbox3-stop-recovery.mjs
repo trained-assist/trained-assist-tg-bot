@@ -73,7 +73,24 @@ async function sendStop(chatId, userId, updateId) {
   assert(messages.some(item => item.telegramOk === true && Number.isSafeInteger(item.messageId) && item.messageId > 0),
     'sandbox3_stop_reply_not_delivered');
   const text = messages.map(item => String(item.text ?? '')).join('\n');
-  assert(stopReplyConfirmsRequest(text), 'sandbox3_stop_not_confirmed_by_worker');
+  return stopReplyConfirmsRequest(text);
+}
+
+async function reconcileTerminalRuns(chatId) {
+  const headers = { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' };
+  const inspect = await fetch(`${TG_ORIGIN}/operator/stop-window`, { method: 'POST', headers,
+    body: JSON.stringify({ mode: 'inspect', profileId: PROFILE_ID, chatId, threadId: null }),
+    signal: AbortSignal.timeout(30_000) });
+  const inspected = await inspect.json().catch(() => ({}));
+  if (!inspect.ok || typeof inspected.snapshot?.windowId !== 'string')
+    throw new Error('sandbox3_stop_window_inspect_failed');
+  const windowId = inspected.snapshot.windowId;
+  const response = await fetch(`${TG_ORIGIN}/operator/stop-window`, { method: 'POST', headers,
+    body: JSON.stringify({ mode: 'reconcile', profileId: PROFILE_ID, chatId, threadId: null,
+      windowId, confirmWindowId: windowId }), signal: AbortSignal.timeout(90_000) });
+  const outcome = await response.json().catch(() => ({}));
+  assert(response.ok && outcome.released === true && outcome.recoveryOutcome === 'reconciled_cancelled',
+    'sandbox3_terminal_run_reconciliation_refused');
 }
 
 async function main() {
@@ -93,7 +110,8 @@ async function main() {
   assert.equal(activeTasks.length, 1, 'sandbox3_stop_recovery_unexpected_active_task_count');
   const task = activeTasks[0];
   const updateId = await loginRecoveryProfile(chatId, userId, Date.now());
-  await sendStop(chatId, userId, updateId);
+  const stopConfirmed = await sendStop(chatId, userId, updateId);
+  if (!stopConfirmed) await reconcileTerminalRuns(chatId);
 
   const deadline = Date.now() + 120_000;
   let observed = null;
