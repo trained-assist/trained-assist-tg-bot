@@ -59,7 +59,7 @@ async function deliveryRead(taskId) {
   return payload;
 }
 
-async function inspectStopDiagnostics(chatId, replyConfirmed) {
+async function inspectStopDiagnostics(chatId, replyConfirmed, taskId) {
   let response;
   let payload = {};
   try {
@@ -71,7 +71,9 @@ async function inspectStopDiagnostics(chatId, replyConfirmed) {
     });
     payload = await response.json().catch(() => ({}));
   } catch {}
-  return summarizeStopDiagnostics({ replyConfirmed, inspectStatus: response?.status, inspectPayload: payload });
+  const [task] = await d1('SELECT id, status, generation FROM durable_tasks WHERE id = ?', [taskId]);
+  const taskEvidence = task ? await failedTaskEvidence(task) : null;
+  return summarizeStopDiagnostics({ replyConfirmed, inspectStatus: response?.status, inspectPayload: payload, taskEvidence });
 }
 
 async function d1(sql, params = []) {
@@ -408,7 +410,7 @@ async function main() {
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
     const stopConfirmed = stopReplyConfirmsRequest(stopText);
     if (!stopConfirmed) {
-      const diagnostics = await inspectStopDiagnostics(chatId, stopConfirmed);
+      const diagnostics = await inspectStopDiagnostics(chatId, stopConfirmed, active.id);
       await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics });
       console.error(JSON.stringify({ lane: 'sandbox3', ok: false,
         reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics }));
