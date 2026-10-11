@@ -22,7 +22,7 @@ describe('routing degradation user notice', () => {
       { degraded: true, continuation: { issued: true } }, { chatId: 42 }, 'conversation-1');
 
     expect(mock.enqueue).toHaveBeenCalledWith(expect.objectContaining({
-      text: 'Не удалось определить подходящий сценарий. Передаю задачу на проработку.',
+      text: 'По запросу отсутствует готовый рецепт. Отправляю на проработку.',
     }));
   });
 
@@ -32,7 +32,7 @@ describe('routing degradation user notice', () => {
       { degraded: true, continuation: { issued: false } }, { chatId: 42 }, 'conversation-2');
 
     expect(mock.enqueue).toHaveBeenCalledWith(expect.objectContaining({
-      text: 'Не удалось определить подходящий сценарий. Задача сохранена, запуск исполнителя пока не подтверждён.',
+      text: 'По запросу отсутствует готовый рецепт. Задача сохранена; запуск исполнителя пока не подтверждён.',
     }));
   });
 });
