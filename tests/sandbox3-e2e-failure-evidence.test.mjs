@@ -6,6 +6,7 @@ describe('sandbox3 E2E failure evidence', () => {
     const result = summarizeSandbox3E2eFailure({
       stage: 'answer_validation',
       task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsExpectedInput: true,
+        artifactManifestPersisted: true,
         inputItemCount: 1, expectedLineBreaks: 0, persistedLineBreaks: 0, goal: 'private prompt' },
       routing: { route: 'agent', mode: 'ai-agent-job', reasonCode: 'COMMUNICATION_FALLBACK',
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
@@ -20,7 +21,7 @@ describe('sandbox3 E2E failure evidence', () => {
     expect(result).toEqual({
       stage: 'answer_validation',
       task: { id: 'ut-safe.1', status: 'done', generation: 1, goalContainsExpectedInput: true,
-        inputItemCount: 1, expectedLineBreaks: 0, persistedLineBreaks: 0 },
+        inputItemCount: 1, artifactManifestPersisted: true, expectedLineBreaks: 0, persistedLineBreaks: 0 },
       routing: { route: 'agent', mode: 'ai-agent-job', reasonCode: 'COMMUNICATION_FALLBACK',
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
         needsExecutor: true, replyAllowed: false, continuationRequested: true },
@@ -38,7 +39,7 @@ describe('sandbox3 E2E failure evidence', () => {
       routing: { route: 'some raw prompt\ntext', reasonCode: 'x'.repeat(100) } })).toEqual({
       stage: 'unknown',
       task: { id: null, status: 'running', generation: null, goalContainsExpectedInput: null,
-        inputItemCount: null, expectedLineBreaks: null, persistedLineBreaks: null },
+        inputItemCount: null, artifactManifestPersisted: null, expectedLineBreaks: null, persistedLineBreaks: null },
       routing: { route: null, mode: null, reasonCode: null, providerCode: null, capabilityId: null,
         outcome: null, needsExecutor: null, replyAllowed: null, continuationRequested: null },
     });

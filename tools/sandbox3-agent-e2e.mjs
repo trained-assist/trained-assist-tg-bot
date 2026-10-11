@@ -413,13 +413,15 @@ async function main() {
 
   const task = await waitForTask();
   const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply';
-  const goalContainsExpectedInput = typeof task.goal === 'string'
+  const taskGoalPresent = typeof task.goal === 'string' && task.goal.trim().length > 0;
+  const goalContainsExpectedInput = scenario === 'file-intake' ? null : taskGoalPresent
     && (deterministicScenario ? task.goal.includes(prompt) : task.goal.includes(nonce));
   failureDiagnostics = { stage: 'task_persisted', task: {
     id: task.id, status: task.status, generation: task.generation,
     goalContainsExpectedInput,
   } };
-  assert(goalContainsExpectedInput, 'sandbox3_input_not_persisted');
+  assert(taskGoalPresent, 'sandbox3_task_goal_missing');
+  if (scenario !== 'file-intake') assert(goalContainsExpectedInput, 'sandbox3_input_not_persisted');
   let storedUserValue;
   try { storedUserValue = JSON.parse(task.user_value ?? 'null'); } catch { storedUserValue = null; }
   const storedInputItems = Array.isArray(storedUserValue?.inputItems) ? storedUserValue.inputItems : [];
@@ -427,6 +429,15 @@ async function main() {
     .map(item => item && typeof item.text === 'string' ? item.text : '')
     .filter(Boolean)
     .join('\n');
+  if (scenario === 'file-intake') {
+    const artifacts = storedInputItems.flatMap(item => Array.isArray(item?.artifacts) ? item.artifacts : []);
+    const manifest = artifacts.find(item => item?.name === 'sandbox-intake-fixture.txt'
+      && item.ownerProfileId === PROFILE_ID);
+    const manifestPersisted = Boolean(manifest && /^[a-f0-9]{64}$/.test(manifest.ref ?? '')
+      && /^[a-f0-9]{64}$/.test(manifest.version ?? '') && manifest.sha256 === manifest.version);
+    failureDiagnostics.task = { ...failureDiagnostics.task, artifactManifestPersisted: manifestPersisted };
+    assert(manifestPersisted, 'sandbox3_file_manifest_not_persisted');
+  }
   const originalInputPersisted = storedInputText.includes(prompt);
   const expectedLineBreaks = (prompt.match(/\n/g) ?? []).length;
   const persistedLineBreaks = (storedInputText.match(/\n/g) ?? []).length;
