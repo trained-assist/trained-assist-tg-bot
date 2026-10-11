@@ -127,6 +127,25 @@ describe('sandbox Worker test transcript capture', () => {
     expect(finish()).toMatchObject([{ telegramOk: true, messageId: 46 }]);
     initTestMode(envOf(''));
   });
+
+  it('capture-only test chat suppression ends with its Worker request', () => {
+    initTestMode(envOf(''));
+    const finish = beginTestCapture(TEST);
+    expect(isTestChatCached(TEST)).toBe(true);
+    expect(suppress(TEST, 'sendMessage', 'private test response')).toMatchObject({ suppressed: true });
+    finish();
+    expect(isTestChatCached(TEST)).toBe(false);
+    initTestMode(envOf(''));
+  });
+
+  it('request-scoped real delivery overrides configured test-chat suppression only while active', () => {
+    initTestMode(envOf(String(TEST)));
+    const finish = beginTestCapture(TEST, { deliverToTelegram: true });
+    expect(isTestChatCached(TEST)).toBe(false);
+    finish();
+    expect(isTestChatCached(TEST)).toBe(true);
+    initTestMode(envOf(''));
+  });
 });
 
 describe('модульный кэш для lib/telegram.js (init-точки)', () => {
