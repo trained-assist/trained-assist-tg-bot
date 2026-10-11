@@ -168,13 +168,24 @@ async function main() {
   assertDelivered(login, 'login');
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
-  const question = await sendMessage(prompt);
+  const questionUpdateId = updateId++;
+  const questionUpdate = {
+    target: 'sandbox3', type: 'message', chatId, userId, delivery: 'telegram',
+    updateId: questionUpdateId, text: prompt,
+  };
+  const question = await workerRequest('/operator/test-update', questionUpdate);
   // The message is acknowledged by the Intake Durable Object, which runs in a
   // separate Worker isolate; its Telegram sends are not part of this request's
   // operator transcript. Verify admission here and verify the real terminal
   // answer through the delivery owner below.
   assert.equal(question.ok, true, 'sandbox_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
+  const replay = await workerRequest('/operator/test-update', questionUpdate);
+  assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
+  assert.equal(replay.collector?.pendingCount, 1, 'duplicate_update_added_input_twice');
+  console.log(JSON.stringify({ scenario: 'duplicate-telegram-update-replay',
+    sameUpdateReplayed: true, pendingCountBeforeReplay: question.collector.pendingCount,
+    pendingCountAfterReplay: replay.collector.pendingCount }));
 
   const launched = await workerRequest('/operator/test-update', {
     target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
