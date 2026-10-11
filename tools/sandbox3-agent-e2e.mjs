@@ -440,29 +440,60 @@ async function main() {
     });
     assert.equal(stopLaunch.ok, true, 'sandbox_stop_task_launch_failed');
     const active = await waitForActiveTask([task.id]);
-    const stopReply = await sendMessage('/stop');
-    assertDelivered(stopReply, 'active-task-stop');
-    const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-    const immediateStopConfirmed = stopReplyConfirmsRequest(stopText);
-
     const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
     const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
     let freshQuestion = null;
+    let freshLaunch = null;
     let inputBufferedWhileStopPending = false;
-    if (!immediateStopConfirmed) {
-      const pending = await readStopWindow(chatId);
-      if (pending.pending) {
-        freshQuestion = await sendMessage(freshPrompt);
-        assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
-        assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
-        inputBufferedWhileStopPending = true;
-      } else if (pending.available && pending.stopConfirmed) {
-        // Cancellation settled between the /stop reply and this read. Send the
-        // next question after confirmation; CP terminal evidence is still checked.
-      } else {
-        assert.equal(pending.available, false, 'sandbox_stop_window_not_marked_pending');
+    let launchedWhileStopPending = false;
+
+    // Start the stop webhook without awaiting its CP/Runner round trip. The DO
+    // persists the stop window first; submit and launch the next generation
+    // while that window is still pending when the live timing permits it.
+    let stopFinished = false;
+    const stopOutcome = sendMessage('/stop').then(
+      reply => { stopFinished = true; return { reply }; },
+      error => { stopFinished = true; return { error }; });
+    let pendingWindow = null;
+    const pendingDeadline = Date.now() + 20_000;
+    while (!stopFinished && Date.now() < pendingDeadline) {
+      pendingWindow = await readStopWindow(chatId).catch(() => null);
+      if (pendingWindow?.pending === true) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    if (pendingWindow?.pending === true) {
+      freshQuestion = await sendMessage(freshPrompt);
+      assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
+      assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
+      inputBufferedWhileStopPending = true;
+      const stillPending = await readStopWindow(chatId);
+      if (stillPending.pending) {
+        freshLaunch = await workerRequest('/operator/test-update', {
+          target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+          callbackData: 'auto', updateId: updateId++,
+        });
+        assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
+        const collector = freshLaunch.collector ?? {};
+        const barrier = collector.controlPlaneBarrier ?? {};
+        const dispatched = collector.pendingCount === 0
+          || collector.launchingMessageIds?.length > 0
+          || Number(barrier.busyRequestCount ?? 0) > 1
+          || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+        console.log(JSON.stringify({ scenario: 'next-task-launched-during-stop', pendingCount: collector.pendingCount ?? null,
+          busyRequestCount: barrier.busyRequestCount ?? null, unresolvedLaunchCount: barrier.unresolvedLaunchCount ?? null,
+          launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null }));
+        assert(dispatched, 'sandbox_after_stop_parallel_launch_not_dispatched');
+        launchedWhileStopPending = true;
       }
     }
+
+    const stopResult = await stopOutcome;
+    if (stopResult.error) throw stopResult.error;
+    const stopReply = stopResult.reply;
+    assertDelivered(stopReply, 'active-task-stop');
+    const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
+    const immediateStopConfirmed = stopReplyConfirmsRequest(stopText);
     const stopCompletion = await waitForStopCompletion(chatId, active.id);
     const terminalStatus = stopCompletion.taskStatus;
     const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
@@ -474,25 +505,21 @@ async function main() {
       assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
       assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
     }
-    const freshLaunch = await workerRequest('/operator/test-update', {
-      target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
-      callbackData: 'auto', updateId: updateId++,
-    });
-    assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
-    const freshCollector = freshLaunch.collector ?? {};
-    const freshBarrier = freshCollector.controlPlaneBarrier ?? {};
-    const freshLaunchObserved = freshCollector.pendingCount === 0 || freshCollector.busy === true
-      || freshCollector.launchingMessageIds?.length > 0
-      || Number(freshBarrier.busyRequestCount ?? 0) > 0
-      || Number(freshBarrier.unresolvedLaunchCount ?? 0) > 0;
-    console.log(JSON.stringify({ scenario: 'after-stop-launch-accepted',
-      pendingCount: Number.isSafeInteger(freshCollector.pendingCount) ? freshCollector.pendingCount : null,
-      busy: freshCollector.busy === true,
-      launchingCount: Array.isArray(freshCollector.launchingMessageIds) ? freshCollector.launchingMessageIds.length : null,
-      busyRequestCount: Number.isSafeInteger(freshBarrier.busyRequestCount) ? freshBarrier.busyRequestCount : null,
-      unresolvedLaunchCount: Number.isSafeInteger(freshBarrier.unresolvedLaunchCount) ? freshBarrier.unresolvedLaunchCount : null,
-      callbackAccepted: freshLaunch.admission?.ok === true }));
-    assert(freshLaunchObserved, 'sandbox_after_stop_launch_not_dispatched');
+    if (!freshLaunch) {
+      freshLaunch = await workerRequest('/operator/test-update', {
+        target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
+        callbackData: 'auto', updateId: updateId++,
+      });
+      assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
+      const collector = freshLaunch.collector ?? {};
+      const barrier = collector.controlPlaneBarrier ?? {};
+      const dispatched = collector.pendingCount === 0 || collector.launchingMessageIds?.length > 0
+        || Number(barrier.busyRequestCount ?? 0) > 0 || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+      console.log(JSON.stringify({ scenario: 'next-task-launched-after-stop', pendingCount: collector.pendingCount ?? null,
+        busyRequestCount: barrier.busyRequestCount ?? null, unresolvedLaunchCount: barrier.unresolvedLaunchCount ?? null,
+        launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null }));
+      assert(dispatched, 'sandbox_after_stop_launch_not_dispatched');
+    }
     const freshTask = await waitForTask([task.id, active.id]);
     assert(typeof freshTask.goal === 'string' && freshTask.goal.includes(freshPrompt), 'sandbox_after_stop_input_not_persisted');
     const freshExecution = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [freshTask.id]);
@@ -506,6 +533,7 @@ async function main() {
       stopConfirmedByWorker: true,
       immediateStopConfirmed,
       inputBufferedWhileStopPending,
+      launchedWhileStopPending,
       stoppedTaskTerminalStatus: terminalStatus,
       stopWindowInspectableAtConfirmation: stopCompletion.stopWindow.available,
       stoppedExecutionNotRunning: true,
