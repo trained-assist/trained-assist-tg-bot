@@ -145,6 +145,25 @@ export class TgSliceController {
   }
 
   async handleDirect(profile, message, update) {
+    const attachment = attachmentOf(message);
+    const hasMedia = Boolean(message?.voice || message?.audio || message?.document || message?.video || (Array.isArray(message?.photo) && message.photo.length));
+    if (hasMedia || attachment.type !== 'text' || !attachment.text.trim()) {
+      const requestId = messageKey(profile.conversationId, update.update_id);
+      const text = !hasMedia && attachment.type === 'empty'
+        ? 'Не удалось прочитать сообщение. Задачу не запускал.'
+        : 'Приём вложений в этом режиме пока не настроен. Файл не передан агенту, задачу не запускал.';
+      await this.outbox?.enqueue({
+        deliveryId: `refused:${requestId}`,
+        taskAcceptedAt: Date.now(),
+        conversationId: profile.conversationId,
+        userTaskId: `tg-refused:${requestId}`,
+        destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId ?? null },
+        requestId,
+        type: 'message',
+        text,
+      });
+      return [{ type: 'refused', reason: hasMedia ? 'media' : attachment.type, userTaskId: null, text }];
+    }
     const session = new ConversationSession(this.client, {
       conversationId: profile.conversationId,
       profileId: profile.profileId,
@@ -164,7 +183,7 @@ export class TgSliceController {
     session.index.destination = profile.destination;
     session.index.requestingBot = profile.requestingBot;
     await this.store.save(session.index);
-    const text = typeof message.text === 'string' ? message.text : null;
+    const text = attachment.text;
     if (awaiting && text != null) {
       const answer = await session.answer(text);
       const effects = [{ type: 'answer', userTaskId: answer.userTaskId, seq: answer.seq, duplicate: answer.duplicate }];
@@ -183,7 +202,7 @@ export class TgSliceController {
       return effects;
     }
     const requestId = `${profile.ingressRef}:u${update.update_id}`;
-    const send = await session.sendMessage(text ?? '[no text]', null, null, requestId);
+    const send = await session.sendMessage(text, null, null, requestId);
     const effects = [{ type: 'new', userTaskId: send.userTaskId, seq: send.seq, duplicate: send.duplicate }];
     if (!send.duplicate) {
       await this.outbox?.enqueue({
