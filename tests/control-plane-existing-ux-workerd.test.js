@@ -253,6 +253,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     env.CONTROL_PLANE_PROFILE = 'integration-sandbox3-v1';
     env.TG_SANDBOX_E2E_CHAT_ID = '42';
     env.TG_SANDBOX_E2E_USER_ID = '43';
+    env.TG_SANDBOX_OPERATOR_TOKEN = 'stale-operator-token';
+    env.TG_SANDBOX3_OPERATOR_TOKEN = 'offline-operator-token';
   }
   if (boundary === 'operator-test-api') {
     env.CONTROL_PLANE_URL = 'https://trained-assist-cp-telegram-ux-v1-sandbox.skillset-apply.workers.dev';
