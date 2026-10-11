@@ -112,6 +112,12 @@ jobs:
             echo "- Worker deployment status and /health smoke passed."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Clean CP and Runner sandbox before resetting Telegram buffers
+        id: cp_cleanup_before
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: node tools/dispatch-cp-sandbox-cleanup.mjs
+
       - name: Require all sandbox buffers empty before starting tests
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -121,11 +127,11 @@ jobs:
       - name: Run existing-UX Worker contract tests
         run: npx vitest run tests/control-plane-existing-ux-entrypoint.test.js tests/control-plane-existing-ux-workerd.test.js --silent
 
-      - name: Recheck and clear both sandboxes before fresh-message scenario
+      - name: Verify sandbox buffers stayed empty during local Worker contract tests
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs reset
+        run: node tools/sandbox-buffer-cycle.mjs inspect
 
       - name: Test fresh messages aggregate in the sandbox buffer
         env:
@@ -142,15 +148,23 @@ jobs:
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: node tools/sandbox-probability-agent-e2e.mjs
 
-      - name: Clear all sandbox state after the buffer scenario
+      - name: Clean CP and Runner state before deleting Telegram state
+        id: cp_cleanup_after
         if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: node tools/dispatch-cp-sandbox-cleanup.mjs
+
+      - name: Clear Telegram sandbox state after CP and Runner cleanup
+        id: telegram_cleanup_after
+        if: always() && steps.cp_cleanup_after.outcome == 'success'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs reset
 
       - name: Require empty CP and Telegram buffers after cleanup
-        if: always()
+        if: always() && steps.cp_cleanup_after.outcome == 'success' && steps.telegram_cleanup_after.outcome == 'success'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
