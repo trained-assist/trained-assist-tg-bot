@@ -27,11 +27,17 @@ app.use('*', async (c, next) => {
 });
 
 app.get('/health', c => {
+  const mode = c.env.TG_SLICE_MODE ?? MODE.direct;
   const required = ['TG_SANDBOX_BOT_TOKEN', 'CONTROL_PLANE_URL', 'CONTROL_PLANE_PRINCIPAL', 'CONTROL_PLANE_PROFILE', 'TELEGRAM_WEBHOOK_SECRET', 'TG_SLICE_ALLOWED_CHATS'];
   const missing = required.filter(name => !String(c.env[name] ?? '').trim());
   if (!c.env.TG_DELIVERY_OWNER?.idFromName || !c.env.TG_DELIVERY_OWNER?.get) missing.push('TG_DELIVERY_OWNER');
   if (!String(c.env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST ?? '').trim()) missing.push('TG_SLICE_DELIVERY_CUTOVER_MANIFEST');
-  return c.json({ status: 'ok', readiness: missing.length ? 'not_configured' : 'configured', missingBindings: missing, bot: c.env.TG_SANDBOX_BOT_USERNAME, mode: c.env.TG_SLICE_MODE ?? MODE.direct });
+  const mediaIntake = mode !== MODE.batch
+    ? 'disabled'
+    : c.env.INGRESS_BUFFER?.fetch && String(c.env.INGRESS_BUFFER_TOKEN ?? '').trim()
+      ? 'ready'
+      : 'not_configured';
+  return c.json({ status: 'ok', readiness: missing.length ? 'not_configured' : 'configured', missingBindings: missing, bot: c.env.TG_SANDBOX_BOT_USERNAME, mode, capabilities: { mediaIntake } });
 });
 
 app.post('/webhook', async c => {

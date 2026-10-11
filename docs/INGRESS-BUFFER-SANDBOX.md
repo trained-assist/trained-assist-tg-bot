@@ -20,4 +20,13 @@ npx wrangler secret put INGRESS_BUFFER_TOKEN --config wrangler.sandbox-tg.toml
 
 CP's matching secret and service binding must be deployed separately. Do not expose the buffer via `workers_dev`, point it at a production bucket, or enable the production `MEDIA_PIPELINE` while Runner materialization is incomplete. Worker deployment alone does not enable Telegram media collection; verify the sandbox bindings and test `/v1/manifests/verify` before enabling it there.
 
+Telegram `/health` reports `capabilities.mediaIntake` separately from general
+Worker readiness: `disabled` in direct mode, `not_configured` in batch mode
+without both the service binding and token, and `ready` only when both are
+present. A general `readiness: configured` response does not prove media intake
+works. Direct mode must refuse files explicitly instead of converting them to a
+text task. Before claiming file-to-Agent E2E, verify upload, manifest
+verification, task-scoped byte reads, run acceptance, and result delivery in the
+same sandbox lane.
+
 The buffer accepts immutable artifacts up to 20 MiB, keyed by profile, opaque ref, and SHA-256 version. Its only routes are authenticated upload, manifest verification, and task-independent content retrieval; ingress must remain private through service bindings.
