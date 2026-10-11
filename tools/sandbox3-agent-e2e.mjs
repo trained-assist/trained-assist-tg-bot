@@ -296,7 +296,7 @@ async function main() {
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
-  assert(deliveryMode !== 'capture' || scenario === 'file-intake', 'capture_mode_only_supports_file_intake');
+  assert(deliveryMode !== 'capture' || ['file-intake', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
   assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
