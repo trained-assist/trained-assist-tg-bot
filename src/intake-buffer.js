@@ -1413,6 +1413,15 @@ export class IntakeBuffer {
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
           .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef) || await hasUnsupportedUnresolvedLaunch();
+      // Refusing a new attachment must never clear text that the user already
+      // collected. Keep this separate from recovery of an old, stranded
+      // unsupported draft below.
+      if (unsupportedMedia) {
+        await sendTracked(this.env, msg.chat.id,
+          '⚠️ В этом тестовом режиме вложения пока не поддерживаются. Файл не добавил; уже собранный ввод сохранён. Можешь продолжать отправлять текст.',
+          {}, threadIdOf(msg)).catch(() => null);
+        return json({ buffered: 0, refused: true, unsupported: 'media', preservedDraft: true });
+      }
       // Reconcile an orphaned admission checkpoint whenever the user sends a
       // fresh text. It may outlive `launching` after a cold restart, so tying
       // recovery only to a visible unsupported-media draft can wedge the chat.
@@ -1421,27 +1430,29 @@ export class IntakeBuffer {
         await this._recoverControlPlaneLaunch().catch(() => false);
       }
       let oldUnsupported = !mediaOf(msg) && await hasUnsupportedDraft();
-      if (unsupportedMedia || oldUnsupported) {
+      if (oldUnsupported) {
         const reset = await this._exclusive(async () => {
           const busy = !!(await this.state.storage.get('busy'));
           if (this.cpDispatches || ((await this.state.storage.get('cpUnresolvedLaunches')) || []).length ||
               (await this.state.storage.get('launching'))?.length || (await this.state.storage.get('cpStopWindow'))?.pending) return { state: 'pending' };
-          if (unsupportedMedia && busy) return { state: 'busy' };
-          if (oldUnsupported && busy) {
-            const buf = (await this.state.storage.get('buf')) || [];
-            const retry = (await this.state.storage.get('retryBatch')) || [];
-            await this.state.storage.put('buf', buf.filter(item => !mediaOf(item.msg) || item.msg?.fileRef));
-            if (retry.some(item => !!mediaOf(item.msg) && !item.msg?.fileRef)) {
+          const buf = (await this.state.storage.get('buf')) || [];
+          const retry = (await this.state.storage.get('retryBatch')) || [];
+          const supported = item => !mediaOf(item.msg) || !!item.msg?.fileRef;
+          const keptBuf = buf.filter(supported);
+          const keptRetry = retry.filter(supported);
+          await this.state.storage.put('buf', keptBuf);
+          if (retry.length) {
+            if (keptRetry.length) await this.state.storage.put('retryBatch', keptRetry);
+            else {
               await this.state.storage.delete('retryBatch');
               await this.state.storage.delete('retryBatchAttempts');
             }
+          }
+          if (keptBuf.length || keptRetry.length) {
             await this.state.storage.delete('collectorMsgId');
             await this._bumpDraftRevisionLocked();
-            return { state: 'held-cleaned' };
+            return { state: busy ? 'held-cleaned' : 'cleaned-preserving-input' };
           }
-          await this.state.storage.delete('buf');
-          await this.state.storage.delete('retryBatch');
-          await this.state.storage.delete('retryBatchAttempts');
           for (const key of ['debounceExpiresAt', 'gateLevel', 'shortDebounce', 'gateConsulted', 'receiptDue',
             'collectorMsgId', 'launchAfterRelease', 'launchWhenReady', 'launchQueued', 'launchParallel',
             'launchWorkStyle', 'launchWorkStyleSource', 'parkedAt', 'parkReoffers']) await this.state.storage.delete(key);
@@ -1451,14 +1462,6 @@ export class IntakeBuffer {
           return { state: 'cleared', batchId };
         });
         if (reset.batchId) await this._closePending(this.env, reset.batchId, 'cleared');
-        if (unsupportedMedia) {
-          await sendTracked(this.env, msg.chat.id,
-            reset.state === 'busy' || reset.state === 'pending'
-              ? '⚠️ В этом тестовом режиме вложения пока не поддерживаются — это сообщение не добавил. Уже собранный ввод и текущую задачу не трогал; отправь запрос текстом.'
-              : '⚠️ В этом тестовом режиме вложения пока не поддерживаются — задачу не запускал и эту порцию сбросил. Отправь её текстом; черновик можно сбросить кнопкой в меню.',
-            {}, threadIdOf(msg)).catch(() => null);
-          return json({ buffered: 0, refused: true, unsupported: 'media' });
-        }
         if (reset.state === 'pending') {
           heldBehindPendingUnsupportedLaunch = !unsupportedMedia && oldUnsupported;
           if (heldBehindPendingUnsupportedLaunch) {
@@ -1473,9 +1476,9 @@ export class IntakeBuffer {
           }
         }
         if (reset.state !== 'pending') await sendTracked(this.env, msg.chat.id,
-          reset.state === 'held-cleaned'
-            ? '⚠️ Удалил неподдерживаемое вложение из отложенной порции; остальные сообщения и текущую задачу сохранил. Это текстовое сообщение добавил к отложенной порции.'
-            : '⚠️ В предыдущей порции было вложение, которое этот режим не может передать. Сбросил старую порцию; это текстовое сообщение начал как новую задачу.',
+          ['held-cleaned', 'cleaned-preserving-input'].includes(reset.state)
+            ? '⚠️ Удалил неподдерживаемое вложение из собранного ввода; остальные сообщения и текущую задачу сохранил. Это текстовое сообщение добавил к собранному вводу.'
+            : '⚠️ Удалил неподдерживаемое вложение из собранного ввода. Это текстовое сообщение начал как новую задачу.',
           {}, threadIdOf(msg)).catch(() => null);
       }
       const buf = await this._exclusive(async () => {
