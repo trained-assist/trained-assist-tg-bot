@@ -515,12 +515,26 @@ app.post('/operator/test-update', async context => {
     const stateResponse = await intake.fetch('https://intake/debug');
     return stateResponse.ok ? stateResponse.json().catch(() => null) : null;
   };
-  const before = await readCollectorState();
+  const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
+    ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
+  let before = await readCollectorState();
+  if (callbackShortcut && source.messageId === undefined && source.delivery !== 'telegram' &&
+      !Number.isSafeInteger(before?.collectorMsgId)) {
+    const session = await getSession(env.SESSIONS, chatId, null);
+    if (!session?.username || target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') {
+      return context.json({ error: 'no_current_button_message' }, 409);
+    }
+    const syntheticMessageId = source.messageId ?? (900_000_000 + ((source.updateId ?? Date.now()) % 99_999_999));
+    const seeded = await intake.fetch('https://intake/_sandbox-test/seed-capture-collector', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ capture: true, username: session.username, messageId: syntheticMessageId }),
+    });
+    if (!seeded.ok) return context.json({ error: 'no_current_button_message' }, 409);
+    before = await readCollectorState();
+  }
   if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
     return context.json({ error: 'no_current_button_message' }, 409);
   }
-  const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
-    ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
   if (callbackShortcut && !Number.isSafeInteger(before?.collectorDraftRevision)) {
     return context.json({ error: 'no_current_button_revision' }, 409);
   }

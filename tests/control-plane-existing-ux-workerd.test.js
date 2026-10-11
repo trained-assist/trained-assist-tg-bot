@@ -479,7 +479,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       const response = await runtime.dispatchFetch('https://worker.test/operator/test-update', {
         method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
         body: JSON.stringify({ target: 'sandbox3', type: 'message', chatId: 42, userId: 43,
-          delivery: 'telegram', text: 'sandbox3-file-test read attachment', fixtureFile: true, updateId: 99001 }),
+          delivery: 'capture', text: 'sandbox3-file-test read attachment', fixtureFile: true, updateId: 99001 }),
       });
       expect(response.status).toBe(200);
       const result = await response.json();
@@ -492,21 +492,26 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect(manifest.version).toMatch(/^[a-f0-9]{64}$/);
       expect(JSON.stringify(stateBody)).not.toContain('sandbox3-fixture-');
       expect(artifactObjects.size).toBe(1);
-      await (await intake.get(intake.idFromName('42'))).fetch('https://intake/scenario-seed-test-callback', {
-        method: 'POST', headers: { 'x-scenario-probe': 'offline-probe', 'content-type': 'application/json' },
-        body: JSON.stringify({ messageId: 501, revision: 1 }),
+      const intakeStub = intake.get(intake.idFromName('42'));
+      const forbiddenSeed = await intakeStub.fetch('https://intake/_sandbox-test/seed-capture-collector', {
+        method: 'POST', headers: { authorization: 'Bearer incorrect-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ capture: true, username: 'sandbox-file-test', messageId: 501 }),
       });
+      expect(forbiddenSeed.status).toBe(404);
       const launch = await runtime.dispatchFetch('https://worker.test/operator/test-update', {
         method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
         body: JSON.stringify({ target: 'sandbox3', type: 'callback', chatId: 42, userId: 43,
-          callbackData: 'auto', updateId: 99002 }),
+          callbackData: 'auto', delivery: 'capture', updateId: 99002 }),
       });
       expect(launch.status).toBe(200);
+      expect(providerMessages).toHaveLength(0);
       expect(cpIntakes).toHaveLength(1);
       expect(cpIntakes[0].inputItems[0].artifacts).toMatchObject([{
         ref: manifest.ref, version: manifest.version, ownerProfileId: 'integration-sandbox3-v1',
       }]);
       expect(cpIntakes[0].inputItems[0].text).toContain('sandbox-intake-fixture.txt');
+      const finalState = await intakeStub.fetch('https://intake/debug');
+      expect(await finalState.json()).toMatchObject({ buf: [], collectorMsgId: null, busy: true });
       return;
     }
     if (boundary === 'operator-test-api') {
