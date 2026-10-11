@@ -174,7 +174,19 @@ async function main() {
 
   const task = await waitForTask();
   assert(typeof task.goal === 'string' && task.goal.includes(nonce), 'sandbox3_input_not_persisted');
-  assert(typeof task.user_value === 'string' && task.user_value.includes(prompt), 'sandbox3_original_input_not_persisted');
+  let storedUserValue;
+  try { storedUserValue = JSON.parse(task.user_value ?? 'null'); } catch { storedUserValue = null; }
+  const storedInputItems = Array.isArray(storedUserValue?.inputItems) ? storedUserValue.inputItems : [];
+  const storedInputText = storedInputItems
+    .map(item => item && typeof item.text === 'string' ? item.text : '')
+    .filter(Boolean)
+    .join('\n');
+  const originalInputPersisted = storedInputText.includes(prompt);
+  const expectedLineBreaks = (prompt.match(/\n/g) ?? []).length;
+  const persistedLineBreaks = (storedInputText.match(/\n/g) ?? []).length;
+  console.log(JSON.stringify({ scenario: 'original-input-persistence', inputScenario: scenario,
+    originalInputPersisted, expectedLineBreaks, persistedLineBreaks, inputItemCount: storedInputItems.length }));
+  assert(originalInputPersisted, 'sandbox3_original_input_not_persisted');
   const [routingRow] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?', [`routing:${task.id}:${task.generation}`]);
   assert(routingRow?.payload_json, 'sandbox3_routing_selection_not_persisted');
   const routing = JSON.parse(routingRow.payload_json);
