@@ -50,6 +50,8 @@ export function summarizeSandbox3E2eFailure(value = {}) {
         engine: text(item?.engine),
         generation: integer(item?.generation),
         runIdPresent: typeof item?.runId === 'string' && ID.test(item.runId),
+        errorClass: text(item?.errorClass),
+        runnerErrorCode: text(item?.runnerErrorCode),
       })),
     };
   }
