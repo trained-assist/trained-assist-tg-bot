@@ -76,6 +76,56 @@ async function inspectStopDiagnostics(chatId, replyConfirmed, taskId) {
   return summarizeStopDiagnostics({ replyConfirmed, inspectStatus: response?.status, inspectPayload: payload, taskEvidence });
 }
 
+async function readStopWindow(chatId) {
+  const response = await fetch(`${TG_ORIGIN}/operator/stop-window`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ mode: 'inspect', profileId: PROFILE_ID, chatId, threadId: null }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`sandbox3_stop_window_inspect_${response.status}`);
+  const entries = payload.snapshot?.entries;
+  const window = entries?.cpStopWindow;
+  if (!window || typeof window !== 'object') throw new Error('sandbox3_stop_window_missing');
+  return {
+    pending: window.pending === true,
+    stopConfirmed: window.stopConfirmed === true,
+    bufferedCount: (Array.isArray(entries.buf) ? entries.buf.length : 0)
+      + (Array.isArray(entries.retryBatch) ? entries.retryBatch.length : 0),
+    collectorMessageId: Number.isSafeInteger(entries.collectorMsgId) ? entries.collectorMsgId : null,
+  };
+}
+
+async function waitForStopCompletion(chatId, taskId, { requireBufferedCollector = false } = {}) {
+  // The Intake DO retries an unresolved CP stop on its alarm (currently 60s).
+  // Observe that durable path rather than treating the first pending response as
+  // a failed stop or issuing a second cancellation from the test harness.
+  const deadline = Date.now() + 3 * 60_000;
+  let observed = null;
+  while (Date.now() < deadline) {
+    const [task] = await d1('SELECT status, generation FROM durable_tasks WHERE id = ?', [taskId]);
+    const [execution] = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at DESC LIMIT 1', [taskId]);
+    const stopWindow = await readStopWindow(chatId);
+    observed = { taskStatus: task?.status ?? 'missing', generation: task?.generation ?? null,
+      executionStatus: execution?.status ?? 'missing', stopWindow };
+    const terminal = task?.status === 'cancelled' && execution?.status === 'cancelled'
+      && !stopWindow.pending && stopWindow.stopConfirmed;
+    const collectorReady = !requireBufferedCollector || (stopWindow.bufferedCount === 1
+      && Number.isSafeInteger(stopWindow.collectorMessageId) && stopWindow.collectorMessageId > 0);
+    if (terminal && collectorReady) return observed;
+    if (task?.status && ['done', 'failed', 'unknown'].includes(task.status)) {
+      throw new Error(`sandbox3_stop_terminal_${task.status}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 3_000));
+  }
+  const diagnostics = await inspectStopDiagnostics(chatId, false, taskId);
+  await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode: 'sandbox_stop_confirmation_timeout', diagnostics });
+  console.error(JSON.stringify({ lane: 'sandbox3', ok: false,
+    reasonCode: 'sandbox_stop_confirmation_timeout', observed, diagnostics }));
+  throw new Error('sandbox_stop_confirmation_timeout');
+}
+
 async function d1(sql, params = []) {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`, {
     method: 'POST',
@@ -179,25 +229,6 @@ async function waitForActiveTask(excludedTaskIds = []) {
     await new Promise(resolve => setTimeout(resolve, 2_000));
   }
   throw new Error(`sandbox3_stop_runner_never_started_${rows[0]?.task_status ?? 'not_admitted'}`);
-}
-
-async function waitForCancelledTask(taskId) {
-  const deadline = Date.now() + 2 * 60_000;
-  let rows = [];
-  while (Date.now() < deadline) {
-    rows = await d1('SELECT id, status, generation FROM durable_tasks WHERE id = ?', [taskId]);
-    const status = rows[0]?.status;
-    if (status === 'cancelled') return status;
-    if (status && ['done', 'failed', 'unknown'].includes(status)) throw new Error(`sandbox3_stop_terminal_${status}`);
-    await new Promise(resolve => setTimeout(resolve, 2_000));
-  }
-  if (rows[0]) {
-    const diagnostic = await failedTaskEvidence(rows[0]);
-    const reasonCode = `sandbox3_stop_terminal_timeout_${safeCode(rows[0].status) ?? 'unknown'}`;
-    await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode, task: diagnostic });
-    console.error(JSON.stringify({ lane: 'sandbox3', ok: false, reasonCode, task: diagnostic }));
-  }
-  throw new Error(`sandbox3_stop_terminal_timeout_${rows[0]?.status ?? 'missing'}`);
 }
 
 async function waitForDelivery(taskId, chatId) {
@@ -408,24 +439,33 @@ async function main() {
     const stopReply = await sendMessage('/stop');
     assertDelivered(stopReply, 'active-task-stop');
     const stopText = (stopReply.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-    const stopConfirmed = stopReplyConfirmsRequest(stopText);
-    if (!stopConfirmed) {
-      const diagnostics = await inspectStopDiagnostics(chatId, stopConfirmed, active.id);
-      await writeEvidence({ ok: false, inputScenario: 'stop', reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics });
-      console.error(JSON.stringify({ lane: 'sandbox3', ok: false,
-        reasonCode: 'sandbox_stop_confirmation_missing_or_failed', diagnostics }));
+    const immediateStopConfirmed = stopReplyConfirmsRequest(stopText);
+
+    const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
+    const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
+    let freshQuestion = null;
+    let inputBufferedWhileStopPending = false;
+    if (!immediateStopConfirmed) {
+      const pending = await readStopWindow(chatId);
+      assert.equal(pending.pending, true, 'sandbox_stop_not_marked_pending');
+      freshQuestion = await sendMessage(freshPrompt);
+      assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
+      assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
+      inputBufferedWhileStopPending = true;
     }
-    assert(stopConfirmed, 'sandbox_stop_confirmation_missing_or_failed');
-    const terminalStatus = await waitForCancelledTask(active.id);
+    const stopCompletion = await waitForStopCompletion(chatId, active.id, {
+      requireBufferedCollector: inputBufferedWhileStopPending,
+    });
+    const terminalStatus = stopCompletion.taskStatus;
     const stoppedExecutions = await d1('SELECT status FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
     assert.equal(stoppedExecutions.length, 1, 'sandbox_stop_execution_count_not_one');
     assert.notEqual(stoppedExecutions[0].status, 'running', 'sandbox_stop_execution_still_running');
 
-    const freshToken = `AFTER-STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
-    const freshPrompt = `Reply with exactly this token and nothing else: ${freshToken}`;
-    const freshQuestion = await sendMessage(freshPrompt);
-    assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
-    assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
+    if (!freshQuestion) {
+      freshQuestion = await sendMessage(freshPrompt);
+      assert.equal(freshQuestion.ok, true, 'sandbox_after_stop_question_not_accepted');
+      assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
+    }
     const freshLaunch = await workerRequest('/operator/test-update', {
       target: 'sandbox3', type: 'callback', chatId, userId, delivery: 'telegram',
       callbackData: 'auto', updateId: updateId++,
@@ -442,7 +482,11 @@ async function main() {
     stopEvidence = {
       activeTaskObserved: true,
       stopConfirmedByWorker: true,
+      immediateStopConfirmed,
+      inputBufferedWhileStopPending,
       stoppedTaskTerminalStatus: terminalStatus,
+      stopWindowPending: stopCompletion.stopWindow.pending,
+      stopWindowConfirmed: stopCompletion.stopWindow.stopConfirmed,
       stoppedExecutionNotRunning: true,
       freshTaskCompleted: true,
       freshAnswerDelivered: freshDelivery.status === 'sent',
