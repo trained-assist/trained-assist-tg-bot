@@ -77,6 +77,12 @@ for 15 minutes and the Control Plane preflight is empty, the sandbox reset
 clears that stale checkpoint along with the rest of the test state. Production
 Intake state does not use this reset path.
 
+If a sandbox3 E2E leaves a task active, run the protected-main
+`Recover and clean sandbox3 stop state` workflow with `run_recovery=true`. It
+requests `/stop` through `/operator/test-update`, requires a terminal CP task
+and execution before invoking reset, and checks that both CP and Intake state
+are empty afterward. The workflow refuses to reset when stop is unconfirmed.
+
 Sandbox user records use the existing `user:` keys in the isolated sandbox KV
 and are removed by the full sandbox reset (which also clears older
 `sandbox-user:` fixtures). The message/callback endpoint is operator-only;
