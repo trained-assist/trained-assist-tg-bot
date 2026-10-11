@@ -140,7 +140,8 @@ app.get('/collector-state', async context => {
 app.post('/operator/stop-window', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
-  const token = String(env.TG_SANDBOX_OPERATOR_TOKEN ?? '').trim();
+  const operatorLane = sandboxOperatorLane(env);
+  const token = operatorLane ? sandboxOperatorToken(env, operatorLane) : String(env.TG_SANDBOX_OPERATOR_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
   const source = await context.req.json().catch(() => null);
   const chatId = source?.chatId ?? (config.allowedChats.length === 1 ? Number(config.allowedChats[0]) : null);
@@ -153,7 +154,6 @@ app.post('/operator/stop-window', async context => {
       source.mode === 'reconcile-task' && (typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId)) ||
       source.mode === 'abandon' && (source.confirmWindowId !== source.windowId ||
         source.auditReason !== 'sandbox_test_fixture_abandoned')) return context.json({ error: 'invalid selector' }, 400);
-  const operatorLane = sandboxOperatorLane(env);
   const ownerChatAllowed = operatorLane === 'sandbox3'
     ? sandboxOperatorChatAllowed(env, config, operatorLane, chatId)
     : config.allowedChats.includes(String(chatId));
