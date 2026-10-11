@@ -71,6 +71,15 @@ matching the real inline keyboard. `intake_run` is retained as an alias for
 `auto` for older test clients. Raw callback payloads remain available for
 testing other buttons.
 
+In sandbox3 `capture` mode, if a pending draft has no Telegram collector message
+ID because sends are suppressed, the operator endpoint seeds a synthetic ID
+inside the Intake Durable Object. The seed is bound to the pinned chat, the
+authenticated sandbox session, and the current draft revision; the internal
+seed route also requires the sandbox3 operator token. It is unavailable outside
+the isolated test API. This lets file-intake and other capture-only journeys
+exercise the normal revision-bound callback path without sending test messages
+to Telegram. Real-delivery callbacks continue to use the actual collector ID.
+
 Optional `updateId` and message `messageId` fields let tests choose fixture
 IDs. Omit them for automatic IDs. Do not replay an update as a retry: this
 endpoint exercises webhook ingress and does not promise idempotency for
