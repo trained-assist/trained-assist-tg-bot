@@ -295,7 +295,7 @@ async function main() {
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
-      : `Reply with exactly this token and nothing else: ${nonce}`;
+      : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
     : scenario === 'history' ? ['READY'] : [nonce];
