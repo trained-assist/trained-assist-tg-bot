@@ -144,6 +144,16 @@ async function main() {
     updateId: updateId++, text, ...extra,
   });
 
+  // Exercise separate HTTP requests through the live Worker with the same
+  // pinned chat. A module-level TEST_CHAT_IDS cache from a prior request must
+  // never suppress a later real delivery.
+  const help = await sendMessage('/help');
+  assertDelivered(help, 'help-real-delivery');
+  const status = await sendMessage('/status');
+  assertDelivered(status, 'status-after-help-real-delivery');
+  console.log(JSON.stringify({ scenario: 'cross-request-real-delivery',
+    helpDelivered: true, statusDeliveredAfterSeparateWorkerRequest: true }));
+
   // Keep the generated password inside the Actions process; never send it to
   // the shared test chat. The actual login reply and task answer use Telegram.
   const created = await sendMessage(`/adduser ${username} Sandbox E2E`, { admin: true, delivery: 'capture' });
