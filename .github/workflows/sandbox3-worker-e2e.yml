@@ -8,6 +8,14 @@ on:
         required: true
         type: boolean
         default: false
+      scenario:
+        description: User input scenario to exercise after the clean preflight
+        required: true
+        type: choice
+        options:
+          - basic
+          - multiline
+        default: basic
 
 permissions:
   contents: read
@@ -223,6 +231,7 @@ jobs:
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+          SANDBOX3_E2E_SCENARIO: ${{ inputs.scenario }}
           GITHUB_SHA: ${{ github.sha }}
         run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
 

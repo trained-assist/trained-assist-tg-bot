@@ -127,8 +127,16 @@ async function verifyGatewayOwnedDelivery(taskId, taskDeliveryState) {
 async function main() {
   if (process.env.TG_SANDBOX_TARGET !== 'sandbox3') throw new Error('sandbox3_target_required');
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
+  const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
+  assert(['basic', 'multiline'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
+  const prompt = scenario === 'multiline'
+    ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
+    : `Reply with exactly this token and nothing else: ${nonce}`;
+  const expectedLines = scenario === 'multiline'
+    ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
+    : [nonce];
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
   const sendMessage = (text, extra = {}) => workerRequest('/operator/test-update', {
@@ -150,7 +158,7 @@ async function main() {
   assertDelivered(login, 'login');
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
-  const question = await sendMessage(`Reply with exactly this token and nothing else: ${nonce}`);
+  const question = await sendMessage(prompt);
   // The message is acknowledged by the Intake Durable Object, which runs in a
   // separate Worker isolate; its Telegram sends are not part of this request's
   // operator transcript. Verify admission here and verify the real terminal
@@ -166,7 +174,7 @@ async function main() {
 
   const task = await waitForTask();
   assert(typeof task.goal === 'string' && task.goal.includes(nonce), 'sandbox3_input_not_persisted');
-  assert(typeof task.user_value === 'string' && task.user_value.includes(nonce), 'sandbox3_original_input_not_persisted');
+  assert(typeof task.user_value === 'string' && task.user_value.includes(prompt), 'sandbox3_original_input_not_persisted');
   const [routingRow] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?', [`routing:${task.id}:${task.generation}`]);
   assert(routingRow?.payload_json, 'sandbox3_routing_selection_not_persisted');
   const routing = JSON.parse(routingRow.payload_json);
@@ -187,14 +195,28 @@ async function main() {
   assert(typeof executions[0].engine === 'string' && executions[0].engine.length > 0, 'sandbox_runner_engine_missing');
   assert(Number.isSafeInteger(executions[0].generation), 'sandbox_runner_generation_missing');
   assert(typeof executions[0].session_id === 'string' && executions[0].session_id.length > 0, 'sandbox_runner_session_missing');
-  const resultText = typeof task.result_json === 'string' ? task.result_json : JSON.stringify(task.result_json ?? '');
-  assert(resultText.toLowerCase().includes(nonce.toLowerCase()), 'sandbox_answer_did_not_match_challenge');
+  let resultValue = task.result_json;
+  if (typeof resultValue === 'string') {
+    try { resultValue = JSON.parse(resultValue); } catch { /* retain plain text */ }
+  }
+  const answerParts = [];
+  const collectText = value => {
+    if (typeof value === 'string') answerParts.push(value);
+    else if (Array.isArray(value)) value.forEach(collectText);
+    else if (value && typeof value === 'object') Object.values(value).forEach(collectText);
+  };
+  collectText(resultValue);
+  const resultText = answerParts.join('\n');
+  const escapedLines = expectedLines.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const answerMatchesChallenge = new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
+  assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
   const terminal = await waitForDelivery(task.id, chatId);
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
 
   const report = {
     ok: true,
     scenario: 'sandbox3-profile-login-question-runner-answer-telegram-delivery',
+    inputScenario: scenario,
     sourceSha: process.env.GITHUB_SHA ?? null,
     communicationOutcome,
     communicationReasonCode,
@@ -204,7 +226,7 @@ async function main() {
     taskTerminalDone: task.status === 'done',
     runnerExecutionSuccess: executions[0].status === 'success',
     runnerExecutionCount: executions.length,
-    answerMatchesChallenge: true,
+    answerMatchesChallenge,
     telegramDeliverySent: terminal.status === 'sent',
     telegramProviderMessageIdPresent: true,
     deliveryAttempts: terminal.attempts,
