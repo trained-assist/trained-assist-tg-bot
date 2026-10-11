@@ -11,7 +11,7 @@ describe('sandbox3 E2E failure evidence', () => {
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
         needsExecutor: true, replyAllowed: false, continuationRequested: true, prompt: 'private prompt' },
       executions: { count: 1, items: [{ id: 'attempt-1', status: 'success', engine: 'cloudflare-workflows',
-        generation: 1, runId: 'run_abc.1', result: 'private model output' }] },
+        generation: 1, runId: 'run_abc.1', errorClass: null, runnerErrorCode: null, result: 'private model output' }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27, text: 'private model output' },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0, chatId: 'private chat' },
@@ -25,7 +25,7 @@ describe('sandbox3 E2E failure evidence', () => {
         providerCode: 'no_matching_option', capabilityId: 'agent', outcome: 'dispatched',
         needsExecutor: true, replyAllowed: false, continuationRequested: true },
       executions: { count: 1, items: [{ id: 'attempt-1', status: 'success', engine: 'cloudflare-workflows',
-        generation: 1, runIdPresent: true }] },
+        generation: 1, runIdPresent: true, errorClass: null, runnerErrorCode: null }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27 },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0 },
@@ -42,5 +42,17 @@ describe('sandbox3 E2E failure evidence', () => {
       routing: { route: null, mode: null, reasonCode: null, providerCode: null, capabilityId: null,
         outcome: null, needsExecutor: null, replyAllowed: null, continuationRequested: null },
     });
+  });
+
+  it('keeps only safe Runner rejection codes from arbitrary error text', () => {
+    expect(summarizeSandbox3E2eFailure({ executions: { count: 1, items: [
+      { errorClass: 'runner_rejected', runnerErrorCode: 'INVALID_INGRESS_MANIFEST', errorText: 'secret user prompt' },
+      { errorClass: 'runner_rejected', runnerErrorCode: 'not a code: token=secret' },
+    ] } })).toEqual({ stage: 'unknown', executions: { count: 1, items: [
+      { id: null, status: null, engine: null, generation: null, runIdPresent: false,
+        errorClass: 'runner_rejected', runnerErrorCode: 'INVALID_INGRESS_MANIFEST' },
+      { id: null, status: null, engine: null, generation: null, runIdPresent: false,
+        errorClass: 'runner_rejected', runnerErrorCode: null },
+    ] } });
   });
 });
