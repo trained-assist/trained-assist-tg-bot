@@ -100,11 +100,12 @@ export class TelegramApi {
     });
   }
 
-  sendDocument({ chatId, document, filename, caption = null, contentType = 'application/octet-stream', replyToMessageId = null }) {
+  sendDocument({ chatId, threadId = null, document, filename, caption = null, contentType = 'application/octet-stream', replyToMessageId = null }) {
     // Multipart is the only honest way to upload bytes; the emulator accepts it
     // exactly like the real API (field `document`, optional filename/caption).
     const form = new FormData();
     form.set('chat_id', String(chatId));
+    if (threadId != null) form.set('message_thread_id', String(threadId));
     form.set('document', new Blob([document], { type: contentType }), filename);
     if (caption != null) form.set('caption', caption);
     if (replyToMessageId != null) form.set('reply_to_message_id', String(replyToMessageId));

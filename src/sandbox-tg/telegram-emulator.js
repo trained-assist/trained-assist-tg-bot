@@ -163,12 +163,14 @@ export class TelegramEmulator {
       return json({ ok: true, result: message });
     }
     if (method === 'sendDocument') {
+      const file = body.document && typeof body.document === 'object' ? body.document : {};
       const message = {
         message_id: this.nextMessageId++,
         from: { ...this.bot },
         chat: { id: body.chat_id, type: body.chat_id < 0 ? 'group' : 'private' },
         date: Math.floor(this.now() / 1000),
-        document: { file_name: body.filename ?? 'file', file_size: body.size ?? null },
+        document: { file_name: file.filename ?? body.filename ?? 'file', file_size: file.size ?? body.size ?? null,
+          file_sha256: file.sha256 ?? body.sha256 ?? null },
         caption: body.caption ?? null,
       };
       this.messages.push({ method, message, request: body });
@@ -210,7 +212,11 @@ async function readJsonBody(input, init) {
   if (init.body instanceof FormData) {
     const out = {};
     for (const [key, value] of init.body.entries()) {
-      out[key] = value instanceof Blob ? { filename: value.name, size: value.size } : value;
+      if (value instanceof Blob) {
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await value.arrayBuffer()));
+        out[key] = { filename: value.name, size: value.size,
+          sha256: [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+      } else out[key] = value;
     }
     return out;
   }
