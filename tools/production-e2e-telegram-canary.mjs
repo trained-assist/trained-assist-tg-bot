@@ -139,8 +139,9 @@ async function waitForTask(baselineIds, startedAt, challenge) {
     assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
     const candidates = (evidence.tasks ?? []).filter(candidate => !baselineIds.has(candidate.userTaskId)
       && Number(candidate.acceptedAt) >= startedAt);
-    task = candidates.find(candidate => candidate.status === 'done' && candidate.answerMatchesChallenge === true)
-      ?? candidates.find(candidate => ['failed', 'cancelled'].includes(candidate.status)) ?? null;
+    // Return any terminal task so the caller can report an answer mismatch
+    // immediately instead of waiting eight minutes for a matching answer.
+    task = candidates.find(candidate => ['done', 'failed', 'cancelled'].includes(candidate.status)) ?? null;
     if (task && ['done', 'failed', 'cancelled'].includes(task.status)) return { task, buffer: evidence.buffer };
     await new Promise(resolve => setTimeout(resolve, 4_000));
   }
@@ -162,6 +163,55 @@ async function waitForDelivery(taskId, chatId) {
     await new Promise(resolve => setTimeout(resolve, 3_000));
   }
   throw new Error(`production_canary_delivery_timeout_${result?.terminal?.status ?? 'not_queued'}`);
+}
+
+function summarizeLaunch(launch) {
+  const collector = launch?.collector ?? {};
+  return {
+    callbackAccepted: launch?.ok === true,
+    pendingCount: Number.isSafeInteger(collector.pendingCount) ? collector.pendingCount : null,
+    busy: collector.busy === true,
+    launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null,
+    controlPlaneBarrierPresent: !!collector.controlPlaneBarrier,
+  };
+}
+
+function launchWasDispatched(launch) {
+  const collector = launch?.collector ?? {};
+  return collector.pendingCount === 0 || collector.busy === true ||
+    (Array.isArray(collector.launchingMessageIds) && collector.launchingMessageIds.length > 0) ||
+    !!collector.controlPlaneBarrier;
+}
+
+async function cleanupIfTerminalAndIdle(username) {
+  const evidence = await workerRequest('/operator/test-evidence');
+  assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_cleanup_profile_mismatch');
+  const tasksTerminal = (evidence.tasks ?? []).every(task => ['done', 'failed', 'cancelled'].includes(task.status));
+  const buffer = evidence.buffer ?? {};
+  const noDispatchInFlight = buffer.busy !== true && buffer.launching === 0 &&
+    buffer.unresolvedLaunchCount === 0 && buffer.busyRequestCount === 0;
+  if (!tasksTerminal || !noDispatchInFlight) {
+    await checkpoint('cleanup_deferred_for_active_or_unknown_task', { cleanup: {
+      ok: false, deferred: true, tasksTerminal, noDispatchInFlight,
+    } });
+    return false;
+  }
+
+  // The cleanup endpoint independently refuses an Intake DO with an active
+  // dispatch. It clears only the pinned test chat, including a stranded
+  // unlaunched draft, and leaves CP history untouched.
+  const cleanup = await workerRequest('/operator/test-cleanup', {
+    target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT', username,
+  });
+  await checkpoint('test_profile_cleanup_complete', { cleanup: {
+    ok: cleanup.ok === true,
+    testProfileDeleted: cleanup.testProfileDeleted === true,
+    loginSessionDeleted: cleanup.loginSessionDeleted === true,
+  } });
+  if (cleanup.ok !== true || cleanup.testProfileDeleted !== true || cleanup.loginSessionDeleted !== true) {
+    throw new Error('production_canary_cleanup_incomplete');
+  }
+  return true;
 }
 
 async function main() {
@@ -190,7 +240,6 @@ async function main() {
 
   const username = `production_e2e_${randomBytes(6).toString('hex')}`;
   let task = null;
-  let taskTerminal = false;
   try {
     const created = await capture(`/adduser ${username} Production E2E`, { admin: true });
     assert.equal(created.ok, true, 'production_canary_profile_create_failed');
@@ -221,7 +270,6 @@ async function main() {
 
     const observed = await waitForTask(baselineIds, startedAt, nonce);
     task = observed.task;
-    taskTerminal = ['done', 'failed', 'cancelled'].includes(task.status);
     await checkpoint('first_turn_terminal', { turns: [safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
     assert.equal(task.status, 'done', 'production_canary_task_not_done');
     assert.equal(task.resultPresent, true, 'production_canary_result_not_persisted');
@@ -249,12 +297,15 @@ async function main() {
       { accepted: true, pendingCount: Number.isSafeInteger(followupInput.collector?.pendingCount)
         ? followupInput.collector.pendingCount : null }] });
     assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
-    taskTerminal = false;
     const followupLaunch = await pressCurrentLaunchButton();
     assert.equal(followupLaunch.ok, true, 'production_canary_followup_launch_failed');
+    await checkpoint('followup_launch_callback', { turns: [
+      safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      { accepted: true, launch: summarizeLaunch(followupLaunch) },
+    ] });
+    assert(launchWasDispatched(followupLaunch), 'production_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
     task = followupObserved.task;
-    taskTerminal = ['done', 'failed', 'cancelled'].includes(task.status);
     await checkpoint('followup_turn_terminal', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
       safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
     assert.equal(task.status, 'done', 'production_canary_followup_task_not_done');
@@ -288,21 +339,7 @@ async function main() {
     await checkpoint('complete', { ...report, ok: true });
     console.log(JSON.stringify(report));
   } finally {
-    if (!task || taskTerminal) {
-      const cleanup = await workerRequest('/operator/test-cleanup', {
-        target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT', username,
-      });
-      await checkpoint('test_profile_cleanup_complete', { cleanup: {
-        ok: cleanup.ok === true,
-        testProfileDeleted: cleanup.testProfileDeleted === true,
-        loginSessionDeleted: cleanup.loginSessionDeleted === true,
-      } });
-      if (cleanup.ok !== true || cleanup.testProfileDeleted !== true || cleanup.loginSessionDeleted !== true) {
-        throw new Error('production_canary_cleanup_incomplete');
-      }
-    } else {
-      await checkpoint('cleanup_deferred_for_nonterminal_task', { cleanup: { ok: false, deferred: true } });
-    }
+    await cleanupIfTerminalAndIdle(username);
   }
 }
 
