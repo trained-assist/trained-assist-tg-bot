@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { launchWasDispatched, summarizeLaunch } from '../tools/production-e2e-telegram-canary.mjs';
+import { intakeIsIdle, launchWasDispatched, summarizeIntakeState, summarizeLaunch } from '../tools/production-e2e-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
   it('does not treat the always-present empty CP barrier as dispatch evidence', () => {
@@ -29,5 +29,17 @@ describe('production Telegram canary launch evidence', () => {
       controlPlaneBarrier: barrier } };
 
     expect(launchWasDispatched(after, before)).toBe(false);
+  });
+
+  it('waits for task completion to propagate to an idle Intake before sending a follow-up', () => {
+    expect(intakeIsIdle({ pendingCount: 0, busy: false, launching: 0,
+      unresolvedLaunchCount: 0, busyRequestCount: 0 })).toBe(true);
+    expect(intakeIsIdle({ pendingCount: 0, busy: true, launching: 0,
+      unresolvedLaunchCount: 0, busyRequestCount: 0 })).toBe(false);
+    expect(intakeIsIdle({ pendingCount: 1, busy: false, launching: 0,
+      unresolvedLaunchCount: 0, busyRequestCount: 0 })).toBe(false);
+    expect(summarizeIntakeState({ pendingCount: 1, busy: false, stranded: true })).toMatchObject({
+      pendingCount: 1, busy: false, stranded: true, alarmPresent: false,
+    });
   });
 });

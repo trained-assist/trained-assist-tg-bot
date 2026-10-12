@@ -197,6 +197,43 @@ export function launchWasDispatched(launch, beforeCollector = {}) {
     afterBarrier.unresolvedLaunchCount > beforeBarrier.unresolvedLaunchCount;
 }
 
+export function summarizeIntakeState(buffer = {}) {
+  return {
+    pendingCount: Number.isSafeInteger(buffer.pendingCount) ? buffer.pendingCount : null,
+    busy: buffer.busy === true,
+    launching: Number.isSafeInteger(buffer.launching) ? buffer.launching : 0,
+    unresolvedLaunchCount: Number.isSafeInteger(buffer.unresolvedLaunchCount) ? buffer.unresolvedLaunchCount : 0,
+    busyRequestCount: Number.isSafeInteger(buffer.busyRequestCount) ? buffer.busyRequestCount : 0,
+    alarmPresent: Number.isSafeInteger(buffer.alarmAt),
+    stranded: buffer.stranded === true,
+  };
+}
+
+export function intakeIsIdle(buffer) {
+  const state = summarizeIntakeState(buffer);
+  return state.pendingCount === 0 && !state.busy && state.launching === 0 &&
+    state.unresolvedLaunchCount === 0 && state.busyRequestCount === 0;
+}
+
+async function waitForIntakeIdle() {
+  const deadline = Date.now() + 90_000;
+  let lastState = null;
+  let lastCheckpointAt = 0;
+  while (Date.now() < deadline) {
+    const evidence = await workerRequest('/operator/test-evidence');
+    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+    lastState = summarizeIntakeState(evidence.buffer);
+    if (intakeIsIdle(evidence.buffer)) return lastState;
+    if (Date.now() - lastCheckpointAt >= 10_000) {
+      await checkpoint('waiting_for_first_turn_intake_idle', { followupReadiness: lastState });
+      lastCheckpointAt = Date.now();
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+  await checkpoint('first_turn_intake_idle_timeout', { followupReadiness: lastState });
+  throw new Error('production_canary_first_turn_intake_idle_timeout');
+}
+
 async function cleanupIfTerminalAndIdle(username) {
   const evidence = await workerRequest('/operator/test-evidence');
   assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_cleanup_profile_mismatch');
@@ -305,6 +342,11 @@ async function main() {
     const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
     await checkpoint('first_turn_delivered', { turns: [{ ...safeTaskSummary(firstTask, { matchedPriorNonce: true }),
       deliveryStatus: firstDelivery.status, providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) }] });
+    const intakeAfterFirstTurn = await waitForIntakeIdle();
+    await checkpoint('first_turn_delivery_and_intake_idle', { turns: [{
+      ...safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      deliveryStatus: firstDelivery.status, providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId),
+    }], followupReadiness: intakeAfterFirstTurn });
 
     // Verify session context across separate Telegram turns. The follow-up
     // intentionally omits the nonce; only the preceding conversation contains it.
