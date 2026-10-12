@@ -195,13 +195,43 @@ async function main() {
     assert((task.historyTypes ?? []).includes('run_finished'), 'production_canary_terminal_event_not_persisted');
     assert(observed.buffer?.pendingCount === 0, 'production_canary_buffer_not_drained');
 
-    const delivery = await waitForDelivery(task.userTaskId, chatId);
-    const report = { ok: true, scenario: 'sandbox-telegram-ingress-to-production-cp-runner-france-vm-and-telegram-delivery',
-      taskId: task.userTaskId, profileId: PROFILE_ID, taskStatus: task.status,
-      runStatus: task.runs[0].status, sessionPersisted: task.runs[0].hasSessionId,
-      resultPersisted: task.resultPresent, answerMatchedNonce: true,
-      resultEventTypes: task.historyTypes ?? [], telegramDeliveryStatus: delivery.status,
-      telegramProviderMessageIdPresent: true, answerTextLogged: false };
+    const firstTask = task;
+    const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
+
+    // Verify session context across separate Telegram turns. The follow-up
+    // intentionally omits the nonce; only the preceding conversation contains it.
+    const followupStartedAt = Date.now();
+    const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
+    assert.equal(followupInput.ok, true, 'production_canary_followup_rejected');
+    assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
+    taskTerminal = false;
+    const followupLaunch = await pressCurrentLaunchButton();
+    assert.equal(followupLaunch.ok, true, 'production_canary_followup_launch_failed');
+    const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
+    task = followupObserved.task;
+    taskTerminal = ['done', 'failed', 'cancelled'].includes(task.status);
+    assert.equal(task.status, 'done', 'production_canary_followup_task_not_done');
+    assert.equal(task.resultPresent, true, 'production_canary_followup_result_not_persisted');
+    assert.equal(task.answerPresent, true, 'production_canary_followup_answer_not_persisted');
+    assert.equal(task.answerMatchesChallenge, true, 'production_canary_followup_lost_prior_context');
+    assert.equal(task.runs?.length, 1, 'production_canary_followup_run_count_mismatch');
+    assert.equal(task.runs[0].status, 'success', 'production_canary_followup_runner_not_successful');
+    assert.equal(task.runs[0].hasSessionId, true, 'production_canary_followup_session_not_persisted');
+    assert.equal(task.runs[0].hasStartedAt, true, 'production_canary_followup_run_start_not_persisted');
+    assert.equal(task.runs[0].hasFinishedAt, true, 'production_canary_followup_run_finish_not_persisted');
+    assert((task.historyTypes ?? []).includes('run_finished'), 'production_canary_followup_finish_event_not_persisted');
+    assert(followupObserved.buffer?.pendingCount === 0, 'production_canary_followup_buffer_not_drained');
+
+    const followupDelivery = await waitForDelivery(task.userTaskId, chatId);
+    const report = { ok: true, scenario: 'production-telegram-two-turn-session-context-and-delivery',
+      profileId: PROFILE_ID, turns: [
+        { taskId: firstTask.userTaskId, taskStatus: firstTask.status, runStatus: firstTask.runs[0].status,
+          sessionPersisted: firstTask.runs[0].hasSessionId, resultPersisted: firstTask.resultPresent,
+          answerMatchedNonce: true, telegramDeliveryStatus: firstDelivery.status },
+        { taskId: task.userTaskId, taskStatus: task.status, runStatus: task.runs[0].status,
+          sessionPersisted: task.runs[0].hasSessionId, resultPersisted: task.resultPresent,
+          answerRecoveredPriorNonce: true, telegramDeliveryStatus: followupDelivery.status },
+      ], telegramProviderMessageIdPresent: true, answerTextLogged: false };
     await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
     console.log(JSON.stringify(report));
   } finally {
