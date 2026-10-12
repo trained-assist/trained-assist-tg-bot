@@ -127,6 +127,7 @@ async function main() {
         continuationIssued: taskEvidence.routingOutcome.continuationIssued === true,
         continuationRefusal: taskEvidence.routingOutcome.continuationRefusal ?? null,
       } : null,
+      reconciliationFailure: taskEvidence.reconciliationFailure ?? null,
       resultPersisted: taskEvidence.resultPresent === true,
       answerPersisted: taskEvidence.answerPresent === true,
       answerMatchedChallenge: taskEvidence.answerMatchesChallenge === true,

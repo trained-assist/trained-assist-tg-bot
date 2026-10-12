@@ -89,7 +89,8 @@ describe('sandbox-only Intake DO reset', () => {
 
   it('returns redacted durable task evidence only for the exact production E2E sandbox lane', async () => {
     const storage = new Storage({ 'cp-acceptance:req-1': { receipt: { requestId: 'req-1', userTaskId: 'ut-1',
-      profileId: 'production-e2e-telegram-v1', providerAcceptedAt: 100 } },
+      profileId: 'production-e2e-telegram-v1', providerAcceptedAt: 100 },
+      reconciliationFailure: { stage: 'route', httpStatus: 403, errorName: 'ControlPlaneError', at: 123 } },
     'cp-acceptance:req-foreign': { receipt: { requestId: 'req-foreign', userTaskId: 'ut-foreign',
       profileId: 'foreign-profile', providerAcceptedAt: 200 } } });
     const state = { storage, blockConcurrencyWhile: operation => operation() };
@@ -125,6 +126,7 @@ describe('sandbox-only Intake DO reset', () => {
       requestId: 'req-1', userTaskId: 'ut-1', acceptedAt: 100, status: 'done', resultPresent: true,
       answerPresent: true, answerMatchesChallenge: true, historyTypes: [], runs: [{ status: 'success', generation: 1, hasSessionId: true,
         hasStartedAt: true, hasFinishedAt: true }],
+      reconciliationFailure: { stage: 'route', httpStatus: 403, errorName: 'ControlPlaneError', at: 123 },
     }] });
     expect(JSON.stringify(evidence)).not.toContain('private answer text');
   });

@@ -468,6 +468,15 @@ export class IntakeBuffer {
             continuationRefusal: typeof value.routingOutcome.continuationRefusal === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(value.routingOutcome.continuationRefusal)
               ? value.routingOutcome.continuationRefusal : null,
           } : null,
+          reconciliationFailure: value?.reconciliationFailure && typeof value.reconciliationFailure === 'object' ? {
+            stage: ['acceptance', 'status', 'route', 'reconcile'].includes(value.reconciliationFailure.stage)
+              ? value.reconciliationFailure.stage : 'reconcile',
+            httpStatus: Number.isInteger(value.reconciliationFailure.httpStatus)
+              ? value.reconciliationFailure.httpStatus : null,
+            errorName: typeof value.reconciliationFailure.errorName === 'string' && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(value.reconciliationFailure.errorName)
+              ? value.reconciliationFailure.errorName : 'Error',
+            at: Number.isSafeInteger(value.reconciliationFailure.at) ? value.reconciliationFailure.at : null,
+          } : null,
           resultPresent: !!row.result, answerPresent: !!answer.trim(),
           answerMatchesChallenge: !!challenge && answer.includes(challenge),
           historyTypes: [...new Set((Array.isArray(row.history) ? row.history : [])
@@ -3158,6 +3167,8 @@ export class IntakeBuffer {
     if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length) return false;
     const ids = (await this.state.storage.get('cpBusyRequests')) || [];
     if (!ids.length) return false;
+    let reconcileRequestId = null;
+    let reconcileStage = 'acceptance';
     try {
       const client = controlPlaneClient(this.env);
       const profileId = client.config.profileId;
@@ -3165,9 +3176,11 @@ export class IntakeBuffer {
       const unresolved = [];
       const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
       for (const requestId of ids) {
+        reconcileRequestId = requestId;
         const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
         const receipt = record?.receipt;
         if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId || receipt.durable !== true) return false;
+        reconcileStage = 'status';
         const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
@@ -3186,6 +3199,7 @@ export class IntakeBuffer {
           const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
           if (!routingKnown && !routingDeferred) {
             if (stopPending) return false;
+            reconcileStage = 'route';
             routed = await client.route(receipt.userTaskId);
             if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return false;
           }
@@ -3214,7 +3228,7 @@ export class IntakeBuffer {
                 continuationIssued: routed.continuation?.issued === true,
           continuationRefusal: typeof routed.continuation?.refusal === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(routed.continuation.refusal)
             ? routed.continuation.refusal : null,
-              } });
+              }, reconciliationFailure: null });
             }));
           }
           return false;
@@ -3271,7 +3285,20 @@ export class IntakeBuffer {
         await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       }
       return released;
-    } catch {
+    } catch (error) {
+      if (reconcileRequestId) {
+        const stage = ['acceptance', 'status', 'route'].includes(reconcileStage) ? reconcileStage : 'reconcile';
+        const httpStatus = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+          ? error.status : null;
+        const errorName = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(error.name)
+          ? error.name : 'Error';
+        await this._exclusive(async () => this.state.storage.transaction(async tx => {
+          const key = `cp-acceptance:${reconcileRequestId}`;
+          const current = await tx.get(key);
+          if (current?.receipt?.requestId !== reconcileRequestId || current.terminal === true) return;
+          await tx.put(key, { ...current, reconciliationFailure: { stage, httpStatus, errorName, at: Date.now() } });
+        })).catch(() => {});
+      }
       return false;
     }
   }
