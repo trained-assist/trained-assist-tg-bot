@@ -10,6 +10,14 @@ function setTomlString(source, name, value) {
   return source.replace(pattern, `${name} = ${JSON.stringify(value)}`);
 }
 
+function replaceOnce(source, before, after, label) {
+  const first = source.indexOf(before);
+  if (first < 0 || source.indexOf(before, first + before.length) >= 0) {
+    throw new Error(`wrangler_config_not_unique_${label}`);
+  }
+  return `${source.slice(0, first)}${after}${source.slice(first + before.length)}`;
+}
+
 export function renderProductionE2eWorkerConfig(source, { paused }) {
   if (typeof source !== 'string' || typeof paused !== 'boolean') throw new Error('invalid_production_e2e_config_input');
   let output = source;
@@ -22,10 +30,21 @@ export function renderProductionE2eWorkerConfig(source, { paused }) {
     TG_SLICE_DELIVERY_PAUSED: String(paused),
   };
   for (const [name, value] of Object.entries(vars)) output = setTomlString(output, name, value);
+  // The pinned production test chat is also used in sandbox3. Give the canary
+  // its own DO namespaces so chat-keyed intake scope and delivery state cannot
+  // collide with the sandbox3 profile that uses the same Telegram chat ID.
+  output = replaceOnce(output, 'class_name = "TgDeliveryOwner"', 'class_name = "ProductionE2eTgDeliveryOwner"', 'delivery_owner_binding');
+  output = replaceOnce(output, 'class_name = "IntakeBuffer"', 'class_name = "ProductionE2eIntakeBuffer"', 'intake_binding');
   if (!output.includes('id = "f81925f900dc42fca7bec33d9d422840"') ||
       !output.includes('id = "9fbaf8e6a86f4673bf0990b540e75f6d"') ||
       !output.includes('service = "trained-assist-cp-sandbox3"')) {
     throw new Error('sandbox3_state_bindings_changed');
+  }
+  if (!output.includes('[exports.ProductionE2eIntakeBuffer]') ||
+      !output.includes('[exports.ProductionE2eTgDeliveryOwner]') ||
+      output.includes('class_name = "IntakeBuffer"') ||
+      output.includes('class_name = "TgDeliveryOwner"')) {
+    throw new Error('production_e2e_state_namespaces_not_isolated');
   }
   return output;
 }
