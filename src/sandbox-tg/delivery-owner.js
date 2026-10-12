@@ -13,6 +13,7 @@ const summary = record => record ? {
   reason: record.status === 'sending' ? 'provider_outcome_not_recorded' : record.reason ?? null,
   generation: generation(record), chatId: record.destination.chatId,
   type: record.type, artifactName: record.type === 'artifact' ? record.artifact?.name ?? null : null,
+  ...(record.type === 'artifact' && record.artifactSourceFailure ? { artifactSourceFailure: record.artifactSourceFailure } : {}),
   threadId: record.destination.threadId ?? null,
   legacyStatus: record.legacyStatus ?? null,
 } : null;
@@ -241,12 +242,17 @@ export class TgDeliveryOwner {
       const permanentArtifactFailure = claim.type === 'artifact' && error instanceof ControlPlaneError
         && [400, 404, 409, 413].includes(error.status);
       const retryArtifactRead = claim.type === 'artifact' && !providerCalled && !permanentArtifactFailure;
+      const artifactSourceFailure = retryArtifactRead || permanentArtifactFailure
+        ? error instanceof ControlPlaneError ? `http_${error.status}`
+          : ['TimeoutError', 'AbortError', 'TypeError'].includes(error?.name) ? error.name : 'operation_failed'
+        : null;
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
       completion = { ...claim,
         status: permanentArtifactFailure ? 'dead' : retryArtifactRead || rateLimited
           ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
         reason: permanentArtifactFailure ? 'artifact_source_rejected' : retryArtifactRead ? 'artifact_source_unavailable'
           : rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
+        ...(artifactSourceFailure ? { artifactSourceFailure } : {}),
         ...(!permanentArtifactFailure && (retryArtifactRead || rateLimited) ? { nextAttemptAt: Date.now() + delay } : {}) };
     }
     await this.state.storage.put(key(claim.deliveryId), completion);
