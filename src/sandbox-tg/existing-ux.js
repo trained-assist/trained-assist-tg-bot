@@ -185,6 +185,8 @@ app.post('/operator/test-wake-pending-task', async context => {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ taskId: source.taskId, requestId: source.requestId }),
   });
+  if (response.status === 404) return context.json({ error: 'intake_recovery_endpoint_not_found' }, 502,
+    { 'cache-control': 'no-store' });
   const result = await response.json().catch(() => ({}));
   return context.json(result, response.status, { 'cache-control': 'no-store' });
 });

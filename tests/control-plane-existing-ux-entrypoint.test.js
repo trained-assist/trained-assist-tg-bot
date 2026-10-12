@@ -291,6 +291,25 @@ describe('signed existing-UX ingress', () => {
       body: { challenge: 'PROD-E2E-ABCD1234' } });
   });
 
+  it('reports a missing production Intake recovery route as a scoped backend failure', async () => {
+    const { env } = fixture();
+    configureProductionE2eOperator(env);
+    let observed;
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, init) {
+      observed = { name, path: new URL(url).pathname, body: JSON.parse(init.body) };
+      return new Response('not found', { status: 404 });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/test-wake-pending-task', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'productionE2e', taskId: 'ut-recovery-fixture',
+        requestId: `tgcp-${'a'.repeat(64)}` }),
+    }), env);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: 'intake_recovery_endpoint_not_found' });
+    expect(observed).toMatchObject({ name: '1714048', path: '/_sandbox-test/wake-pending-task',
+      body: { taskId: 'ut-recovery-fixture', requestId: `tgcp-${'a'.repeat(64)}` } });
+  });
+
   it('clears only an idle pinned production E2E chat Intake buffer and refuses active state', async () => {
     const { env } = fixture();
     configureProductionE2eOperator(env);
