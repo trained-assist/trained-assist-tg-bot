@@ -102,12 +102,8 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var CONTROL_PLANE_URL:https://trained-assist-cp-production.skillset-apply.workers.dev \
-            --var CONTROL_PLANE_PRINCIPAL:production-e2e-telegram-v1 \
-            --var CONTROL_PLANE_PROFILE:production-e2e-telegram-v1 \
-            --var SESSION_NAMESPACE:integrator-production-e2e-v1 \
-            --var 'TG_SLICE_INGRESS_PAUSED:"true"' --var 'TG_SLICE_DELIVERY_PAUSED:"true"' \
+          node tools/render-production-e2e-worker-config.mjs paused wrangler.production-e2e-paused.generated.toml
+          npx wrangler deploy --strict --config wrangler.production-e2e-paused.generated.toml \
             --message "production-backend-canary-paused-${GITHUB_SHA}"
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
@@ -116,12 +112,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var CONTROL_PLANE_URL:https://trained-assist-cp-production.skillset-apply.workers.dev \
-            --var CONTROL_PLANE_PRINCIPAL:production-e2e-telegram-v1 \
-            --var CONTROL_PLANE_PROFILE:production-e2e-telegram-v1 \
-            --var SESSION_NAMESPACE:integrator-production-e2e-v1 \
-            --var 'TG_SLICE_INGRESS_PAUSED:"false"' --var 'TG_SLICE_DELIVERY_PAUSED:"false"' \
+          set -euo pipefail
+          node tools/render-production-e2e-worker-config.mjs live wrangler.production-e2e-live.generated.toml
+          npx wrangler deploy --strict --config wrangler.production-e2e-live.generated.toml \
             --message "production-backend-canary-live-${GITHUB_SHA}"
 
       - name: Run read-only question, France VM execution, persistence, and real Telegram delivery
@@ -151,8 +144,8 @@ jobs:
           set -euo pipefail
           node tools/production-e2e-restore-guard.mjs
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var 'TG_SLICE_INGRESS_PAUSED:"true"' --var 'TG_SLICE_DELIVERY_PAUSED:"true"' \
-            --message "sandbox3-restored-paused-${GITHUB_SHA}"
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var 'TG_SLICE_INGRESS_PAUSED:"false"' --var 'TG_SLICE_DELIVERY_PAUSED:"false"' \
-            --message "sandbox3-restored-live-${GITHUB_SHA}"
+            --message "sandbox3-restored-${GITHUB_SHA}"
+
+      - name: Remove generated E2E Wrangler configs
+        if: always()
+        run: rm -f wrangler.production-e2e-paused.generated.toml wrangler.production-e2e-live.generated.toml

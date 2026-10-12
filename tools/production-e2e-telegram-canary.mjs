@@ -100,7 +100,7 @@ async function main() {
   assert.equal(before.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
   if (before.readiness?.testApiEnabled !== true || before.readiness?.ingressPaused !== false ||
       before.readiness?.deliveryPaused !== false) {
-    throw new Error(`production_canary_lane_not_ready_${before.readiness?.testApiEnabled ? 'paused' : 'test_api_disabled'}`);
+    throw new Error(`production_canary_lane_not_ready_test_api_${before.readiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${before.readiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${before.readiness?.deliveryPaused ? 'yes' : 'no'}`);
   }
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
