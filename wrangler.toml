@@ -28,11 +28,33 @@ INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-s
 # Workers Logs instead of Telegram (delivery:"log" + reserve chatId).
 # EMPTY = disabled. Flip it only AFTER both agent and gateway ship the mode.
 TEST_CHAT_IDS = ""
+EXECUTION_BACKEND = "control-plane"
+CONTROL_PLANE_URL = "https://trained-assist-cp-production.skillset-apply.workers.dev"
+CONTROL_PLANE_PRINCIPAL = "production-e2e-telegram-v1"
+CONTROL_PLANE_PROFILE = "production-e2e-telegram-v1"
+SESSION_NAMESPACE = "integrator-production-e2e-v1"
+TG_PRODUCTION_E2E_MODE = "true"
+TG_ACCEPT_ONLY_ENVIRONMENT = "production-e2e"
+TG_SANDBOX_BOT_USERNAME = "super_personal_assistant_bot"
+TG_SLICE_ROUTER_ENABLED = "true"
+TG_SLICE_DELIVERY_PAUSED = "false"
+TG_SLICE_INGRESS_PAUSED = "false"
+TG_SLICE_STOP_ENABLED = "true"
+TG_SLICE_REQUEST_TIMEOUT_MS = "60000"
+TG_SLICE_ALLOWED_CHATS = "1714048"
+TG_SLICE_ALLOWED_USERS = "1714048"
+TG_SANDBOX_E2E_CHAT_ID = "1714048"
+TG_SANDBOX_E2E_USER_ID = "1714048"
+TG_SANDBOX_TEST_API_ENABLED = "false"
 
 # Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
 [[durable_objects.bindings]]
 name = "INTAKE"
-class_name = "IntakeBuffer"
+class_name = "ProductionE2eIntakeBuffer"
+
+[[durable_objects.bindings]]
+name = "TG_DELIVERY_OWNER"
+class_name = "ProductionE2eTgDeliveryOwner"
 
 [[durable_objects.bindings]]
 name = "RETRY_QUEUE"
@@ -74,9 +96,26 @@ id = "5753e58c86c14550930106cf9248eb72"
 binding = "USERS"
 id = "74c1930ed8464f4889c056031f0d42f8"
 
+# Conversation indexes share the existing production USERS namespace but use
+# the disjoint `conv:` key family. User records remain under `user:` keys.
+[[kv_namespaces]]
+binding = "TG_SLICE"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+# The CP E2E route reads the existing production profile credentials. It does
+# not write or reset this binding.
+[[kv_namespaces]]
+binding = "PRODUCTION_USERS"
+id = "74c1930ed8464f4889c056031f0d42f8"
+
+[[migrations]]
+tag = "v5-production-e2e"
+new_sqlite_classes = ["ProductionE2eIntakeBuffer", "ProductionE2eTgDeliveryOwner"]
+
 # ── Staging environment (auto-deployed from feature branches) ──────────────
 [env.staging]
 name = "trained-assist-tg-bot-staging"
+main = "src/index.js"
 
 [env.staging.vars]
 MEDIA_PIPELINE = "off"
@@ -110,6 +149,7 @@ id = "1928a191938f4f60b01fbe12d66380e0"
 # general-purpose bot's user base and command set) ─────────────────────────
 [env.recruiter]
 name = "trained-assist-tg-bot-recruiter"
+main = "src/index.js"
 
 [env.recruiter.vars]
 MEDIA_PIPELINE = "off" # No R2 bucket declared for this env — keep media ingestion off.
@@ -148,6 +188,7 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 # token/webhook is wired here — enabling + canary is a separate step after merge.
 [env.freelance]
 name = "trained-assist-tg-bot-freelance"
+main = "src/index.js"
 # Telegram's webhook DNS resolver could not resolve the fresh
 # *.workers.dev subdomain (main/recruiter work, this one failed with
 # "Temporary failure in name resolution"). Bind a stable custom domain on the
@@ -246,6 +287,7 @@ class_name = "RetryQueue"
 # решение владельца №3).
 [env.sales]
 name = "trained-assist-tg-bot-sales"
+main = "src/index.js"
 
 [env.sales.vars]
 MEDIA_PIPELINE = "off" # No R2 bucket declared — keep media ingestion off (like recruiter/freelance).

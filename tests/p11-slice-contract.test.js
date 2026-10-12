@@ -36,6 +36,21 @@ describe('config — production-bot guard + env-only', () => {
     expect(() => readTgSliceConfig({ ...env, SESSION_NAMESPACE: 'integrator-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
     expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
   });
+  it('allows the real production bot only in the pinned production E2E profile and private test chat', () => {
+    const env = makeEnv({ TG_PRODUCTION_E2E_MODE: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'production-e2e',
+      TG_SANDBOX_TEST_API_ENABLED: 'false', TG_SANDBOX_BOT_USERNAME: 'super_personal_assistant_bot',
+      SESSION_NAMESPACE: 'integrator-production-e2e-v1', CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'production-e2e-signature',
+      TG_SLICE_ALLOWED_CHATS: '1714048', TG_SLICE_ALLOWED_USERS: '1714048',
+      TG_SANDBOX_E2E_CHAT_ID: '1714048', TG_SANDBOX_E2E_USER_ID: '1714048' });
+    expect(readTgSliceConfig(env)).toMatchObject({ botUsername: 'super_personal_assistant_bot',
+      principalSignature: 'production-e2e-signature', profileId: 'production-e2e-telegram-v1',
+      allowedChats: ['1714048'], e2eUserId: '1714048', productionE2eMode: true });
+    expect(() => readTgSliceConfig({ ...env, TG_SLICE_ALLOWED_CHATS: '1714048,1714049' })).toThrow(/pinned to one private chat/i);
+    expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PROFILE: 'another-profile' })).toThrow(/pinned production E2E sandbox lane/i);
+    expect(() => readTgSliceConfig({ ...env, TG_SANDBOX_BOT_USERNAME: 'super_recruiter_assistant_bot' })).toThrow(/pinned production E2E sandbox lane/i);
+  });
   it('bypasses the sandbox CP service binding only for the pinned production E2E lane', () => {
     const fetch = () => new Response('sandbox-cp');
     const service = { fetch };
@@ -89,7 +104,7 @@ describe('config — production-bot guard + env-only', () => {
     expect(chatAllowed(config, 1714048)).toBe(true);
     expect(chatAllowed(config, 1714049)).toBe(false);
     expect(() => readTgSliceConfig(makeEnv({ TG_SANDBOX_E2E_CHAT_ID: '1714048' }))).toThrow(/sandbox chat/i);
-    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_E2E_USER_ID: '0' }))).toThrow(/sandbox user/i);
+    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_E2E_USER_ID: '0' }))).toThrow(/pinned test user/i);
   });
   it('auth scheme depends on bearer key', () => {
     expect(authScheme(readTgSliceConfig(makeEnv({ CONTROL_PLANE_API_KEY: '' })))).toBe('x-principal');
