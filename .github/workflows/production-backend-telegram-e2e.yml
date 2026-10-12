@@ -142,6 +142,7 @@ jobs:
         if: ${{ inputs.diagnose_only == true }}
         env:
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          PRODUCTION_E2E_SIGNATURE: ${{ secrets.CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE }}
         run: node tools/production-e2e-state-probe.mjs
 
       - name: Preserve evidence for review
