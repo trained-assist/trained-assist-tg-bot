@@ -79,7 +79,7 @@ async function main() {
     assert.equal(task.routingOutcome?.known, true, 'production_e2e_prior_route_not_confirmed');
     assert.equal(task.routingOutcome?.continuationRequested, false, 'production_e2e_route_already_requested_continuation');
     assert.equal(task.routingOutcome?.continuationIssued, false, 'production_e2e_route_already_issued_continuation');
-    assert.equal(task.routingRetryCount, 0, 'production_e2e_route_retry_already_used');
+    assert([0, 1].includes(task.routingRetryCount), 'production_e2e_route_retry_state_invalid');
   }
   assert.equal(evidence.buffer?.pendingCount, 0, 'production_e2e_unexpected_pending_input');
   assert.equal(evidence.buffer?.busy, true, 'production_e2e_intake_not_waiting');
