@@ -555,7 +555,12 @@ async function main() {
     .map(item => [`${item.ref}\0${item.name}`, item])).values()];
   const resultText = answerParts.join('\n');
   const escapedLines = expectedLines.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const answerMatchesChallenge = new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
+  // Playwright asks for the title and marker in the reply, but does not
+  // require them to be adjacent lines. Markdown bullets/bold formatting from
+  // the agent must not make a correct answer fail this user-facing check.
+  const answerMatchesChallenge = scenario === 'playwright-artifact'
+    ? expectedLines.every(line => resultText.toLowerCase().includes(line.toLowerCase()))
+    : new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
   failureDiagnostics = { ...failureDiagnostics, stage: 'answer_validation', answer: {
     matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
   } };
