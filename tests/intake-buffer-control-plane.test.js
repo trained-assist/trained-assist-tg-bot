@@ -1793,6 +1793,25 @@ describe('existing collector control-plane ownership', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('retries a collector after Telegram explicitly rejects a send', async () => {
+    const { owner, storage } = fixture();
+    await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
+    send.mockResolvedValueOnce({ ok: false, error_code: 404, description: 'Not Found' });
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+
+    const batch = await storage.get('pendingBatch');
+    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'rejected', errorCode: 404 });
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await owner.fetch(rpc('/append', { text: 'second', msg: { ...items[0].msg, message_id: 2, text: 'second' }, telegramUpdateId: 101 }));
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'sent', messageId: 99 });
+  });
+
   it('persists launch checkpoint before external collector send and prevents warm recovery overlap', async () => {
     const { owner, storage } = fixture();
     await storage.put('buf', items);

@@ -2543,8 +2543,14 @@ export class IntakeBuffer {
       if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
       const id = sent?.result?.message_id;
+      // A provider's explicit ok:false is proof it did not accept the send; let
+      // the next receipt retry it. A thrown fetch or malformed ACK remains
+      // unknown and fenced, since retrying could create a duplicate collector.
       if (claimKey) await this.state.storage.put(claimKey, id && sent?.ok
-        ? { state: 'sent', messageId: id } : { state: 'unknown' });
+        ? { state: 'sent', messageId: id }
+        : sent?.ok === false
+          ? { state: 'rejected', ...(Number.isSafeInteger(sent.error_code) ? { errorCode: sent.error_code } : {}) }
+          : { state: 'unknown' });
       // A fresh bubble becomes THE collector: the older one is edited to a neutral
       // line so two launch buttons never compete (same reason as /stop).
       if (id && (freshCollector || stopPending && items.length)) {
