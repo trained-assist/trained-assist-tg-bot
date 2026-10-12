@@ -108,10 +108,6 @@ id = "74c1930ed8464f4889c056031f0d42f8"
 binding = "PRODUCTION_USERS"
 id = "74c1930ed8464f4889c056031f0d42f8"
 
-[[migrations]]
-tag = "v5-production-e2e"
-new_sqlite_classes = ["ProductionE2eIntakeBuffer", "ProductionE2eTgDeliveryOwner"]
-
 # ── Staging environment (auto-deployed from feature branches) ──────────────
 [env.staging]
 name = "trained-assist-tg-bot-staging"
@@ -418,6 +414,12 @@ class_name = "RunOutbox"
 [[migrations]]
 tag = "v4-run-outbox"
 new_sqlite_classes = ["RunOutbox"]
+
+# Keep the new production lane classes after the current production migration
+# history; Wrangler sends migrations in declaration order.
+[[migrations]]
+tag = "v5-production-e2e"
+new_sqlite_classes = ["ProductionE2eIntakeBuffer", "ProductionE2eTgDeliveryOwner"]
 
 [[env.staging.durable_objects.bindings]]
 name = "RUN_OUTBOX"
