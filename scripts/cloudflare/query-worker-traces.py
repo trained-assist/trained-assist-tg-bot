@@ -158,6 +158,31 @@ def event_payload(event):
     return None
 
 
+def safe_error_class(message):
+    text = str(message or "").lower()
+    if "chat not found" in text:
+        return "chat_not_found"
+    if "bot was blocked" in text:
+        return "bot_blocked"
+    if "message thread not found" in text:
+        return "thread_not_found"
+    if "message to edit not found" in text:
+        return "message_to_edit_not_found"
+    if "message is not modified" in text:
+        return "message_not_modified"
+    if "can't parse entities" in text or "cant parse entities" in text:
+        return "message_format_rejected"
+    if "too many requests" in text:
+        return "rate_limited"
+    if "[sendmessage]" in text or "sendmessage failed" in text:
+        return "telegram_send_rejected"
+    if "cp_http_" in text:
+        return "control_plane_http_error"
+    if "control_plane_" in text or "control plane" in text:
+        return "control_plane_error"
+    return "other_worker_error"
+
+
 if VIEW == "events":
     # Return only bounded lifecycle metadata. Worker logs may also contain user
     # text and identifiers, so never print a raw event or arbitrary log message.
@@ -188,6 +213,8 @@ if VIEW == "events":
                     "sendFailurePresent": isinstance(message, str) and any(marker in message.lower() for marker in (
                         "[sendmessage]", "sendmessage failed", "telegram_rejected", "chat not found", "bot was blocked",
                     ))}
+                if record["level"] == "error":
+                    record["errorClass"] = safe_error_class(message)
                 try:
                     parsed_log = json.loads(message) if isinstance(message, str) else None
                 except (TypeError, ValueError):
