@@ -303,7 +303,7 @@ async function main() {
   const prompt = scenario === 'file-intake'
     ? 'sandbox3-file-test Read the attached file and reply with only the secret word written in it.'
     : scenario === 'artifact-export'
-    ? `Use your shell tool to create agent-note.md containing this exact marker and nothing else: ${nonce}. Export agent-note.md as a task artifact. Do not commit or publish it. Reply with exactly this marker: ${nonce}`
+    ? `Use your shell tool to create outputs/agent-note.md containing this exact marker and nothing else: ${nonce}. Export outputs/agent-note.md as a task artifact. Do not commit or publish it. Reply with exactly this marker: ${nonce}`
     : scenario === 'playwright-artifact'
     ? `Use the Playwright browser tool, not curl/fetch or memory, to open https://example.com, read its page title, and capture a screenshot. Create browser-check.md with the URL, page title, and this unique marker: ${nonce}. Export both browser-check.md and browser-proof.png as task artifacts. Do not commit or publish anything. In your reply include the exact page title and marker: ${nonce}`
     : scenario === 'retry-mid-run'
