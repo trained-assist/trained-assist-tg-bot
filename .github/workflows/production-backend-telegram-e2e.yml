@@ -90,10 +90,14 @@ jobs:
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: |
           set -euo pipefail
-          printf '%s' "$PRODUCTION_E2E_SIGNATURE" | npx wrangler secret put CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE --config wrangler.sandbox-tg-sandbox3.toml
-          printf '%s' "$TG_SANDBOX3_OPERATOR_TOKEN" | npx wrangler secret put TG_SANDBOX3_OPERATOR_TOKEN --config wrangler.sandbox-tg-sandbox3.toml
-          printf '%s' "$TG_SANDBOX_E2E_CHAT_ID" | npx wrangler secret put TG_SANDBOX_E2E_CHAT_ID --config wrangler.sandbox-tg-sandbox3.toml
-          printf '%s' "$TG_SANDBOX_E2E_USER_ID" | npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
+          WRANGLER_RETRY_STDIN_ENV=PRODUCTION_E2E_SIGNATURE tools/retry-cloudflare-command.sh \
+            npx wrangler secret put CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE --config wrangler.sandbox-tg-sandbox3.toml
+          WRANGLER_RETRY_STDIN_ENV=TG_SANDBOX3_OPERATOR_TOKEN tools/retry-cloudflare-command.sh \
+            npx wrangler secret put TG_SANDBOX3_OPERATOR_TOKEN --config wrangler.sandbox-tg-sandbox3.toml
+          WRANGLER_RETRY_STDIN_ENV=TG_SANDBOX_E2E_CHAT_ID tools/retry-cloudflare-command.sh \
+            npx wrangler secret put TG_SANDBOX_E2E_CHAT_ID --config wrangler.sandbox-tg-sandbox3.toml
+          WRANGLER_RETRY_STDIN_ENV=TG_SANDBOX_E2E_USER_ID tools/retry-cloudflare-command.sh \
+            npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
 
       - name: Deploy sandbox ingress paused against isolated production CP profile
         id: deploy-production-lane
@@ -103,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/render-production-e2e-worker-config.mjs paused wrangler.production-e2e-paused.generated.toml
-          npx wrangler deploy --strict --config wrangler.production-e2e-paused.generated.toml \
+          tools/retry-cloudflare-command.sh npx wrangler deploy --strict --config wrangler.production-e2e-paused.generated.toml \
             --message "production-backend-canary-paused-${GITHUB_SHA}"
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
@@ -114,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/render-production-e2e-worker-config.mjs live wrangler.production-e2e-live.generated.toml
-          npx wrangler deploy --strict --config wrangler.production-e2e-live.generated.toml \
+          tools/retry-cloudflare-command.sh npx wrangler deploy --strict --config wrangler.production-e2e-live.generated.toml \
             --message "production-backend-canary-live-${GITHUB_SHA}"
 
       - name: Run read-only question, France VM execution, persistence, and real Telegram delivery
@@ -143,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           node tools/production-e2e-restore-guard.mjs
-          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
+          tools/retry-cloudflare-command.sh npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
             --message "sandbox3-restored-${GITHUB_SHA}"
 
       - name: Remove generated E2E Wrangler configs
