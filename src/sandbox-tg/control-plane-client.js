@@ -53,12 +53,7 @@ function safeJson(text) {
   }
 }
 
-function base64ToBytes(value) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
+const MAX_TASK_ARTIFACT_BYTES = 10 * 1024 * 1024;
 
 export class ControlPlaneClient {
   constructor(config, options = {}) {
@@ -117,6 +112,43 @@ export class ControlPlaneClient {
       throw new ControlPlaneError(res.status, `control plane ${method} ${pathname} -> ${res.status}`, value);
     }
     return { status: res.status, value };
+  }
+
+  async requestBytes(pathname, opts = {}) {
+    const url = this.url(pathname, opts.query);
+    const timeout = AbortSignal.timeout(opts.timeoutMs ?? this.config.requestTimeoutMs);
+    const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+    const res = await this.fetchImpl(url, { method: 'GET', headers: this.headers(), signal });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ControlPlaneError(res.status, `control plane GET ${pathname} -> ${res.status}`, text ? safeJson(text) : null);
+    }
+    const declaredSize = Number(res.headers.get('content-length'));
+    if (Number.isSafeInteger(declaredSize) && declaredSize > MAX_TASK_ARTIFACT_BYTES) {
+      await res.body?.cancel();
+      throw new ControlPlaneError(413, 'artifact exceeds delivery size limit');
+    }
+    if (!res.body) throw new ControlPlaneError(502, 'artifact body missing');
+    const reader = res.body.getReader();
+    const chunks = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_TASK_ARTIFACT_BYTES) {
+        await reader.cancel();
+        throw new ControlPlaneError(413, 'artifact exceeds delivery size limit');
+      }
+      chunks.push(value);
+    }
+    const body = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const filename = /^attachment; filename="([^"\\/\r\n]{1,200})"$/i.exec(disposition)?.[1] ?? null;
+    return { body, filename, sizeBytes: size, sha256: res.headers.get('x-artifact-sha256'),
+      artifactId: res.headers.get('x-artifact-id'), contentType: res.headers.get('content-type') };
   }
 
   /** Intake (C01). Repeat with the same requestId = the same receipt. */
@@ -370,17 +402,9 @@ export class ControlPlaneClient {
     return value;
   }
 
-  /** Artifact bytes. The plane returns a manifest; the byte source is its own deal. */
+  /** Artifact bytes via the authenticated, task-scoped CP proxy. */
   async artifact(userTaskId, ref) {
-    const { value } = await this.request('GET', '/artifact', { query: { taskId: userTaskId, ref } });
-    const body = value.bodyBase64;
-    return {
-      ref: str(value.ref) ?? ref,
-      sizeBytes: numOrNull(value.sizeBytes),
-      sha256: str(value.sha256),
-      contentType: str(value.contentType),
-      body: typeof body === 'string' ? base64ToBytes(body) : new Uint8Array(),
-    };
+    return this.requestBytes('/artifact', { query: { taskId: userTaskId, ref } });
   }
 
   /** Is the plane alive: cheap auth + configuration check. */

@@ -18,7 +18,80 @@ async function fixture(overrides = {}) {
   return { env, client, record, owner };
 }
 
+async function emptyFixture(overrides = {}) {
+  const env = makeEnv({ TG_SLICE: new MemKV(), ...overrides });
+  const client = new TgDeliveryOwnerClient(env);
+  await client.open();
+  const owner = [...env.TG_DELIVERY_OWNER.owners.values()][0];
+  return { env, client, owner };
+}
+
 describe('sandbox durable single delivery owner', () => {
+  it('downloads a task-scoped artifact, verifies size and digest, then sends it as a Telegram document', async () => {
+    const { client } = await emptyFixture();
+    const bytes = new TextEncoder().encode('E2E-DOC');
+    const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map(value => value.toString(16).padStart(2, '0')).join('');
+    const artifact = { ref: 'artifact-123', name: 'agent-note.md', sizeBytes: bytes.length,
+      sha256, contentType: 'text/markdown' };
+    const deliveryId = 'artifact:fixturehash:g1';
+    await client.enqueue({ deliveryId, userTaskId: 'task', conversationId: 'conv-1', destination: { chatId: 1001, threadId: 7 },
+      type: 'artifact', text: '', artifact, taskAcceptedAt: Date.now() });
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (input, init = {}) => {
+      const url = new URL(input);
+      requests.push({ url, init });
+      if (url.pathname === '/artifact') return new Response(bytes, { status: 200, headers: {
+        'content-type': 'text/markdown', 'content-length': String(bytes.length),
+        'content-disposition': 'attachment; filename="agent-note.md"',
+        'x-artifact-sha256': sha256, 'x-artifact-id': 'artifact-123',
+      } });
+      if (url.pathname.endsWith('/sendDocument')) return Response.json({ ok: true, result: { message_id: 2026 } });
+      throw new Error('unexpected_request');
+    }));
+
+    expect(await client.drain()).toBe(1);
+    const receipt = await client.load(deliveryId);
+    expect(receipt).toMatchObject({ status: 'sent', telegramMessageId: 2026, artifact: { name: 'agent-note.md' } });
+    expect(requests).toHaveLength(2);
+    const [download, send] = requests;
+    expect(download.url.pathname).toBe('/artifact');
+    expect(download.url.searchParams.get('taskId')).toBe('task');
+    expect(download.url.searchParams.get('ref')).toBe('artifact-123');
+    expect(download.init.headers.get('x-principal')).toBe('sandbox-local');
+    expect(send.url.pathname.endsWith('/sendDocument')).toBe(true);
+    expect(send.init.body.get('chat_id')).toBe('1001');
+    expect(send.init.body.get('message_thread_id')).toBe('7');
+    const uploaded = send.init.body.get('document');
+    expect(uploaded.name).toBe('agent-note.md');
+    expect(new TextDecoder().decode(await uploaded.arrayBuffer())).toBe('E2E-DOC');
+  });
+
+  it('refuses an artifact with a checksum mismatch and rejects a duplicate sent to another destination', async () => {
+    const { client } = await emptyFixture();
+    const bytes = new TextEncoder().encode('wrong bytes');
+    const artifact = { ref: 'artifact-456', name: 'agent-note.md', sizeBytes: 11, sha256: 'a'.repeat(64), contentType: 'text/markdown' };
+    const deliveryId = 'artifact:otherhash:g1';
+    const record = { deliveryId, userTaskId: 'task', conversationId: 'conv-1', destination: { chatId: 1001, threadId: 7 },
+      type: 'artifact', text: '', artifact, taskAcceptedAt: Date.now() };
+    await client.enqueue(record);
+    await expect(client.enqueue({ ...record, destination: { chatId: 1002, threadId: 7 } })).rejects.toThrow();
+    const sendDocument = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async input => {
+      const url = new URL(input);
+      if (url.pathname === '/artifact') return new Response(bytes, { status: 200, headers: {
+        'content-type': 'text/markdown', 'content-length': String(bytes.length),
+        'content-disposition': 'attachment; filename="agent-note.md"',
+        'x-artifact-sha256': 'b'.repeat(64), 'x-artifact-id': 'artifact-456',
+      } });
+      if (url.pathname.endsWith('/sendDocument')) { sendDocument(); return Response.json({ ok: true, result: { message_id: 2027 } }); }
+      throw new Error('unexpected_request');
+    }));
+    expect(await client.drain()).toBe(1);
+    expect(await client.load(deliveryId)).toMatchObject({ status: 'dead', reason: 'artifact_integrity_rejected' });
+    expect(sendDocument).not.toHaveBeenCalled();
+  });
+
   it('uses the current Worker pause flags even when the existing Durable Object has stale env', async () => {
     const { env, client } = await fixture();
     const calls = vi.fn(async () => Response.json({ ok: true, result: { message_id: 1365 } }));
