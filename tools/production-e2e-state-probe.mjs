@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
 import { summarizeProductionE2eDelivery } from './production-e2e-evidence.mjs';
+import { summarizeCpRouting } from './production-e2e-cp-evidence.mjs';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
@@ -37,6 +38,7 @@ const cpTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
     taskStatus: typeof row.status === 'string' ? row.status : null,
     taskStage: typeof row.stage === 'string' ? row.stage : null,
     generation: Number.isSafeInteger(row.generation) ? row.generation : null,
+    routing: summarizeCpRouting(row),
     workflowStatus: typeof engine.status === 'string' && /^[a-z_-]{1,40}$/i.test(engine.status)
       ? engine.status.toLowerCase() : null,
     workflowStatusType: engine.status === null ? 'null' : typeof engine.status,
