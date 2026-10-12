@@ -517,7 +517,6 @@ async function main() {
   failureDiagnostics = { ...failureDiagnostics, stage: 'answer_validation', answer: {
     matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
   } };
-  assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
   let playwrightArtifactEvidence = null;
   if (scenario === 'playwright-artifact') {
     const artifacts = await d1(`SELECT artifact_ref, size_bytes, checksum, run_id FROM task_artifacts
@@ -537,16 +536,22 @@ async function main() {
     });
     const markdown = exported.find(item => item.name === 'browser-check.md');
     const screenshot = exported.find(item => item.name === 'browser-proof.png');
+    const expectedMarkdownExported = Boolean(markdown && markdown.size > 0 && markdown.sha256);
+    const expectedScreenshotExported = Boolean(screenshot && screenshot.size > 0 && screenshot.sha256);
+    const manifestMetadataValid = artifacts.length >= 2 && artifacts.every(item => typeof item.artifact_ref === 'string'
+      && Number.isSafeInteger(item.size_bytes) && item.size_bytes > 0
+      && typeof item.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(item.checksum)
+      && item.run_id === primaryCorrelation.runnerRunId);
+    failureDiagnostics = { ...failureDiagnostics, stage: 'artifact_export_validation', artifactExport: {
+      expectedMarkdownExported, expectedScreenshotExported, manifestCount: artifacts.length, manifestMetadataValid,
+    } };
     assert(markdown && markdown.size > 0 && markdown.sha256, 'sandbox_playwright_markdown_not_exported');
     assert(screenshot && screenshot.size > 0 && screenshot.sha256, 'sandbox_playwright_screenshot_not_exported');
     assert(artifacts.length >= 2, 'sandbox_playwright_artifact_manifest_not_persisted');
-    assert(artifacts.every(item => typeof item.artifact_ref === 'string'
-      && Number.isSafeInteger(item.size_bytes) && item.size_bytes > 0
-      && typeof item.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(item.checksum)
-      && item.run_id === primaryCorrelation.runnerRunId), 'sandbox_playwright_artifact_metadata_invalid');
+    assert(manifestMetadataValid, 'sandbox_playwright_artifact_metadata_invalid');
     playwrightArtifactEvidence = {
       browserToolRequested: true,
-      resultTitleAndMarkerPresent: true,
+      resultTitleAndMarkerPresent: answerMatchesChallenge,
       expectedArtifactsExported: 2,
       persistedArtifactManifestCount: artifacts.length,
       markdownSize: markdown.size,
@@ -555,6 +560,7 @@ async function main() {
     };
     console.log(JSON.stringify({ scenario: 'playwright-artifact-export', ...playwrightArtifactEvidence }));
   }
+  assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
   const terminal = deliveryMode === 'telegram'
     ? await waitForDelivery(task.id, chatId)
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
