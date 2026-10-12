@@ -166,6 +166,12 @@ if VIEW == "events":
         "returned_event_count": len(event_items),
         "truncated": response.get("result", {}).get("truncated", False),
         "lifecycle_events": safe_events,
+        "event_shape_sample": [{
+            "top_level_keys": sorted(str(key) for key in item.keys()),
+            "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
+            "source_type": type(item.get("source")).__name__,
+            "message_type": type((item.get("$metadata") or item.get("metadata") or {}).get("message")).__name__,
+        } for item in event_items[:3] if isinstance(item, dict)],
     }, indent=2))
     raise SystemExit(0)
 
