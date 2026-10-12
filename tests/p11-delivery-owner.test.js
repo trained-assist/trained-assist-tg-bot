@@ -32,7 +32,7 @@ describe('sandbox durable single delivery owner', () => {
     const bytes = new TextEncoder().encode('E2E-DOC');
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
       .map(value => value.toString(16).padStart(2, '0')).join('');
-    const artifact = { ref: 'artifact-123', name: 'agent-note.md', sizeBytes: bytes.length,
+    const artifact = { ref: 'runs/task/artifact-123', name: 'agent-note.md', sizeBytes: bytes.length,
       sha256, contentType: 'text/markdown' };
     const deliveryId = 'artifact:fixturehash:g1';
     await client.enqueue({ deliveryId, userTaskId: 'task', conversationId: 'conv-1', destination: { chatId: 1001, threadId: 7 },
@@ -57,7 +57,7 @@ describe('sandbox durable single delivery owner', () => {
     const [download, send] = requests;
     expect(download.url.pathname).toBe('/artifact');
     expect(download.url.searchParams.get('taskId')).toBe('task');
-    expect(download.url.searchParams.get('ref')).toBe('artifact-123');
+    expect(download.url.searchParams.get('ref')).toBe('runs/task/artifact-123');
     expect(download.init.headers.get('x-principal')).toBe('sandbox-local');
     expect(send.url.pathname.endsWith('/sendDocument')).toBe(true);
     expect(send.init.body.get('chat_id')).toBe('1001');
@@ -93,6 +93,14 @@ describe('sandbox durable single delivery owner', () => {
     expect(await client.drain()).toBe(1);
     expect(await client.load(deliveryId)).toMatchObject({ status: 'dead', reason: 'artifact_integrity_rejected' });
     expect(sendDocument).not.toHaveBeenCalled();
+  });
+
+  it('rejects traversal segments in artifact object references', async () => {
+    const { client } = await emptyFixture();
+    await expect(client.enqueue({ deliveryId: 'artifact:unsafe:g1', userTaskId: 'task', destination: { chatId: 1001 },
+      type: 'artifact', text: '', taskAcceptedAt: Date.now(), artifact: { ref: 'runs/../private.md', name: 'note.md',
+        sizeBytes: 1, sha256: 'a'.repeat(64), contentType: 'text/markdown' } })).rejects.toThrow('delivery_owner_refused');
+    expect((await client.read('task', { includeArtifacts: true })).artifacts).toEqual([]);
   });
 
   it('uses the current Worker pause flags even when the existing Durable Object has stale env', async () => {

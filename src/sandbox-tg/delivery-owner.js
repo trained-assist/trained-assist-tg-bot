@@ -3,6 +3,8 @@ import { TelegramApi, TelegramApiError } from './telegram.js';
 import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
 
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+const artifactReference = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)
+  && !value.split('/').some(part => part === '..') && !value.endsWith('/');
 const key = id => `delivery:${id}`;
 const generation = record => Number(record.deliveryId.match(/:g(\d+)$/)?.[1] ?? 0);
 const summary = record => record ? {
@@ -163,7 +165,7 @@ export class TgDeliveryOwner {
         !['message', 'launch', 'artifact'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
     if (input.type === 'artifact') {
       const item = input.artifact;
-      if (!item || typeof item !== 'object' || !reference(item.ref)
+      if (!item || typeof item !== 'object' || !artifactReference(item.ref)
         || typeof item.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
         || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes < 1 || item.sizeBytes > 10 * 1024 * 1024
         || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)

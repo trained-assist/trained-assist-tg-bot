@@ -253,9 +253,9 @@ describe('P11 exported Worker composition', () => {
     const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
       .map(value => value.toString(16).padStart(2, '0')).join('');
     task.result = { answer: 'The document is ready.', artifacts: [{
-      ref: 'artifact-telegram-e2e', name: 'agent-note.md', sizeBytes: bytes.length, sha256, mime: 'text/markdown',
+      ref: 'runs/task/artifact-telegram-e2e', name: 'agent-note.md', sizeBytes: bytes.length, sha256, mime: 'text/markdown',
     }] };
-    fake.artifacts.push({ task_id: task.user_task_id, ref: 'artifact-telegram-e2e', body: bytes,
+    fake.artifacts.push({ task_id: task.user_task_id, ref: 'runs/task/artifact-telegram-e2e', body: bytes,
       filename: 'agent-note.md', contentType: 'text/markdown', sha256, id: 'artifact-telegram-e2e' });
 
     for (let attempt = 0; attempt < 8; attempt += 1) await worker.scheduled({}, env);
