@@ -5,6 +5,14 @@ import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
 const artifactReference = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)
   && !value.split('/').some(part => part === '..') && !value.endsWith('/');
+const artifactSourceFailureCode = error => {
+  if (error instanceof ControlPlaneError) {
+    const runnerStatus = error.status === 502 && typeof error.body?.reason === 'string'
+      ? /\bHTTP_(\d{3})\b/.exec(error.body.reason)?.[1] : null;
+    return runnerStatus ? `runner_http_${runnerStatus}` : `http_${error.status}`;
+  }
+  return ['TimeoutError', 'AbortError', 'TypeError'].includes(error?.name) ? error.name : 'operation_failed';
+};
 const key = id => `delivery:${id}`;
 const generation = record => Number(record.deliveryId.match(/:g(\d+)$/)?.[1] ?? 0);
 const summary = record => record ? {
@@ -242,10 +250,7 @@ export class TgDeliveryOwner {
       const permanentArtifactFailure = claim.type === 'artifact' && error instanceof ControlPlaneError
         && [400, 404, 409, 413].includes(error.status);
       const retryArtifactRead = claim.type === 'artifact' && !providerCalled && !permanentArtifactFailure;
-      const artifactSourceFailure = retryArtifactRead || permanentArtifactFailure
-        ? error instanceof ControlPlaneError ? `http_${error.status}`
-          : ['TimeoutError', 'AbortError', 'TypeError'].includes(error?.name) ? error.name : 'operation_failed'
-        : null;
+      const artifactSourceFailure = retryArtifactRead || permanentArtifactFailure ? artifactSourceFailureCode(error) : null;
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
       completion = { ...claim,
         status: permanentArtifactFailure ? 'dead' : retryArtifactRead || rateLimited
