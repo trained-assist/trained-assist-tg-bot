@@ -119,16 +119,19 @@ async function pressCurrentLaunchButton() {
 async function waitForLiveLane() {
   const deadline = Date.now() + 60_000;
   let lastReadiness = null;
+  let expectedProfileObserved = false;
   while (Date.now() < deadline) {
     const evidence = await workerRequest('/operator/test-evidence');
-    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+    expectedProfileObserved ||= evidence.profileId === PROFILE_ID;
     lastReadiness = evidence.readiness ?? {};
-    if (lastReadiness.testApiEnabled === true && lastReadiness.ingressPaused === false &&
-        lastReadiness.deliveryPaused === false) return evidence;
-    // The live config is deployed immediately after a paused version. Allow
-    // edge propagation to finish before sending any synthetic user message.
+    if (liveLaneIsReady(evidence)) return evidence;
+    // The isolated live config is deployed immediately after a paused version.
+    // Some Cloudflare edges can briefly serve the prior Worker version, whose
+    // profile identity differs. Poll until the intended profile and live
+    // readiness are both visible; do not send messages to that old lane.
     await new Promise(resolve => setTimeout(resolve, 2_000));
   }
+  if (!expectedProfileObserved) throw new Error('production_canary_profile_not_propagated');
   throw new Error(`production_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
 }
 
@@ -213,6 +216,11 @@ export function intakeIsIdle(buffer) {
   const state = summarizeIntakeState(buffer);
   return state.pendingCount === 0 && !state.busy && state.launching === 0 &&
     state.unresolvedLaunchCount === 0 && state.busyRequestCount === 0;
+}
+
+export function liveLaneIsReady(evidence) {
+  return evidence?.profileId === PROFILE_ID && evidence?.readiness?.testApiEnabled === true &&
+    evidence?.readiness?.ingressPaused === false && evidence?.readiness?.deliveryPaused === false;
 }
 
 export function cleanupReadiness(evidence = {}) {
