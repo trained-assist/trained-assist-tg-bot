@@ -69,9 +69,15 @@ export function summarizeSandbox3E2eFailure(value = {}) {
       expectedFileExportsPresent: typeof value.artifactExport.expectedFileExportsPresent === 'boolean'
         ? value.artifactExport.expectedFileExportsPresent : null,
       exportEventCount: integer(value.artifactExport.exportEventCount),
+      resultManifestCount: integer(value.artifactExport.resultManifestCount),
+      runnerResultManifestValid: typeof value.artifactExport.runnerResultManifestValid === 'boolean'
+        ? value.artifactExport.runnerResultManifestValid : null,
       manifestCount: integer(value.artifactExport.manifestCount),
       manifestMetadataValid: typeof value.artifactExport.manifestMetadataValid === 'boolean'
         ? value.artifactExport.manifestMetadataValid : null,
+      matchingTaskManifest: typeof value.artifactExport.matchingTaskManifest === 'boolean'
+        ? value.artifactExport.matchingTaskManifest : null,
+      persistenceState: text(value.artifactExport.persistenceState),
     };
   }
 
