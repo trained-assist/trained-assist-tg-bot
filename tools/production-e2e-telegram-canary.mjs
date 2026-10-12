@@ -33,10 +33,12 @@ async function workerRequest(path, body) {
     // Keep production canary failures actionable without logging the captured
     // transcript, which can contain temporary credentials or user input.
     const safeCode = typeof payload.code === 'string' && /^[a-z0-9_-]{1,80}$/i.test(payload.code)
-      ? payload.code : null;
+      ? payload.code.toLowerCase() : null;
+    const safeError = typeof payload.error === 'string' && /^[a-z0-9_-]{1,80}$/i.test(payload.error)
+      ? payload.error.toLowerCase() : 'failed';
     const innerStatus = Number.isSafeInteger(payload.status) ? `webhook_${payload.status}` : null;
     const suffix = [innerStatus, safeCode].filter(Boolean).join('_');
-    throw new Error(`worker_${path.replaceAll('/', '_')}_${response.status}_${payload.error ?? 'failed'}${suffix ? `_${suffix}` : ''}`);
+    throw new Error(`worker_${path.replaceAll('/', '_').toLowerCase()}_${response.status}_${safeError}${suffix ? `_${suffix}` : ''}`);
   }
   return payload;
 }
@@ -187,8 +189,13 @@ async function main() {
 }
 
 main().catch(error => {
-  const reason = error instanceof Error ? error.message : 'production_canary_failed';
+  // Assertions include a multiline expected/actual diff. Keep only a safe
+  // first-line slug so failure evidence stays useful without ever emitting
+  // transcripts, user input, answers, or credentials.
+  const firstLine = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
+  const reason = /^[a-z0-9][a-z0-9_:.-]{0,159}$/i.test(firstLine)
+    ? firstLine.toLowerCase() : 'production_canary_failed';
   console.error(JSON.stringify({ lane: TARGET, ok: false,
-    reasonCode: /^[a-z0-9_:.-]+$/.test(reason) ? reason : 'production_canary_failed' }));
+    reasonCode: reason }));
   process.exitCode = 1;
 });
