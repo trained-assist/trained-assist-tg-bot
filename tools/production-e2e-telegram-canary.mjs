@@ -29,7 +29,15 @@ async function workerRequest(path, body) {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(60_000) });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`worker_${path.replaceAll('/', '_')}_${response.status}_${payload.error ?? 'failed'}`);
+  if (!response.ok) {
+    // Keep production canary failures actionable without logging the captured
+    // transcript, which can contain temporary credentials or user input.
+    const safeCode = typeof payload.code === 'string' && /^[a-z0-9_-]{1,80}$/i.test(payload.code)
+      ? payload.code : null;
+    const innerStatus = Number.isSafeInteger(payload.status) ? `webhook_${payload.status}` : null;
+    const suffix = [innerStatus, safeCode].filter(Boolean).join('_');
+    throw new Error(`worker_${path.replaceAll('/', '_')}_${response.status}_${payload.error ?? 'failed'}${suffix ? `_${suffix}` : ''}`);
+  }
   return payload;
 }
 
