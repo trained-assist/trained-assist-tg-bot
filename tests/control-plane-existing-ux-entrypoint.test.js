@@ -314,6 +314,30 @@ describe('signed existing-UX ingress', () => {
       body: { taskId: 'ut-recovery-fixture', requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true } });
   });
 
+  it.each([
+    ['wrong lane', env => {
+      env.CONTROL_PLANE_URL = 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev';
+      env.CONTROL_PLANE_PROFILE = 'integration-sandbox3-v1';
+      env.CONTROL_PLANE_PRINCIPAL = 'integration-sandbox3-v1';
+      env.SESSION_NAMESPACE = 'integrator-sandbox3-v1';
+    }, 'production_e2e_lane_mismatch'],
+    ['disabled test API', env => { env.TG_SANDBOX_TEST_API_ENABLED = 'false'; }, 'test_api_disabled'],
+    ['paused ingress', env => { env.TG_SLICE_INGRESS_PAUSED = 'true'; }, 'test_ingress_paused'],
+    ['paused delivery', env => { env.TG_SLICE_DELIVERY_PAUSED = 'true'; }, 'test_delivery_paused'],
+    ['missing Intake binding', env => { env.INTAKE = undefined; }, 'intake_binding_unavailable'],
+  ])('reports the specific safe production E2E wake precondition: %s', async (_label, change, expectedError) => {
+    const { env } = fixture();
+    configureProductionE2eOperator(env);
+    change(env);
+    const response = await worker.fetch(new Request('https://worker/operator/test-wake-pending-task', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: 'productionE2e', taskId: 'ut-recovery-fixture',
+        requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true }),
+    }), env);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: expectedError });
+  });
+
   it('clears only an idle pinned production E2E chat Intake buffer and refuses active state', async () => {
     const { env } = fixture();
     configureProductionE2eOperator(env);
