@@ -22,8 +22,8 @@ import { setSession } from '../src/lib/kv.js';
 // Форматы журнала зафиксированы DESIGN.md §2.2 («по ним пишется автотест»):
 //   [test-mode] run-start chat=<реальный id> requestId=<id> delivery=log
 //   [test-mode] kind=sendMessage chat=<id> text=<300 символов>…
-//   [test-mode] kind=run-finished chat=<id> requestId=<id> outcome=done|error|stopped|quick
-//   [test-mode] kind=agent-answer chat=<id> requestId=<id> len=<n> text=<до 4000>
+//   {"event":"tg.agent.run_finished_received","requestId":"<id>","outcome":"done", ...}
+// Answer content is intentionally never included in Worker logs.
 // Резервный (мёртвый) id тестового чата: -(1e14 + i), DESIGN.md §2.1.
 
 const TEST_CHAT = 777000111;
@@ -100,6 +100,7 @@ async function runScenario({ chatId, testChatIds }) {
   try {
     const env = {
       BOT_TOKEN: '123456:SBX',
+      BUILD_SHA: 'test-build',
       INTAKE_DEBOUNCE: 'on',
       AGENT_URL: AGENT,
       AGENT_SECRET,
@@ -247,20 +248,17 @@ describe('US-TEST-01 — тестовый режим шлюза: замкнут�
       expect(lines.every(l => l.includes(`chat=${TEST_CHAT}`))).toBe(true);
     });
 
-    it('журнал: строка run-finished с исходом прогона', () => {
-      const line = L1.journal.find(l => /\[test-mode\] kind=run-finished chat=/.test(l));
+    it('журнал: структурированное событие run-finished связано с запросом', () => {
+      const line = L1.journal.find(l => { try { return JSON.parse(l).event === 'tg.agent.run_finished_received'; } catch { return false; } });
       expect(line, `нет kind=run-finished${dump(L1)}`).toBeDefined();
-      expect(line).toContain(`chat=${TEST_CHAT}`);
-      expect(line).toContain(`requestId=${L1.runBodies[0].requestId}`);
-      expect(line).toMatch(/outcome=(done|error|stopped|quick)/);
+      const event = JSON.parse(line);
+      expect(event).toMatchObject({ requestId: L1.runBodies[0].requestId,
+        correlationId: L1.runBodies[0].requestId, outcome: 'done', answerPresent: true });
+      expect(event).not.toHaveProperty('chatId');
     });
 
-    it('шаги 4–5: ответ агента в журнале (kind=agent-answer), не в чате', () => {
-      const line = L1.journal.find(l => /\[test-mode\] kind=agent-answer chat=/.test(l));
-      expect(line, `нет kind=agent-answer — answer из run-finished не принят/не залогирован${dump(L1)}`).toBeDefined();
-      expect(line).toContain(`chat=${TEST_CHAT}`);
-      expect(line).toContain(`requestId=${L1.runBodies[0].requestId}`);
-      expect(line, 'текст ответа не в журнале').toContain(AGENT_ANSWER);
+    it('ответ агента принят, но его содержимое не попадает в Worker logs', () => {
+      expect(L1.journal.join('\n')).not.toContain(AGENT_ANSWER);
       expect(L1.tg.filter(c => Number(c.chatId) === TEST_CHAT)).toHaveLength(0);
     });
 

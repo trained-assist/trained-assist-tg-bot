@@ -8,7 +8,7 @@ import worker from '../src/index.js';
 function makeEnv() {
   const stub = { fetch: vi.fn(async () => Response.json({ released: true })) };
   return {
-    env: { AGENT_SECRET: 'test-secret', INTAKE: { idFromName: vi.fn(x => x), get: vi.fn(() => stub) } },
+    env: { AGENT_SECRET: 'test-secret', BUILD_SHA: 'test-build', INTAKE: { idFromName: vi.fn(x => x), get: vi.fn(() => stub) } },
     stub,
   };
 }
@@ -71,22 +71,27 @@ function testEnv(ids) {
   return { env, stub };
 }
 
-it('test mode: run-finished под резервным id уходит в IntakeBuffer РЕАЛЬНОГО чата и пишет журнал', async () => {
+it('test mode: run-finished под резервным id уходит в IntakeBuffer и журналирует только безопасные факты', async () => {
   const { env, stub } = testEnv(String(TEST));
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
   const res = await worker.fetch(req({
     chatId: RESERVE, requestId: 'intake-tm', outcome: 'done',
-    answer: 'Ответ агента в журнал.',
+    taskId: 'task-tm', generation: 3, answer: 'Ответ агента в журнал.',
   }), env);
   expect(res.status).toBe(200);
   expect(env.INTAKE.idFromName).toHaveBeenCalledWith(String(TEST)); // инверсия
   const lines = spy.mock.calls.map(c => c.join(' '));
-  expect(lines.some(l => l.includes(`[test-mode] kind=run-finished chat=${TEST} requestId=intake-tm outcome=done`))).toBe(true);
-  expect(lines.some(l => l.includes(`[test-mode] kind=agent-answer chat=${TEST} requestId=intake-tm`) && l.includes('Ответ агента в журнал.'))).toBe(true);
+  const event = lines.map(line => { try { return JSON.parse(line); } catch { return null; } })
+    .find(item => item?.event === 'tg.agent.run_finished_received');
+  expect(event).toMatchObject({ requestId: 'intake-tm', correlationId: 'intake-tm',
+    taskId: 'task-tm', generation: 3, outcome: 'done', answerPresent: true,
+    answerLength: 'Ответ агента в журнал.'.length });
+  expect(lines.join('\n')).not.toContain('Ответ агента в журнал.');
+  expect(lines.join('\n')).not.toContain(String(TEST));
   spy.mockRestore();
 });
 
-it('test mode: обычный чат без answer — ни одной строки журнала; резерв без списка не инвертируется', async () => {
+it('ordinary run-finished logs bounded lifecycle metadata; reserve without a list is not inverted', async () => {
   const { env, stub } = testEnv(String(TEST));
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
   await worker.fetch(req({ chatId: CTRL_OR_PLAIN, requestId: 'r-plain', outcome: 'done' }), env);
@@ -95,7 +100,11 @@ it('test mode: обычный чат без answer — ни одной стро�
   const { env: envOff } = testEnv('');
   await worker.fetch(req({ chatId: RESERVE, requestId: 'r-off', outcome: 'done' }), envOff);
   expect(envOff.INTAKE.idFromName).toHaveBeenCalledWith(String(RESERVE));
-  expect(spy.mock.calls.map(c => c.join(' ')).some(l => l.includes('[test-mode]'))).toBe(false);
+  const lines = spy.mock.calls.map(c => c.join(' '));
+  expect(lines.join('\n')).not.toContain(String(CTRL_OR_PLAIN));
+  expect(lines.join('\n')).not.toContain(String(RESERVE));
+  expect(lines.map(line => { try { return JSON.parse(line); } catch { return null; } })
+    .filter(item => item?.event === 'tg.agent.run_finished_received')).toHaveLength(2);
   spy.mockRestore();
   expect(stub.fetch).toHaveBeenCalled();
 });

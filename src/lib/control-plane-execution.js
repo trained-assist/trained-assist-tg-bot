@@ -5,6 +5,7 @@ import { ControlPlaneClient } from '../sandbox-tg/control-plane-client.js';
 import { KvConversationStore, ConversationIndex } from '../sandbox-tg/conversation.js';
 import { TgDeliveryOwnerClient } from '../sandbox-tg/delivery-owner.js';
 import { sandboxControlPlaneFetch } from '../sandbox-tg/operator-lane.js';
+import { logLifecycleEvent } from './lifecycle-log.js';
 
 export function controlPlaneClient(env) {
   const config = readTgSliceConfig(env);
@@ -68,30 +69,82 @@ export async function runControlPlaneTask(env, input) {
     workStyle: ['explore', 'answer', 'auto'].includes(input.workStyle) ? input.workStyle : 'auto',
     workStyleSource: input.workStyleSource === 'explicit' ? 'explicit' : 'default',
   };
+  logLifecycleEvent({ event: 'tg.cp.snapshot_started', component: 'gateway',
+    correlationId: requestId, requestId, status: 'started' }, env);
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(input.userId, input.threadId)));
-  const response = await stub.fetch('https://intake/snapshot', {
-    method: 'POST', body: JSON.stringify({ items: input.inputItems ?? [], body: {
-      username: input.username, requestId, task: input.task, initialMsgId: input.initialMsgId,
-      controlPlaneEnvelope: envelope,
-    } }),
-  });
-  if (!response.ok) throw new Error('control_plane_snapshot_failed');
-  const saved = (await response.json()).body.controlPlaneEnvelope;
-  if (!saved || saved.requestId !== requestId || saved.profileId !== config.profileId) throw new Error('control_plane_snapshot_scope_mismatch');
-  const client = controlPlaneClient(env);
-  const persisted = await stub.fetch(`https://intake/cp-acceptance?requestId=${encodeURIComponent(requestId)}`);
-  if (!persisted.ok) throw new Error('control_plane_acceptance_read_failed');
-  let receipt = (await persisted.json()).receipt;
-  if (!receipt) {
-    receipt = await client.intake({ requestId: saved.requestId, conversationId: saved.conversationRef,
-      sessionId: saved.sessionId, inputItems: saved.inputItems, waitTimeoutSec: saved.waitTimeoutSec,
-      workStyle: saved.workStyle ?? 'auto', workStyleSource: saved.workStyleSource ?? 'default' });
-    const accepted = await stub.fetch('https://intake/cp-acceptance', {
-      method: 'POST', body: JSON.stringify({ requestId, receipt }),
+  let response;
+  try {
+    response = await stub.fetch('https://intake/snapshot', {
+      method: 'POST', body: JSON.stringify({ items: input.inputItems ?? [], body: {
+        username: input.username, requestId, task: input.task, initialMsgId: input.initialMsgId,
+        controlPlaneEnvelope: envelope,
+      } }),
     });
-    if (!accepted.ok) throw new Error('control_plane_acceptance_persist_failed');
+  } catch {
+    logLifecycleEvent({ event: 'tg.cp.snapshot_failed', component: 'gateway',
+      correlationId: requestId, requestId, status: 'failed', reasonCode: 'collector_unavailable' }, env);
+    throw new Error('control_plane_snapshot_failed');
+  }
+  if (!response.ok) {
+    logLifecycleEvent({ event: 'tg.cp.snapshot_failed', component: 'gateway',
+      correlationId: requestId, requestId, status: 'failed', reasonCode: 'snapshot_persist_failed' }, env);
+    throw new Error('control_plane_snapshot_failed');
+  }
+  const snapshotPayload = await response.json().catch(() => null);
+  const saved = snapshotPayload?.body?.controlPlaneEnvelope;
+  if (!saved || saved.requestId !== requestId || saved.profileId !== config.profileId) {
+    logLifecycleEvent({ event: 'tg.cp.snapshot_failed', component: 'gateway',
+      correlationId: requestId, requestId, status: 'failed', reasonCode: 'snapshot_scope_mismatch' }, env);
+    throw new Error('control_plane_snapshot_scope_mismatch');
+  }
+  logLifecycleEvent({ event: 'tg.cp.snapshot_persisted', component: 'gateway',
+    correlationId: requestId, requestId, status: 'persisted' }, env);
+  const client = controlPlaneClient(env);
+  let persisted;
+  try {
+    persisted = await stub.fetch(`https://intake/cp-acceptance?requestId=${encodeURIComponent(requestId)}`);
+  } catch {
+    logLifecycleEvent({ event: 'tg.cp.receipt_read_failed', component: 'gateway',
+      correlationId: requestId, requestId, status: 'failed', reasonCode: 'collector_unavailable' }, env);
+    throw new Error('control_plane_acceptance_read_failed');
+  }
+  if (!persisted.ok) {
+    logLifecycleEvent({ event: 'tg.cp.receipt_read_failed', component: 'gateway',
+      correlationId: requestId, requestId, status: 'failed', reasonCode: 'receipt_read_failed' }, env);
+    throw new Error('control_plane_acceptance_read_failed');
+  }
+  let receipt = (await persisted.json().catch(() => ({}))).receipt;
+  if (!receipt) {
+    try {
+      receipt = await client.intake({ requestId: saved.requestId, conversationId: saved.conversationRef,
+        sessionId: saved.sessionId, inputItems: saved.inputItems, waitTimeoutSec: saved.waitTimeoutSec,
+        workStyle: saved.workStyle ?? 'auto', workStyleSource: saved.workStyleSource ?? 'default' });
+    } catch (error) {
+      logLifecycleEvent({ event: 'tg.cp.intake_failed', component: 'gateway',
+        correlationId: requestId, requestId, status: 'failed',
+        reasonCode: Number.isSafeInteger(error?.status) ? `cp_http_${error.status}` : 'cp_intake_unavailable' }, env);
+      throw error;
+    }
+    let accepted;
+    try {
+      accepted = await stub.fetch('https://intake/cp-acceptance', {
+        method: 'POST', body: JSON.stringify({ requestId, receipt }),
+      });
+    } catch {
+      logLifecycleEvent({ event: 'tg.cp.receipt_persist_failed', component: 'gateway',
+        correlationId: requestId, requestId, status: 'failed', reasonCode: 'collector_unavailable' }, env);
+      throw new Error('control_plane_acceptance_persist_failed');
+    }
+    if (!accepted.ok) {
+      logLifecycleEvent({ event: 'tg.cp.receipt_persist_failed', component: 'gateway',
+        correlationId: requestId, requestId, status: 'failed', reasonCode: 'receipt_persist_failed' }, env);
+      throw new Error('control_plane_acceptance_persist_failed');
+    }
   }
   if (receipt.requestId !== requestId || receipt.profileId !== config.profileId || !receipt.userTaskId || receipt.durable !== true) throw new Error('control_plane_receipt_scope_mismatch');
+  logLifecycleEvent({ event: 'tg.cp.task_accepted', component: 'gateway',
+    correlationId: requestId, requestId, taskId: receipt.userTaskId, status: 'durable',
+    duplicate: receipt.duplicate === true }, env);
   const store = new KvConversationStore(env.TG_SLICE);
   const deliveryConversationId = `${saved.conversationRef}-b${requestId.slice(-24)}`;
   const index = await store.load(deliveryConversationId) ?? new ConversationIndex(deliveryConversationId, config.profileId);
@@ -107,8 +160,17 @@ export async function runControlPlaneTask(env, input) {
   let routingPending = false;
   try {
     const routed = await client.route(receipt.userTaskId);
+    logLifecycleEvent({ event: 'tg.cp.route_completed', component: 'gateway',
+      correlationId: requestId, requestId, taskId: receipt.userTaskId,
+      status: 'completed', ...(routed?.route ? { route: routed.route } : {}),
+      ...(routed?.reasonCode ? { reasonCode: routed.reasonCode } : {}) }, env);
     await publishRoutingDegradation(env, receipt, routed, index.destination, deliveryConversationId);
-  } catch { routingPending = true; }
+  } catch {
+    routingPending = true;
+    logLifecycleEvent({ event: 'tg.cp.route_pending', component: 'gateway',
+      correlationId: requestId, requestId, taskId: receipt.userTaskId,
+      status: 'pending', reasonCode: 'route_ack_unavailable' }, env);
+  }
   return { taskId: receipt.userTaskId, userTaskId: receipt.userTaskId, requestId, durable: true,
     controlPlane: true, routingPending };
 }

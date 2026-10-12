@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runControlPlaneTask } from '../src/lib/control-plane-execution.js';
 import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
 import { makeEnv, MemKV } from './helpers/p11-helpers.js';
@@ -9,7 +9,7 @@ function fixture() {
   const receipts = new Map();
   const fake = new FakeControlPlane();
   let routeFails = false;
-  const env = makeEnv({ TG_SLICE: new MemKV(), CONTROL_PLANE_SESSION_ID: 'source-session' });
+  const env = makeEnv({ TG_SLICE: new MemKV(), CONTROL_PLANE_SESSION_ID: 'source-session', BUILD_SHA: 'test-build' });
   const stub = { async fetch(url, options = {}) {
     const address = new URL(url);
     if (address.pathname === '/snapshot') {
@@ -44,6 +44,7 @@ function fixture() {
 
 describe('existing collector control-plane execution boundary', () => {
   it('routes the entire ordered aggregate without starting an executor directly', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const state = fixture();
     const ack = await runControlPlaneTask(state.env, state.input);
     expect(state.calls.map(call => call.pathname)).toEqual(['/intake', '/route']);
@@ -52,6 +53,14 @@ describe('existing collector control-plane execution boundary', () => {
     expect(ack.taskId).toBe(ack.userTaskId);
     expect(state.fake.routes).toMatchObject([{ taskId: ack.userTaskId, route: 'agent', continuation: { requested: true, issued: false } }]);
     expect(state.fake.runs(ack.userTaskId)).toHaveLength(0);
+    const events = log.mock.calls.map(call => JSON.parse(call[0])).filter(event => event.event?.startsWith('tg.cp.'));
+    expect(events).toMatchObject([
+      { event: 'tg.cp.snapshot_started', requestId: ack.requestId, status: 'started' },
+      { event: 'tg.cp.snapshot_persisted', requestId: ack.requestId, status: 'persisted' },
+      { event: 'tg.cp.task_accepted', requestId: ack.requestId, taskId: ack.userTaskId, status: 'durable' },
+      { event: 'tg.cp.route_completed', requestId: ack.requestId, taskId: ack.userTaskId, status: 'completed', route: 'agent' },
+    ]);
+    log.mockRestore();
   });
 
   it('reuses frozen input and source session after a cold adapter restart', async () => {
@@ -83,6 +92,7 @@ describe('existing collector control-plane execution boundary', () => {
   });
 
   it('keeps durable task identity when route acknowledgement is lost', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const state = fixture();
     state.failRoute(true);
     const first = await runControlPlaneTask(state.env, state.input);
@@ -93,6 +103,10 @@ describe('existing collector control-plane execution boundary', () => {
     expect(recovered.taskId).toBe(first.taskId);
     expect(recovered.routingPending).toBe(false);
     expect(state.calls.filter(call => call.pathname === '/intake')).toHaveLength(1);
+    const events = log.mock.calls.map(call => JSON.parse(call[0])).filter(event => event.event?.startsWith('tg.cp.'));
+    expect(events).toContainEqual(expect.objectContaining({ event: 'tg.cp.route_pending',
+      requestId: first.requestId, taskId: first.userTaskId, status: 'pending', reasonCode: 'route_ack_unavailable' }));
+    log.mockRestore();
   });
 
   it('does not collide across topic or later equal-sized batch', async () => {

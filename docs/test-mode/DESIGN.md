@@ -20,7 +20,7 @@ Cloudflare, откуда их читает человек (`wrangler tail` / д�
 
 | Сторона | Изменение |
 |---|---|
-| шлюз (trained-assist-tg-bot) | env-список `TEST_CHAT_IDS`; все исходящие в тестовый чат подавляются и пишутся в лог `[test-mode]`; `/run` для тестового чата уходит с `delivery:"log"` и резервным (мёртвым) `chatId`; `/internal/run-finished` принимает поле `answer` и пишет его в журнал |
+| шлюз (trained-assist-tg-bot) | env-список `TEST_CHAT_IDS`; все исходящие в тестовый чат подавляются и отражаются в журнале; `/run` для тестового чата уходит с `delivery:"log"` и резервным (мёртвым) `chatId`; `/internal/run-finished` принимает `answer`, но пишет только факт и длину ответа, без его содержимого |
 | агент (trained-assist-agent) | принимает `delivery:"log"` из `/run`; при нём ни одна отправка в чат не трогает Telegram (гейт в `tg-stream` — единственная точка отправки рана); финальный ответ возвращается полем `answer` в том же `run-finished` |
 
 **Влияние.**
@@ -123,15 +123,14 @@ Workers Logs, ~3 дня). Никаких эндпоинтов и хранили�
 ```
 [test-mode] run-start chat=<реальный id> requestId=<id> delivery=log
 [test-mode] kind=sendMessage chat=<id> text=<300 символов>…
-[test-mode] kind=run-finished chat=<id> requestId=<id> outcome=done|error|stopped|quick
-[test-mode] kind=agent-answer chat=<id> requestId=<id> len=<n> text=<до 4000 символов>
+{"event":"tg.agent.run_finished_received","requestId":"<id>","outcome":"done","answerPresent":true,"answerLength":<n>}
 ```
 
-`/internal/run-finished` (`src/index.js:36-58`): + `answer` (string, defensive-обрезка до
-8000). Логируется когда `isTestChat(env, realChatId)` ИЛИ `answer` присутствует; в DO
-(`intake/run-finished`) уходит прежний `{requestId, consumed}` — схема накопителя не
-меняется. Идемпотентность R9: повтор даёт повторную строку лога, автотест дедуплицирует по
-`requestId` (как и договорено в C4).
+`/internal/run-finished` (`src/index.js`) по-прежнему принимает `answer` (defensive-обрезка
+до 8000), но журналирует только allowlisted lifecycle metadata. В lifecycle-событие
+не попадают содержимое ответа и сообщения, chat/user ID и текст ошибки. В DO (`intake/run-finished`)
+уходит прежний `{requestId, consumed}` — схема накопителя не меняется. Повтор даёт
+повторное структурированное событие; при разборе коррелировать по `requestId`.
 
 **`/test_mode` (решение R11):** только чтение. Запись `{command:"/test_mode",
 handler:"local", adminOnly:true, audiences:[...]}` в `commands-registry.json` + обработчик
@@ -162,7 +161,7 @@ handler:"local", adminOnly:true, audiences:[...]}` в `commands-registry.json` +
   `if (opts.delivery === 'log') recordRunAnswer(opts.taskId, final)` (Map с cap 64);
   в `_finishAcceptedChatRun` (~:641) — `answer = opts.delivery === 'log' ?
   takeRunAnswer(opts.taskId) : null` → `notifyRunFinished({…, ...(answer && {answer})})`.
-  Ошибочные/стоп-исходы `answer` не несут — их видно по `kind=run-finished outcome=…`.
+  Ошибочные/стоп-исходы `answer` не несут — их видно по `tg.agent.run_finished_received.outcome`.
 - **`gateway-callback.js:64`**: параметр `answer` → поле тела (обрезка до 8000 до отправки).
 - Что НЕ покрывается гейтом (аудит выполняется слайсом A4, следствие урезанного R3):
   прямые `api.telegram.org` вне `tg-stream` — MCP-артефакты (`94-tg-send`, `95-illustrate`,
@@ -223,7 +222,7 @@ handler:"local", adminOnly:true, audiences:[...]}` в `commands-registry.json` +
 | G2 | Гейты в `lib/telegram.js` (7 функций + `answerCallbackQuery` по реестру) + `sendMessageWithKeyboard`→без `trackUI` при suppressed | unit: init с тестовым id → 0 вызовов `fetch`; обычный чат → fetch вызван; callback-ack подавляется только зарегистрированный |
 | G3 | Init-точки (`dispatchInner`, конструктор `IntakeBuffer`, `processDueRetries`) | unit: dispatch тестового апдейта → journal-строка и ни одного sendMessage (интеграция через `worker.fetch` как в `tests/internal-run-finished.test.js`) |
 | G4 | Обходы: `run-outbox notify`, `commands.js` cleanup, `transient-ui` | unit по каждому: тестовый чат → journal, сети нет; обычный → fetch |
-| G5 | `/internal/run-finished`: `answer`+логирование; инверсия резервного id в `run-finished` и `held-messages` | расширить `tests/internal-run-finished.test.js`: резервный id → stub реального чата; `answer` → строка `kind=agent-answer`; чужой чат без `answer` → без journal-шума |
+| G5 | `/internal/run-finished`: `answer` metadata-only logging; инверсия резервного id в `run-finished` и `held-messages` | `tests/internal-run-finished.test.js`: резервный id → stub реального чата; проверить `answerPresent`/`answerLength` и отсутствие ответа/chat ID в журнале |
 | G6 | `runTask`/`RunOutbox.alarm`/`stopTask`: `applyTestDelivery` на последнем хопе + строка `run-start` | unit: тело `/run` тестового чата = резерв+`delivery:"log"`; обычного — байт-в-байт прежнее; `job.chatId` outbox остаётся реальным; `stopTask` переводит id |
 | G7 | `/test_mode` (реестр + обработчик + admin-ветка `dispatchInner`) | unit: из админ-группы → статус; из чужого чата → `adminOnlyHint`; `scripts/check-commands-registry.mjs` зелёный |
 | G8 | `wrangler.toml` `[vars] TEST_CHAT_IDS=""` + комментарий | `npm run check`; staging smoke без изменений поведения |
@@ -242,9 +241,9 @@ handler:"local", adminOnly:true, audiences:[...]}` в `commands-registry.json` +
 | 2 (путь маршрутизации, отправки в журнал) | G3 интеграция: апдейт тестового чата → 0 `sendMessage`-fetch + journal-строка; существующие intake-тесты зелёные | S1 |
 | 3 (`/run` c `delivery`+резервом) | G6 unit | S1 |
 | 4 (ответ не в чате, а слой A) | A2+A3 unit (сеть не трогается, `answer` в callback) | S1 |
-| 5 (запись в журнале, 0 отправок) | Шаг 6 плана «Песочница»: замкнутый цикл — воркер + фейковый агент (стаб `/run`, отдающий `run-finished` с `answer`) + перехват `fetch`; ассерт: строка `kind=agent-answer` есть, к api.telegram.org с тестовым `chat_id` — 0 обращений | S2 |
+| 5 (запись в журнале, 0 отправок) | Шаг 6 плана «Песочница»: замкнутый цикл — воркер + фейковый агент (стаб `/run`, отдающий `run-finished` с `answer`) + перехват `fetch`; ассерт: структурированное `tg.agent.run_finished_received` подтверждает наличие ответа без его текста, к api.telegram.org с тестовым `chat_id` — 0 обращений | S2 |
 | 6 (снятие флага → обычное) | G1 unit + ревью: все гейты синхронные, до `await` | S1 |
-| Целое | CI: `npm test` + `npm run check` (без LLM-судьи, #271) + staging-gate зелёный (R15); смоук на проде — шаг 13 плана: сообщение в тестовый чат → journal-строки в CF-dashboard, ответ в `kind=agent-answer`; контрольный обычный чат — без изменений | S3→S4 |
+| Целое | CI: `npm test` + `npm run check` (без LLM-судьи, #271) + staging-gate зелёный (R15); смоук на проде — шаг 13 плана: сообщение в тестовый чат → безопасные lifecycle events в Worker Logs; контрольный обычный чат — без изменений | S3→S4 |
 
 Остаточный риск урезанного объёма R3 (агентские артефакты) закрывается смоуком: в тестовом
 чате за прогон — ноль сообщений; если артефакт протёк — это не регрессия флага, а
@@ -258,7 +257,7 @@ handler:"local", adminOnly:true, audiences:[...]}` в `commands-registry.json` +
 | Шаг сценария | Живая проверка | Итог |
 |---|---|---|
 | 4 — ответ агента не в чате | реальный ран `delivery:"log"` → `agent-suppress` в журнале агента, в Telegram 0 сообщений | ✅ подтверждено (прогоны A, C) |
-| 5 — `kind=agent-answer` в журнале шлюза | строка `[test-mode] kind=agent-answer … text=ТЕСТРЕЖИМ-ОК` в Workers Logs | ✅ подтверждено (прогоны A, C) |
+| 5 — факт ответа в журнале шлюза | исторически в Workers Logs записывался полный тестовый ответ; теперь `tg.agent.run_finished_received` содержит только metadata, сам ответ не журналируется | обновлено 12.10.2026 |
 | 6 — снятие флага → чат живой | контрольный прогон без флага: реальная отправка в Telegram (400 от мёртвого резервного id — для живого чата это обычный ответ) | ✅ подтверждено после фикса R2 (#2027); до фикса — ПРОВАЛ (метка не снималась, чат молчал до рестарта) |
 | 1 — гейт шлюза вживую | — | ⏭ режим выключен в проде (`TEST_CHAT_IDS` пуст) по дизайну; покрыто песочницей и `scenario-gate` |
 | 2–3 — входящая нога вживую | — | ⏭ невозможно: `TELEGRAM_WEBHOOK_SECRET` в Cloudflare только для записи (API отдаёт имена, не значения), подделать вебхук нельзя. Покрыто автотестом `npm run test:scenario` (12/12, цикл S5) и CI-гейтом `scenario-gate` |
