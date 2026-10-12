@@ -474,6 +474,7 @@ export class IntakeBuffer {
       return json({ profileId, tasks: tasks.slice(0, 20), buffer: {
         pendingCount, busy: state.busy === true,
         launching: Array.isArray(state.launching) ? state.launching.length : 0,
+        alarmAt: Number.isSafeInteger(state.alarm) ? state.alarm : null,
         stranded: state.stranded === true,
         unresolvedLaunchCount: state.controlPlaneBarrier?.unresolvedLaunchCount ?? null,
         busyRequestCount: state.controlPlaneBarrier?.busyRequestCount ?? null,
