@@ -138,7 +138,12 @@ export class TgDeliveryOwner {
           const receipt = records.find(record => record.deliveryId.startsWith('receipt:')) ?? records.find(record => record.deliveryId === body.taskId);
           const terminal = records.filter(record => record.deliveryId.startsWith('terminal:')).sort((first, second) => generation(second) - generation(first))[0];
           if (records.some(record => !chatAllowed(config, record.destination.chatId))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
-          return Response.json({ receipt: summary(receipt), terminal: summary(terminal) });
+          const response = { receipt: summary(receipt), terminal: summary(terminal) };
+          if (body.includeArtifacts === true) response.artifacts = records
+            .filter(record => record.type === 'artifact')
+            .map(summary)
+            .sort((first, second) => first.deliveryId.localeCompare(second.deliveryId));
+          return Response.json(response);
         }
         if (route === '/drain') {
           const deliveryPaused = typeof body.deliveryPaused === 'boolean'
@@ -271,7 +276,7 @@ export class TgDeliveryOwnerClient {
     ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true',
   }); }
   load(deliveryId) { return this.call('load', { deliveryId }); }
-  read(taskId) { return this.call('read', { taskId }); }
+  read(taskId, options = {}) { return this.call('read', { taskId, ...(options.includeArtifacts === true ? { includeArtifacts: true } : {}) }); }
   discovery() { return this.call('discovery', {}); }
   async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
   async drain() { return (await this.call('drain', {
