@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { intakeIsIdle, launchWasDispatched, summarizeIntakeState, summarizeLaunch } from '../tools/production-e2e-telegram-canary.mjs';
+import { cleanupReadiness, intakeIsIdle, launchWasDispatched, summarizeIntakeState, summarizeLaunch,
+  waitForCleanupReadiness } from '../tools/production-e2e-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
   it('does not treat the always-present empty CP barrier as dispatch evidence', () => {
@@ -41,5 +42,34 @@ describe('production Telegram canary launch evidence', () => {
     expect(summarizeIntakeState({ pendingCount: 1, busy: false, stranded: true })).toMatchObject({
       pendingCount: 1, busy: false, stranded: true, alarmPresent: false,
     });
+  });
+
+  it('waits for a terminal CP task while Intake finishes releasing its dispatch', async () => {
+    let now = 0;
+    let reads = 0;
+    const terminalButBusy = { tasks: [{ status: 'done' }], buffer: { pendingCount: 0,
+      busy: true, launching: 0, unresolvedLaunchCount: 0, busyRequestCount: 1 } };
+    const terminalAndIdle = { tasks: [{ status: 'done' }], buffer: { pendingCount: 0,
+      busy: false, launching: 0, unresolvedLaunchCount: 0, busyRequestCount: 0 } };
+
+    expect(cleanupReadiness(terminalButBusy)).toMatchObject({ ready: false, tasksTerminal: true, intakeIdle: false });
+    const result = await waitForCleanupReadiness(async () => ++reads === 1 ? terminalButBusy : terminalAndIdle, {
+      timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async ms => { now += ms; },
+    });
+
+    expect(reads).toBe(2);
+    expect(result).toMatchObject({ ready: true, tasksTerminal: true, intakeIdle: true, evidence: terminalAndIdle });
+  });
+
+  it('leaves cleanup deferred if the dispatch does not become idle before the deadline', async () => {
+    let now = 0;
+    const result = await waitForCleanupReadiness(async () => ({ tasks: [{ status: 'done' }],
+      buffer: { pendingCount: 0, busy: true, launching: 0, unresolvedLaunchCount: 0, busyRequestCount: 1 } }), {
+      timeoutMs: 3_000, intervalMs: 2_000, now: () => now,
+      sleep: async ms => { now += ms; },
+    });
+
+    expect(result).toMatchObject({ ready: false, tasksTerminal: true, intakeIdle: false });
   });
 });
