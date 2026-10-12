@@ -64,13 +64,6 @@ def query(view: str) -> dict:
             "type": "string",
             "value": "POST /webhook",
         })
-    elif view == "events":
-        filters.append({
-            "key": "$metadata.type",
-            "operation": "eq",
-            "type": "string",
-            "value": "cf-worker-log",
-        })
     body = {
         "queryId": f"adhoc-{WORKER}-{view}",
         "timeframe": {"from": now - window_ms, "to": now},
@@ -174,9 +167,13 @@ if VIEW == "events":
     log_event_counts = {}
     trigger_counts = {}
     worker_event_type_counts = {}
+    metadata_type_counts = {}
     webhook_invocations = []
     for item in event_items:
         metadata = item.get("$metadata") or item.get("metadata") or {}
+        metadata_type = metadata.get("type")
+        if isinstance(metadata_type, str):
+            metadata_type_counts[metadata_type] = metadata_type_counts.get(metadata_type, 0) + 1
         trigger = metadata.get("trigger")
         if isinstance(trigger, str):
             match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
@@ -247,7 +244,12 @@ if VIEW == "events":
         "log_event_name_counts": log_event_counts,
         "trigger_counts_by_method_and_first_path_segment": trigger_counts,
         "worker_event_type_counts": worker_event_type_counts,
+        "metadata_type_counts": metadata_type_counts,
         "webhook_invocations": webhook_invocations,
+        "worker_log_settings": {
+            key: value for key, value in (read_worker_settings().get("result", {}).get("observability", {}).get("logs", {}) or {}).items()
+            if key in {"enabled", "persist", "invocation_logs", "head_sampling_rate"}
+        },
         "event_shape_sample": [{
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
