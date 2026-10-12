@@ -117,6 +117,7 @@ jobs:
         run: npx wrangler deploy --dry-run --config wrangler.sandbox-tg-sandbox3.toml
 
       - name: Deploy sandbox3 with ingress and delivery paused
+        id: deploy-sandbox3
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -274,7 +275,10 @@ jobs:
         run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
 
       - name: Clear test state after terminal E2E
-        if: always()
+        # Do not touch the shared lane when input/ref preflight failed before
+        # the first mutating step. Once deployment was attempted, always
+        # reconcile buffers even if the deploy/test itself failed.
+        if: always() && steps.deploy-sandbox3.outcome != 'skipped'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -284,7 +288,7 @@ jobs:
 
       - name: Require empty CP and Telegram intake state at exit
         id: final-state
-        if: always()
+        if: always() && steps.deploy-sandbox3.outcome != 'skipped'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
