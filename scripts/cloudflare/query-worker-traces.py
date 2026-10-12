@@ -170,7 +170,7 @@ if VIEW == "events":
     metadata_type_counts = {}
     webhook_invocations = []
     recent_route_activity = []
-    recent_cutoff_ms = int(time.time() * 1000) - 15 * 60 * 1000
+    recent_cutoff_ms = int(time.time() * 1000) - 60 * 60 * 1000
     for item in event_items:
         metadata = item.get("$metadata") or item.get("metadata") or {}
         metadata_type = metadata.get("type")
