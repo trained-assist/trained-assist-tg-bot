@@ -458,6 +458,16 @@ export class IntakeBuffer {
         tasks.push({ requestId: receipt.requestId, userTaskId: row.id ?? receipt.userTaskId,
           acceptedAt: receipt.providerAcceptedAt ?? null,
           status: row.status ?? 'unknown', generation: row.generation ?? 0,
+          routingOutcome: value?.routingOutcome && typeof value.routingOutcome === 'object' ? {
+            known: value.routingOutcome.known === true,
+            degraded: value.routingOutcome.degraded === true,
+            routeReasonCode: typeof value.routingOutcome.routeReasonCode === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(value.routingOutcome.routeReasonCode)
+              ? value.routingOutcome.routeReasonCode : null,
+            continuationRequested: value.routingOutcome.continuationRequested === true,
+            continuationIssued: value.routingOutcome.continuationIssued === true,
+            continuationRefusal: typeof value.routingOutcome.continuationRefusal === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(value.routingOutcome.continuationRefusal)
+              ? value.routingOutcome.continuationRefusal : null,
+          } : null,
           resultPresent: !!row.result, answerPresent: !!answer.trim(),
           answerMatchesChallenge: !!challenge && answer.includes(challenge),
           historyTypes: [...new Set((Array.isArray(row.history) ? row.history : [])
@@ -3198,7 +3208,12 @@ export class IntakeBuffer {
                   current.receipt.requestId !== requestId) throw new Error('Routing receipt changed');
               await tx.put(key, { ...current, routingOutcome: {
                 known: true, publicationComplete: true, degraded: routed.degraded === true,
+          routeReasonCode: typeof routed.reasonCode === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(routed.reasonCode)
+            ? routed.reasonCode : null,
+          continuationRequested: routed.continuation?.requested === true,
                 continuationIssued: routed.continuation?.issued === true,
+          continuationRefusal: typeof routed.continuation?.refusal === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(routed.continuation.refusal)
+            ? routed.continuation.refusal : null,
               } });
             }));
           }

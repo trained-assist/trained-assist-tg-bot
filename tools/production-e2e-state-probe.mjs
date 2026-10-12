@@ -71,6 +71,14 @@ const summary = {
     userTaskId: task.userTaskId,
     status: task.status,
     acceptedAt: Number.isFinite(Number(task.acceptedAt)) ? Number(task.acceptedAt) : null,
+    routingOutcome: task.routingOutcome ? {
+      known: task.routingOutcome.known === true,
+      degraded: task.routingOutcome.degraded === true,
+      routeReasonCode: task.routingOutcome.routeReasonCode ?? null,
+      continuationRequested: task.routingOutcome.continuationRequested === true,
+      continuationIssued: task.routingOutcome.continuationIssued === true,
+      continuationRefusal: task.routingOutcome.continuationRefusal ?? null,
+    } : null,
     resultPresent: task.resultPresent === true,
     answerPresent: task.answerPresent === true,
     runs: (task.runs ?? []).map(run => ({
