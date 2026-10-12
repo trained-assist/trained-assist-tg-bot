@@ -23,6 +23,11 @@ on:
         required: true
         type: boolean
         default: false
+      inspect_e2e_lane:
+        description: Temporarily mount the isolated production E2E namespace for read-only evidence, then restore sandbox3 only if terminal and idle
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,7 +38,7 @@ concurrency:
 
 jobs:
   production-backend-e2e:
-    if: ${{ (inputs.run_canary == true || inputs.diagnose_only == true || inputs.resume_pending_input == true || inputs.retry_route == true) && github.ref == 'refs/heads/main' }}
+    if: ${{ (inputs.run_canary == true || inputs.diagnose_only == true || inputs.resume_pending_input == true || inputs.retry_route == true || inputs.inspect_e2e_lane == true) && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -47,6 +52,10 @@ jobs:
 
       - name: Require resume mode for route retry
         if: ${{ inputs.retry_route == true && inputs.resume_pending_input != true }}
+        run: exit 1
+
+      - name: Keep isolated lane inspection read-only
+        if: ${{ inputs.inspect_e2e_lane == true && (inputs.run_canary == true || inputs.resume_pending_input == true || inputs.retry_route == true) }}
         run: exit 1
 
       - uses: actions/checkout@v4
@@ -120,7 +129,7 @@ jobs:
             npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
 
       - name: Deploy sandbox ingress paused against isolated production CP profile
-        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true }}
+        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true || inputs.inspect_e2e_lane == true }}
         id: deploy-production-lane
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -133,7 +142,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
       - name: Enable the pinned production backend test lane
-        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true }}
+        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true || inputs.inspect_e2e_lane == true }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -163,7 +172,7 @@ jobs:
         run: node tools/production-e2e-resume-held-input.mjs
 
       - name: Read current pinned E2E state without changing it
-        if: ${{ inputs.diagnose_only == true }}
+        if: ${{ inputs.diagnose_only == true || inputs.inspect_e2e_lane == true }}
         env:
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
           PRODUCTION_E2E_SIGNATURE: ${{ secrets.CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE }}
@@ -179,7 +188,7 @@ jobs:
           retention-days: 30
 
       - name: Restore sandbox3 CP routing after confirmed terminal state
-        if: ${{ always() && (steps.deploy-production-lane.outputs.deployed == 'true' || inputs.resume_pending_input == true) }}
+        if: ${{ always() && (steps.deploy-production-lane.outputs.deployed == 'true' || inputs.resume_pending_input == true || inputs.inspect_e2e_lane == true) }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
