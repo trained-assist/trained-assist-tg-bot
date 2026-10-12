@@ -283,6 +283,34 @@ async function waitForDelivery(taskId, chatId) {
   throw new Error(`sandbox3_delivery_timeout_${observed?.terminal?.status ?? 'not_enqueued'}`);
 }
 
+async function waitForArtifactDeliveries(taskId, chatId, expectedNames) {
+  const deadline = Date.now() + 8 * 60_000;
+  let observed;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${TG_ORIGIN}/operator/test-delivery/${encodeURIComponent(taskId)}?includeArtifacts=true`, {
+      headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}` },
+      signal: AbortSignal.timeout(20_000),
+    });
+    observed = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`sandbox3_artifact_delivery_read_${response.status}_${observed.error ?? 'failed'}`);
+    const artifacts = Array.isArray(observed.artifacts) ? observed.artifacts : [];
+    const matching = expectedNames.map(name => artifacts.find(item => item.artifactName === name) ?? null);
+    const failed = matching.find(item => item && ['dead', 'unknown'].includes(item.status));
+    if (failed) throw new Error(`sandbox3_artifact_delivery_${failed.status}_${failed.artifactName}`);
+    if (matching.every(Boolean) && matching.every(item => item.status === 'sent')) {
+      for (const item of matching) {
+        assert.equal(String(item.chatId), String(chatId), 'artifact_sent_to_unexpected_chat');
+        assert(Number.isSafeInteger(item.providerMessageId) && item.providerMessageId > 0,
+          `artifact_provider_message_id_missing_${item.artifactName}`);
+      }
+      return matching.map(item => ({ name: item.artifactName, status: item.status, chatId: String(item.chatId),
+        providerMessageIdPresent: true, attempts: item.attempts }));
+    }
+    await new Promise(resolve => setTimeout(resolve, 5_000));
+  }
+  throw new Error(`sandbox3_artifact_delivery_timeout_${JSON.stringify(observed?.artifacts ?? [])}`);
+}
+
 async function verifyGatewayOwnedDelivery(taskId, taskDeliveryState) {
   const [projection] = await d1(`SELECT count(*) AS row_count FROM deliveries WHERE user_task_id = ?`, [taskId]);
   assert.equal(taskDeliveryState, 'not_required', 'sandbox3_telegram_delivery_is_owned_by_gateway');
@@ -592,6 +620,11 @@ async function main() {
   const terminal = deliveryMode === 'telegram'
     ? await waitForDelivery(task.id, chatId)
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
+  let artifactDeliveryEvidence = null;
+  if (artifactExportEvidence && deliveryMode === 'telegram') {
+    const expectedNames = scenario === 'artifact-export' ? ['agent-note.md'] : ['browser-check.md', 'browser-proof.png'];
+    artifactDeliveryEvidence = await waitForArtifactDeliveries(task.id, chatId, expectedNames);
+  }
   failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
     status: terminal.status, attempts: terminal.attempts,
     providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
@@ -795,6 +828,7 @@ async function main() {
     runnerInvoked: expectsAgent,
     answerMatchesChallenge,
     ...(artifactExportEvidence ? { artifactExportEvidence } : {}),
+    ...(artifactDeliveryEvidence ? { artifactDeliveryEvidence, telegramArtifactsSent: artifactDeliveryEvidence.length } : {}),
     telegramDeliverySent: deliveryMode === 'telegram' && terminal.status === 'sent',
     telegramProviderMessageIdPresent: deliveryMode === 'telegram' && Number.isSafeInteger(terminal.providerMessageId),
     deliveryAttempts: terminal.attempts ?? 0,

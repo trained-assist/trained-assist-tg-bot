@@ -65,6 +65,9 @@ describe('sandbox durable single delivery owner', () => {
     const uploaded = send.init.body.get('document');
     expect(uploaded.name).toBe('agent-note.md');
     expect(new TextDecoder().decode(await uploaded.arrayBuffer())).toBe('E2E-DOC');
+    expect(await client.read('task', { includeArtifacts: true })).toMatchObject({ artifacts: [{
+      deliveryId, status: 'sent', providerMessageId: 2026, type: 'artifact', artifactName: 'agent-note.md', chatId: 1001, threadId: 7,
+    }] });
   });
 
   it('refuses an artifact with a checksum mismatch and rejects a duplicate sent to another destination', async () => {

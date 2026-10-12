@@ -335,6 +335,26 @@ describe('signed existing-UX ingress', () => {
     expect(await foreign.json()).toMatchObject({ error: 'sandbox_test_delivery_identity_mismatch' });
   });
 
+  it('optionally exposes artifact delivery metadata only for the pinned sandbox3 chat', async () => {
+    const { env } = fixture();
+    configureSandbox3Operator(env);
+    const calls = [];
+    env.TG_DELIVERY_OWNER = { idFromName: name => name, get: () => ({ async fetch(request) {
+      const body = await request.json();
+      calls.push({ path: new URL(request.url).pathname, body });
+      return Response.json({ receipt: null, terminal: null, artifacts: [{ deliveryId: 'artifact:abc:g1',
+        userTaskId: body.taskId, status: 'sent', attempts: 1, providerMessageId: 321, generation: 1,
+        chatId: 1714048, threadId: 7, type: 'artifact', artifactName: 'agent-note.md' }] });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/test-delivery/task-3?includeArtifacts=true', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ taskId: 'task-3', artifacts: [{ status: 'sent', chatId: 1714048,
+      providerMessageId: 321, type: 'artifact', artifactName: 'agent-note.md' }] });
+    expect(calls).toEqual([{ path: '/read', body: { taskId: 'task-3', includeArtifacts: true } }]);
+  });
+
   it('reads only delivery metadata for the explicitly selected probability sandbox chat', async () => {
     const { env } = fixture();
     configureProbabilityOperator(env);

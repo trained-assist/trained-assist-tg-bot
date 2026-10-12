@@ -123,11 +123,13 @@ app.get('/operator/test-delivery/:taskId', async context => {
     if (!chatId || !chatAllowed(config, chatId) || (pinnedChat && String(chatId) !== pinnedChat)) {
       return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
     }
-    const result = await createController(env, config).outbox.read(taskId);
-    const records = [result.receipt, result.terminal].filter(Boolean);
+    const includeArtifacts = context.req.query('includeArtifacts') === 'true';
+    const result = await createController(env, config).outbox.read(taskId, { includeArtifacts });
+    const records = [result.receipt, result.terminal, ...(result.artifacts ?? [])].filter(Boolean);
     if (records.some(record => String(record.chatId) !== String(chatId)))
       return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
-    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal: result.terminal });
+    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal: result.terminal,
+      ...(includeArtifacts ? { artifacts: result.artifacts ?? [] } : {}) });
   } catch {
     return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
   }
