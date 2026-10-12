@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   query:
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' || github.ref_name == 'debug/production-message-events'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
