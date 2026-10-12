@@ -174,16 +174,18 @@ app.post('/operator/test-wake-pending-task', async context => {
     return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   }
   const source = await context.req.json().catch(() => null);
-  if (!source || source.target !== target || Object.keys(source).some(key => !['target', 'taskId', 'requestId'].includes(key)) ||
+  if (!source || source.target !== target || Object.keys(source).some(key => !['target', 'taskId', 'requestId', 'retryRoute'].includes(key)) ||
       typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||
-      typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId)) {
+      typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId) ||
+      source.retryRoute !== undefined && typeof source.retryRoute !== 'boolean') {
     return context.json({ error: 'invalid_test_recovery' }, 400);
   }
   const chatId = sandboxOperatorResetChat(env, target);
   const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
   const response = await intake.fetch('https://intake/_sandbox-test/wake-pending-task', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ taskId: source.taskId, requestId: source.requestId }),
+    body: JSON.stringify({ taskId: source.taskId, requestId: source.requestId,
+      ...(source.retryRoute === true ? { retryRoute: true } : {}) }),
   });
   if (response.status === 404) return context.json({ error: 'intake_recovery_endpoint_not_found' }, 502,
     { 'cache-control': 'no-store' });

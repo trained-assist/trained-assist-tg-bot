@@ -306,12 +306,12 @@ describe('signed existing-UX ingress', () => {
     const response = await worker.fetch(new Request('https://worker/operator/test-wake-pending-task', {
       method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
       body: JSON.stringify({ target: 'productionE2e', taskId: 'ut-recovery-fixture',
-        requestId: `tgcp-${'a'.repeat(64)}` }),
+        requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true }),
     }), env);
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: 'intake_recovery_endpoint_not_found' });
     expect(observed).toMatchObject({ name: '1714048', path: '/_sandbox-test/wake-pending-task',
-      body: { taskId: 'ut-recovery-fixture', requestId: `tgcp-${'a'.repeat(64)}` } });
+      body: { taskId: 'ut-recovery-fixture', requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true } });
   });
 
   it('clears only an idle pinned production E2E chat Intake buffer and refuses active state', async () => {
