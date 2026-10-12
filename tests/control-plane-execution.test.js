@@ -103,11 +103,26 @@ describe('existing collector control-plane execution boundary', () => {
     expect(new Set([first.requestId, next.requestId, topic.requestId]).size).toBe(3);
   });
 
-  it('blocks media instead of dispatching only its text caption', async () => {
+  it('blocks media without a verified immutable manifest instead of dispatching only its caption', async () => {
     const state = fixture();
     await expect(runControlPlaneTask(state.env, { ...state.input,
-      inputItems: [{ msg: { caption: 'analyse', document: { file_id: 'unmaterialized' } } }] })).rejects.toThrow('Вложения');
+      inputItems: [{ msg: { caption: 'analyse', document: { file_id: 'unmaterialized' } } }] }))
+      .rejects.toThrow('вложение в хранилище');
     expect(state.calls).toEqual([]);
+  });
+
+  it('sends a pinned artifact manifest with the matching caption into the CP snapshot', async () => {
+    const state = fixture();
+    const artifactManifest = { contractVersion: 1, ref: 'a'.repeat(64), version: 'b'.repeat(64),
+      ownerProfileId: 'profile-1', mediaType: 'text/plain', name: 'brief.txt', sizeBytes: 5, sha256: 'b'.repeat(64) };
+    const ack = await runControlPlaneTask(state.env, { ...state.input, inputItems: [{
+      text: 'analyse', artifactManifest,
+      msg: { caption: 'analyse', document: { file_name: 'brief.txt' }, artifactManifest },
+    }] });
+    expect(ack).toMatchObject({ durable: true, controlPlane: true });
+    expect(state.calls[0].body.inputItems).toEqual([{ text: 'analyse\nВложение 1: brief.txt', artifacts: [artifactManifest] }]);
+    const saved = [...state.snapshots.values()][0].body.controlPlaneEnvelope;
+    expect(saved.inputItems).toEqual(state.calls[0].body.inputItems);
   });
 
   it('fails closed for another profile or chat', async () => {

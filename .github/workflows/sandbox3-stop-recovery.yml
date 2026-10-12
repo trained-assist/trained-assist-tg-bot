@@ -1,0 +1,78 @@
+name: Recover and clean sandbox3 stop state
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_recovery:
+        description: Stop an active sandbox3 task through the Worker API, then require empty state
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trained-assist-sandbox3-worker-e2e
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: ${{ inputs.run_recovery == true && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Enable sandbox3 test API for recovery
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: >-
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
+          --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
+          --message "sandbox3-stop-recovery-${GITHUB_SHA}"
+      - name: Stop through Worker API; reconcile only terminal runs if needed
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: node tools/sandbox3-stop-recovery.mjs | tee sandbox3-stop-recovery.json
+      - name: Clear sandbox3 CP and Telegram intake state
+        if: success()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox3-reset-after-recovery.json
+      - name: Require empty sandbox3 CP and Telegram intake state
+        if: always()
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX_TARGET: sandbox3
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox3-final-recovery-state.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandbox3-stop-recovery-${{ github.run_id }}
+          path: |
+            sandbox3-stop-recovery.json
+            sandbox3-reset-after-recovery.json
+            sandbox3-final-recovery-state.json
+          if-no-files-found: ignore

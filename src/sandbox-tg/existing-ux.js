@@ -11,10 +11,13 @@ import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routin
 import { beginTestCapture, initTestMode, rememberCallback } from '../lib/test-mode.js';
 import { answerCallbackQuery, sendMessage, sendMessageWithKeyboard } from '../lib/telegram.js';
 import { ControlPlaneClient } from './control-plane-client.js';
-import { cmdLogin } from '../handlers/commands.js';
+import { isTerminalTaskStatus } from './contract.js';
+import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorPinnedTestLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
+import { mediaOf } from '../media-jobs.js';
+import { prepareIntake } from '../intake-preflight.js';
 
 const app = new Hono();
 
@@ -39,7 +42,12 @@ function createEphemeralSessionStore() {
   };
 }
 
-app.get('/health', context => context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending' }));
+app.get('/health', context => {
+  const mediaIntake = context.env.MEDIA_PIPELINE !== 'ingress-buffer' ? 'disabled'
+    : context.env.INGRESS_BUFFER?.fetch && String(context.env.INGRESS_BUFFER_TOKEN ?? '').trim()
+      ? 'configured' : 'not_configured';
+  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', capabilities: { mediaIntake } });
+});
 
 app.get('/cron', async context => {
   const config = readTgSliceConfig(context.env);
@@ -96,24 +104,35 @@ app.get('/operator/delivery-cutover-v1', async context => {
   }
 });
 
-// Bounded E2E observation for the pinned sandbox identity. This performs a
-// read only from the delivery owner and never returns message text.
+// Bounded E2E observation for a sandbox delivery. The legacy probability lane
+// supplies its allowed chat explicitly; sandbox3 is pinned to its configured
+// identity. This performs a read only from the delivery owner and never returns
+// message text.
 app.get('/operator/test-delivery/:taskId', async context => {
   const env = executionEnv(context.env);
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (!sandboxOperatorPinnedTestLane(target) || env.TG_SANDBOX_TEST_API_ENABLED !== 'true'
-      || !sandboxOperatorResetChat(env, target)) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      (sandboxOperatorPinnedTestLane(target) && !sandboxOperatorResetChat(env, target))) {
+    return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  }
   const taskId = context.req.param('taskId');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return context.json({ error: 'invalid_task_id' }, 400);
   try {
     const config = readTgSliceConfig(env);
-    const result = await createController(env, config).outbox.read(taskId);
-    const records = [result.receipt, result.terminal].filter(Boolean);
-    if (records.some(record => String(record.chatId) !== String(env.TG_SANDBOX_E2E_CHAT_ID ?? '')))
+    const pinnedChat = sandboxOperatorResetChat(env, target);
+    const chatId = context.req.query('chatId') ?? pinnedChat;
+    if (!chatId || !chatAllowed(config, chatId) || (pinnedChat && String(chatId) !== pinnedChat)) {
       return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
-    return context.json({ taskId, receipt: result.receipt, terminal: result.terminal });
+    }
+    const includeArtifacts = context.req.query('includeArtifacts') === 'true';
+    const result = await createController(env, config).outbox.read(taskId, { includeArtifacts });
+    const records = [result.receipt, result.terminal, ...(result.artifacts ?? [])].filter(Boolean);
+    if (records.some(record => String(record.chatId) !== String(chatId)))
+      return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
+    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal: result.terminal,
+      ...(includeArtifacts ? { artifacts: result.artifacts ?? [] } : {}) });
   } catch {
     return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
   }
@@ -204,20 +223,80 @@ app.get('/collector-state', async context => {
 app.post('/operator/stop-window', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
-  const token = String(env.TG_SANDBOX_OPERATOR_TOKEN ?? '').trim();
+  const operatorLane = sandboxOperatorLane(env);
+  const token = operatorLane ? sandboxOperatorToken(env, operatorLane) : String(env.TG_SANDBOX_OPERATOR_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
   const source = await context.req.json().catch(() => null);
   const chatId = source?.chatId ?? (config.allowedChats.length === 1 ? Number(config.allowedChats[0]) : null);
   const profileId = source?.profileId ?? config.profileId;
-  if (!source || !['inspect', 'release', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
+  if (!source || !['inspect', 'release', 'reconcile-task', 'abandon'].includes(source.mode) || !Number.isSafeInteger(chatId) ||
       (source.threadId != null && (!Number.isSafeInteger(source.threadId) || source.threadId <= 0)) ||
       profileId !== config.profileId ||
       (source.windowId != null && typeof source.windowId !== 'string') ||
-      (source.mode !== 'inspect' && typeof source.windowId !== 'string') ||
+      (source.mode !== 'inspect' && source.mode !== 'reconcile-task' && typeof source.windowId !== 'string') ||
+      source.mode === 'reconcile-task' && (typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId)) ||
       source.mode === 'abandon' && (source.confirmWindowId !== source.windowId ||
         source.auditReason !== 'sandbox_test_fixture_abandoned')) return context.json({ error: 'invalid selector' }, 400);
-  if (!config.allowedChats.includes(String(chatId))) return context.json({ error: 'owner refused' }, 403);
+  const ownerChatAllowed = operatorLane === 'sandbox3'
+    ? sandboxOperatorChatAllowed(env, config, operatorLane, chatId)
+    : config.allowedChats.includes(String(chatId));
+  if (!ownerChatAllowed) return context.json({ error: 'owner refused' }, 403);
   if (env.TG_SANDBOX_OPERATOR_RECOVERY !== 'enabled') return context.json({ error: 'recovery disabled' }, 404);
+  if (source.mode === 'reconcile-task') {
+    if (operatorLane !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true')
+      return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+    const pinnedUserId = String(env.TG_SANDBOX_E2E_USER_ID ?? '').trim();
+    if (!/^[1-9]\d*$/.test(pinnedUserId)) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+    const conversation = `^tg-${pinnedUserId}${source.threadId == null
+      ? '' : `-t${source.threadId}`}-s[0-9a-f]{24}$`;
+    const taskId = source.taskId;
+    const client = new ControlPlaneClient(config, { fetchImpl: env.CONTROL_PLANE_SERVICE
+      ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined });
+    const refused = (reason, details = {}) => context.json({ refused: true, reason, ...details }, 409);
+    const upstreamCode = error => {
+      const code = error?.body?.code ?? error?.body?.reasonCode;
+      return typeof code === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(code) ? code : null;
+    };
+    let status;
+    try { status = await client.status(taskId); }
+    catch (error) { return context.json({ error: 'control_plane_status_unavailable',
+      httpStatus: Number.isInteger(error?.status) ? error.status : null, upstreamCode: upstreamCode(error) }, 503); }
+    const taskMatches = status.id === taskId && status.profile_id === profileId &&
+      new RegExp(conversation).test(status.conversation_id ?? '');
+    const runsTerminal = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
+      ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
+    const awaitingClosed = status.awaiting?.status !== 'open';
+    if (!taskMatches) return refused('control_plane_task_scope_mismatch');
+    if (!runsTerminal || !awaitingClosed) return refused('control_plane_run_not_terminal', { taskEvidence: {
+      taskId, status: status.status, generation: status.generation,
+      runs: (status.runs || []).map(run => ({ id: run.id, status: run.status, leaseUntil: run.lease_until ?? null })),
+      awaitingStatus: status.awaiting?.status ?? null,
+    } });
+    if (!isTerminalTaskStatus(status.status)) {
+      let cancellation;
+      try { cancellation = await client.cancel(taskId, { reason: 'sandbox_stop_fixture_recovery' }); }
+      catch (error) { return context.json({ error: 'control_plane_cancel_unavailable',
+        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+      if (cancellation.cancelled !== true || cancellation.stopConfirmed !== true || cancellation.status !== 'cancelled') {
+        return refused('control_plane_cancel_unconfirmed', { taskEvidence: {
+          taskId, status: cancellation.status, generation: cancellation.generation,
+          stopConfirmed: cancellation.stopConfirmed,
+        } });
+      }
+      try { status = await client.status(taskId); }
+      catch (error) { return context.json({ error: 'control_plane_status_unavailable',
+        httpStatus: Number.isInteger(error?.status) ? error.status : null, upstreamCode: upstreamCode(error) }, 503); }
+    }
+    const verifiedRuns = Array.isArray(status.runs) && status.runs.length > 0 && status.runs.every(run =>
+      ['done', 'success', 'failed', 'cancelled'].includes(run.status) && run.lease_until == null);
+    if (status.id !== taskId || status.profile_id !== profileId || !new RegExp(conversation).test(status.conversation_id ?? '')
+        || !isTerminalTaskStatus(status.status) || !verifiedRuns || status.awaiting?.status === 'open') {
+      return refused('control_plane_task_not_terminal', { taskEvidence: { taskId, status: status.status,
+        generation: status.generation, runsTerminal: verifiedRuns } });
+    }
+    return context.json({ reconciled: true, status: status.status, generation: status.generation,
+      runs: status.runs.map(run => ({ id: run.id, status: run.status, generation: run.generation })) });
+  }
   const selector = { ...source, chatId, profileId, threadId: source.threadId ?? null };
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, selector.threadId)));
   const response = await stub.fetch('https://intake/operator/stop-window', {
@@ -476,7 +555,8 @@ app.post('/operator/test-update', async context => {
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== target || !['message', 'callback'].includes(source.type) ||
-      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin'].includes(key)) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin', 'fixtureFile'].includes(key)) ||
+      (source.fixtureFile !== undefined && (target !== 'sandbox3' || source.fixtureFile !== true)) ||
       (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
       (source.admin !== undefined && typeof source.admin !== 'boolean') ||
       (source.userId !== undefined && (!Number.isSafeInteger(source.userId) || source.userId < 1)) ||
@@ -484,6 +564,7 @@ app.post('/operator/test-update', async context => {
     return context.json({ error: 'invalid_test_update' }, 400);
   }
   if (source.type === 'message' && (typeof source.text !== 'string' || !source.text.trim() || source.text.length > 4000) ||
+      source.fixtureFile === true && (source.type !== 'message' || !source.text.startsWith('sandbox3-file-test ')) ||
       source.type === 'message' && source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1) ||
       source.type === 'callback' && (typeof source.callbackData !== 'string' || !source.callbackData || source.callbackData.length > 64 ||
         source.messageId !== undefined && (!Number.isSafeInteger(source.messageId) || source.messageId < 1))) return context.json({ error: 'invalid_test_update' }, 400);
@@ -504,12 +585,26 @@ app.post('/operator/test-update', async context => {
     const stateResponse = await intake.fetch('https://intake/debug');
     return stateResponse.ok ? stateResponse.json().catch(() => null) : null;
   };
-  const before = await readCollectorState();
+  const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
+    ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
+  let before = await readCollectorState();
+  if (callbackShortcut && source.messageId === undefined && source.delivery !== 'telegram' &&
+      !Number.isSafeInteger(before?.collectorMsgId)) {
+    const session = await getSession(env.SESSIONS, chatId, null);
+    if (!session?.username || target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') {
+      return context.json({ error: 'no_current_button_message' }, 409);
+    }
+    const syntheticMessageId = source.messageId ?? (900_000_000 + ((source.updateId ?? Date.now()) % 99_999_999));
+    const seeded = await intake.fetch('https://intake/_sandbox-test/seed-capture-collector', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ capture: true, username: session.username, messageId: syntheticMessageId }),
+    });
+    if (!seeded.ok) return context.json({ error: 'no_current_button_message' }, 409);
+    before = await readCollectorState();
+  }
   if (source.type === 'callback' && source.messageId === undefined && !Number.isSafeInteger(before?.collectorMsgId)) {
     return context.json({ error: 'no_current_button_message' }, 409);
   }
-  const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
-    ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
   if (callbackShortcut && !Number.isSafeInteger(before?.collectorDraftRevision)) {
     return context.json({ error: 'no_current_button_revision' }, 409);
   }
@@ -521,10 +616,21 @@ app.post('/operator/test-update', async context => {
     chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
     from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
     ...(source.type === 'message' ? { text: source.text } : {}) };
+  const fixtureBytes = new TextEncoder().encode('The secret word in this file is LANTERN.\n');
+  const fixtureToken = `sandbox3-fixture-${updateId}`;
   const update = source.type === 'message' ? { update_id: updateId, message } : {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
       message, chat_instance: 'sandbox-test', data: callbackData },
   };
+  if (source.fixtureFile === true) {
+    if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER?.fetch || !String(env.INGRESS_BUFFER_TOKEN ?? '').trim()) {
+      return context.json({ error: 'sandbox_file_fixture_not_ready' }, 409);
+    }
+    message.document = { file_id: fixtureToken, file_unique_id: fixtureToken,
+      file_name: 'sandbox-intake-fixture.txt', mime_type: 'text/plain', file_size: fixtureBytes.byteLength };
+    message.caption = message.text;
+    delete message.text;
+  }
   if (source.type === 'callback') rememberCallback(update.callback_query.id, chatId);
   const deliverToTelegram = source.delivery === 'telegram';
   const testEnv = { ...context.env, TEST_CHAT_IDS: deliverToTelegram ? '' : String(chatId),
@@ -533,16 +639,37 @@ app.post('/operator/test-update', async context => {
     ...(source.admin === true ? { ADMIN_GROUP_ID: String(chatId) } : {}) };
   const capture = beginTestCapture(chatId, { deliverToTelegram });
   if (!capture) return context.json({ error: 'sandbox_test_api_busy' }, 409);
-  initTestMode(testEnv);
+  // TEST_CHAT_IDS is isolate-scoped module state. Keep synthetic request
+  // delivery decisions in this request's capture instead of mutating it.
+  initTestMode(context.env);
   let response;
   let admission;
+  let fixtureManifest = null;
   try {
+    if (source.fixtureFile === true) {
+      const fileFetch = async (input, init) => {
+        const requestUrl = String(input);
+        if (requestUrl.includes('/getFile?')) return Response.json({ ok: true, result: {
+          file_path: `sandbox3-fixtures/${fixtureToken}.txt`, file_size: fixtureBytes.byteLength,
+        } });
+        if (requestUrl.includes('/file/bot')) return new Response(fixtureBytes, {
+          headers: { 'content-length': String(fixtureBytes.byteLength) },
+        });
+        return fetch(input, init);
+      };
+      const fixtureSession = await getSession(env.SESSIONS, chatId, null);
+      if (!fixtureSession) return context.json({ error: 'sandbox_test_login_required' }, 409);
+      const prepared = await prepareIntake(message, env, fixtureSession, undefined, fileFetch);
+      fixtureManifest = prepared.artifactManifest;
+      update.message = prepared;
+    }
     response = await app.fetch(new Request('https://sandbox.internal/webhook', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': config.webhookSecret },
       body: JSON.stringify(update),
     }), testEnv);
     admission = await response.json().catch(() => ({}));
-  } catch {
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'tg.sandbox.test_update_failed', errorName: error?.name ?? 'Error' }));
     const transcript = capture();
     initTestMode(context.env);
     return context.json({ error: 'synthetic_webhook_failed', transcript }, 503);
@@ -560,7 +687,18 @@ app.post('/operator/test-update', async context => {
     collectorDraftRevision: after.collectorDraftRevision ?? null,
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
+    artifacts: (after.buf ?? []).flatMap(item => {
+      const manifest = item.msg?.artifactManifest;
+      return manifest ? [{ name: manifest.name, sizeBytes: manifest.sizeBytes,
+        ownerProfileId: manifest.ownerProfileId, ref: manifest.ref, version: manifest.version,
+        sha256: manifest.sha256, manifestPresent: true }] : [];
+    }),
   } : null;
+  if (collector && fixtureManifest) collector.artifacts = [...collector.artifacts, {
+    name: fixtureManifest.name, sizeBytes: fixtureManifest.sizeBytes,
+    ownerProfileId: fixtureManifest.ownerProfileId, ref: fixtureManifest.ref,
+    version: fixtureManifest.version, sha256: fixtureManifest.sha256, manifestPresent: true,
+  }];
   return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
     admin: source.admin === true, callbackData: source.type === 'callback' ? callbackData : undefined,
     admission, transcript, collector });
@@ -687,6 +825,13 @@ app.post('/webhook', async context => {
     await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id, text, threadExtra(threadId));
     return context.json({ ok: true, serviceCommand: 'status', active, pending });
   }
+  if (message.text && /^\/(?:stop|стоп)(?:@[a-z0-9_]+)?(?:\s|$)/i.test(message.text.trim())) {
+    // Route explicit stop commands through the same command handler as the main
+    // bot. Letting them fall through to Intake would turn `/stop` into user
+    // task text and leave the active Runner execution untouched.
+    await handleCommand(message, runtimeEnv);
+    return context.json({ ok: true, serviceCommand: 'stop' });
+  }
   if (!session?.username || session.username === 'integrator') {
     if (update.callback_query) {
       await answerCallbackQuery(env.TG_SANDBOX_BOT_TOKEN, update.callback_query.id,
@@ -723,10 +868,26 @@ app.post('/webhook', async context => {
     return context.json({ ok: true });
   }
   if (!hasIntakeContent(message)) return context.json({ ok: true, unsupported: true });
+  let intakeMessage = message;
+  if (env.MEDIA_PIPELINE === 'ingress-buffer' && mediaOf(message)) {
+    try {
+      intakeMessage = await prepareIntake(message, runtimeEnv, session);
+    } catch (error) {
+      const reason = error?.retryable === true ? 'media_intake_retryable' : 'media_intake_refused';
+      console.warn(JSON.stringify({ event: 'tg.media.intake_failed', reason }));
+      if (error?.retryable !== true) {
+        const sent = await sendMessage(env.TG_SANDBOX_BOT_TOKEN, message.chat.id,
+          'Не удалось принять вложение. Уже собранный ввод сохранён; проверь файл и отправь его ещё раз.',
+          threadExtra(threadId));
+        if (sent?.ok) return context.json({ error: reason });
+      }
+      return context.json({ error: reason }, 503);
+    }
+  }
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(message.chat.id, threadId)));
   const flush = FORCE_RUN_RE.test(message.text ?? '') || AUTO_LAUNCH_RE.test(message.text ?? '');
   const response = await stub.fetch('https://intake/append', {
-    method: 'POST', body: JSON.stringify({ text: message.text ?? message.caption, msg: message, flush, telegramUpdateId: update.update_id }),
+    method: 'POST', body: JSON.stringify({ text: intakeMessage.text ?? intakeMessage.caption, msg: intakeMessage, flush, telegramUpdateId: update.update_id }),
   });
   if (!response.ok) return context.json({ error: 'collector admission failed' }, 503);
   return context.json({ ok: true, ...(await response.json()) });

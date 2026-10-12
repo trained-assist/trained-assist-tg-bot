@@ -19,6 +19,40 @@ import { MediaIntakeError, prepareTelegramArtifact } from './media-intake.js';
 
 export const MODE = { direct: 'direct', batch: 'batch' };
 
+function taskOutputArtifacts(result) {
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result); } catch { return []; }
+  }
+  const found = [];
+  const visit = value => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value.artifacts)) {
+      for (const item of value.artifacts) {
+        if (item && typeof item === 'object' && typeof item.ref === 'string'
+          && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(item.ref)
+          && !item.ref.split('/').some(part => part === '..') && !item.ref.endsWith('/')
+          && typeof item.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
+          && Number.isSafeInteger(item.sizeBytes) && item.sizeBytes > 0 && item.sizeBytes <= 10 * 1024 * 1024
+          && typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(item.sha256)) found.push({
+          ref: item.ref, name: item.name, sizeBytes: item.sizeBytes, sha256: item.sha256.toLowerCase(),
+          contentType: typeof item.mime === 'string' && item.mime.length <= 100 ? item.mime : 'application/octet-stream',
+        });
+      }
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(result);
+  return [...new Map(found.map(item => [item.ref, item])).values()];
+}
+
+async function artifactDeliveryId(taskId, generation, ref) {
+  const bytes = new TextEncoder().encode(`${taskId}\0${ref}`);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  const suffix = [...digest].map(value => value.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  return `artifact:${suffix}:g${generation}`;
+}
+
 export class TgSliceController {
   constructor(client, store, options = {}) {
     this.client = client;
@@ -145,6 +179,25 @@ export class TgSliceController {
   }
 
   async handleDirect(profile, message, update) {
+    const attachment = attachmentOf(message);
+    const hasMedia = Boolean(message?.voice || message?.audio || message?.document || message?.video || (Array.isArray(message?.photo) && message.photo.length));
+    if (hasMedia || attachment.type !== 'text' || !attachment.text.trim()) {
+      const requestId = messageKey(profile.conversationId, update.update_id);
+      const text = !hasMedia && attachment.type === 'empty'
+        ? 'Не удалось прочитать сообщение. Задачу не запускал.'
+        : 'Приём вложений в этом режиме пока не настроен. Файл не передан агенту, задачу не запускал.';
+      await this.outbox?.enqueue({
+        deliveryId: `refused:${requestId}`,
+        taskAcceptedAt: Date.now(),
+        conversationId: profile.conversationId,
+        userTaskId: `tg-refused:${requestId}`,
+        destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId ?? null },
+        requestId,
+        type: 'message',
+        text,
+      });
+      return [{ type: 'refused', reason: hasMedia ? 'media' : attachment.type, userTaskId: null, text }];
+    }
     const session = new ConversationSession(this.client, {
       conversationId: profile.conversationId,
       profileId: profile.profileId,
@@ -164,7 +217,7 @@ export class TgSliceController {
     session.index.destination = profile.destination;
     session.index.requestingBot = profile.requestingBot;
     await this.store.save(session.index);
-    const text = typeof message.text === 'string' ? message.text : null;
+    const text = attachment.text;
     if (awaiting && text != null) {
       const answer = await session.answer(text);
       const effects = [{ type: 'answer', userTaskId: answer.userTaskId, seq: answer.seq, duplicate: answer.duplicate }];
@@ -183,7 +236,7 @@ export class TgSliceController {
       return effects;
     }
     const requestId = `${profile.ingressRef}:u${update.update_id}`;
-    const send = await session.sendMessage(text ?? '[no text]', null, null, requestId);
+    const send = await session.sendMessage(text, null, null, requestId);
     const effects = [{ type: 'new', userTaskId: send.userTaskId, seq: send.seq, duplicate: send.duplicate }];
     if (!send.duplicate) {
       await this.outbox?.enqueue({
@@ -306,15 +359,27 @@ export class TgSliceController {
         if (status.id !== entry.userTaskId || !Number.isSafeInteger(status.generation) || status.generation < 1) continue;
         const terminal = isTerminalTaskStatus(status.status) ? status.status : null;
         if (!terminal && !hasUnknownOutcome(status)) continue;
-        const deliveryId = `${terminal ? 'terminal' : 'unknown'}:${entry.userTaskId}:g${status.generation}`;
-        boundary = 'delivery_owner_read';
-        if (await bounded(() => this.outbox.load(deliveryId))) continue;
         const answer = typeof status.result === 'string' ? status.result : status.result?.answer;
+        const artifacts = terminal === 'done' ? taskOutputArtifacts(status.result) : [];
+        const deliveryId = `${terminal ? 'terminal' : 'unknown'}:${entry.userTaskId}:g${status.generation}`;
         const label = terminal === 'done' ? 'Готово. Текст результата отсутствует.' : terminal === 'failed' ? controlPlaneFailureText(status) : terminal === 'cancelled' ? 'Отменено.' : 'Связь с исполнителем потеряна. Исход задачи неизвестен.';
-        boundary = 'delivery_owner_enqueue';
-        await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
-          conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
-          requestId: deliveryId, type: 'message', text: terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label }));
+        boundary = 'delivery_owner_read';
+        const existingMessage = await bounded(() => this.outbox.load(deliveryId));
+        if (!existingMessage) {
+          boundary = 'delivery_owner_enqueue';
+          await bounded(() => this.outbox.enqueue({ deliveryId, taskAcceptedAt: entry.providerAcceptedAt,
+            conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
+            requestId: deliveryId, type: 'message', text: terminal === 'done' && typeof answer === 'string' && answer.trim() ? answer : label }));
+        }
+        for (const artifact of artifacts) {
+          const artifactId = await artifactDeliveryId(entry.userTaskId, status.generation, artifact.ref);
+          boundary = 'artifact_delivery_owner_read';
+          if (await bounded(() => this.outbox.load(artifactId))) continue;
+          boundary = 'artifact_delivery_owner_enqueue';
+          await bounded(() => this.outbox.enqueue({ deliveryId: artifactId, taskAcceptedAt: entry.providerAcceptedAt,
+            conversationId: index.conversationId, userTaskId: entry.userTaskId, destination: index.destination,
+            requestId: artifactId, type: 'artifact', text: '', artifact }));
+        }
         pushed.push({ userTaskId: entry.userTaskId, terminal });
       } catch (error) {
         const status = Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : null;

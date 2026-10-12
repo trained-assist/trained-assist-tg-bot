@@ -20,8 +20,8 @@ export async function publishRoutingDegradation(env, receipt, routed, destinatio
     taskAcceptedAt: receipt.providerAcceptedAt, conversationId, userTaskId: receipt.userTaskId,
     destination, requestId: `routing-degraded:${receipt.userTaskId}`, type: 'message',
     text: routed.continuation?.issued === true
-      ? 'Определение маршрута недоступно; запрос сохранён. Готовлю запуск исполнителя.'
-      : 'Определение маршрута недоступно; запрос сохранён, запуск исполнителя не подтверждён.' });
+      ? 'По запросу отсутствует готовый рецепт. Отправляю на проработку.'
+      : 'По запросу отсутствует готовый рецепт. Задача сохранена; запуск исполнителя пока не подтверждён.' });
 }
 
 async function digest(value) {
@@ -34,14 +34,30 @@ export async function runControlPlaneTask(env, input) {
   if (!env.INTAKE || !env.TG_SLICE || !input.requestId || !input.sessionId) throw Object.assign(new Error('control_plane_execution_not_configured'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
   if (!chatAllowed(config, input.userId)) throw Object.assign(new Error('control_plane_chat_refused'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
   if (config.chatProfiles[String(input.userId)] && config.chatProfiles[String(input.userId)] !== config.profileId) throw Object.assign(new Error('control_plane_profile_refused'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
-  if (input.fileRefs?.length || input.fileBase64 || input.inputItems?.some(item => item.msg?.fileRef || item.msg?.transcriptRef || item.msg?.photo || item.msg?.document || item.msg?.voice || item.msg?.audio || item.msg?.video)) {
-    throw Object.assign(new Error('Вложения сохранены в накопителе, но их передача новому исполнителю ещё не подключена.'), { code: 'INTAKE_PREPARATION_FAILED' });
+  const mediaInput = input.inputItems?.map(item => {
+    const message = item.msg ?? {};
+    const artifactManifest = item.artifactManifest ?? message.artifactManifest;
+    const hasMedia = Boolean(message.fileRef || message.transcriptRef || message.photo || message.document || message.voice || message.audio || message.video);
+    const validManifest = artifactManifest && artifactManifest.contractVersion === 1
+      && artifactManifest.ownerProfileId === config.profileId
+      && /^[a-f0-9]{64}$/.test(artifactManifest.ref ?? '')
+      && /^[a-f0-9]{64}$/.test(artifactManifest.sha256 ?? '')
+      && artifactManifest.version === artifactManifest.sha256
+      && Number.isSafeInteger(artifactManifest.sizeBytes) && artifactManifest.sizeBytes > 0
+      && typeof artifactManifest.name === 'string' && artifactManifest.name.length > 0
+      && typeof artifactManifest.mediaType === 'string';
+    return { item, artifactManifest, hasMedia, validManifest: Boolean(validManifest) };
+  }) ?? [];
+  if (input.fileRefs?.length || input.fileBase64 || mediaInput.some(({ hasMedia, artifactManifest, validManifest }) =>
+    hasMedia && !validManifest || artifactManifest && !validManifest)) {
+    throw Object.assign(new Error('Не удалось подтвердить вложение в хранилище; задача не запускалась.'), { code: 'INTAKE_PREPARATION_FAILED' });
   }
   const scope = `${config.botUsername}:${config.profileId}:${input.userId}:${input.threadId ?? ''}`;
   const requestId = `tgcp-${await digest(`${scope}:${input.requestId}`)}`;
   const conversationId = `tg-${input.userId}${input.threadId == null ? '' : `-t${input.threadId}`}-s${(await digest(`${scope}:${input.sessionId}`)).slice(0, 24)}`;
   const inputItems = input.inputItems?.length
-    ? input.inputItems.map(item => ({ text: assembleInput([item], false).task, artifactRefs: [] }))
+    ? mediaInput.map(({ item, artifactManifest }) => ({ text: assembleInput([item], false).task,
+      ...(artifactManifest ? { artifacts: [artifactManifest] } : { artifactRefs: [] }) }))
     : [{ text: input.task ?? '', artifactRefs: [] }];
   if (!inputItems.some(item => item.text)) throw Object.assign(new Error('control_plane_empty_input'), { code: 'CONTROL_PLANE_NO_ADMISSION' });
   const envelope = {

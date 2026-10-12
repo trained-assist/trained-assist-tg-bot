@@ -67,6 +67,40 @@ describe('preflight before collector', () => {
     expect(fetch.mock.calls).toEqual([]); expect(result.msg.fileRef.id).toBe('a'.repeat(64));
     expect(env.SESSIONS.put).not.toHaveBeenCalled();
   });
+  it('uploads sandbox3 media to the passive buffer and removes Telegram file IDs before persistence', async () => {
+    const { env } = world();
+    Object.assign(env, {
+      EXECUTION_BACKEND: 'control-plane', MEDIA_PIPELINE: 'ingress-buffer',
+      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', TG_SANDBOX_BOT_TOKEN: 'fixture-bot-token',
+      CONTROL_PLANE_URL: 'https://cp.example.test', CONTROL_PLANE_PRINCIPAL: 'sandbox-principal',
+      CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1', TELEGRAM_WEBHOOK_SECRET: 'fixture-webhook',
+      TG_SLICE_ALLOWED_CHATS: '42', INGRESS_BUFFER_TOKEN: 'fixture-buffer-token',
+    });
+    const bytes = new TextEncoder().encode('hello');
+    const digestBytes = await crypto.subtle.digest('SHA-256', bytes);
+    const sha256 = [...new Uint8Array(digestBytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    fetch.mockImplementation(async url => String(url).includes('/getFile')
+      ? Response.json({ ok: true, result: { file_path: 'test/brief.txt', file_size: bytes.byteLength } })
+      : new Response(bytes, { headers: { 'content-length': String(bytes.byteLength) } }));
+    let savedManifest;
+    env.INGRESS_BUFFER = { fetch: async (_url, init) => {
+      const headers = new Headers(init.headers);
+      savedManifest = { contractVersion: 1, ref: headers.get('x-artifact-ref'),
+        version: sha256, sha256, ownerProfileId: headers.get('x-artifact-owner-profile-id'),
+        mediaType: headers.get('content-type'), name: decodeURIComponent(headers.get('x-artifact-name')),
+        sizeBytes: bytes.byteLength };
+      return Response.json({ manifest: savedManifest }, { status: 201 });
+    } };
+    const original = { ...msg, text: undefined, caption: 'review this', document: {
+      file_id: 'telegram-private-file-id', file_unique_id: 'telegram-private-unique-id',
+      file_name: 'brief.txt', mime_type: 'text/plain', file_size: bytes.byteLength,
+    } };
+    const prepared = await prepareIntake(original, env, { username: 'alice' });
+    expect(prepared.artifactManifest).toEqual(savedManifest);
+    expect(prepared.document).toEqual({ file_name: 'brief.txt', mime_type: 'text/plain', file_size: bytes.byteLength });
+    expect(JSON.stringify(prepared)).not.toContain('telegram-private-file-id');
+    expect(JSON.stringify(prepared)).not.toContain('telegram-private-unique-id');
+  });
   it('failed transcription retains original voice for retry at launch', async () => {
     const { io, map } = world(); mocks.stt.mockResolvedValue({ error: 'unavailable' });
     await ingest(io, { ...msg, text: undefined, voice: { file_id: 'v' } });

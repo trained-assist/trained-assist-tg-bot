@@ -21,6 +21,16 @@ describe('P11 exported Worker composition', () => {
     fetchSpy = vi.fn(async (input, init) => {
       const url = new URL(input);
       if (url.origin === env.CONTROL_PLANE_URL) {
+        if (url.pathname === '/artifact') {
+          const artifact = fake.artifacts.find(item => item.task_id === url.searchParams.get('taskId')
+            && item.ref === url.searchParams.get('ref'));
+          if (!artifact) return Response.json({ error: 'not found' }, { status: 404 });
+          return new Response(artifact.body, { status: 200, headers: {
+            'content-type': artifact.contentType, 'content-length': String(artifact.body.length),
+            'content-disposition': `attachment; filename="${artifact.filename}"`,
+            'x-artifact-sha256': artifact.sha256, 'x-artifact-id': artifact.id,
+          } });
+        }
         const result = await fake.fetch(input, init);
         return Response.json(result.value, { status: result.status });
       }
@@ -153,6 +163,34 @@ describe('P11 exported Worker composition', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('refuses direct-mode attachments visibly without creating a task or storing Telegram file IDs', async () => {
+    const refusal = 'Приём вложений в этом режиме пока не настроен. Файл не передан агенту, задачу не запускал.';
+    for (const caption of [undefined, 'Посмотри этот документ']) {
+      const response = await webhook(emulator.pushMessage({ chatId: 1001, text: caption, document: {
+        file_id: `telegram-secret-file-id-${caption ? 'caption' : 'plain'}`, file_name: 'notes.pdf', mime_type: 'application/pdf', file_size: 128,
+      } }));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ userTaskId: null, text: refusal });
+    }
+    expect(fake.tasks).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect([...env.TG_SLICE.data.values()].join('\n')).not.toContain('telegram-secret-file-id');
+
+    await worker.scheduled({}, env);
+    await worker.scheduled({}, env);
+    expect(emulator.messagesTo(1001).map(item => item.message.text)).toEqual([refusal, refusal]);
+  });
+
+  it('reports media intake capability separately from general health readiness', async () => {
+    const health = async () => (await worker.fetch(new Request('https://sandbox.test/health'), env)).json();
+    expect(await health()).toMatchObject({ readiness: 'configured', mode: 'direct', capabilities: { mediaIntake: 'disabled' } });
+    env.TG_SLICE_MODE = 'batch';
+    expect(await health()).toMatchObject({ readiness: 'configured', mode: 'batch', capabilities: { mediaIntake: 'not_configured' } });
+    env.INGRESS_BUFFER_TOKEN = 'fixture-buffer-token';
+    env.INGRESS_BUFFER = { fetch: vi.fn() };
+    expect(await health()).toMatchObject({ readiness: 'configured', mode: 'batch', capabilities: { mediaIntake: 'configured' } });
+  });
+
   it('deduplicates actual HTTP updates across fresh controllers and sends the receipt with the configured token', async () => {
     const update = emulator.pushMessage({ chatId: 1001, text: 'hello' });
     const response = await webhook(update);
@@ -204,6 +242,31 @@ describe('P11 exported Worker composition', () => {
     expect(emulator.messagesTo('profile-1')).toHaveLength(0);
     expect(fake.tasks).toHaveLength(1);
     expect(fake.runs(fake.tasks[0].user_task_id)).toHaveLength(1);
+  });
+
+  it('delivers a persisted task artifact to the originating chat with verified bytes and deduplicates reconciliation', async () => {
+    await webhook(emulator.pushMessage({ chatId: 1001, messageThreadId: 7, text: 'Create a document.' }));
+    await worker.scheduled({}, env);
+    await webhook(emulator.pushMessage({ chatId: 1001, messageThreadId: 7, text: 'The answer.' }));
+    const task = fake.tasks[0];
+    const bytes = new TextEncoder().encode('sandbox document bytes');
+    const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+      .map(value => value.toString(16).padStart(2, '0')).join('');
+    task.result = { answer: 'The document is ready.', artifacts: [{
+      ref: 'runs/task/artifact-telegram-e2e', name: 'agent-note.md', sizeBytes: bytes.length, sha256, mime: 'text/markdown',
+    }] };
+    fake.artifacts.push({ task_id: task.user_task_id, ref: 'runs/task/artifact-telegram-e2e', body: bytes,
+      filename: 'agent-note.md', contentType: 'text/markdown', sha256, id: 'artifact-telegram-e2e' });
+
+    for (let attempt = 0; attempt < 8; attempt += 1) await worker.scheduled({}, env);
+    const sent = emulator.outboundCalls('sendDocument');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message.chat.id).toBe('1001');
+    expect(sent[0].message.document).toMatchObject({ file_name: 'agent-note.md', file_size: bytes.length, file_sha256: sha256 });
+    expect(sent[0].request.message_thread_id).toBe('7');
+    expect(sent[0].message.caption).toBe('📎 agent-note.md');
+    for (let attempt = 0; attempt < 3; attempt += 1) await worker.scheduled({}, env);
+    expect(emulator.outboundCalls('sendDocument')).toHaveLength(1);
   });
 
   it('does not use KV delivery pagination as send authority', async () => {

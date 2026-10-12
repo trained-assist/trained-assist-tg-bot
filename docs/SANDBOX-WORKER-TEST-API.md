@@ -34,6 +34,13 @@ The response also includes a small `collector` snapshot with busy,
 pending count, current collector message ID, and CP receipt counters. For
 asynchronous agent runs, normal sandbox delivery sends the final answer to the
 same real chat; inspect CP task state and Worker tail without opening Telegram.
+The protected sandbox3 Worker E2E offers `delivery_mode=capture` for the
+`file-intake` scenario. It temporarily places only the pinned test chat in
+`TEST_CHAT_IDS`, so that CP run uses the reserved log destination and sends no
+messages to Telegram. After terminal completion, the workflow clears CP and
+Intake test state and restores the normal empty `TEST_CHAT_IDS` policy. If
+cleanup cannot prove the state is empty, restoration stays blocked so an
+unresolved run cannot become a real-chat delivery.
 
 Example message:
 
@@ -64,6 +71,15 @@ matching the real inline keyboard. `intake_run` is retained as an alias for
 `auto` for older test clients. Raw callback payloads remain available for
 testing other buttons.
 
+In sandbox3 `capture` mode, if a pending draft has no Telegram collector message
+ID because sends are suppressed, the operator endpoint seeds a synthetic ID
+inside the Intake Durable Object. The seed is bound to the pinned chat, the
+authenticated sandbox session, and the current draft revision; the internal
+seed route also requires the sandbox3 operator token. It is unavailable outside
+the isolated test API. This lets file-intake and other capture-only journeys
+exercise the normal revision-bound callback path without sending test messages
+to Telegram. Real-delivery callbacks continue to use the actual collector ID.
+
 Optional `updateId` and message `messageId` fields let tests choose fixture
 IDs. Omit them for automatic IDs. Do not replay an update as a retry: this
 endpoint exercises webhook ingress and does not promise idempotency for
@@ -76,6 +92,16 @@ blocks cleanup while its dispatch is in flight; if it has remained unresolved
 for 15 minutes and the Control Plane preflight is empty, the sandbox reset
 clears that stale checkpoint along with the rest of the test state. Production
 Intake state does not use this reset path.
+
+If a sandbox3 E2E leaves a task active, run the protected-main
+`Recover and clean sandbox3 stop state` workflow with `run_recovery=true`. It
+requests `/stop` through `/operator/test-update`. If the stop reply is not
+confirmed, the workflow asks the sandbox3 operator route to reconcile that exact
+CP task through the normal CP `/cancel` API; it verifies profile and
+chat/topic-derived conversation identity, and proceeds only when every run is
+terminal and lease-free. The Worker rechecks terminal CP state before reset. An
+active or unknown run blocks reconciliation and reset. The workflow checks
+that both CP and Intake state are empty afterward.
 
 Sandbox user records use the existing `user:` keys in the isolated sandbox KV
 and are removed by the full sandbox reset (which also clears older

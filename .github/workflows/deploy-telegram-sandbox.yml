@@ -11,6 +11,11 @@ on:
           - skip
           - probability-sandbox
         default: skip
+      run_agent_e2e:
+        description: Run one bounded Runner task and Telegram reply in the probability sandbox
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -107,37 +112,78 @@ jobs:
             echo "- Worker deployment status and /health smoke passed."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Clean CP and Runner sandbox before resetting Telegram buffers
+        id: cp_cleanup_before
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: node tools/dispatch-cp-sandbox-cleanup.mjs | tee cp-cleanup-before.log
+
       - name: Require all sandbox buffers empty before starting tests
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs reset
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox-reset-before.json
 
       - name: Run existing-UX Worker contract tests
-        run: npx vitest run tests/control-plane-existing-ux-entrypoint.test.js tests/control-plane-existing-ux-workerd.test.js --silent
+        run: npx vitest run tests/control-plane-existing-ux-entrypoint.test.js tests/control-plane-existing-ux-workerd.test.js --silent | tee worker-contract-tests.log
 
-      - name: Recheck and clear both sandboxes before fresh-message scenario
+      - name: Verify sandbox buffers stayed empty during local Worker contract tests
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs reset
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox-empty-after-contract.json
 
       - name: Test fresh messages aggregate in the sandbox buffer
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs test-buffers
+        run: node tools/sandbox-buffer-cycle.mjs test-buffers | tee sandbox-buffer-test.json
 
-      - name: Clear all sandbox state after the buffer scenario
-        if: always()
+      - name: Test login, Runner answer and Telegram delivery in the probability sandbox
+        if: ${{ inputs.run_agent_e2e == true }}
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs reset
+          TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+        run: node tools/sandbox-probability-agent-e2e.mjs
+
+      - name: Clean CP and Runner state before deleting Telegram state
+        id: cp_cleanup_after
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: node tools/dispatch-cp-sandbox-cleanup.mjs | tee cp-cleanup-after.log
+
+      - name: Clear Telegram sandbox state after CP and Runner cleanup
+        id: telegram_cleanup_after
+        if: always() && steps.cp_cleanup_after.outcome == 'success'
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
+        run: node tools/sandbox-buffer-cycle.mjs reset | tee sandbox-reset-after.json
 
       - name: Require empty CP and Telegram buffers after cleanup
-        if: always()
+        if: always() && steps.cp_cleanup_after.outcome == 'success' && steps.telegram_cleanup_after.outcome == 'success'
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_CLEANUP_TOKEN: ${{ secrets.TG_SANDBOX_CLEANUP_TOKEN }}
-        run: node tools/sandbox-buffer-cycle.mjs inspect
+        run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox-empty-after.json
+
+      - name: Upload probability sandbox E2E evidence
+        if: ${{ always() && inputs.run_agent_e2e == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: probability-sandbox-agent-e2e-${{ github.run_id }}
+          path: |
+            sandbox-probability-agent-e2e-evidence.json
+            cp-cleanup-before.log
+            sandbox-reset-before.json
+            sandbox-empty-after-contract.json
+            worker-contract-tests.log
+            sandbox-buffer-test.json
+            cp-cleanup-after.log
+            sandbox-reset-after.json
+            sandbox-empty-after.json
+          if-no-files-found: ignore
+          retention-days: 7

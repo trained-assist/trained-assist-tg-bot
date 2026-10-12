@@ -8,7 +8,11 @@ chat while immediate replies are also returned in the operator transcript.
 This exercises intake, Control Plane, runner, and delivery without using the
 Telegram UI.
 
-Use the manual Telegram procedure below only when the question specifically
+The **Sandbox3 Telegram worker E2E** workflow offers `basic` and `multiline`
+input scenarios. Both use the same temporary-profile login and real Telegram
+delivery path; the multiline case additionally checks exact line-break
+persistence through the task's saved original input and ordered three-line
+Runner answer. Use the manual Telegram procedure below only when the question specifically
 concerns Telegram's own webhook ingress or client behavior. `/health` proves
 liveness only.
 
@@ -30,7 +34,8 @@ contract checks and resets state after them.
 ### Deploying the isolated sandbox3 Worker
 
 Use the manual workflow **Sandbox3 Telegram worker E2E** from protected `main`
-with `run_e2e=true`. It verifies the Cloudflare account and pinned test-user
+with `run_e2e=true`; select `scenario=basic` for a one-token task or
+`scenario=multiline` for a three-line formatting task. It verifies the Cloudflare account and pinned test-user
 ID, deploys only `trained-assist-tg-sandbox3` with ingress and delivery paused,
 checks the isolated CP lane and existing V1 delivery-owner state, and clears
 CP plus Telegram intake state before enabling traffic. It then exercises help,
@@ -96,10 +101,20 @@ For each Worker-driven scenario, check these layers:
    admission, CP receipt, and delivery-owner enqueue/drain/load.
 2. **Control Plane:** one durable task contains the submitted input, its
    execution reaches terminal success, and the saved result matches the request.
+   For the sandbox3 Telegram route, CP output has `delivery_state='not_required'`
+   with no CP delivery rows: the sandbox Intake delivery owner owns Telegram
+   sends. This matches the CP stop-window contract; a CP delivery row is not
+   evidence of the gateway's external Telegram acknowledgement.
+   Communication routing may be `COMMUNICATION_SELECTED` or
+   `COMMUNICATION_FALLBACK` with route `agent`. Selector/provider failure is
+   recorded as diagnostic evidence; agent fallback is valid behavior. It does
+   not waive the task, execution, exact-answer, or terminal Telegram-delivery
+   assertions.
 3. **Delivery:** the Intake barrier clears only after the delivery owner reports
-   the terminal Telegram message as sent. Immediate replies include Telegram's
-   accepted message IDs in the API transcript; verify the final result through
-   the CP result and delivery-owner/Intake completion path.
+   the terminal Telegram message as sent to the pinned chat and supplies a
+   Telegram provider message ID. Immediate replies include Telegram's accepted
+   message IDs in the API transcript; verify the final answer through the CP
+   result and delivery-owner/Intake completion path.
 
 When diagnosing intake state, use the protected operator API and verify each
 unique message was stored exactly once.
@@ -143,6 +158,44 @@ Telegram, plus redacted Worker/collector state, then fix the bug and repeat the
 same user-originated scenario after deploying the fix.
 
 ## Record
+
+### 2026-10-11 sandbox3 baseline: help, intake, login, answer and delivery
+
+GitHub Actions run [38101728592](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38101728592)
+passed against the isolated sandbox3 lane. It began with empty CP and Telegram
+intake stores, checked `/help`, status and anonymous-login prompt, aggregated a
+fresh two-message input, then logged in the pinned test profile and submitted a
+question. Communication selected the agent route (`COMMUNICATION_SELECTED`);
+the CP task completed, exactly one Runner execution succeeded, and its answer
+matched the run's challenge. The sandbox3 Intake delivery owner reported one
+terminal Telegram send to the pinned test chat with a provider message ID.
+CP correctly reported `delivery_state='not_required'` and zero CP delivery
+rows. Both stores were empty again after cleanup. The run used CP build
+`0c1e9c5a2d88f8c3a3aa297d9cd5ddf19edb7b67` and Worker source
+`a292739a68fe65038ccb5ba6c9b82151d4b1c85a`.
+
+This confirms the basic authenticated question-to-answer path on sandbox3; it
+does not certify the remaining user scenarios or production.
+
+### 2026-10-11 repeated Worker E2E after fallback assertion fix
+
+Runs [38102931588](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38102931588),
+[38103212003](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38103212003),
+and [38103450031](https://github.com/trained-assist/trained-assist-tg-bot/actions/runs/38103450031)
+passed consecutively on source SHA
+`730356d60a81b3eb70872c2650b49c855af92914`. Each reset CP and Telegram state,
+exercised help/status/anonymous-login, aggregated fresh input, logged in a new
+temporary profile, completed exactly one Runner execution, delivered one
+challenge-matching answer to the pinned private test chat, and verified both
+stores empty after cleanup. Each artifact records delivery owner
+`sandbox3-intake`, CP delivery `not_required`, zero CP delivery rows, and the
+Telegram provider-message-ID presence without storing raw IDs or challenge text.
+
+The classifier was invoked in all three runs but timed out at the configured
+20-second boundary. The intended agent fallback completed the task in every
+run. This confirms fallback resilience, not successful classifier resolution.
+The broader issue #190 scenario matrix and production user-question path remain
+unverified.
 
 Record the date, Worker version, bot username, sender account label, unique
 marker, observed user-visible reply, ingress-log result, stored-once result,

@@ -1,7 +1,18 @@
 import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
+import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
 
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+const artifactReference = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)
+  && !value.split('/').some(part => part === '..') && !value.endsWith('/');
+const artifactSourceFailureCode = error => {
+  if (error instanceof ControlPlaneError) {
+    const runnerStatus = error.status === 502 && typeof error.body?.reason === 'string'
+      ? /\bHTTP_(\d{3})\b/.exec(error.body.reason)?.[1] : null;
+    return runnerStatus ? `runner_http_${runnerStatus}` : `http_${error.status}`;
+  }
+  return ['TimeoutError', 'AbortError', 'TypeError'].includes(error?.name) ? error.name : 'operation_failed';
+};
 const key = id => `delivery:${id}`;
 const generation = record => Number(record.deliveryId.match(/:g(\d+)$/)?.[1] ?? 0);
 const summary = record => record ? {
@@ -9,6 +20,8 @@ const summary = record => record ? {
   attempts: record.attempts, providerMessageId: record.telegramMessageId ?? null,
   reason: record.status === 'sending' ? 'provider_outcome_not_recorded' : record.reason ?? null,
   generation: generation(record), chatId: record.destination.chatId,
+  type: record.type, artifactName: record.type === 'artifact' ? record.artifact?.name ?? null : null,
+  ...(record.type === 'artifact' && record.artifactSourceFailure ? { artifactSourceFailure: record.artifactSourceFailure } : {}),
   threadId: record.destination.threadId ?? null,
   legacyStatus: record.legacyStatus ?? null,
 } : null;
@@ -136,7 +149,12 @@ export class TgDeliveryOwner {
           const receipt = records.find(record => record.deliveryId.startsWith('receipt:')) ?? records.find(record => record.deliveryId === body.taskId);
           const terminal = records.filter(record => record.deliveryId.startsWith('terminal:')).sort((first, second) => generation(second) - generation(first))[0];
           if (records.some(record => !chatAllowed(config, record.destination.chatId))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
-          return Response.json({ receipt: summary(receipt), terminal: summary(terminal) });
+          const response = { receipt: summary(receipt), terminal: summary(terminal) };
+          if (body.includeArtifacts === true) response.artifacts = records
+            .filter(record => record.type === 'artifact')
+            .map(summary)
+            .sort((first, second) => first.deliveryId.localeCompare(second.deliveryId));
+          return Response.json(response);
         }
         if (route === '/drain') {
           const deliveryPaused = typeof body.deliveryPaused === 'boolean'
@@ -153,17 +171,27 @@ export class TgDeliveryOwner {
   async enqueue(input, config) {
     const deliveryId = input.deliveryId ?? input.userTaskId;
     if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !chatAllowed(config, input.destination?.chatId) ||
-        !['message', 'launch'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+        !['message', 'launch', 'artifact'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+    if (input.type === 'artifact') {
+      const item = input.artifact;
+      if (!item || typeof item !== 'object' || !artifactReference(item.ref)
+        || typeof item.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
+        || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes < 1 || item.sizeBytes > 10 * 1024 * 1024
+        || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)
+        || typeof item.contentType !== 'string' || item.contentType.length < 1 || item.contentType.length > 100) throw new Error();
+    } else if (input.artifact !== undefined) throw new Error();
     const payload = { deliveryId, userTaskId: input.userTaskId, conversationId: input.conversationId ?? null,
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
       requestId: input.requestId ?? deliveryId, type: input.type, text: input.text, replyMarkup: input.replyMarkup ?? null,
-      taskAcceptedAt: input.taskAcceptedAt ?? null };
+      taskAcceptedAt: input.taskAcceptedAt ?? null, ...(input.type === 'artifact' ? { artifact: input.artifact } : {}) };
     const fingerprint = JSON.stringify(payload);
     return this.state.storage.transaction(async storage => {
       const existing = await storage.get(key(deliveryId));
       if (existing) {
         if (existing.fingerprint !== null && existing.fingerprint !== fingerprint) throw new Error();
-        if (existing.userTaskId !== payload.userTaskId || String(existing.destination.chatId) !== String(payload.destination.chatId) || existing.destination.threadId !== payload.destination.threadId) throw new Error();
+        if (existing.userTaskId !== payload.userTaskId || existing.conversationId !== payload.conversationId
+          || existing.type !== payload.type || String(existing.destination.chatId) !== String(payload.destination.chatId)
+          || existing.destination.threadId !== payload.destination.threadId) throw new Error();
         return { record: existing, duplicate: true };
       }
       const cutoverAt = await storage.get('cutoverAt');
@@ -188,18 +216,49 @@ export class TgDeliveryOwner {
     if (!claim) return 0;
     const api = new TelegramApi(config);
     let completion;
+    let providerCalled = false;
     try {
-      const result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-        text: claim.text, replyMarkup: claim.replyMarkup });
+      let result;
+      if (claim.type === 'artifact') {
+        const client = new ControlPlaneClient(config, { fetchImpl: this.env.CONTROL_PLANE_SERVICE
+          ? this.env.CONTROL_PLANE_SERVICE.fetch.bind(this.env.CONTROL_PLANE_SERVICE) : undefined });
+        const downloaded = await client.artifact(claim.userTaskId, claim.artifact.ref);
+        const actualSha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', downloaded.body))]
+          .map(value => value.toString(16).padStart(2, '0')).join('');
+        const expectedSha256 = claim.artifact.sha256.replace(/^sha256:/, '').toLowerCase();
+        if (downloaded.filename !== claim.artifact.name || downloaded.sizeBytes !== claim.artifact.sizeBytes
+          || downloaded.sha256?.toLowerCase() !== expectedSha256 || actualSha256 !== expectedSha256
+          || downloaded.body.byteLength !== claim.artifact.sizeBytes) {
+          completion = { ...claim, status: 'dead', reason: 'artifact_integrity_rejected', finishedAt: Date.now() };
+          await this.state.storage.put(key(claim.deliveryId), completion);
+          return 1;
+        }
+        providerCalled = true;
+        result = await api.sendDocument({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          document: downloaded.body, filename: claim.artifact.name, caption: `📎 ${claim.artifact.name}`,
+          contentType: downloaded.contentType ?? claim.artifact.contentType });
+      } else {
+        providerCalled = true;
+        result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          text: claim.text, replyMarkup: claim.replyMarkup });
+      }
       if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new Error();
       completion = { ...claim, status: 'sent', telegramMessageId: result.message_id, sentAt: Date.now(), reason: 'provider_accepted' };
     } catch (error) {
       const rejected = error instanceof TelegramApiError && error.payloadVerified === true && error.payload?.ok === false;
       const rateLimited = rejected && error.status === 429 && error.payload.error_code === 429;
+      const permanentArtifactFailure = claim.type === 'artifact' && error instanceof ControlPlaneError
+        && [400, 404, 409, 413].includes(error.status);
+      const retryArtifactRead = claim.type === 'artifact' && !providerCalled && !permanentArtifactFailure;
+      const artifactSourceFailure = retryArtifactRead || permanentArtifactFailure ? artifactSourceFailureCode(error) : null;
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
-      completion = { ...claim, status: rateLimited ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
-        reason: rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
-        ...(rateLimited ? { nextAttemptAt: Date.now() + delay } : {}) };
+      completion = { ...claim,
+        status: permanentArtifactFailure ? 'dead' : retryArtifactRead || rateLimited
+          ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
+        reason: permanentArtifactFailure ? 'artifact_source_rejected' : retryArtifactRead ? 'artifact_source_unavailable'
+          : rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
+        ...(artifactSourceFailure ? { artifactSourceFailure } : {}),
+        ...(!permanentArtifactFailure && (retryArtifactRead || rateLimited) ? { nextAttemptAt: Date.now() + delay } : {}) };
     }
     await this.state.storage.put(key(claim.deliveryId), completion);
     return 1;
@@ -230,7 +289,7 @@ export class TgDeliveryOwnerClient {
     ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true',
   }); }
   load(deliveryId) { return this.call('load', { deliveryId }); }
-  read(taskId) { return this.call('read', { taskId }); }
+  read(taskId, options = {}) { return this.call('read', { taskId, ...(options.includeArtifacts === true ? { includeArtifacts: true } : {}) }); }
   discovery() { return this.call('discovery', {}); }
   async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
   async drain() { return (await this.call('drain', {
