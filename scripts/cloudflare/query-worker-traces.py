@@ -19,6 +19,9 @@ ALLOWED_WORKERS = {
 if WORKER not in ALLOWED_WORKERS:
     raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
 HEALTH_PROBE_COUNT = 80
+VIEW = os.environ.get("CF_QUERY_VIEW", "traces")
+if VIEW not in {"traces", "events"}:
+    raise SystemExit("CF_QUERY_VIEW must be traces or events")
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
@@ -114,23 +117,70 @@ if os.environ.get("CF_GENERATE_HEALTH_TRAFFIC") == "true":
         time.sleep(0.25)
 
 
-traces_response = query("traces")
-if not traces_response.get("success"):
-    print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+response = query(VIEW)
+if not response.get("success"):
+    print(json.dumps({"errors": response.get("errors", [])}), file=sys.stderr)
     raise SystemExit(1)
 
-trace_items = traces_response.get("result", {}).get("traces", [])
+if VIEW == "events":
+    # Return only bounded lifecycle metadata. Worker logs may also contain user
+    # text and identifiers, so never print a raw event or arbitrary log message.
+    allowed = {
+        "tg.dispatch.failed", "tg.cp.snapshot_started", "tg.cp.snapshot_persisted",
+        "tg.cp.snapshot_failed", "tg.cp.receipt_read_failed", "tg.cp.intake_failed",
+        "tg.cp.receipt_persist_failed", "tg.cp.task_accepted", "tg.cp.route_completed",
+        "tg.cp.route_pending", "tg.delivery.accepted", "tg.delivery.rejected",
+        "tg.agent.run_finished_received",
+    }
+    def event_payload(event):
+        metadata = event.get("$metadata") or event.get("metadata") or {}
+        for candidate in (event.get("source"), metadata.get("message")):
+            if isinstance(candidate, str):
+                try:
+                    candidate = json.loads(candidate)
+                except (TypeError, ValueError):
+                    continue
+            if isinstance(candidate, dict) and candidate.get("event") in allowed:
+                return candidate
+        return None
+
+    event_items = response.get("result", {}).get("events", {}).get("events", [])
+    safe_events = []
+    for item in event_items:
+        payload = event_payload(item)
+        if payload is None:
+            continue
+        record = {"event": payload["event"]}
+        timestamp = item.get("timestamp") or (item.get("$metadata") or {}).get("timestamp")
+        if isinstance(timestamp, (int, float)):
+            record["timestamp"] = timestamp
+        for key in ("component", "status", "outcome", "reasonCode", "route", "answerPresent", "generation", "attempt"):
+            value = payload.get(key)
+            if isinstance(value, (str, bool, int)) and len(str(value)) <= 120:
+                record[key] = value
+        safe_events.append(record)
+    print(json.dumps({
+        "worker": WORKER,
+        "view": "events",
+        "window_hours": 24,
+        "returned_event_count": len(event_items),
+        "truncated": response.get("result", {}).get("truncated", False),
+        "lifecycle_events": safe_events,
+    }, indent=2))
+    raise SystemExit(0)
+
+trace_items = response.get("result", {}).get("traces", [])
 if health_probe_count:
     for _ in range(3):
         has_worker_trace = any(belongs_to_worker(trace) for trace in trace_items)
         if has_worker_trace:
             break
         time.sleep(15)
-        traces_response = query("traces")
-        if not traces_response.get("success"):
-            print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+        response = query("traces")
+        if not response.get("success"):
+            print(json.dumps({"errors": response.get("errors", [])}), file=sys.stderr)
             raise SystemExit(1)
-        trace_items = traces_response.get("result", {}).get("traces", [])
+        trace_items = response.get("result", {}).get("traces", [])
 trace_candidate_count = len(trace_items)
 matching_traces = []
 for trace in trace_items:
@@ -185,7 +235,7 @@ print(
             "health_probe_count": health_probe_count,
             "trace_count": len(matching_traces),
             "trace_candidate_count": trace_candidate_count,
-            "traces_truncated": traces_response.get("result", {}).get("truncated", False),
+            "traces_truncated": response.get("result", {}).get("truncated", False),
             "root_span_counts": root_span_counts,
             "root_span_duration_ms": {
                 name: {

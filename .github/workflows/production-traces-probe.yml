@@ -2,6 +2,14 @@ name: Production traces probe
 
 on:
   workflow_dispatch:
+    inputs:
+      view:
+        description: Read-only Cloudflare telemetry view
+        required: true
+        type: choice
+        options:
+          - events
+          - traces
 
 permissions:
   contents: read
@@ -15,7 +23,8 @@ jobs:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_OBSERVABILITY_TOKEN: ${{ secrets.CF_OBSERVABILITY_TOKEN }}
       CF_WORKER_NAME: trained-assist-tg-bot
-      CF_GENERATE_HEALTH_TRAFFIC: "true"
+      CF_GENERATE_HEALTH_TRAFFIC: "false"
+      CF_QUERY_VIEW: ${{ inputs.view }}
     steps:
       - uses: actions/checkout@v4
       - name: Query production trace summaries
