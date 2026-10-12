@@ -3,8 +3,16 @@ import { readFile } from 'node:fs/promises';
 import { renderProductionE2eWorkerConfig } from '../tools/render-production-e2e-worker-config.mjs';
 
 const sandboxConfig = await readFile(new URL('../wrangler.sandbox-tg-sandbox3.toml', import.meta.url), 'utf8');
+const productionE2eWorkflow = await readFile(new URL('../.github/workflows/production-backend-telegram-e2e.yml', import.meta.url), 'utf8');
 
 describe('temporary production E2E Worker config', () => {
+  it('keeps read-only inspection paused instead of redeploying the live lane', () => {
+    const pausedDeploy = /- name: Deploy sandbox ingress paused against isolated production CP profile\s+if: (.+)/.exec(productionE2eWorkflow)?.[1] ?? '';
+    const liveDeploy = /- name: Enable the pinned production backend test lane\s+if: (.+)/.exec(productionE2eWorkflow)?.[1] ?? '';
+    expect(pausedDeploy).toContain('inputs.inspect_e2e_lane == true');
+    expect(liveDeploy).not.toContain('inputs.inspect_e2e_lane');
+  });
+
   it.each([[true, '"true"'], [false, '"false"']])('writes pause=%s as TOML strings and preserves sandbox state bindings', (paused, encoded) => {
     const rendered = renderProductionE2eWorkerConfig(sandboxConfig, { paused });
     expect(rendered).toContain(`TG_SLICE_INGRESS_PAUSED = ${encoded}`);
