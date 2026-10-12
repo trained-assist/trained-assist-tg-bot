@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { MemKV, collectLogSink, makeEnv } from '../tests/helpers/p11-helpers.js';
 import { readTgSliceConfig, authScheme, PRODUCTION_BOT_USERNAMES, chatAllowed } from '../src/sandbox-tg/config.js';
 import { ControlPlaneClient } from '../src/sandbox-tg/control-plane-client.js';
+import { sandboxControlPlaneFetch } from '../src/sandbox-tg/operator-lane.js';
 import { profileForUpdate } from '../src/sandbox-tg/profile.js';
 import { TelegramEmulator } from '../src/sandbox-tg/telegram-emulator.js';
 import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
@@ -34,6 +35,22 @@ describe('config — production-bot guard + env-only', () => {
     expect(readTgSliceConfig(env)).toMatchObject({ principalSignature: 'production-e2e-signature', sessionId: null, chatProfiles: {} });
     expect(() => readTgSliceConfig({ ...env, SESSION_NAMESPACE: 'integrator-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
     expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
+  });
+  it('bypasses the sandbox CP service binding only for the pinned production E2E lane', () => {
+    const fetch = () => new Response('sandbox-cp');
+    const service = { fetch };
+    const productionE2e = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_TEST_API_ENABLED: 'true',
+      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
+      EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_SERVICE: service });
+    expect(sandboxControlPlaneFetch(productionE2e)).toBeUndefined();
+    const sandbox3 = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      SESSION_NAMESPACE: 'integrator-sandbox3-v1',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
+      CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1', CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1',
+      EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_SERVICE: service });
+    expect(sandboxControlPlaneFetch(sandbox3)).toBeTypeOf('function');
   });
   it('does not treat the production CP URL as the E2E sandbox lane outside sandbox environment', () => {
     const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'production', TG_SANDBOX_TEST_API_ENABLED: 'true',

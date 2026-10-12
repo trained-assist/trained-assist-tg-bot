@@ -22,6 +22,11 @@ const LANES = Object.freeze({
 });
 
 /** Return a fixed sandbox lane only when its bot, state namespace and CP agree. */
+export function sandboxControlPlaneFetch(env) {
+  if (sandboxOperatorLane(env) === 'productionE2e') return undefined;
+  return env?.CONTROL_PLANE_SERVICE?.fetch?.bind(env.CONTROL_PLANE_SERVICE);
+}
+
 export function sandboxOperatorLane(env) {
   if (env?.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || env?.EXECUTION_BACKEND !== 'control-plane') return null;
   for (const [target, expected] of Object.entries(LANES)) {

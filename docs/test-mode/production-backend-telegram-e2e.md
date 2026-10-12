@@ -1,8 +1,8 @@
 # Production backend Telegram E2E canary
 
-This canary sends one read-only question through the isolated `ptichka_status_bot` sandbox ingress, the production Control Plane profile `production-e2e-telegram-v1`, the production Runner API, and the France VM execution worker. The answer is delivered to the pinned test chat `1714048` through Telegram.
+This canary sends one read-only question through the isolated `ptichka_status_bot` sandbox ingress, the production Control Plane profile `production-e2e-telegram-v1`, the production Runner API, and the France VM execution worker. Runner health must report `eu-vm-agent-run` before the workflow proceeds. The answer is delivered to the pinned test chat `1714048` through Telegram.
 
-The production Telegram bot and its routes are not changed. The sandbox Worker is temporarily deployed with the production CP URL, principal, profile, and a distinct `integrator-production-e2e-v1` session namespace. The HMAC signature is a Worker secret and is scoped to the E2E principal. Runner production health must report `eu-vm-agent-run` before the workflow proceeds.
+The production Telegram bot and its routes are not changed. The sandbox Worker is temporarily deployed with the production CP URL, principal, profile, and a distinct `integrator-production-e2e-v1` session namespace. The E2E lane bypasses the sandbox CP service binding and calls the configured production CP URL over HTTPS; ordinary sandbox3 traffic continues to use its service binding. The HMAC signature is a Worker secret and is scoped to the E2E principal. Pause flags are passed as strings, and the canary checks intake/delivery readiness before creating a test login or task.
 
 The test creates a random, temporary Telegram login, sends a nonce challenge, and checks the durable CP task, successful run, stored session identifier, nonce match, and Telegram delivery receipt. Evidence contains task/run IDs and status only; prompt, answer, password, and credentials are not logged. CP task history and Runner session/workspace data are retained as production evidence.
 
