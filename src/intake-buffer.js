@@ -528,8 +528,10 @@ export class IntakeBuffer {
             acceptance.receipt.profileId !== profileId || acceptance.receipt.durable !== true || acceptance.terminal === true ||
             JSON.stringify(busyRequests) !== JSON.stringify([source.requestId]) || unresolved.length || launching.length ||
             busy !== true || buf.length || retryBatch.length || this.cpDispatches) return 'test_recovery_scope_mismatch';
-        if (acceptance.routingRetryCount === 1) return 'test_route_retry_already_used';
-        if (acceptance.routingRetryCount !== undefined && acceptance.routingRetryCount !== 0) return 'test_route_retry_state_invalid';
+        const retryCount = acceptance.routingRetryCount;
+        const retryTimestampPresent = Number.isSafeInteger(acceptance.routingRetryAt) && acceptance.routingRetryAt > 0;
+        if (retryCount === 1 && retryTimestampPresent) return 'test_route_retry_already_used';
+        if (retryCount !== undefined && retryCount !== 0 && retryCount !== 1) return 'test_route_retry_state_invalid';
         const prior = acceptance.routingOutcome;
         if (!prior?.known || prior.publicationComplete !== true || prior.continuationRequested === true ||
             prior.continuationIssued === true) return 'test_route_retry_not_safe';
@@ -584,8 +586,10 @@ export class IntakeBuffer {
           const currentBuf = await this.state.storage.get('buf') || [];
           const currentRetryBatch = await this.state.storage.get('retryBatch') || [];
           const prior = current?.routingOutcome;
+          const retryTimestampPresent = Number.isSafeInteger(current?.routingRetryAt) && current.routingRetryAt > 0;
           if (current?.routingRetryClaim !== source.requestId ||
-              current.routingRetryCount !== undefined && current.routingRetryCount !== 0 ||
+              current.routingRetryCount !== undefined && current.routingRetryCount !== 0 && current.routingRetryCount !== 1 ||
+              current.routingRetryCount === 1 && retryTimestampPresent ||
               current?.receipt?.requestId !== source.requestId || current.receipt.userTaskId !== source.taskId ||
               current.receipt.profileId !== profileId || JSON.stringify(currentBusy) !== JSON.stringify([source.requestId]) ||
               currentUnresolved.length || currentLaunching.length || currentBusyState !== true || currentBuf.length ||

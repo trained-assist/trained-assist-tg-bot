@@ -135,6 +135,43 @@ describe('sandbox-only Intake DO reset', () => {
     expect(networkFetch).toHaveBeenCalledOnce();
   });
 
+  it('repairs an orphaned retry counter only when the stale no-continuation receipt still proves zero runs', async () => {
+    const requestId = `tgcp-${'f'.repeat(64)}`;
+    const taskId = 'ut-pinned-e2e-orphaned-route-retry';
+    const key = `cp-acceptance:${requestId}`;
+    const storage = new Storage({ busy: true, cpBusyRequests: [requestId],
+      [key]: { terminal: false, routingRetryCount: 1,
+        receipt: { requestId, userTaskId: taskId, profileId: 'production-e2e-telegram-v1', durable: true },
+        routingOutcome: { known: true, publicationComplete: true, continuationRequested: false,
+          continuationIssued: false } } });
+    const state = { storage, blockConcurrencyWhile: operation => operation() };
+    const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      TG_SANDBOX_BOT_TOKEN: 'bot-token', TG_SANDBOX3_OPERATOR_TOKEN: 'operator-token', CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1', CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'scoped-signature', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+      EXECUTION_BACKEND: 'control-plane', TG_SANDBOX_TEST_API_ENABLED: 'true' };
+    const intake = new IntakeBuffer(state, env);
+    const networkFetch = vi.fn(async () => Response.json({ taskStore: { id: taskId,
+      profile_id: 'production-e2e-telegram-v1', status: 'active', stage: 'queued' }, runs: [],
+      engine: { error: { message: 'Workflow instance not found' } } }));
+    vi.stubGlobal('fetch', networkFetch);
+    let response;
+    try {
+      response = await intake.fetch(new Request('https://intake/_sandbox-test/wake-pending-task', {
+        method: 'POST', headers: { authorization: 'Bearer operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ taskId, requestId, retryRoute: true }),
+      }));
+    } finally { vi.unstubAllGlobals(); }
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, routingRetryCount: 1,
+      action: 'wake_saved_acceptance_route_retry' });
+    const repaired = await storage.get(key);
+    expect(repaired.routingRetryCount).toBe(1);
+    expect(repaired.routingRetryAt).toBeGreaterThan(0);
+    expect(repaired.routingOutcome).toBeUndefined();
+    expect(networkFetch).toHaveBeenCalledOnce();
+  });
+
   it('refuses route retry when the old route already requested continuation', async () => {
     const requestId = `tgcp-${'d'.repeat(64)}`;
     const taskId = 'ut-pinned-e2e-already-continued';
