@@ -24,5 +24,7 @@ describe('temporary production E2E Worker config', () => {
     expect(sandboxConfig).toContain('[exports.ProductionE2eTgDeliveryOwner]');
     expect(rendered).not.toContain('class_name = "IntakeBuffer"');
     expect(rendered).not.toContain('class_name = "TgDeliveryOwner"');
+    expect(rendered).not.toMatch(/^\[triggers\]/m);
+    expect(sandboxConfig).toMatch(/^\[triggers\]\s*\ncrons = \["\* \* \* \* \*"\]/m);
   });
 });
