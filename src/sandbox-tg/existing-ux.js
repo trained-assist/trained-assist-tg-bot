@@ -4,7 +4,7 @@ import { createController } from './index.js';
 import { IntakeBuffer } from '../intake-buffer.js';
 import { TgDeliveryOwner, TgDeliveryOwnerV2 } from './delivery-owner.js';
 import { handleCallbackQuery } from '../handlers/callbacks.js';
-import { getSession, setSession, deleteSession } from '../lib/kv.js';
+import { getSession, setSession, deleteSession, deleteUser } from '../lib/kv.js';
 import { applySessionNamespace } from '../lib/session-namespace.js';
 import { conversationKey, threadIdOf, threadExtra } from '../conversation-context.js';
 import { FORCE_RUN_RE, AUTO_LAUNCH_RE, hasIntakeContent } from '../intake-routing.js';
@@ -15,7 +15,7 @@ import { isTerminalTaskStatus } from './contract.js';
 import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
-import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
+import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorPinnedTestLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
 import { mediaOf } from '../media-jobs.js';
 import { prepareIntake } from '../intake-preflight.js';
 
@@ -70,7 +70,7 @@ app.get('/delivery-cutover', async context => {
 app.get('/operator/delivery-cutover', async context => {
   const env = executionEnv(context.env);
   const target = sandboxOperatorLane(env);
-  const token = target === 'sandbox3'
+  const token = sandboxOperatorPinnedTestLane(target)
     ? sandboxOperatorToken(env, target)
     : String(env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
@@ -89,7 +89,7 @@ app.get('/operator/delivery-cutover', async context => {
 app.get('/operator/delivery-cutover-v1', async context => {
   const env = executionEnv(context.env);
   const target = sandboxOperatorLane(env);
-  const token = target === 'sandbox3'
+  const token = sandboxOperatorPinnedTestLane(target)
     ? sandboxOperatorToken(env, target)
     : String(env.TG_SANDBOX_CUTOVER_READ_TOKEN ?? '').trim();
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
@@ -113,7 +113,10 @@ app.get('/operator/test-delivery/:taskId', async context => {
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      (sandboxOperatorPinnedTestLane(target) && !sandboxOperatorResetChat(env, target))) {
+    return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  }
   const taskId = context.req.param('taskId');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId)) return context.json({ error: 'invalid_task_id' }, 400);
   try {
@@ -133,6 +136,71 @@ app.get('/operator/test-delivery/:taskId', async context => {
   } catch {
     return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
   }
+});
+
+// Read only: correlate the pinned test lane's durable CP receipts with saved
+// task/run/session/result state, without exposing prompt or answer text.
+app.get('/operator/test-evidence', async context => {
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (!sandboxOperatorPinnedTestLane(target) || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      !sandboxOperatorResetChat(env, target) || !env.INTAKE) return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  const challenge = context.req.query('challenge');
+  if (challenge !== undefined && !/^[A-Z0-9-]{10,64}$/.test(challenge)) return context.json({ error: 'invalid_test_challenge' }, 400);
+  const chatId = sandboxOperatorResetChat(env, target);
+  const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
+  const response = await stub.fetch('https://intake/operator/test-evidence', { method: 'POST',
+    body: JSON.stringify(challenge ? { challenge } : {}) });
+  return new Response(response.body, { status: response.status,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+});
+
+// Clear only this pinned Telegram chat's Intake DO, login session, and optional
+// generated test user. CP history/workspaces, broad KV state, and other chats
+// are intentionally outside this path.
+app.post('/operator/test-cleanup', async context => {
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (target !== 'productionE2e' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !env.INTAKE) {
+    return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  }
+  const source = await context.req.json().catch(() => null);
+  if (!source || source.target !== target || source.confirm !== 'CLEAN_PINNED_TEST_CHAT' ||
+      Object.keys(source).some(key => !['target', 'confirm', 'username'].includes(key)) ||
+      source.username !== undefined && !/^production_e2e_[a-z0-9]{12}$/.test(source.username)) {
+    return context.json({ error: 'explicit_test_cleanup_required' }, 400);
+  }
+  const chatId = sandboxOperatorResetChat(env, target);
+  const namespaces = [['intake', env.INTAKE], ['legacyIntake', env.LEGACY_INTAKE]].filter(([, namespace]) => namespace);
+  const inspected = [];
+  for (const [binding, namespace] of namespaces) {
+    const stub = namespace.get(namespace.idFromName(conversationKey(chatId, null)));
+    const inspect = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
+    const state = await inspect.json().catch(() => ({}));
+    if (!inspect.ok) return context.json({ error: 'test_buffer_inspect_failed', binding }, 503);
+    if (state.active === true) return context.json({ error: 'active_intake_state', binding }, 409);
+    inspected.push({ binding, stub });
+  }
+  const cleared = [];
+  for (const { binding, stub } of inspected) {
+    const response = await stub.fetch('https://intake/operator/reset-all', { method: 'POST' });
+    if (!response.ok) return context.json({ error: 'test_buffer_reset_failed', binding }, 503);
+    const verify = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
+    const finalState = await verify.json().catch(() => ({}));
+    if (!verify.ok || finalState.active === true || finalState.keys !== 0) {
+      return context.json({ error: 'test_buffer_reset_verify_failed', binding }, 503);
+    }
+    cleared.push(binding);
+  }
+  await deleteSession(env.SESSIONS, Number(chatId));
+  if (source.username) await deleteUser(env.USERS, source.username);
+  return context.json({ ok: true, chatId, clearedBindings: cleared, cpHistoryTouched: false,
+    productionProfileDataTouched: false, sharedKvNamespaceReset: false,
+    testProfileDeleted: typeof source.username === 'string', loginSessionDeleted: true });
 });
 
 app.get('/collector-state', async context => {
@@ -419,9 +487,9 @@ app.post('/operator/test-buffer-message', async context => {
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
   if (await env.TG_SLICE?.get?.(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
-  const configuredBufferChatId = target === 'sandbox3'
+  const configuredBufferChatId = sandboxOperatorPinnedTestLane(target)
     ? sandboxOperatorResetChat(env, target) : env.TG_SANDBOX_BUFFER_TEST_CHAT_ID;
-  const configuredBufferUserId = target === 'sandbox3'
+  const configuredBufferUserId = sandboxOperatorPinnedTestLane(target)
     ? env.TG_SANDBOX_E2E_USER_ID : '900000236';
   if (!target || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
       env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false' || !configuredBufferChatId) {
