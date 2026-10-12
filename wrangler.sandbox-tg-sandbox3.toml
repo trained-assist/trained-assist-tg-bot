@@ -23,6 +23,16 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+# Keep production-canary namespaces declared across canonical sandbox3 restores.
+# The canary renderer binds these classes only while its isolated lane is active.
+[exports.ProductionE2eTgDeliveryOwner]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ProductionE2eIntakeBuffer]
+type = "durable-object"
+storage = "sqlite"
+
 [[durable_objects.bindings]]
 name = "TG_DELIVERY_OWNER"
 class_name = "TgDeliveryOwner"

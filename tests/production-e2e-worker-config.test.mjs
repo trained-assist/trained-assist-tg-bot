@@ -20,6 +20,8 @@ describe('temporary production E2E Worker config', () => {
     expect(rendered).toContain('class_name = "ProductionE2eIntakeBuffer"');
     expect(rendered).toContain('[exports.ProductionE2eTgDeliveryOwner]');
     expect(rendered).toContain('class_name = "ProductionE2eTgDeliveryOwner"');
+    expect(sandboxConfig).toContain('[exports.ProductionE2eIntakeBuffer]');
+    expect(sandboxConfig).toContain('[exports.ProductionE2eTgDeliveryOwner]');
     expect(rendered).not.toContain('class_name = "IntakeBuffer"');
     expect(rendered).not.toContain('class_name = "TgDeliveryOwner"');
   });
