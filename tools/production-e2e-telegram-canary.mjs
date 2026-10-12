@@ -215,6 +215,32 @@ export function intakeIsIdle(buffer) {
     state.unresolvedLaunchCount === 0 && state.busyRequestCount === 0;
 }
 
+export function cleanupReadiness(evidence = {}) {
+  const tasksTerminal = (evidence.tasks ?? []).every(task => ['done', 'failed', 'cancelled'].includes(task.status));
+  return { ready: tasksTerminal && intakeIsIdle(evidence.buffer), tasksTerminal,
+    intakeIdle: intakeIsIdle(evidence.buffer) };
+}
+
+export async function waitForCleanupReadiness(readEvidence, {
+  timeoutMs = 60_000,
+  intervalMs = 2_000,
+  now = () => Date.now(),
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  onPending = async () => {},
+} = {}) {
+  const deadline = now() + timeoutMs;
+  let evidence = null;
+  let readiness = cleanupReadiness();
+  while (now() < deadline) {
+    evidence = await readEvidence();
+    readiness = cleanupReadiness(evidence);
+    if (readiness.ready) return { ...readiness, evidence };
+    await onPending(readiness);
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - now())));
+  }
+  return { ...readiness, evidence };
+}
+
 async function waitForIntakeIdle() {
   const deadline = Date.now() + 90_000;
   let lastState = null;
@@ -235,15 +261,21 @@ async function waitForIntakeIdle() {
 }
 
 async function cleanupIfTerminalAndIdle(username) {
-  const evidence = await workerRequest('/operator/test-evidence');
-  assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_cleanup_profile_mismatch');
-  const tasksTerminal = (evidence.tasks ?? []).every(task => ['done', 'failed', 'cancelled'].includes(task.status));
-  const buffer = evidence.buffer ?? {};
-  const noDispatchInFlight = buffer.busy !== true && buffer.launching === 0 &&
-    buffer.unresolvedLaunchCount === 0 && buffer.busyRequestCount === 0;
-  if (!tasksTerminal || !noDispatchInFlight) {
+  let lastCheckpointAt = 0;
+  const readiness = await waitForCleanupReadiness(async () => {
+    const evidence = await workerRequest('/operator/test-evidence');
+    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_cleanup_profile_mismatch');
+    return evidence;
+  }, { onPending: async state => {
+    if (Date.now() - lastCheckpointAt < 10_000) return;
+    await checkpoint('waiting_for_cleanup_terminal_and_idle', { cleanup: {
+      ok: false, deferred: false, tasksTerminal: state.tasksTerminal, intakeIdle: state.intakeIdle,
+    } });
+    lastCheckpointAt = Date.now();
+  } });
+  if (!readiness.ready) {
     await checkpoint('cleanup_deferred_for_active_or_unknown_task', { cleanup: {
-      ok: false, deferred: true, tasksTerminal, noDispatchInFlight,
+      ok: false, deferred: true, tasksTerminal: readiness.tasksTerminal, intakeIdle: readiness.intakeIdle,
     } });
     return false;
   }
