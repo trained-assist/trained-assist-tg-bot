@@ -513,6 +513,18 @@ async function main() {
     else if (value && typeof value === 'object') Object.values(value).forEach(collectText);
   };
   collectText(resultValue);
+  const resultArtifactManifests = [];
+  const collectArtifactManifests = value => {
+    if (Array.isArray(value)) value.forEach(collectArtifactManifests);
+    else if (value && typeof value === 'object') {
+      if (Array.isArray(value.artifacts)) resultArtifactManifests.push(...value.artifacts.filter(item => item && typeof item === 'object'));
+      Object.values(value).forEach(collectArtifactManifests);
+    }
+  };
+  collectArtifactManifests(resultValue);
+  const uniqueResultArtifactManifests = [...new Map(resultArtifactManifests
+    .filter(item => typeof item.ref === 'string' && typeof item.name === 'string')
+    .map(item => [`${item.ref}\0${item.name}`, item])).values()];
   const resultText = answerParts.join('\n');
   const escapedLines = expectedLines.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const answerMatchesChallenge = new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
@@ -523,6 +535,11 @@ async function main() {
   if (scenario === 'artifact-export' || scenario === 'playwright-artifact') {
     const expectedArtifactNames = scenario === 'artifact-export'
       ? ['agent-note.md'] : ['browser-check.md', 'browser-proof.png'];
+    const resultManifests = expectedArtifactNames.map(name => uniqueResultArtifactManifests.find(item => item.name === name) ?? null);
+    const runnerResultManifestValid = resultManifests.every(item => item
+      && typeof item.ref === 'string' && item.ref.length > 0
+      && Number.isSafeInteger(item.sizeBytes) && item.sizeBytes > 0
+      && typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/.test(item.sha256));
     const artifacts = await d1(`SELECT artifact_ref, size_bytes, checksum, run_id FROM task_artifacts
       WHERE user_task_id = ? ORDER BY created_at, artifact_id`, [task.id]);
     const runEvents = await d1(`SELECT payload_json FROM task_events
@@ -538,23 +555,31 @@ async function main() {
         }] : [];
       } catch { return []; }
     });
-    const expectedFileExportsPresent = expectedArtifactNames.every(name => exported.some(item => item.name === name
-      && item.size > 0 && item.sha256));
+    const matchingTaskManifest = runnerResultManifestValid && resultManifests.every(item => artifacts.some(row =>
+      row.artifact_ref === item.ref && row.size_bytes === item.sizeBytes
+      && row.checksum === `sha256:${item.sha256}` && row.run_id === primaryCorrelation.runnerRunId));
+    const expectedFileExportsPresent = matchingTaskManifest;
+    const persistenceState = safeCode(resultValue?.persistence) ?? null;
     const manifestMetadataValid = artifacts.length >= expectedArtifactNames.length && artifacts.every(item => typeof item.artifact_ref === 'string'
       && Number.isSafeInteger(item.size_bytes) && item.size_bytes > 0
       && typeof item.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(item.checksum)
       && item.run_id === primaryCorrelation.runnerRunId);
     failureDiagnostics = { ...failureDiagnostics, stage: 'artifact_export_validation', artifactExport: {
       expectedFileExportsPresent, exportEventCount: exported.length,
-      manifestCount: artifacts.length, manifestMetadataValid,
+      resultManifestCount: uniqueResultArtifactManifests.length, runnerResultManifestValid,
+      manifestCount: artifacts.length, manifestMetadataValid, matchingTaskManifest, persistenceState,
     } };
-    assert(expectedFileExportsPresent, 'sandbox_expected_artifacts_not_exported');
+    assert(runnerResultManifestValid, 'sandbox_runner_result_manifest_missing_expected_file');
+    assert(matchingTaskManifest, 'sandbox_expected_artifact_not_persisted_in_cp');
+    assert(persistenceState === 'persisted', 'sandbox_runner_artifact_persistence_not_confirmed');
     assert(artifacts.length >= expectedArtifactNames.length, 'sandbox_task_artifact_manifest_not_persisted');
     assert(manifestMetadataValid, 'sandbox_task_artifact_metadata_invalid');
     artifactExportEvidence = {
       expectedArtifactExportsPresent: true,
-      expectedExportEventCount: expectedArtifactNames.length,
+      expectedArtifactNamesPresentInResult: true,
+      runnerExportEventCount: exported.length,
       persistedArtifactManifestCount: artifacts.length,
+      persistenceState,
       ...(scenario === 'playwright-artifact' ? {
         browserToolRequested: true,
         resultTitleAndMarkerPresent: answerMatchesChallenge,

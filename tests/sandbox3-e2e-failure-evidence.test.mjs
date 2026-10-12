@@ -15,7 +15,9 @@ describe('sandbox3 E2E failure evidence', () => {
         generation: 1, runId: 'run_abc.1', errorClass: null, runnerErrorCode: null, result: 'private model output' }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27, text: 'private model output' },
       artifactExport: { expectedFileExportsPresent: false, exportEventCount: 0,
-        manifestCount: 0, manifestMetadataValid: false, rawArtifactRef: 'private storage key' },
+        resultManifestCount: 0, runnerResultManifestValid: false, manifestCount: 0,
+        manifestMetadataValid: false, matchingTaskManifest: false, persistenceState: 'persisted',
+        rawArtifactRef: 'private storage key' },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0, chatId: 'private chat' },
     });
@@ -31,7 +33,8 @@ describe('sandbox3 E2E failure evidence', () => {
         generation: 1, runIdPresent: true, errorClass: null, runnerErrorCode: null }] },
       answer: { matchesChallenge: false, resultCharacterCount: 27 },
       artifactExport: { expectedFileExportsPresent: false, exportEventCount: 0,
-        manifestCount: 0, manifestMetadataValid: false },
+        resultManifestCount: 0, runnerResultManifestValid: false, manifestCount: 0,
+        manifestMetadataValid: false, matchingTaskManifest: false, persistenceState: 'persisted' },
       delivery: { status: 'unknown', attempts: 2, providerMessageIdPresent: false,
         controlPlaneState: 'not_required', controlPlaneRows: 0 },
     });
