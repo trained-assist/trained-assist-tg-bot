@@ -1,0 +1,180 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+
+const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
+const cp = 'https://trained-assist-cp-production.skillset-apply.workers.dev';
+const profileId = 'production-e2e-telegram-v1';
+const target = 'productionE2e';
+
+function required(name) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name.toLowerCase()}_required`);
+  return value;
+}
+
+const operatorToken = required('TG_SANDBOX3_OPERATOR_TOKEN');
+const signature = required('PRODUCTION_E2E_SIGNATURE');
+const chatId = Number(required('TG_SANDBOX_E2E_CHAT_ID'));
+const userId = Number(required('TG_SANDBOX_E2E_USER_ID'));
+assert.equal(chatId, 1714048, 'production_e2e_chat_mismatch');
+assert.equal(userId, 1714048, 'production_e2e_user_mismatch');
+
+async function workerRequest(path, body) {
+  const response = await fetch(`${worker}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { authorization: `Bearer ${operatorToken}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`worker_${response.status}_${safeCode(payload.error)}`);
+  return payload;
+}
+
+function safeCode(value) {
+  return typeof value === 'string' && /^[a-z0-9_-]{1,80}$/i.test(value) ? value.toLowerCase() : 'failed';
+}
+
+async function cpStatus(taskId) {
+  const response = await fetch(`${cp}/status`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-principal': profileId, 'x-principal-sig': signature },
+    body: JSON.stringify({ taskId }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`control_plane_status_${response.status}`);
+  return response.json();
+}
+
+function safeStatus(status) {
+  const task = status.taskStore ?? {};
+  const engine = status.engine && typeof status.engine === 'object' ? status.engine : {};
+  return {
+    taskStatus: typeof task.status === 'string' ? task.status : null,
+    stage: typeof task.stage === 'string' ? task.stage : null,
+    workflowStatus: typeof engine.status === 'string' && /^[a-z_-]{1,40}$/i.test(engine.status)
+      ? engine.status.toLowerCase() : null,
+    runCount: Array.isArray(status.runs) ? status.runs.length : 0,
+    runs: (status.runs ?? []).map(run => ({ status: run.status,
+      hasSessionId: typeof run.session_id === 'string' && !!run.session_id,
+      hasStartedAt: Number.isSafeInteger(run.started_at), hasFinishedAt: Number.isSafeInteger(run.finished_at) })),
+  };
+}
+
+async function main() {
+  let evidence = await workerRequest('/operator/test-evidence');
+  assert.equal(evidence.profileId, profileId, 'production_e2e_profile_mismatch');
+  const activeTasks = (evidence.tasks ?? []).filter(task => !['done', 'failed', 'cancelled'].includes(task.status));
+  assert.equal(activeTasks.length, 1, 'production_e2e_expected_one_active_task');
+  const task = activeTasks[0];
+  assert.equal(task.status, 'active', 'production_e2e_task_not_active');
+  assert.equal(task.runs?.length, 0, 'production_e2e_task_already_has_run');
+  assert.equal(evidence.buffer?.pendingCount, 0, 'production_e2e_unexpected_pending_input');
+  assert.equal(evidence.buffer?.busy, true, 'production_e2e_intake_not_waiting');
+  assert.equal(evidence.buffer?.busyRequestCount, 1, 'production_e2e_admission_scope_ambiguous');
+
+  let status = await cpStatus(task.userTaskId);
+  assert.equal(status.taskStore?.id, task.userTaskId, 'production_e2e_cp_task_mismatch');
+  assert.equal(status.taskStore?.status, 'active', 'production_e2e_cp_task_not_active');
+  assert.equal(status.taskStore?.stage, 'queued', 'production_e2e_cp_stage_changed');
+  assert.equal(status.runs?.length, 0, 'production_e2e_cp_run_already_exists');
+  const challenge = /PROD-E2E-[A-F0-9]{16}/.exec(JSON.stringify(status.taskStore))?.[0];
+  assert(challenge, 'production_e2e_challenge_not_found');
+
+  // Replay the current button once as the pinned test user. The callback is
+  // revision-bound by the Worker and still refers to the already accepted task;
+  // no message, task, or new idempotency key is created here.
+  const callback = await workerRequest('/operator/test-update', {
+    target, type: 'callback', chatId, userId, delivery: 'telegram', callbackData: 'auto',
+    updateId: Date.now() + Math.floor(Math.random() * 1000),
+  });
+  assert.equal(callback.ok, true, 'production_e2e_callback_replay_failed');
+  const transcriptText = (callback.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
+  const callbackOutcome = /устарел|устарела|актуальност/.test(transcriptText) ? 'stale_button'
+    : /передаю|запуск|принят/.test(transcriptText) ? 'launch_acknowledged' : 'callback_processed';
+
+  const deadline = Date.now() + 8 * 60_000;
+  let taskEvidence;
+  let cpView;
+  while (Date.now() < deadline) {
+    evidence = await workerRequest(`/operator/test-evidence?challenge=${encodeURIComponent(challenge)}`);
+    taskEvidence = (evidence.tasks ?? []).find(candidate => candidate.userTaskId === task.userTaskId);
+    cpView = await cpStatus(task.userTaskId);
+    if (['done', 'failed', 'cancelled'].includes(taskEvidence?.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 4_000));
+  }
+
+  const terminal = ['done', 'failed', 'cancelled'].includes(taskEvidence?.status);
+  const report = {
+    ok: false,
+    scenario: 'resume-existing-pinned-production-e2e-task',
+    profileId,
+    taskId: task.userTaskId,
+    callbackOutcome,
+    task: taskEvidence ? {
+      status: taskEvidence.status,
+      resultPersisted: taskEvidence.resultPresent === true,
+      answerPersisted: taskEvidence.answerPresent === true,
+      answerMatchedChallenge: taskEvidence.answerMatchesChallenge === true,
+      eventTypes: taskEvidence.historyTypes ?? [],
+    } : null,
+    cp: cpView ? safeStatus(cpView) : null,
+    telegramDeliveryStatus: null,
+    telegramProviderMessageIdPresent: false,
+    buffer: evidence.buffer ? {
+      pendingCount: evidence.buffer.pendingCount ?? null,
+      busy: evidence.buffer.busy === true,
+      busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
+    } : null,
+    answerTextLogged: false,
+    promptTextLogged: false,
+  };
+
+  if (terminal && taskEvidence.status === 'done') {
+    assert.equal(taskEvidence.resultPresent, true, 'production_e2e_result_not_persisted');
+    assert.equal(taskEvidence.answerPresent, true, 'production_e2e_answer_not_persisted');
+    assert.equal(taskEvidence.answerMatchesChallenge, true, 'production_e2e_answer_mismatch');
+    assert.equal(taskEvidence.runs?.length, 1, 'production_e2e_run_count_mismatch');
+    assert.equal(taskEvidence.runs[0].status, 'success', 'production_e2e_runner_not_successful');
+    assert.equal(taskEvidence.runs[0].hasSessionId, true, 'production_e2e_session_not_persisted');
+    assert.equal(taskEvidence.runs[0].hasStartedAt, true, 'production_e2e_run_start_not_persisted');
+    assert.equal(taskEvidence.runs[0].hasFinishedAt, true, 'production_e2e_run_finish_not_persisted');
+    assert((taskEvidence.historyTypes ?? []).includes('run_finished'), 'production_e2e_finish_event_not_persisted');
+    const delivery = await workerRequest(`/operator/test-delivery/${encodeURIComponent(task.userTaskId)}`);
+    assert.equal(delivery.terminal?.status, 'sent', 'production_e2e_delivery_not_sent');
+    assert.equal(String(delivery.terminal.chatId), String(chatId), 'production_e2e_delivery_chat_mismatch');
+    assert(Number.isSafeInteger(delivery.terminal.providerMessageId) && delivery.terminal.providerMessageId > 0,
+      'production_e2e_provider_message_id_missing');
+    report.ok = true;
+    report.telegramDeliveryStatus = delivery.terminal.status;
+    report.telegramProviderMessageIdPresent = true;
+  }
+
+  if (terminal && !evidence.buffer?.busy && !evidence.buffer?.pendingCount &&
+      !evidence.buffer?.busyRequestCount && !evidence.buffer?.unresolvedLaunchCount) {
+    const cleanup = await workerRequest('/operator/test-cleanup', {
+      target, confirm: 'CLEAN_PINNED_TEST_CHAT',
+    });
+    if (cleanup.ok !== true || cleanup.loginSessionDeleted !== true) throw new Error('production_e2e_scoped_cleanup_failed');
+    report.bufferCleaned = true;
+  } else {
+    report.bufferCleaned = false;
+  }
+
+  await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify(report));
+  if (!terminal) throw new Error('production_e2e_task_not_terminal_after_resume');
+  if (taskEvidence.status !== 'done') throw new Error(`production_e2e_task_${safeCode(taskEvidence.status)}`);
+  if (!report.ok) throw new Error('production_e2e_resume_checks_failed');
+  if (!report.bufferCleaned) throw new Error('production_e2e_buffer_not_clean');
+}
+
+main().catch(error => {
+  const firstLine = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
+  const reasonCode = /^[a-z0-9][a-z0-9_:.-]{0,159}$/i.test(firstLine)
+    ? firstLine.toLowerCase() : 'production_e2e_resume_failed';
+  console.error(JSON.stringify({ ok: false, reasonCode, answerTextLogged: false, promptTextLogged: false }));
+  process.exitCode = 1;
+});
