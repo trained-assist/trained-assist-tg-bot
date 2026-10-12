@@ -170,6 +170,9 @@ if VIEW == "events":
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
             "source_type": type(item.get("source")).__name__,
+            "source_keys": sorted(str(key) for key in item.get("source", {}).keys()) if isinstance(item.get("source"), dict) else [],
+            "source_nested_keys": {str(key): sorted(str(nested_key) for nested_key in value.keys())
+                for key, value in item.get("source", {}).items() if isinstance(value, dict)},
             "message_type": type((item.get("$metadata") or item.get("metadata") or {}).get("message")).__name__,
         } for item in event_items[:3] if isinstance(item, dict)],
     }, indent=2))
