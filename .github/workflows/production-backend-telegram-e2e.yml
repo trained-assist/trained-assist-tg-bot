@@ -142,7 +142,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
       - name: Enable the pinned production backend test lane
-        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true || inputs.inspect_e2e_lane == true }}
+        if: ${{ inputs.run_canary == true || inputs.resume_pending_input == true }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
