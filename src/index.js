@@ -172,7 +172,12 @@ app.get('/internal/held-messages', async c => {
 });
 
 // Health check
-app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null }));
+app.get('/health', (c) => c.json({ status: 'alive', buildSha: c.env.BUILD_SHA || null,
+  executionBackend: c.env.EXECUTION_BACKEND || 'legacy-agent',
+  controlPlaneUrlConfigured: Boolean(c.env.CONTROL_PLANE_URL),
+  ingressPaused: c.env.TG_SLICE_INGRESS_PAUSED === 'true',
+  deliveryPaused: c.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
+  stopEnabled: c.env.TG_SLICE_STOP_ENABLED !== 'false' }));
 
 // Debug: dump what Telegram currently has registered as the bot's command
 // menu. Used to verify that commands-registry.json → setMyCommands actually
@@ -610,3 +615,4 @@ export default { fetch: app.fetch, scheduled };
 export { RetryQueue } from './retry-queue.js';
 
 export { MediaJob } from './media-jobs.js';
+export { ProductionE2eIntakeBuffer, ProductionE2eTgDeliveryOwner } from './sandbox-tg/production-e2e-classes.js';
