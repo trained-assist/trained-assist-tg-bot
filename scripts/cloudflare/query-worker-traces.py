@@ -151,6 +151,23 @@ if VIEW == "events":
 
     event_items = response.get("result", {}).get("events", {}).get("events", [])
     safe_events = []
+    json_message_shapes = {}
+    for item in event_items:
+        source = item.get("source") if isinstance(item, dict) else None
+        message = source.get("message") if isinstance(source, dict) else None
+        if not isinstance(message, str):
+            continue
+        try:
+            parsed = json.loads(message)
+        except (TypeError, ValueError):
+            shape = "non_json"
+        else:
+            if isinstance(parsed, dict):
+                name = parsed.get("event")
+                shape = f"json_event:{name}" if isinstance(name, str) and name.replace(".", "").replace("_", "").isalnum() else "json_object"
+            else:
+                shape = f"json_{type(parsed).__name__}"
+        json_message_shapes[shape] = json_message_shapes.get(shape, 0) + 1
     for item in event_items:
         payload = event_payload(item)
         if payload is None:
@@ -171,6 +188,7 @@ if VIEW == "events":
         "returned_event_count": len(event_items),
         "truncated": response.get("result", {}).get("truncated", False),
         "lifecycle_events": safe_events,
+        "message_shapes": json_message_shapes,
         "event_shape_sample": [{
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
