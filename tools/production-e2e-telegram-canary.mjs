@@ -55,6 +55,22 @@ async function capture(text, extra = {}) {
     delivery: 'capture', text, updateId: Date.now() + Math.floor(Math.random() * 1000), ...extra });
 }
 
+async function waitForLiveLane() {
+  const deadline = Date.now() + 60_000;
+  let lastReadiness = null;
+  while (Date.now() < deadline) {
+    const evidence = await workerRequest('/operator/test-evidence');
+    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+    lastReadiness = evidence.readiness ?? {};
+    if (lastReadiness.testApiEnabled === true && lastReadiness.ingressPaused === false &&
+        lastReadiness.deliveryPaused === false) return evidence;
+    // The live config is deployed immediately after a paused version. Allow
+    // edge propagation to finish before sending any synthetic user message.
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+  }
+  throw new Error(`production_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
+}
+
 async function waitForTask(baselineIds, startedAt, challenge) {
   const deadline = Date.now() + 8 * 60_000;
   let task = null;
@@ -106,12 +122,7 @@ async function waitForDelivery(taskId, chatId) {
 async function main() {
   if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('production_canary_target_required');
   const { chatId } = identity();
-  const before = await workerRequest('/operator/test-evidence');
-  assert.equal(before.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
-  if (before.readiness?.testApiEnabled !== true || before.readiness?.ingressPaused !== false ||
-      before.readiness?.deliveryPaused !== false) {
-    throw new Error(`production_canary_lane_not_ready_test_api_${before.readiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${before.readiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${before.readiness?.deliveryPaused ? 'yes' : 'no'}`);
-  }
+  const before = await waitForLiveLane();
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
     throw new Error('production_canary_intake_not_idle');
