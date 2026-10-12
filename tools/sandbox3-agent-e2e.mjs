@@ -296,7 +296,7 @@ async function waitForArtifactDeliveries(taskId, chatId, expectedNames) {
     const artifacts = Array.isArray(observed.artifacts) ? observed.artifacts : [];
     const matching = expectedNames.map(name => artifacts.find(item => item.artifactName === name) ?? null);
     const failed = matching.find(item => item && ['dead', 'unknown'].includes(item.status));
-    if (failed) throw new Error(`sandbox3_artifact_delivery_${failed.status}_${failed.reason ?? 'reason_unknown'}_${failed.artifactName}`);
+    if (failed) throw new Error(`sandbox3_artifact_delivery_${failed.status}_${failed.reason ?? 'reason_unknown'}_${failed.artifactSourceFailure ?? 'source_unknown'}_${failed.artifactName}`);
     if (matching.every(Boolean) && matching.every(item => item.status === 'sent')) {
       for (const item of matching) {
         assert.equal(String(item.chatId), String(chatId), 'artifact_sent_to_unexpected_chat');
