@@ -18,6 +18,21 @@ function replaceOnce(source, before, after, label) {
   return `${source.slice(0, first)}${after}${source.slice(first + before.length)}`;
 }
 
+function omitCronTriggerTable(source) {
+  const lines = source.split(/\r?\n/);
+  const starts = lines.flatMap((line, index) => line.trim() === '[triggers]' ? [index] : []);
+  if (starts.length !== 1) throw new Error('wrangler_trigger_table_not_unique');
+  const start = starts[0];
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[\[?[^\]]+\]\]?\s*$/.test(lines[end])) end += 1;
+  const entries = lines.slice(start + 1, end).filter(line => line.trim() && !line.trim().startsWith('#'));
+  if (entries.length !== 1 || !/^\s*crons\s*=/.test(entries[0])) {
+    throw new Error('wrangler_trigger_table_unexpected_contents');
+  }
+  lines.splice(start, end - start);
+  return lines.join('\n');
+}
+
 export function renderProductionE2eWorkerConfig(source, { paused }) {
   if (typeof source !== 'string' || typeof paused !== 'boolean') throw new Error('invalid_production_e2e_config_input');
   let output = source;
@@ -30,6 +45,10 @@ export function renderProductionE2eWorkerConfig(source, { paused }) {
     TG_SLICE_DELIVERY_PAUSED: String(paused),
   };
   for (const [name, value] of Object.entries(vars)) output = setTomlString(output, name, value);
+  // The canary does not need scheduled invocations. Leaving triggers.crons
+  // undefined tells Wrangler to keep the existing sandbox schedule unchanged
+  // and avoids making the unrelated schedules API part of the canary deploy.
+  output = omitCronTriggerTable(output);
   // The pinned production test chat is also used in sandbox3. Give the canary
   // its own DO namespaces so chat-keyed intake scope and delivery state cannot
   // collide with the sandbox3 profile that uses the same Telegram chat ID.
