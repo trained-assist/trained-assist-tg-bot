@@ -64,6 +64,7 @@ const summary = {
     launching: evidence.buffer.launching ?? 0,
     unresolvedLaunchCount: evidence.buffer.unresolvedLaunchCount ?? 0,
     busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
+    alarmAt: Number.isSafeInteger(evidence.buffer.alarmAt) ? evidence.buffer.alarmAt : null,
     stranded: evidence.buffer.stranded === true,
   } : null,
   tasks: (evidence.tasks ?? []).map(task => ({
