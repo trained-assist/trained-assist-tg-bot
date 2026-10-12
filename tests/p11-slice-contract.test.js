@@ -35,6 +35,15 @@ describe('config — production-bot guard + env-only', () => {
     expect(() => readTgSliceConfig({ ...env, SESSION_NAMESPACE: 'integrator-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
     expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
   });
+  it('does not treat the production CP URL as the E2E sandbox lane outside sandbox environment', () => {
+    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'production', TG_SANDBOX_TEST_API_ENABLED: 'true',
+      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PRINCIPAL: 'production-telegram-v1', CONTROL_PLANE_PROFILE: 'production-profile',
+      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'normal-production-signature',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'must-not-be-used' });
+    expect(readTgSliceConfig(env).principalSignature).toBe('normal-production-signature');
+  });
   it('allowlist empty → no chat served (fail closed)', () => {
     const config = readTgSliceConfig(makeEnv({ TG_SLICE_ALLOWED_CHATS: '' }));
     expect(profileForUpdate(config, { message: { chat: { id: 1001 } } })).toBeNull();
