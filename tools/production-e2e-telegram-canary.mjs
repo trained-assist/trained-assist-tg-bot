@@ -6,6 +6,40 @@ import { writeFile } from 'node:fs/promises';
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const PROFILE_ID = 'production-e2e-telegram-v1';
 const TARGET = 'productionE2e';
+let canaryProgress = {
+  ok: false,
+  scenario: 'production-telegram-two-turn-session-context-and-delivery',
+  profileId: PROFILE_ID,
+  phase: 'starting',
+  turns: [],
+  answerTextLogged: false,
+  promptTextLogged: false,
+};
+
+async function checkpoint(phase, patch = {}) {
+  canaryProgress = { ...canaryProgress, ...patch, phase };
+  await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(canaryProgress, null, 2)}\n`, { mode: 0o600 });
+}
+
+function safeTaskSummary(task, { matchedPriorNonce = false } = {}) {
+  const statuses = new Set(['active', 'done', 'failed', 'cancelled']);
+  const runStatuses = new Set(['queued', 'running', 'success', 'failed', 'cancelled', 'unknown']);
+  const run = Array.isArray(task?.runs) ? task.runs[0] : null;
+  return {
+    taskId: typeof task?.userTaskId === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(task.userTaskId)
+      ? task.userTaskId : null,
+    taskStatus: statuses.has(task?.status) ? task.status : null,
+    runCount: Array.isArray(task?.runs) ? task.runs.length : 0,
+    runStatus: runStatuses.has(run?.status) ? run.status : null,
+    sessionPersisted: run?.hasSessionId === true,
+    resultPersisted: task?.resultPresent === true,
+    answerPersisted: task?.answerPresent === true,
+    answerMatchedPriorNonce: matchedPriorNonce,
+    startTimePersisted: run?.hasStartedAt === true,
+    finishTimePersisted: run?.hasFinishedAt === true,
+    eventTypes: (task?.historyTypes ?? []).filter(type => typeof type === 'string' && /^[a-z0-9_-]{1,80}$/i.test(type)),
+  };
+}
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -141,6 +175,7 @@ async function main() {
   if ((before.tasks ?? []).some(task => !['done', 'failed', 'cancelled'].includes(task.status))) {
     throw new Error('production_canary_previous_task_not_terminal');
   }
+  await checkpoint('lane_ready', { priorTaskCount: (before.tasks ?? []).length, intakeIdle: true });
   const baselineIds = new Set((before.tasks ?? []).map(task => task.userTaskId));
   // A prior interrupted canary may leave only an unlaunched draft. The pinned
   // test cleanup endpoint clears this exact chat's Intake/session state and
@@ -151,6 +186,7 @@ async function main() {
   assert.equal(clean.ok, true, 'production_canary_initial_cleanup_failed');
   const cleaned = await workerRequest('/operator/test-evidence');
   assert.equal(cleaned.buffer?.pendingCount, 0, 'production_canary_buffer_not_clean');
+  await checkpoint('initial_cleanup_complete', { intakeIdle: true });
 
   const username = `production_e2e_${randomBytes(6).toString('hex')}`;
   let task = null;
@@ -164,11 +200,14 @@ async function main() {
 
     const login = await send(`/login ${username} ${password}`);
     assert.equal(login.admission?.authenticated, true, 'production_canary_login_failed');
+    await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
 
     const nonce = `PROD-E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
     const startedAt = Date.now();
     const question = await send(`Reply with exactly this token and nothing else: ${nonce}`);
     assert.equal(question.ok, true, 'production_canary_question_rejected');
+    await checkpoint('first_turn_accepted', { turns: [{ accepted: true,
+      pendingCount: Number.isSafeInteger(question.collector?.pendingCount) ? question.collector.pendingCount : null }] });
     assert.equal(question.collector?.pendingCount, 1, 'production_canary_input_not_buffered');
 
     const { userId } = identity();
@@ -183,6 +222,7 @@ async function main() {
     const observed = await waitForTask(baselineIds, startedAt, nonce);
     task = observed.task;
     taskTerminal = ['done', 'failed', 'cancelled'].includes(task.status);
+    await checkpoint('first_turn_terminal', { turns: [safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
     assert.equal(task.status, 'done', 'production_canary_task_not_done');
     assert.equal(task.resultPresent, true, 'production_canary_result_not_persisted');
     assert.equal(task.answerPresent, true, 'production_canary_answer_not_persisted');
@@ -197,12 +237,17 @@ async function main() {
 
     const firstTask = task;
     const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
+    await checkpoint('first_turn_delivered', { turns: [{ ...safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      deliveryStatus: firstDelivery.status, providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) }] });
 
     // Verify session context across separate Telegram turns. The follow-up
     // intentionally omits the nonce; only the preceding conversation contains it.
     const followupStartedAt = Date.now();
     const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
     assert.equal(followupInput.ok, true, 'production_canary_followup_rejected');
+    await checkpoint('followup_turn_accepted', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      { accepted: true, pendingCount: Number.isSafeInteger(followupInput.collector?.pendingCount)
+        ? followupInput.collector.pendingCount : null }] });
     assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
     taskTerminal = false;
     const followupLaunch = await pressCurrentLaunchButton();
@@ -210,6 +255,8 @@ async function main() {
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
     task = followupObserved.task;
     taskTerminal = ['done', 'failed', 'cancelled'].includes(task.status);
+    await checkpoint('followup_turn_terminal', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
     assert.equal(task.status, 'done', 'production_canary_followup_task_not_done');
     assert.equal(task.resultPresent, true, 'production_canary_followup_result_not_persisted');
     assert.equal(task.answerPresent, true, 'production_canary_followup_answer_not_persisted');
@@ -223,6 +270,12 @@ async function main() {
     assert(followupObserved.buffer?.pendingCount === 0, 'production_canary_followup_buffer_not_drained');
 
     const followupDelivery = await waitForDelivery(task.userTaskId, chatId);
+    await checkpoint('followup_turn_delivered', { turns: [
+      { ...safeTaskSummary(firstTask, { matchedPriorNonce: true }), deliveryStatus: firstDelivery.status,
+        providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) },
+      { ...safeTaskSummary(task, { matchedPriorNonce: true }), deliveryStatus: followupDelivery.status,
+        providerMessageIdPresent: Number.isSafeInteger(followupDelivery.providerMessageId) },
+    ] });
     const report = { ok: true, scenario: 'production-telegram-two-turn-session-context-and-delivery',
       profileId: PROFILE_ID, turns: [
         { taskId: firstTask.userTaskId, taskStatus: firstTask.status, runStatus: firstTask.runs[0].status,
@@ -232,27 +285,35 @@ async function main() {
           sessionPersisted: task.runs[0].hasSessionId, resultPersisted: task.resultPresent,
           answerRecoveredPriorNonce: true, telegramDeliveryStatus: followupDelivery.status },
       ], telegramProviderMessageIdPresent: true, answerTextLogged: false };
-    await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    await checkpoint('complete', { ...report, ok: true });
     console.log(JSON.stringify(report));
   } finally {
     if (!task || taskTerminal) {
       const cleanup = await workerRequest('/operator/test-cleanup', {
         target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT', username,
       });
+      await checkpoint('test_profile_cleanup_complete', { cleanup: {
+        ok: cleanup.ok === true,
+        testProfileDeleted: cleanup.testProfileDeleted === true,
+        loginSessionDeleted: cleanup.loginSessionDeleted === true,
+      } });
       if (cleanup.ok !== true || cleanup.testProfileDeleted !== true || cleanup.loginSessionDeleted !== true) {
         throw new Error('production_canary_cleanup_incomplete');
       }
+    } else {
+      await checkpoint('cleanup_deferred_for_nonterminal_task', { cleanup: { ok: false, deferred: true } });
     }
   }
 }
 
-main().catch(error => {
+main().catch(async error => {
   // Assertions include a multiline expected/actual diff. Keep only a safe
   // first-line slug so failure evidence stays useful without ever emitting
   // transcripts, user input, answers, or credentials.
   const firstLine = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
   const reason = /^[a-z0-9][a-z0-9_:.-]{0,159}$/i.test(firstLine)
     ? firstLine.toLowerCase() : 'production_canary_failed';
+  await checkpoint(canaryProgress.phase, { ok: false, failureReasonCode: reason }).catch(() => {});
   console.error(JSON.stringify({ lane: TARGET, ok: false,
     reasonCode: reason }));
   process.exitCode = 1;
