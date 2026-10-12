@@ -24,6 +24,36 @@ function actor(entries = {}) {
 }
 
 describe('sandbox-only Intake DO reset', () => {
+  it('returns redacted durable task evidence only for the exact production E2E sandbox lane', async () => {
+    const storage = new Storage({ 'cp-acceptance:req-1': { receipt: { requestId: 'req-1', userTaskId: 'ut-1',
+      profileId: 'production-e2e-telegram-v1', providerAcceptedAt: 100 } },
+    'cp-acceptance:req-foreign': { receipt: { requestId: 'req-foreign', userTaskId: 'ut-foreign',
+      profileId: 'foreign-profile', providerAcceptedAt: 200 } } });
+    const state = { storage, blockConcurrencyWhile: operation => operation() };
+    const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      TG_SANDBOX_BOT_TOKEN: 'fixture-test-token',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1', CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'scoped-signature',
+      SESSION_NAMESPACE: 'integrator-production-e2e-v1', EXECUTION_BACKEND: 'control-plane',
+      TG_SANDBOX_TEST_API_ENABLED: 'true', CONTROL_PLANE_SERVICE: { async fetch() { return Response.json({
+        taskStore: { id: 'ut-1', profile_id: 'production-e2e-telegram-v1', status: 'done', generation: 1,
+          result: { answer: 'private answer text PROD-E2E-ABCD1234' } },
+        runs: [{ status: 'success', generation: 1, session_id: 'persisted-session', started_at: 10, finished_at: 20 }],
+      }); } } };
+    const intake = new IntakeBuffer(state, env);
+    const response = await intake.fetch(new Request('https://intake/operator/test-evidence', { method: 'POST',
+      body: JSON.stringify({ challenge: 'PROD-E2E-ABCD1234' }) }));
+    expect(response.status).toBe(200);
+    const evidence = await response.json();
+    expect(evidence).toMatchObject({ profileId: 'production-e2e-telegram-v1', tasks: [{
+      requestId: 'req-1', userTaskId: 'ut-1', acceptedAt: 100, status: 'done', resultPresent: true,
+      answerPresent: true, answerMatchesChallenge: true, historyTypes: [], runs: [{ status: 'success', generation: 1, hasSessionId: true,
+        hasStartedAt: true, hasFinishedAt: true }],
+    }] });
+    expect(JSON.stringify(evidence)).not.toContain('private answer text');
+  });
+
   it('reports and refuses an in-progress launch but allows clearing stale busy and receipt markers', async () => {
     const { instance, storage } = actor({ buf: [{ text: 'old test input' }], busy: true,
       cpUnresolvedLaunches: ['old-request'], cpStopWindow: { pending: true }, alarm: 7 });
@@ -77,7 +107,8 @@ describe('sandbox-only Intake DO reset', () => {
     const state = { storage, blockConcurrencyWhile: operation => operation() };
     const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
       CONTROL_PLANE_URL: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
-      CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1', SESSION_NAMESPACE: 'integrator-sandbox3-v1',
+      CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1', CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1',
+      SESSION_NAMESPACE: 'integrator-sandbox3-v1',
       EXECUTION_BACKEND: 'control-plane' };
     const intake = new IntakeBuffer(state, env);
     const inspected = await intake.fetch(new Request('https://intake/operator/reset-inspect', { method: 'POST' }));

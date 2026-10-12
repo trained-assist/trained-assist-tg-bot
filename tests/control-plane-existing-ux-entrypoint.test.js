@@ -48,6 +48,20 @@ function configureSandbox3Operator(env) {
     cutoverAt: Date.now(), oldTaskIds: [], deliveries: [] });
 }
 
+function configureProductionE2eOperator(env) {
+  Object.assign(env, { CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+    CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1', CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1',
+    CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'production-e2e-signature',
+    TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+    TG_SANDBOX3_OPERATOR_TOKEN: 'dedicated-sandbox3-operator-token', TG_SANDBOX_TEST_API_ENABLED: 'true',
+    TG_SANDBOX_E2E_CHAT_ID: '1714048', TG_SANDBOX_E2E_USER_ID: '1714048',
+    SESSION_NAMESPACE: 'integrator-production-e2e-v1', EXECUTION_BACKEND: 'control-plane',
+    TG_SLICE_OPEN_SANDBOX: 'false', TG_SLICE_INGRESS_PAUSED: 'false', TG_SLICE_DELIVERY_PAUSED: 'false' });
+  env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST = JSON.stringify({ version: 'tg-delivery-cutover-v1',
+    botUsername: 'ptichka_status_bot', profileId: 'production-e2e-telegram-v1', cutoverId: 'production-e2e-fixture',
+    cutoverAt: Date.now(), oldTaskIds: [], deliveries: [] });
+}
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
@@ -227,6 +241,92 @@ describe('signed existing-UX ingress', () => {
     env.TG_SANDBOX_CLEANUP_TOKEN = 'dedicated-sandbox-cleanup-token';
     expect((await request({ target: 'sandbox3', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' },
       'dedicated-sandbox-cleanup-token')).status).toBe(409);
+  });
+
+  it('allows a Telegram test update to production CP only through the pinned test bot, principal, profile, and user', async () => {
+    const { env } = fixture();
+    configureProductionE2eOperator(env);
+    const intakeCalls = [];
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      intakeCalls.push({ name, path: new URL(url).pathname });
+      return Response.json({ buf: [], retryBatch: [], busy: false, launching: [] });
+    } }) };
+    const request = (body, token = env.TG_SANDBOX3_OPERATOR_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714049, userId: 1714048, text: '/help' })).status).toBe(403);
+    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714049, text: '/help' })).status).toBe(403);
+    const response = await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714048,
+      delivery: 'capture', text: '/help' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chatId: 1714048, userId: 1714048, delivery: 'capture',
+      admission: { ok: true } });
+    expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
+    env.CONTROL_PLANE_PRINCIPAL = 'integration-sandbox3-v1';
+    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' })).status).toBe(401);
+  });
+
+  it('returns only redacted production E2E task evidence from the pinned Telegram Intake object', async () => {
+    const { env } = fixture();
+    configureProductionE2eOperator(env);
+    let observed;
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, init) {
+      observed = { name, path: new URL(url).pathname, method: init.method,
+        body: init.body ? JSON.parse(init.body) : null };
+      return Response.json({ profileId: 'production-e2e-telegram-v1', tasks: [{ userTaskId: 'ut-test', status: 'done',
+        resultPresent: true, answerPresent: true, runs: [{ status: 'success', hasSessionId: true }] }] });
+    } }) };
+    const response = await worker.fetch(new Request('https://worker/operator/test-evidence?challenge=PROD-E2E-ABCD1234', {
+      headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+    }), env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ profileId: 'production-e2e-telegram-v1',
+      tasks: [{ userTaskId: 'ut-test', status: 'done', resultPresent: true, answerPresent: true,
+        runs: [{ status: 'success', hasSessionId: true }] }] });
+    expect(observed).toMatchObject({ name: '1714048', path: '/operator/test-evidence', method: 'POST',
+      body: { challenge: 'PROD-E2E-ABCD1234' } });
+  });
+
+  it('clears only an idle pinned production E2E chat Intake buffer and refuses active state', async () => {
+    const { env } = fixture();
+    configureProductionE2eOperator(env);
+    const calls = [];
+    let active = false;
+    let keys = 2;
+    const testUsername = 'production_e2e_012345abcdef';
+    await env.TG_SLICE.put(`user:${testUsername}`, { name: 'Temporary canary user' });
+    await env.TG_SLICE.put('user:preserve-this-user', { name: 'Unrelated sandbox account' });
+    await env.SESSIONS.put('integrator-production-e2e-v1:1714048', { username: testUsername });
+    await env.SESSIONS.put('other-sandbox-lane:1714048', { username: 'unrelated' });
+    env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url) {
+      const path = new URL(url).pathname;
+      calls.push({ name, path });
+      if (path === '/operator/reset-inspect') return Response.json({ active, keys });
+      if (path === '/operator/reset-all') { keys = 0; return Response.json({ ok: true, deletedKeys: 2 }); }
+      return Response.json({ error: 'unexpected_path' }, 404);
+    } }) };
+    const request = body => worker.fetch(new Request('https://worker/operator/test-cleanup', {
+      method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    expect((await request({ target: 'productionE2e', confirm: 'wrong' })).status).toBe(400);
+    expect((await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT', username: 'real-user' })).status).toBe(400);
+    active = true;
+    expect((await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT' })).status).toBe(409);
+    expect(calls.map(call => call.path)).toEqual(['/operator/reset-inspect']);
+    active = false;
+    calls.length = 0;
+    const response = await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT', username: testUsername });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, chatId: '1714048', clearedBindings: ['intake'],
+      cpHistoryTouched: false, productionProfileDataTouched: false, sharedKvNamespaceReset: false,
+      testProfileDeleted: true, loginSessionDeleted: true });
+    expect(calls.map(call => call.path)).toEqual(['/operator/reset-inspect', '/operator/reset-all', '/operator/reset-inspect']);
+    expect(await env.TG_SLICE.get(`user:${testUsername}`)).toBeNull();
+    expect(await env.TG_SLICE.get('user:preserve-this-user')).toBeTruthy();
+    expect(await env.SESSIONS.get('integrator-production-e2e-v1:1714048')).toBeNull();
+    expect(await env.SESSIONS.get('other-sandbox-lane:1714048')).toBeTruthy();
   });
 
   it('includes the pinned sandbox3 E2E chat in guarded reset even when no KV session remains', async () => {

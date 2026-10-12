@@ -62,6 +62,15 @@ export function readTgSliceConfig(env) {
     throw new TgSliceConfigError('TG_SLICE_EVENT_TRANSPORT must be auto|events-endpoint|status-history', 'TG_SLICE_EVENT_TRANSPORT');
   }
   const allowedChats = parseChatList(env['TG_SLICE_ALLOWED_CHATS']);
+  const controlPlaneUrl = stripTrailingSlash(requireVar(env, 'CONTROL_PLANE_URL'));
+  const productionE2e = controlPlaneUrl === 'https://trained-assist-cp-production.skillset-apply.workers.dev';
+  if (productionE2e && (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
+      botUsername !== 'ptichka_status_bot' || env.CONTROL_PLANE_PRINCIPAL !== 'production-e2e-telegram-v1' ||
+      env.CONTROL_PLANE_PROFILE !== 'production-e2e-telegram-v1' ||
+      env.SESSION_NAMESPACE !== 'integrator-production-e2e-v1' ||
+      env.TG_SANDBOX_TEST_API_ENABLED !== 'true')) {
+    throw new TgSliceConfigError('Production CP is permitted only for the pinned production E2E sandbox lane', 'CONTROL_PLANE_URL');
+  }
   const e2eChatId = String(env.TG_SANDBOX_E2E_CHAT_ID ?? '').trim();
   if (e2eChatId) {
     if (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' || !/^-?[1-9]\d*$/.test(e2eChatId)) {
@@ -78,21 +87,25 @@ export function readTgSliceConfig(env) {
     throw new TgSliceConfigError('TG_SLICE_OPEN_SANDBOX is permitted only for a sandbox Worker', 'TG_ACCEPT_ONLY_ENVIRONMENT');
   }
   const chatProfiles = {};
-  for (const entry of parseChatList(env['TG_SLICE_CHAT_PROFILES'])) {
-    const [chatId, profileId] = entry.split(':').map(part => part.trim());
-    if (chatId && profileId) chatProfiles[chatId] = profileId;
+  if (!productionE2e) {
+    for (const entry of parseChatList(env['TG_SLICE_CHAT_PROFILES'])) {
+      const [chatId, profileId] = entry.split(':').map(part => part.trim());
+      if (chatId && profileId) chatProfiles[chatId] = profileId;
+    }
   }
   return {
     botUsername,
     openSandbox,
     botToken: requireVar(env, 'TG_SANDBOX_BOT_TOKEN'),
-    controlPlaneUrl: stripTrailingSlash(requireVar(env, 'CONTROL_PLANE_URL')),
+    controlPlaneUrl,
     principalId: requireVar(env, 'CONTROL_PLANE_PRINCIPAL'),
-    principalSignature: String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
+    principalSignature: productionE2e
+      ? requireVar(env, 'CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE')
+      : String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
     routeBeforeStart: env.TG_SLICE_ROUTER_ENABLED === 'true',
     profileId: requireVar(env, 'CONTROL_PLANE_PROFILE'),
     apiKey: String(env['CONTROL_PLANE_API_KEY'] ?? '').trim() || null,
-    sessionId: String(env['CONTROL_PLANE_SESSION_ID'] ?? '').trim() || null,
+    sessionId: productionE2e ? null : String(env['CONTROL_PLANE_SESSION_ID'] ?? '').trim() || null,
     telegramApiBase: stripTrailingSlash(String(env['TELEGRAM_API_BASE'] ?? 'https://api.telegram.org')),
     webhookSecret: String(env['TELEGRAM_WEBHOOK_SECRET'] ?? '').trim() || null,
     allowedChats,
