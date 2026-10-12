@@ -11,6 +11,7 @@ class Storage {
     return new Map(entries.slice(0, limit));
   }
   async getAlarm() { return this.alarm; }
+  async setAlarm(value) { this.alarm = value; }
   async deleteAlarm() { this.alarm = null; }
 }
 
@@ -24,6 +25,68 @@ function actor(entries = {}) {
 }
 
 describe('sandbox-only Intake DO reset', () => {
+  it('wakes only the exact pinned production E2E acceptance after proving it is queued with no run or Workflow', async () => {
+    const requestId = `tgcp-${'a'.repeat(64)}`;
+    const taskId = 'ut-pinned-e2e';
+    const storage = new Storage({ busy: true, cpBusyRequests: [requestId],
+      [`cp-acceptance:${requestId}`]: { terminal: false, receipt: { requestId, userTaskId: taskId,
+        profileId: 'production-e2e-telegram-v1', durable: true } } });
+    const state = { storage, blockConcurrencyWhile: operation => operation() };
+    const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      TG_SANDBOX_BOT_TOKEN: 'bot-token', TG_SANDBOX3_OPERATOR_TOKEN: 'operator-token', CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1', CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'scoped-signature', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+      EXECUTION_BACKEND: 'control-plane', TG_SANDBOX_TEST_API_ENABLED: 'true' };
+    const intake = new IntakeBuffer(state, env);
+    const networkFetch = vi.fn(async () => Response.json({ taskStore: { id: taskId,
+      profile_id: 'production-e2e-telegram-v1', status: 'active', stage: 'queued' }, runs: [],
+      engine: { error: { message: 'Workflow instance not found' } } }));
+    vi.stubGlobal('fetch', networkFetch);
+    let response;
+    try {
+      response = await intake.fetch(new Request('https://intake/_sandbox-test/wake-pending-task', {
+        method: 'POST', headers: { authorization: 'Bearer operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ taskId, requestId }),
+      }));
+    } finally { vi.unstubAllGlobals(); }
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, taskId, action: 'wake_saved_acceptance_reconciliation' });
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    expect(await storage.get('cpBusyRequests')).toEqual([requestId]);
+    expect(networkFetch).toHaveBeenCalledOnce();
+  });
+
+  it('refuses to wake a pinned E2E task if any CP run already exists', async () => {
+    const requestId = `tgcp-${'b'.repeat(64)}`;
+    const taskId = 'ut-pinned-e2e-with-run';
+    const storage = new Storage({ busy: true, cpBusyRequests: [requestId],
+      [`cp-acceptance:${requestId}`]: { terminal: false, receipt: { requestId, userTaskId: taskId,
+        profileId: 'production-e2e-telegram-v1', durable: true } } });
+    const state = { storage, blockConcurrencyWhile: operation => operation() };
+    const env = { TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+      TG_SANDBOX_BOT_TOKEN: 'bot-token', TG_SANDBOX3_OPERATOR_TOKEN: 'operator-token', CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1', CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'scoped-signature', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+      EXECUTION_BACKEND: 'control-plane', TG_SANDBOX_TEST_API_ENABLED: 'true' };
+    const intake = new IntakeBuffer(state, env);
+    const networkFetch = vi.fn(async () => Response.json({ taskStore: { id: taskId,
+      profile_id: 'production-e2e-telegram-v1', status: 'active', stage: 'running' },
+      runs: [{ id: 'run-1', status: 'running' }], engine: { status: 'running' } }));
+    vi.stubGlobal('fetch', networkFetch);
+    let response;
+    try {
+      response = await intake.fetch(new Request('https://intake/_sandbox-test/wake-pending-task', {
+        method: 'POST', headers: { authorization: 'Bearer operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ taskId, requestId }),
+      }));
+    } finally { vi.unstubAllGlobals(); }
+    expect(networkFetch).toHaveBeenCalledOnce();
+    expect(await response.clone().json()).toEqual({ error: 'test_recovery_task_not_safely_queued' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'test_recovery_task_not_safely_queued' });
+    expect(await storage.getAlarm()).toBe(1234);
+  });
+
   it('returns redacted durable task evidence only for the exact production E2E sandbox lane', async () => {
     const storage = new Storage({ 'cp-acceptance:req-1': { receipt: { requestId: 'req-1', userTaskId: 'ut-1',
       profileId: 'production-e2e-telegram-v1', providerAcceptedAt: 100 } },

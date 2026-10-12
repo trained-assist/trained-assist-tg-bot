@@ -161,6 +161,34 @@ app.get('/operator/test-evidence', async context => {
   } }, response.status, { 'cache-control': 'no-store' });
 });
 
+// Wake only the alarm for one already accepted, queued task in the isolated
+// production E2E lane. This never creates a task or calls CP directly; the DO
+// alarm reconciles the saved acceptance through the ordinary route and delivery path.
+app.post('/operator/test-wake-pending-task', async context => {
+  const env = executionEnv(context.env);
+  const target = sandboxOperatorLane(env);
+  const token = sandboxOperatorToken(env, target);
+  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
+  if (target !== 'productionE2e' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false' || !env.INTAKE) {
+    return context.json({ error: 'sandbox_identity_mismatch' }, 409);
+  }
+  const source = await context.req.json().catch(() => null);
+  if (!source || source.target !== target || Object.keys(source).some(key => !['target', 'taskId', 'requestId'].includes(key)) ||
+      typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||
+      typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId)) {
+    return context.json({ error: 'invalid_test_recovery' }, 400);
+  }
+  const chatId = sandboxOperatorResetChat(env, target);
+  const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
+  const response = await intake.fetch('https://intake/_sandbox-test/wake-pending-task', {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ taskId: source.taskId, requestId: source.requestId }),
+  });
+  const result = await response.json().catch(() => ({}));
+  return context.json(result, response.status, { 'cache-control': 'no-store' });
+});
+
 // Clear only this pinned Telegram chat's Intake DO, login session, and optional
 // generated test user. CP history/workspaces, broad KV state, and other chats
 // are intentionally outside this path.

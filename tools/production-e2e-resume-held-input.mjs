@@ -51,9 +51,12 @@ async function cpStatus(taskId) {
 function safeStatus(status) {
   const task = status.taskStore ?? {};
   const engine = status.engine && typeof status.engine === 'object' ? status.engine : {};
+  const engineError = String(engine.error ?? '').toLowerCase();
   return {
     taskStatus: typeof task.status === 'string' ? task.status : null,
     stage: typeof task.stage === 'string' ? task.stage : null,
+    workflowErrorCode: /not found|no such instance/.test(engineError)
+      ? 'workflow_instance_missing' : null,
     workflowStatus: typeof engine.status === 'string' && /^[a-z_-]{1,40}$/i.test(engine.status)
       ? engine.status.toLowerCase() : null,
     runCount: Array.isArray(status.runs) ? status.runs.length : 0,
@@ -83,17 +86,17 @@ async function main() {
   const challenge = /PROD-E2E-[A-F0-9]{16}/.exec(JSON.stringify(status.taskStore))?.[0];
   assert(challenge, 'production_e2e_challenge_not_found');
 
-  // Replay the current button once as the pinned test user. The callback is
-  // revision-bound by the Worker and still refers to the already accepted task;
-  // no message, task, or new idempotency key is created here.
-  const callback = await workerRequest('/operator/test-update', {
-    target, type: 'callback', chatId, userId, delivery: 'telegram', callbackData: 'auto',
-    updateId: Date.now() + Math.floor(Math.random() * 1000),
+  assert.equal(safeStatus(status).workflowErrorCode, 'workflow_instance_missing', 'production_e2e_workflow_instance_not_missing');
+  assert.equal(typeof task.requestId, 'string', 'production_e2e_request_id_missing');
+  // Wake the already-saved Intake DO alarm. The operator endpoint verifies the
+  // exact pinned acceptance, zero CP runs, queued stage, and missing Workflow
+  // before scheduling ordinary reconciliation; it cannot create another task.
+  const wake = await workerRequest('/operator/test-wake-pending-task', {
+    target, taskId: task.userTaskId, requestId: task.requestId,
   });
-  assert.equal(callback.ok, true, 'production_e2e_callback_replay_failed');
-  const transcriptText = (callback.transcript ?? []).map(item => String(item.text ?? '')).join('\n').toLowerCase();
-  const callbackOutcome = /устарел|устарела|актуальност/.test(transcriptText) ? 'stale_button'
-    : /передаю|запуск|принят/.test(transcriptText) ? 'launch_acknowledged' : 'callback_processed';
+  assert.equal(wake.ok, true, 'production_e2e_pending_task_wake_failed');
+  const wakeOutcome = wake.action === 'wake_saved_acceptance_reconciliation' ? 'scheduled' : 'unknown';
+  assert.equal(wakeOutcome, 'scheduled', 'production_e2e_wake_not_scheduled');
 
   const deadline = Date.now() + 8 * 60_000;
   let taskEvidence;
@@ -112,7 +115,8 @@ async function main() {
     scenario: 'resume-existing-pinned-production-e2e-task',
     profileId,
     taskId: task.userTaskId,
-    callbackOutcome,
+    wakeOutcome,
+    alarmScheduledAt: Number.isSafeInteger(wake.scheduledAt) ? wake.scheduledAt : null,
     task: taskEvidence ? {
       status: taskEvidence.status,
       resultPersisted: taskEvidence.resultPresent === true,
@@ -127,6 +131,7 @@ async function main() {
       pendingCount: evidence.buffer.pendingCount ?? null,
       busy: evidence.buffer.busy === true,
       busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
+      alarmAt: Number.isSafeInteger(evidence.buffer.alarmAt) ? evidence.buffer.alarmAt : null,
     } : null,
     answerTextLogged: false,
     promptTextLogged: false,

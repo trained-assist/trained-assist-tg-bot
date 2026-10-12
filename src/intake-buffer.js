@@ -480,6 +480,43 @@ export class IntakeBuffer {
         busyRequestCount: state.controlPlaneBarrier?.busyRequestCount ?? null,
       } });
     }
+    if (url.pathname === '/_sandbox-test/wake-pending-task' && request.method === 'POST') {
+      const lane = sandboxOperatorLane(this.env);
+      const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
+      const source = await request.json().catch(() => null);
+      if (lane !== 'productionE2e' || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !token ||
+          request.headers.get('authorization') !== `Bearer ${token}` ||
+          !source || Object.keys(source).some(key => !['taskId', 'requestId'].includes(key)) ||
+          typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||
+          typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId)) {
+        return json({ error: 'sandbox_identity_mismatch' }, 409);
+      }
+      const profileId = controlPlaneClient(this.env).config.profileId;
+      const acceptance = await this.state.storage.get(`cp-acceptance:${source.requestId}`);
+      const busyRequests = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
+      const unresolved = await this.state.storage.get('cpUnresolvedLaunches') || [];
+      const launching = await this.state.storage.get('launching') || [];
+      if (acceptance?.receipt?.requestId !== source.requestId || acceptance.receipt.userTaskId !== source.taskId ||
+          acceptance.receipt.profileId !== profileId || acceptance.receipt.durable !== true || acceptance.terminal === true ||
+          JSON.stringify(busyRequests) !== JSON.stringify([source.requestId]) || unresolved.length || launching.length || this.cpDispatches) {
+        return json({ error: 'test_recovery_scope_mismatch' }, 409);
+      }
+      let status;
+      try { status = (await controlPlaneClient(this.env).request('POST', '/status', { body: { taskId: source.taskId } })).value; }
+      catch (error) { return json({ error: 'control_plane_status_unavailable',
+        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
+      const task = status?.taskStore ?? {};
+      const engine = status?.engine ?? {};
+      const engineError = String(engine.error?.message ?? engine.error ?? '').toLowerCase();
+      const workflowMissing = !!engine.error && /not found|no such instance/.test(engineError);
+      if (task.id !== source.taskId || task.profile_id !== profileId || task.status !== 'active' || task.stage !== 'queued' ||
+          !Array.isArray(status.runs) || status.runs.length !== 0 || !workflowMissing) {
+        return json({ error: 'test_recovery_task_not_safely_queued' }, 409);
+      }
+      const scheduledAt = Date.now() + BUSY_POLL_MS;
+      await this.state.storage.setAlarm(scheduledAt);
+      return json({ ok: true, taskId: source.taskId, scheduledAt, action: 'wake_saved_acceptance_reconciliation' });
+    }
     if (url.pathname === '/_sandbox-test/seed-capture-collector' && request.method === 'POST') {
       const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
       const source = await request.json().catch(() => null);
@@ -3481,8 +3518,9 @@ export class IntakeBuffer {
   }
 }
 
-function json(obj) {
+function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
+    status,
     headers: { 'content-type': 'application/json' },
   });
 }
