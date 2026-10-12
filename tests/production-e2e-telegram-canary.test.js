@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { cleanupReadiness, intakeIsIdle, launchWasDispatched, summarizeIntakeState, summarizeLaunch,
+import { cleanupReadiness, intakeIsIdle, launchWasDispatched, liveLaneIsReady, summarizeIntakeState, summarizeLaunch,
   waitForCleanupReadiness } from '../tools/production-e2e-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
+  it('waits for the isolated profile identity and live readiness before sending a user update', () => {
+    expect(liveLaneIsReady({ profileId: 'integration-sandbox3-v1', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } })).toBe(false);
+    expect(liveLaneIsReady({ profileId: 'production-e2e-telegram-v1', readiness: {
+      testApiEnabled: true, ingressPaused: true, deliveryPaused: true,
+    } })).toBe(false);
+    expect(liveLaneIsReady({ profileId: 'production-e2e-telegram-v1', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } })).toBe(true);
+  });
+
   it('does not treat the always-present empty CP barrier as dispatch evidence', () => {
     const result = { ok: true, collector: {
       pendingCount: 1, busy: false, launchingMessageIds: [],
