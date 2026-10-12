@@ -6,6 +6,7 @@ const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const cp = 'https://trained-assist-cp-production.skillset-apply.workers.dev';
 const profileId = 'production-e2e-telegram-v1';
 const target = 'productionE2e';
+const retryRoute = process.env.PRODUCTION_E2E_RETRY_ROUTE === 'true';
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -74,6 +75,12 @@ async function main() {
   const task = activeTasks[0];
   assert.equal(task.status, 'active', 'production_e2e_task_not_active');
   assert.equal(task.runs?.length, 0, 'production_e2e_task_already_has_run');
+  if (retryRoute) {
+    assert.equal(task.routingOutcome?.known, true, 'production_e2e_prior_route_not_confirmed');
+    assert.equal(task.routingOutcome?.continuationRequested, false, 'production_e2e_route_already_requested_continuation');
+    assert.equal(task.routingOutcome?.continuationIssued, false, 'production_e2e_route_already_issued_continuation');
+    assert.equal(task.routingRetryCount, 0, 'production_e2e_route_retry_already_used');
+  }
   assert.equal(evidence.buffer?.pendingCount, 0, 'production_e2e_unexpected_pending_input');
   assert.equal(evidence.buffer?.busy, true, 'production_e2e_intake_not_waiting');
   assert.equal(evidence.buffer?.busyRequestCount, 1, 'production_e2e_admission_scope_ambiguous');
@@ -88,15 +95,19 @@ async function main() {
 
   assert.equal(safeStatus(status).workflowErrorCode, 'workflow_instance_missing', 'production_e2e_workflow_instance_not_missing');
   assert.equal(typeof task.requestId, 'string', 'production_e2e_request_id_missing');
-  // Wake the already-saved Intake DO alarm. The operator endpoint verifies the
-  // exact pinned acceptance, zero CP runs, queued stage, and missing Workflow
-  // before scheduling ordinary reconciliation; it cannot create another task.
+  // Wake the already-saved Intake DO alarm. In retry mode, the operator endpoint
+  // also requires the exact pinned acceptance, zero CP runs, no prior continuation,
+  // and a one-time retry budget before clearing the stale route receipt.
   const wake = await workerRequest('/operator/test-wake-pending-task', {
-    target, taskId: task.userTaskId, requestId: task.requestId,
+    target, taskId: task.userTaskId, requestId: task.requestId, ...(retryRoute ? { retryRoute: true } : {}),
   });
   assert.equal(wake.ok, true, 'production_e2e_pending_task_wake_failed');
-  const wakeOutcome = wake.action === 'wake_saved_acceptance_reconciliation' ? 'scheduled' : 'unknown';
-  assert.equal(wakeOutcome, 'scheduled', 'production_e2e_wake_not_scheduled');
+  const expectedAction = retryRoute ? 'wake_saved_acceptance_route_retry' : 'wake_saved_acceptance_reconciliation';
+  assert.equal(wake.action, expectedAction, 'production_e2e_pending_task_wake_action_mismatch');
+  if (retryRoute) assert.equal(wake.routingRetryCount, 1, 'production_e2e_route_retry_not_committed');
+  const wakeOutcome = retryRoute ? 'route_retry_scheduled'
+    : wake.action === expectedAction ? 'scheduled' : 'unknown';
+  assert.equal(wakeOutcome, retryRoute ? 'route_retry_scheduled' : 'scheduled', 'production_e2e_wake_not_scheduled');
 
   const deadline = Date.now() + 8 * 60_000;
   let taskEvidence;
@@ -119,6 +130,7 @@ async function main() {
     alarmScheduledAt: Number.isSafeInteger(wake.scheduledAt) ? wake.scheduledAt : null,
     task: taskEvidence ? {
       status: taskEvidence.status,
+      routingRetryCount: taskEvidence.routingRetryCount,
       routingOutcome: taskEvidence.routingOutcome ? {
         known: taskEvidence.routingOutcome.known === true,
         degraded: taskEvidence.routingOutcome.degraded === true,

@@ -18,6 +18,11 @@ on:
         required: true
         type: boolean
         default: false
+      retry_route:
+        description: Retry the saved route once when evidence confirms no continuation or run was issued
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,7 +33,7 @@ concurrency:
 
 jobs:
   production-backend-e2e:
-    if: ${{ (inputs.run_canary == true || inputs.diagnose_only == true || inputs.resume_pending_input == true) && github.ref == 'refs/heads/main' }}
+    if: ${{ (inputs.run_canary == true || inputs.diagnose_only == true || inputs.resume_pending_input == true || inputs.retry_route == true) && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -39,6 +44,10 @@ jobs:
         env:
           REF: ${{ github.ref }}
         run: test "$REF" = "refs/heads/main"
+
+      - name: Require resume mode for route retry
+        if: ${{ inputs.retry_route == true && inputs.resume_pending_input != true }}
+        run: exit 1
 
       - uses: actions/checkout@v4
         with:
@@ -150,6 +159,7 @@ jobs:
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
           PRODUCTION_E2E_SIGNATURE: ${{ secrets.CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE }}
+          PRODUCTION_E2E_RETRY_ROUTE: ${{ inputs.retry_route }}
         run: node tools/production-e2e-resume-held-input.mjs
 
       - name: Read current pinned E2E state without changing it
