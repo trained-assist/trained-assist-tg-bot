@@ -95,6 +95,18 @@ describe('sandbox durable single delivery owner', () => {
     expect(sendDocument).not.toHaveBeenCalled();
   });
 
+  it('reports only the normalized CP status for a retryable artifact source failure', async () => {
+    const { client } = await emptyFixture();
+    await client.enqueue({ deliveryId: 'artifact:source-fail:g1', userTaskId: 'task', destination: { chatId: 1001 },
+      type: 'artifact', text: '', taskAcceptedAt: Date.now(), artifact: { ref: 'runs/task/output.md', name: 'note.md',
+        sizeBytes: 1, sha256: 'a'.repeat(64), contentType: 'text/markdown' } });
+    vi.stubGlobal('fetch', async () => new Response('unavailable', { status: 503 }));
+    expect(await client.drain()).toBe(1);
+    expect((await client.read('task', { includeArtifacts: true })).artifacts).toMatchObject([{
+      status: 'retrying', reason: 'artifact_source_unavailable', artifactSourceFailure: 'http_503',
+    }]);
+  });
+
   it('rejects traversal segments in artifact object references', async () => {
     const { client } = await emptyFixture();
     await expect(client.enqueue({ deliveryId: 'artifact:unsafe:g1', userTaskId: 'task', destination: { chatId: 1001 },
