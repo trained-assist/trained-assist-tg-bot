@@ -29,7 +29,9 @@ function taskOutputArtifacts(result) {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value.artifacts)) {
       for (const item of value.artifacts) {
-        if (item && typeof item === 'object' && typeof item.ref === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(item.ref)
+        if (item && typeof item === 'object' && typeof item.ref === 'string'
+          && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(item.ref)
+          && !item.ref.split('/').some(part => part === '..') && !item.ref.endsWith('/')
           && typeof item.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
           && Number.isSafeInteger(item.sizeBytes) && item.sizeBytes > 0 && item.sizeBytes <= 10 * 1024 * 1024
           && typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(item.sha256)) found.push({
