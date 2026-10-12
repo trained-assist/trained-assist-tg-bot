@@ -79,6 +79,7 @@ const summary = {
       continuationIssued: task.routingOutcome.continuationIssued === true,
       continuationRefusal: task.routingOutcome.continuationRefusal ?? null,
     } : null,
+    reconciliationFailure: task.reconciliationFailure ?? null,
     resultPresent: task.resultPresent === true,
     answerPresent: task.answerPresent === true,
     runs: (task.runs ?? []).map(run => ({

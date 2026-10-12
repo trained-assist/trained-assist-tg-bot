@@ -1153,6 +1153,26 @@ describe('existing collector control-plane ownership', () => {
     expect(handleMessage).not.toHaveBeenCalled();
   });
 
+  it('stores only redacted routing failure metadata when CP route rejects', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId,
+      profile_id: receipt.profileId, status: 'active', stage: 'queued' }, runs: [] } });
+    route.mockRejectedValue(Object.assign(new Error('private user prompt must not be persisted'), {
+      name: 'ControlPlaneError', status: 403, body: { error: 'scope_missing' },
+    }));
+
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(false);
+
+    const saved = await storage.get(`cp-acceptance:${receipt.requestId}`);
+    expect(saved.reconciliationFailure).toMatchObject({ stage: 'route', httpStatus: 403, errorName: 'ControlPlaneError' });
+    expect(saved.reconciliationFailure.at).toEqual(expect.any(Number));
+    expect(JSON.stringify(saved.reconciliationFailure)).not.toContain('private user prompt');
+    expect(saved.reconciliationFailure).not.toHaveProperty('body');
+    expect(saved.reconciliationFailure).not.toHaveProperty('message');
+    expect(await storage.get('busy')).toBe(true);
+  });
+
   it('does not release while another admission is unresolved or in flight', async () => {
     const { owner, storage } = fixture();
     await accept(owner);
