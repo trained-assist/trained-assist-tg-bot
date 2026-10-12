@@ -1,5 +1,6 @@
 import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
+import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
 
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
 const key = id => `delivery:${id}`;
@@ -9,6 +10,7 @@ const summary = record => record ? {
   attempts: record.attempts, providerMessageId: record.telegramMessageId ?? null,
   reason: record.status === 'sending' ? 'provider_outcome_not_recorded' : record.reason ?? null,
   generation: generation(record), chatId: record.destination.chatId,
+  type: record.type, artifactName: record.type === 'artifact' ? record.artifact?.name ?? null : null,
   threadId: record.destination.threadId ?? null,
   legacyStatus: record.legacyStatus ?? null,
 } : null;
@@ -153,17 +155,27 @@ export class TgDeliveryOwner {
   async enqueue(input, config) {
     const deliveryId = input.deliveryId ?? input.userTaskId;
     if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !chatAllowed(config, input.destination?.chatId) ||
-        !['message', 'launch'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+        !['message', 'launch', 'artifact'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+    if (input.type === 'artifact') {
+      const item = input.artifact;
+      if (!item || typeof item !== 'object' || !reference(item.ref)
+        || typeof item.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
+        || !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes < 1 || item.sizeBytes > 10 * 1024 * 1024
+        || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)
+        || typeof item.contentType !== 'string' || item.contentType.length < 1 || item.contentType.length > 100) throw new Error();
+    } else if (input.artifact !== undefined) throw new Error();
     const payload = { deliveryId, userTaskId: input.userTaskId, conversationId: input.conversationId ?? null,
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
       requestId: input.requestId ?? deliveryId, type: input.type, text: input.text, replyMarkup: input.replyMarkup ?? null,
-      taskAcceptedAt: input.taskAcceptedAt ?? null };
+      taskAcceptedAt: input.taskAcceptedAt ?? null, ...(input.type === 'artifact' ? { artifact: input.artifact } : {}) };
     const fingerprint = JSON.stringify(payload);
     return this.state.storage.transaction(async storage => {
       const existing = await storage.get(key(deliveryId));
       if (existing) {
         if (existing.fingerprint !== null && existing.fingerprint !== fingerprint) throw new Error();
-        if (existing.userTaskId !== payload.userTaskId || String(existing.destination.chatId) !== String(payload.destination.chatId) || existing.destination.threadId !== payload.destination.threadId) throw new Error();
+        if (existing.userTaskId !== payload.userTaskId || existing.conversationId !== payload.conversationId
+          || existing.type !== payload.type || String(existing.destination.chatId) !== String(payload.destination.chatId)
+          || existing.destination.threadId !== payload.destination.threadId) throw new Error();
         return { record: existing, duplicate: true };
       }
       const cutoverAt = await storage.get('cutoverAt');
@@ -188,18 +200,47 @@ export class TgDeliveryOwner {
     if (!claim) return 0;
     const api = new TelegramApi(config);
     let completion;
+    let providerCalled = false;
     try {
-      const result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-        text: claim.text, replyMarkup: claim.replyMarkup });
+      let result;
+      if (claim.type === 'artifact') {
+        const client = new ControlPlaneClient(config, { fetchImpl: this.env.CONTROL_PLANE_SERVICE
+          ? this.env.CONTROL_PLANE_SERVICE.fetch.bind(this.env.CONTROL_PLANE_SERVICE) : undefined });
+        const downloaded = await client.artifact(claim.userTaskId, claim.artifact.ref);
+        const actualSha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', downloaded.body))]
+          .map(value => value.toString(16).padStart(2, '0')).join('');
+        const expectedSha256 = claim.artifact.sha256.replace(/^sha256:/, '').toLowerCase();
+        if (downloaded.filename !== claim.artifact.name || downloaded.sizeBytes !== claim.artifact.sizeBytes
+          || downloaded.sha256?.toLowerCase() !== expectedSha256 || actualSha256 !== expectedSha256
+          || downloaded.body.byteLength !== claim.artifact.sizeBytes) {
+          completion = { ...claim, status: 'dead', reason: 'artifact_integrity_rejected', finishedAt: Date.now() };
+          await this.state.storage.put(key(claim.deliveryId), completion);
+          return 1;
+        }
+        providerCalled = true;
+        result = await api.sendDocument({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          document: downloaded.body, filename: claim.artifact.name, caption: `📎 ${claim.artifact.name}`,
+          contentType: downloaded.contentType ?? claim.artifact.contentType });
+      } else {
+        providerCalled = true;
+        result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          text: claim.text, replyMarkup: claim.replyMarkup });
+      }
       if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new Error();
       completion = { ...claim, status: 'sent', telegramMessageId: result.message_id, sentAt: Date.now(), reason: 'provider_accepted' };
     } catch (error) {
       const rejected = error instanceof TelegramApiError && error.payloadVerified === true && error.payload?.ok === false;
       const rateLimited = rejected && error.status === 429 && error.payload.error_code === 429;
+      const permanentArtifactFailure = claim.type === 'artifact' && error instanceof ControlPlaneError
+        && [400, 404, 409, 413].includes(error.status);
+      const retryArtifactRead = claim.type === 'artifact' && !providerCalled && !permanentArtifactFailure;
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
-      completion = { ...claim, status: rateLimited ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
-        reason: rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
-        ...(rateLimited ? { nextAttemptAt: Date.now() + delay } : {}) };
+      completion = { ...claim,
+        status: permanentArtifactFailure ? 'dead' : retryArtifactRead || rateLimited
+          ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
+        reason: permanentArtifactFailure ? 'artifact_source_rejected' : retryArtifactRead ? 'artifact_source_unavailable'
+          : rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
+        ...(!permanentArtifactFailure && (retryArtifactRead || rateLimited) ? { nextAttemptAt: Date.now() + delay } : {}) };
     }
     await this.state.storage.put(key(claim.deliveryId), completion);
     return 1;
