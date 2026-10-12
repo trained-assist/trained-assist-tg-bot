@@ -66,6 +66,8 @@ export function readTgSliceConfig(env) {
   const productionE2e = controlPlaneUrl === 'https://trained-assist-cp-production.skillset-apply.workers.dev'
     && env.TG_ACCEPT_ONLY_ENVIRONMENT === 'sandbox';
   if (productionE2e && (
+  const productionE2e = controlPlaneUrl === 'https://trained-assist-cp-production.skillset-apply.workers.dev';
+  if (productionE2e && (env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox' ||
       botUsername !== 'ptichka_status_bot' || env.CONTROL_PLANE_PRINCIPAL !== 'production-e2e-telegram-v1' ||
       env.CONTROL_PLANE_PROFILE !== 'production-e2e-telegram-v1' ||
       env.SESSION_NAMESPACE !== 'integrator-production-e2e-v1' ||
