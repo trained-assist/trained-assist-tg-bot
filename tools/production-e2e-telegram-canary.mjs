@@ -253,7 +253,9 @@ async function main() {
 
     const nonce = `PROD-E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
     const startedAt = Date.now();
-    const question = await send(`Reply with exactly this token and nothing else: ${nonce}`);
+    // Use a concrete user task so Communication routing cannot reasonably
+    // classify an echo-only probe as the deterministic system-health quick answer.
+    const question = await send(`Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`);
     assert.equal(question.ok, true, 'production_canary_question_rejected');
     await checkpoint('first_turn_accepted', { turns: [{ accepted: true,
       pendingCount: Number.isSafeInteger(question.collector?.pendingCount) ? question.collector.pendingCount : null }] });
