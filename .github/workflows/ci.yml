@@ -257,11 +257,12 @@ jobs:
           fi
           echo "Cloudflare account matches the trained-assist sandbox account"
       - name: Deploy isolated staging
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy --config wrangler.preview.toml --env staging --var BUILD_SHA:${{ github.sha }} --var PREVIEW_ONLY:true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          tools/retry-cloudflare-command.sh npx wrangler deploy --config wrangler.preview.toml \
+            --env staging --var BUILD_SHA:${{ github.sha }} --var PREVIEW_ONLY:true
 
   smoke-test-staging:
     runs-on: ubuntu-latest
