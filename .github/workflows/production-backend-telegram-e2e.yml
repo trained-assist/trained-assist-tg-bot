@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: false
+      diagnose_only:
+        description: Read current pinned E2E lane evidence without deploying or changing state
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ concurrency:
 
 jobs:
   production-backend-e2e:
-    if: ${{ inputs.run_canary == true && github.ref == 'refs/heads/main' }}
+    if: ${{ (inputs.run_canary == true || inputs.diagnose_only == true) && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -81,6 +86,7 @@ jobs:
         run: npx wrangler deploy --dry-run --config wrangler.sandbox-tg-sandbox3.toml
 
       - name: Install scoped production E2E signature and pinned test operator credentials
+        if: ${{ inputs.run_canary == true }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -100,6 +106,7 @@ jobs:
             npx wrangler secret put TG_SANDBOX_E2E_USER_ID --config wrangler.sandbox-tg-sandbox3.toml
 
       - name: Deploy sandbox ingress paused against isolated production CP profile
+        if: ${{ inputs.run_canary == true }}
         id: deploy-production-lane
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -112,6 +119,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
       - name: Enable the pinned production backend test lane
+        if: ${{ inputs.run_canary == true }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -122,12 +130,19 @@ jobs:
             --message "production-backend-canary-live-${GITHUB_SHA}"
 
       - name: Run read-only question, France VM execution, persistence, and real Telegram delivery
+        if: ${{ inputs.run_canary == true }}
         env:
           TG_SANDBOX_TARGET: productionE2e
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
         run: node tools/production-e2e-telegram-canary.mjs
+
+      - name: Read current pinned E2E state without changing it
+        if: ${{ inputs.diagnose_only == true }}
+        env:
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+        run: node tools/production-e2e-state-probe.mjs
 
       - name: Preserve evidence for review
         if: always()

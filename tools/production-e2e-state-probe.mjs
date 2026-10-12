@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+import { writeFile } from 'node:fs/promises';
+
+const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
+const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
+if (!token) throw new Error('operator_token_required');
+
+const response = await fetch(`${worker}/operator/test-evidence`, {
+  headers: { authorization: `Bearer ${token}` },
+  signal: AbortSignal.timeout(20_000),
+});
+const evidence = await response.json().catch(() => ({}));
+if (!response.ok || evidence.profileId !== 'production-e2e-telegram-v1') {
+  throw new Error('production_e2e_readonly_probe_unavailable');
+}
+
+const summary = {
+  ok: true,
+  mode: 'read-only',
+  profileId: evidence.profileId,
+  readiness: evidence.readiness ?? null,
+  buffer: evidence.buffer ? {
+    pendingCount: evidence.buffer.pendingCount ?? null,
+    busy: evidence.buffer.busy === true,
+    launching: evidence.buffer.launching ?? 0,
+    unresolvedLaunchCount: evidence.buffer.unresolvedLaunchCount ?? 0,
+    busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
+    stranded: evidence.buffer.stranded === true,
+  } : null,
+  tasks: (evidence.tasks ?? []).map(task => ({
+    userTaskId: task.userTaskId,
+    status: task.status,
+    acceptedAt: Number.isFinite(Number(task.acceptedAt)) ? Number(task.acceptedAt) : null,
+    resultPresent: task.resultPresent === true,
+    answerPresent: task.answerPresent === true,
+    runs: (task.runs ?? []).map(run => ({
+      status: run.status,
+      hasSessionId: run.hasSessionId === true,
+      hasStartedAt: run.hasStartedAt === true,
+      hasFinishedAt: run.hasFinishedAt === true,
+    })),
+    historyTypes: (task.historyTypes ?? []).filter(type => typeof type === 'string' && /^[a-z0-9_-]{1,80}$/i.test(type)),
+  })),
+  answerTextLogged: false,
+  promptTextLogged: false,
+  mutationPerformed: false,
+};
+
+await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+console.log(JSON.stringify(summary));
