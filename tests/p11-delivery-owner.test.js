@@ -107,6 +107,20 @@ describe('sandbox durable single delivery owner', () => {
     }]);
   });
 
+  it('extracts only Runner HTTP status from the CP artifact proxy error', async () => {
+    const { client } = await emptyFixture();
+    await client.enqueue({ deliveryId: 'artifact:runner-fail:g1', userTaskId: 'task', destination: { chatId: 1001 },
+      type: 'artifact', text: '', taskAcceptedAt: Date.now(), artifact: { ref: 'runs/task/output.md', name: 'note.md',
+        sizeBytes: 1, sha256: 'a'.repeat(64), contentType: 'text/markdown' } });
+    vi.stubGlobal('fetch', async () => Response.json({ error: 'artifact unavailable',
+      reason: 'artifact private-object-ref: HTTP_404: raw upstream detail' }, { status: 502 }));
+    expect(await client.drain()).toBe(1);
+    const [record] = (await client.read('task', { includeArtifacts: true })).artifacts;
+    expect(record).toMatchObject({ status: 'retrying', reason: 'artifact_source_unavailable', artifactSourceFailure: 'runner_http_404' });
+    expect(JSON.stringify(record)).not.toContain('private-object-ref');
+    expect(JSON.stringify(record)).not.toContain('raw upstream detail');
+  });
+
   it('rejects traversal segments in artifact object references', async () => {
     const { client } = await emptyFixture();
     await expect(client.enqueue({ deliveryId: 'artifact:unsafe:g1', userTaskId: 'task', destination: { chatId: 1001 },
