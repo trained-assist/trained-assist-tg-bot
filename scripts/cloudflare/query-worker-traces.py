@@ -183,6 +183,30 @@ def safe_error_class(message):
     return "other_worker_error"
 
 
+def safe_log_category(message):
+    text = str(message or "").lower()
+    for marker, category in (
+        ("launch outcome unknown", "intake_launch_outcome_unknown"),
+        ("batch preparation failed", "intake_batch_preparation_failed"),
+        ("[setmycommands]", "telegram_command_registration"),
+        ("[sendmessage]", "telegram_message_send"),
+        ("[webhook]", "webhook_configuration"),
+        ("[intake prepare]", "intake_message_preparation"),
+        ("[recovery]", "recovery_worker"),
+        ("[pending-intake]", "pending_intake_registration"),
+        ("[supplement]", "supplement_operation"),
+        ("[stop]", "stop_operation"),
+    ):
+        if marker in text:
+            return category
+    return "unclassified"
+
+
+def safe_status_code(message):
+    match = re.search(r"\b(?:http\s*)?(401|403|404|408|409|422|429|500|502|503|504)\b", str(message or ""), re.I)
+    return int(match.group(1)) if match else None
+
+
 if VIEW == "events":
     # Return only bounded lifecycle metadata. Worker logs may also contain user
     # text and identifiers, so never print a raw event or arbitrary log message.
@@ -215,6 +239,10 @@ if VIEW == "events":
                     ))}
                 if record["level"] == "error":
                     record["errorClass"] = safe_error_class(message)
+                    record["logCategory"] = safe_log_category(message)
+                    status = safe_status_code(message)
+                    if status is not None:
+                        record["statusCode"] = status
                 try:
                     parsed_log = json.loads(message) if isinstance(message, str) else None
                 except (TypeError, ValueError):
