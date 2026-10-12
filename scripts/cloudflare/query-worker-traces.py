@@ -170,6 +170,7 @@ if VIEW == "events":
     metadata_type_counts = {}
     webhook_invocations = []
     recent_route_activity = []
+    recent_worker_logs = []
     recent_cutoff_ms = int(time.time() * 1000) - 60 * 60 * 1000
     for item in event_items:
         metadata = item.get("$metadata") or item.get("metadata") or {}
@@ -177,6 +178,29 @@ if VIEW == "events":
         if isinstance(metadata_type, str):
             metadata_type_counts[metadata_type] = metadata_type_counts.get(metadata_type, 0) + 1
         trigger = metadata.get("trigger")
+        if metadata_type == "cf-worker":
+            source = item.get("source") or {}
+            message = source.get("message") if isinstance(source, dict) else source
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms:
+                record = {"timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "level": metadata.get("level") if metadata.get("level") in {"debug", "info", "log", "warn", "error"} else "unknown",
+                    "sendFailurePresent": isinstance(message, str) and any(marker in message.lower() for marker in (
+                        "[sendmessage]", "sendmessage failed", "telegram_rejected", "chat not found", "bot was blocked",
+                    ))}
+                try:
+                    parsed_log = json.loads(message) if isinstance(message, str) else None
+                except (TypeError, ValueError):
+                    parsed_log = None
+                if isinstance(parsed_log, dict) and parsed_log.get("event") in ALLOWED_LIFECYCLE_EVENTS:
+                    record["lifecycleEvent"] = parsed_log["event"]
+                recent_worker_logs.append(record)
+        if isinstance(trigger, str) and trigger.lower() == "alarm":
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms:
+                recent_route_activity.append({"method": "ALARM", "route": "Durable Object alarm",
+                    "timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "eventType": (item.get("$workers") or {}).get("eventType")})
         if isinstance(trigger, str):
             match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
             bucket = f"{match.group(1)} {match.group(2).split('/')[1] if len(match.group(2).split('/')) > 1 else '/'}" if match else "other"
@@ -261,6 +285,7 @@ if VIEW == "events":
         "metadata_type_counts": metadata_type_counts,
         "webhook_invocations": webhook_invocations,
         "recent_route_activity": sorted(recent_route_activity, key=lambda record: record["timestamp"])[-100:],
+        "recent_worker_logs": sorted(recent_worker_logs, key=lambda record: record["timestamp"])[-100:],
         "worker_log_settings": {
             key: value for key, value in (read_worker_settings().get("result", {}).get("observability", {}).get("logs", {}) or {}).items()
             if key in {"enabled", "persist", "invocation_logs", "head_sampling_rate"}
