@@ -16,5 +16,11 @@ describe('temporary production E2E Worker config', () => {
     expect(rendered).toContain('id = "f81925f900dc42fca7bec33d9d422840"');
     expect(rendered).toContain('id = "9fbaf8e6a86f4673bf0990b540e75f6d"');
     expect(rendered).toContain('service = "trained-assist-cp-sandbox3"');
+    expect(rendered).toContain('[exports.ProductionE2eIntakeBuffer]');
+    expect(rendered).toContain('class_name = "ProductionE2eIntakeBuffer"');
+    expect(rendered).toContain('[exports.ProductionE2eTgDeliveryOwner]');
+    expect(rendered).toContain('class_name = "ProductionE2eTgDeliveryOwner"');
+    expect(rendered).not.toContain('class_name = "IntakeBuffer"');
+    expect(rendered).not.toContain('class_name = "TgDeliveryOwner"');
   });
 });

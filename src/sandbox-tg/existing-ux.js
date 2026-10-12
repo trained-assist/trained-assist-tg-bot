@@ -914,5 +914,10 @@ export default {
 };
 
 export class IntakeBufferReset extends IntakeBuffer {}
+// The production E2E lane uses a dedicated DO namespace. It runs with the same
+// pinned Telegram test chat as sandbox3, so sharing IntakeBuffer would reuse
+// the sandbox3 cpScope and reject the production profile as a scope mismatch.
+export class ProductionE2eIntakeBuffer extends IntakeBuffer {}
+export class ProductionE2eTgDeliveryOwner extends TgDeliveryOwner {}
 
 export { IntakeBuffer, TgDeliveryOwner, TgDeliveryOwnerV2, SandboxAcceptOnlyStore };
