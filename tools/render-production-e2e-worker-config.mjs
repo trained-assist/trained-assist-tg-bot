@@ -33,8 +33,6 @@ export function renderProductionE2eWorkerConfig(source, { paused }) {
   // The pinned production test chat is also used in sandbox3. Give the canary
   // its own DO namespaces so chat-keyed intake scope and delivery state cannot
   // collide with the sandbox3 profile that uses the same Telegram chat ID.
-  output = replaceOnce(output, '[exports.TgDeliveryOwner]', '[exports.ProductionE2eTgDeliveryOwner]', 'delivery_owner_export');
-  output = replaceOnce(output, '[exports.IntakeBuffer]', '[exports.ProductionE2eIntakeBuffer]', 'intake_export');
   output = replaceOnce(output, 'class_name = "TgDeliveryOwner"', 'class_name = "ProductionE2eTgDeliveryOwner"', 'delivery_owner_binding');
   output = replaceOnce(output, 'class_name = "IntakeBuffer"', 'class_name = "ProductionE2eIntakeBuffer"', 'intake_binding');
   if (!output.includes('id = "f81925f900dc42fca7bec33d9d422840"') ||
