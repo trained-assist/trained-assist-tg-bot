@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -152,11 +153,14 @@ if VIEW == "events":
     event_items = response.get("result", {}).get("events", {}).get("events", [])
     safe_events = []
     json_message_shapes = {}
+    log_event_counts = {}
     for item in event_items:
         source = item.get("source") if isinstance(item, dict) else None
         message = source.get("message") if isinstance(source, dict) else None
         if not isinstance(message, str):
             continue
+        for name in re.findall(r"\b(tg\.[A-Za-z0-9_.:-]{1,90})\b", message):
+            log_event_counts[name] = log_event_counts.get(name, 0) + 1
         try:
             parsed = json.loads(message)
         except (TypeError, ValueError):
@@ -189,6 +193,7 @@ if VIEW == "events":
         "truncated": response.get("result", {}).get("truncated", False),
         "lifecycle_events": safe_events,
         "message_shapes": json_message_shapes,
+        "log_event_name_counts": log_event_counts,
         "event_shape_sample": [{
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
