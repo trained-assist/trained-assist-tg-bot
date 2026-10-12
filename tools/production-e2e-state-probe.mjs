@@ -3,7 +3,8 @@ import { writeFile } from 'node:fs/promises';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
-if (!token) throw new Error('operator_token_required');
+const signature = process.env.PRODUCTION_E2E_SIGNATURE?.trim();
+if (!token || !signature) throw new Error('probe_credentials_required');
 
 const response = await fetch(`${worker}/operator/test-evidence`, {
   headers: { authorization: `Bearer ${token}` },
@@ -13,6 +14,36 @@ const evidence = await response.json().catch(() => ({}));
 if (!response.ok || evidence.profileId !== 'production-e2e-telegram-v1') {
   throw new Error('production_e2e_readonly_probe_unavailable');
 }
+
+const cpTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
+  const statusResponse = await fetch('https://trained-assist-cp-production.skillset-apply.workers.dev/status', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-principal': 'production-e2e-telegram-v1',
+      'x-principal-sig': signature },
+    body: JSON.stringify({ taskId: task.userTaskId }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!statusResponse.ok) return { httpStatus: statusResponse.status };
+  const status = await statusResponse.json().catch(() => ({}));
+  const engine = status.engine && typeof status.engine === 'object' ? status.engine : {};
+  const row = status.taskStore && typeof status.taskStore === 'object' ? status.taskStore : {};
+  return {
+    taskStatus: typeof row.status === 'string' ? row.status : null,
+    taskStage: typeof row.stage === 'string' ? row.stage : null,
+    generation: Number.isSafeInteger(row.generation) ? row.generation : null,
+    workflowStatus: typeof engine.status === 'string' && /^[a-z_-]{1,40}$/i.test(engine.status)
+      ? engine.status.toLowerCase() : null,
+    workflowErrorName: typeof engine.error?.name === 'string' && /^[a-z_-]{1,40}$/i.test(engine.error.name)
+      ? engine.error.name.toLowerCase() : null,
+    runCount: Array.isArray(status.runs) ? status.runs.length : 0,
+    runs: (status.runs ?? []).map(run => ({
+      status: typeof run.status === 'string' ? run.status : null,
+      hasSessionId: typeof run.session_id === 'string' && !!run.session_id,
+      hasStartedAt: Number.isSafeInteger(run.started_at),
+      hasFinishedAt: Number.isSafeInteger(run.finished_at),
+    })),
+  };
+}));
 
 const summary = {
   ok: true,
@@ -40,6 +71,7 @@ const summary = {
       hasFinishedAt: run.hasFinishedAt === true,
     })),
     historyTypes: (task.historyTypes ?? []).filter(type => typeof type === 'string' && /^[a-z0-9_-]{1,80}$/i.test(type)),
+    cpStatus: cpTasks[(evidence.tasks ?? []).indexOf(task)],
   })),
   answerTextLogged: false,
   promptTextLogged: false,
