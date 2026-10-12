@@ -277,6 +277,8 @@ describe('signed existing-UX ingress', () => {
       observed = { name, path: new URL(url).pathname, method: init.method,
         body: init.body ? JSON.parse(init.body) : null };
       return Response.json({ profileId: 'production-e2e-telegram-v1', tasks: [{ userTaskId: 'ut-test', status: 'done',
+        routingOutcome: { known: true, degraded: false, routeReasonCode: 'task_needs_agent',
+          continuationRequested: true, continuationIssued: true, continuationRefusal: null },
         resultPresent: true, answerPresent: true, runs: [{ status: 'success', hasSessionId: true }] }] });
     } }) };
     const response = await worker.fetch(new Request('https://worker/operator/test-evidence?challenge=PROD-E2E-ABCD1234', {
@@ -286,6 +288,8 @@ describe('signed existing-UX ingress', () => {
     expect(await response.json()).toMatchObject({ profileId: 'production-e2e-telegram-v1',
       readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
       tasks: [{ userTaskId: 'ut-test', status: 'done', resultPresent: true, answerPresent: true,
+        routingOutcome: { known: true, degraded: false, routeReasonCode: 'task_needs_agent',
+          continuationRequested: true, continuationIssued: true, continuationRefusal: null },
         runs: [{ status: 'success', hasSessionId: true }] }] });
     expect(observed).toMatchObject({ name: '1714048', path: '/operator/test-evidence', method: 'POST',
       body: { challenge: 'PROD-E2E-ABCD1234' } });

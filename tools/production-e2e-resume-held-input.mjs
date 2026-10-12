@@ -119,6 +119,14 @@ async function main() {
     alarmScheduledAt: Number.isSafeInteger(wake.scheduledAt) ? wake.scheduledAt : null,
     task: taskEvidence ? {
       status: taskEvidence.status,
+      routingOutcome: taskEvidence.routingOutcome ? {
+        known: taskEvidence.routingOutcome.known === true,
+        degraded: taskEvidence.routingOutcome.degraded === true,
+        routeReasonCode: taskEvidence.routingOutcome.routeReasonCode ?? null,
+        continuationRequested: taskEvidence.routingOutcome.continuationRequested === true,
+        continuationIssued: taskEvidence.routingOutcome.continuationIssued === true,
+        continuationRefusal: taskEvidence.routingOutcome.continuationRefusal ?? null,
+      } : null,
       resultPersisted: taskEvidence.resultPresent === true,
       answerPersisted: taskEvidence.answerPresent === true,
       answerMatchedChallenge: taskEvidence.answerMatchesChallenge === true,
