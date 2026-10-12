@@ -64,6 +64,13 @@ def query(view: str) -> dict:
             "type": "string",
             "value": "POST /webhook",
         })
+    elif view == "events":
+        filters.append({
+            "key": "$metadata.type",
+            "operation": "eq",
+            "type": "string",
+            "value": "cf-worker-log",
+        })
     body = {
         "queryId": f"adhoc-{WORKER}-{view}",
         "timeframe": {"from": now - window_ms, "to": now},
