@@ -87,21 +87,6 @@ async function waitForTask(baselineIds, startedAt, challenge) {
   throw new Error(`production_canary_task_timeout_${task?.status ?? 'not_admitted'}`);
 }
 
-async function waitForBufferIdle() {
-  const deadline = Date.now() + 3 * 60_000;
-  let evidence;
-  while (Date.now() < deadline) {
-    evidence = await workerRequest('/operator/test-evidence');
-    const buffer = evidence.buffer ?? {};
-    const active = buffer.busy || buffer.pendingCount || buffer.launching ||
-      buffer.unresolvedLaunchCount || buffer.busyRequestCount;
-    const nonterminal = (evidence.tasks ?? []).some(task => !['done', 'failed', 'cancelled'].includes(task.status));
-    if (!active && !nonterminal) return evidence;
-    await new Promise(resolve => setTimeout(resolve, 3_000));
-  }
-  throw new Error(`production_canary_buffer_did_not_drain_${evidence?.buffer?.busy ? 'busy' : 'pending'}`);
-}
-
 async function waitForDelivery(taskId, chatId) {
   const deadline = Date.now() + 3 * 60_000;
   let result;
@@ -131,6 +116,9 @@ async function main() {
     throw new Error('production_canary_previous_task_not_terminal');
   }
   const baselineIds = new Set((before.tasks ?? []).map(task => task.userTaskId));
+  // A prior interrupted canary may leave only an unlaunched draft. The pinned
+  // test cleanup endpoint clears this exact chat's Intake/session state and
+  // refuses if the DO still has an active dispatch; CP history is untouched.
   const clean = await workerRequest('/operator/test-cleanup', {
     target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT',
   });
@@ -161,6 +149,11 @@ async function main() {
     const launched = await workerRequest('/operator/test-update', { target: TARGET, type: 'callback', chatId, userId,
       delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + 1 });
     assert.equal(launched.ok, true, 'production_canary_launch_callback_failed');
+    const launchState = launched.collector ?? {};
+    if (launchState.pendingCount !== 0 && launchState.busy !== true &&
+        !(launchState.launchingMessageIds ?? []).length && !launchState.controlPlaneBarrier) {
+      throw new Error(`production_canary_launch_not_dispatched_pending_${launchState.pendingCount ?? 'unknown'}`);
+    }
 
     const observed = await waitForTask(baselineIds, startedAt, nonce);
     task = observed.task;
@@ -188,7 +181,6 @@ async function main() {
     console.log(JSON.stringify(report));
   } finally {
     if (!task || taskTerminal) {
-      await waitForBufferIdle();
       const cleanup = await workerRequest('/operator/test-cleanup', {
         target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT', username,
       });
