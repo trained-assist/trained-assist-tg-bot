@@ -296,12 +296,14 @@ async function main() {
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
-  assert(deliveryMode !== 'capture' || ['file-intake', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
-  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(deliveryMode !== 'capture' || ['file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
+  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'file-intake'
     ? 'sandbox3-file-test Read the attached file and reply with only the secret word written in it.'
+    : scenario === 'artifact-export'
+    ? `Use your shell tool to create agent-note.md containing this exact marker and nothing else: ${nonce}. Export agent-note.md as a task artifact. Do not commit or publish it. Reply with exactly this marker: ${nonce}`
     : scenario === 'playwright-artifact'
     ? `Use the Playwright browser tool, not curl/fetch or memory, to open https://example.com, read its page title, and capture a screenshot. Create browser-check.md with the URL, page title, and this unique marker: ${nonce}. Export both browser-check.md and browser-proof.png as task artifacts. Do not commit or publish anything. In your reply include the exact page title and marker: ${nonce}`
     : scenario === 'retry-mid-run'
@@ -517,8 +519,10 @@ async function main() {
   failureDiagnostics = { ...failureDiagnostics, stage: 'answer_validation', answer: {
     matchesChallenge: answerMatchesChallenge, resultCharacterCount: resultText.length,
   } };
-  let playwrightArtifactEvidence = null;
-  if (scenario === 'playwright-artifact') {
+  let artifactExportEvidence = null;
+  if (scenario === 'artifact-export' || scenario === 'playwright-artifact') {
+    const expectedArtifactNames = scenario === 'artifact-export'
+      ? ['agent-note.md'] : ['browser-check.md', 'browser-proof.png'];
     const artifacts = await d1(`SELECT artifact_ref, size_bytes, checksum, run_id FROM task_artifacts
       WHERE user_task_id = ? ORDER BY created_at, artifact_id`, [task.id]);
     const runEvents = await d1(`SELECT payload_json FROM task_events
@@ -534,31 +538,30 @@ async function main() {
         }] : [];
       } catch { return []; }
     });
-    const markdown = exported.find(item => item.name === 'browser-check.md');
-    const screenshot = exported.find(item => item.name === 'browser-proof.png');
-    const expectedMarkdownExported = Boolean(markdown && markdown.size > 0 && markdown.sha256);
-    const expectedScreenshotExported = Boolean(screenshot && screenshot.size > 0 && screenshot.sha256);
-    const manifestMetadataValid = artifacts.length >= 2 && artifacts.every(item => typeof item.artifact_ref === 'string'
+    const expectedFileExportsPresent = expectedArtifactNames.every(name => exported.some(item => item.name === name
+      && item.size > 0 && item.sha256));
+    const manifestMetadataValid = artifacts.length >= expectedArtifactNames.length && artifacts.every(item => typeof item.artifact_ref === 'string'
       && Number.isSafeInteger(item.size_bytes) && item.size_bytes > 0
       && typeof item.checksum === 'string' && /^sha256:[a-f0-9]{64}$/.test(item.checksum)
       && item.run_id === primaryCorrelation.runnerRunId);
     failureDiagnostics = { ...failureDiagnostics, stage: 'artifact_export_validation', artifactExport: {
-      expectedMarkdownExported, expectedScreenshotExported, manifestCount: artifacts.length, manifestMetadataValid,
+      expectedFileExportsPresent, exportEventCount: exported.length,
+      manifestCount: artifacts.length, manifestMetadataValid,
     } };
-    assert(markdown && markdown.size > 0 && markdown.sha256, 'sandbox_playwright_markdown_not_exported');
-    assert(screenshot && screenshot.size > 0 && screenshot.sha256, 'sandbox_playwright_screenshot_not_exported');
-    assert(artifacts.length >= 2, 'sandbox_playwright_artifact_manifest_not_persisted');
-    assert(manifestMetadataValid, 'sandbox_playwright_artifact_metadata_invalid');
-    playwrightArtifactEvidence = {
-      browserToolRequested: true,
-      resultTitleAndMarkerPresent: answerMatchesChallenge,
-      expectedArtifactsExported: 2,
+    assert(expectedFileExportsPresent, 'sandbox_expected_artifacts_not_exported');
+    assert(artifacts.length >= expectedArtifactNames.length, 'sandbox_task_artifact_manifest_not_persisted');
+    assert(manifestMetadataValid, 'sandbox_task_artifact_metadata_invalid');
+    artifactExportEvidence = {
+      expectedArtifactExportsPresent: true,
+      expectedExportEventCount: expectedArtifactNames.length,
       persistedArtifactManifestCount: artifacts.length,
-      markdownSize: markdown.size,
-      screenshotSize: screenshot.size,
+      ...(scenario === 'playwright-artifact' ? {
+        browserToolRequested: true,
+        resultTitleAndMarkerPresent: answerMatchesChallenge,
+      } : {}),
       contentBytesDownloadedForVerification: false,
     };
-    console.log(JSON.stringify({ scenario: 'playwright-artifact-export', ...playwrightArtifactEvidence }));
+    console.log(JSON.stringify({ scenario: `${scenario}-export`, ...artifactExportEvidence }));
   }
   assert(answerMatchesChallenge, 'sandbox_answer_did_not_match_challenge');
   const terminal = deliveryMode === 'telegram'
@@ -766,7 +769,7 @@ async function main() {
     runnerExecutionCount: executions.length,
     runnerInvoked: expectsAgent,
     answerMatchesChallenge,
-    ...(playwrightArtifactEvidence ? { playwrightArtifactEvidence } : {}),
+    ...(artifactExportEvidence ? { artifactExportEvidence } : {}),
     telegramDeliverySent: deliveryMode === 'telegram' && terminal.status === 'sent',
     telegramProviderMessageIdPresent: deliveryMode === 'telegram' && Number.isSafeInteger(terminal.providerMessageId),
     deliveryAttempts: terminal.attempts ?? 0,
