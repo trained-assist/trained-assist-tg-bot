@@ -66,10 +66,9 @@ export function summarizeSandbox3E2eFailure(value = {}) {
 
   if (value.artifactExport && typeof value.artifactExport === 'object') {
     summary.artifactExport = {
-      expectedMarkdownExported: typeof value.artifactExport.expectedMarkdownExported === 'boolean'
-        ? value.artifactExport.expectedMarkdownExported : null,
-      expectedScreenshotExported: typeof value.artifactExport.expectedScreenshotExported === 'boolean'
-        ? value.artifactExport.expectedScreenshotExported : null,
+      expectedFileExportsPresent: typeof value.artifactExport.expectedFileExportsPresent === 'boolean'
+        ? value.artifactExport.expectedFileExportsPresent : null,
+      exportEventCount: integer(value.artifactExport.exportEventCount),
       manifestCount: integer(value.artifactExport.manifestCount),
       manifestMetadataValid: typeof value.artifactExport.manifestMetadataValid === 'boolean'
         ? value.artifactExport.manifestMetadataValid : null,
