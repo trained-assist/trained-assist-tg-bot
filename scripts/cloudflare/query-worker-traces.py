@@ -22,8 +22,8 @@ if WORKER not in ALLOWED_WORKERS:
     raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
 HEALTH_PROBE_COUNT = 80
 VIEW = os.environ.get("CF_QUERY_VIEW", "traces")
-if VIEW not in {"traces", "events"}:
-    raise SystemExit("CF_QUERY_VIEW must be traces or events")
+if VIEW not in {"traces", "events", "invocations"}:
+    raise SystemExit("CF_QUERY_VIEW must be traces, events, or invocations")
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
@@ -50,14 +50,14 @@ def read_worker_settings() -> dict:
 
 def query(view: str) -> dict:
     now = int(time.time() * 1000)
-    window_ms = (60 * 60 * 1000) if view == "events" else 24 * 60 * 60 * 1000
+    window_ms = (60 * 60 * 1000) if view in {"events", "invocations"} else 24 * 60 * 60 * 1000
     filters = [{
         "key": "$metadata.service",
         "operation": "eq",
         "type": "string",
         "value": WORKER,
     }]
-    if view == "events":
+    if view == "invocations":
         filters.append({
             "key": "$metadata.trigger",
             "operation": "eq",
@@ -131,33 +131,36 @@ if not response.get("success"):
     print(json.dumps({"errors": response.get("errors", [])}), file=sys.stderr)
     raise SystemExit(1)
 
+ALLOWED_LIFECYCLE_EVENTS = {
+    "tg.dispatch.failed", "tg.cp.snapshot_started", "tg.cp.snapshot_persisted",
+    "tg.cp.snapshot_failed", "tg.cp.receipt_read_failed", "tg.cp.intake_failed",
+    "tg.cp.receipt_persist_failed", "tg.cp.task_accepted", "tg.cp.route_completed",
+    "tg.cp.route_pending", "tg.delivery.accepted", "tg.delivery.rejected",
+    "tg.agent.run_finished_received",
+}
+
+
+def event_payload(event):
+    metadata = event.get("$metadata") or event.get("metadata") or {}
+    source = event.get("source")
+    for candidate in (
+        source,
+        source.get("message") if isinstance(source, dict) else None,
+        metadata.get("message"),
+    ):
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+        if isinstance(candidate, dict) and candidate.get("event") in ALLOWED_LIFECYCLE_EVENTS:
+            return candidate
+    return None
+
+
 if VIEW == "events":
     # Return only bounded lifecycle metadata. Worker logs may also contain user
     # text and identifiers, so never print a raw event or arbitrary log message.
-    allowed = {
-        "tg.dispatch.failed", "tg.cp.snapshot_started", "tg.cp.snapshot_persisted",
-        "tg.cp.snapshot_failed", "tg.cp.receipt_read_failed", "tg.cp.intake_failed",
-        "tg.cp.receipt_persist_failed", "tg.cp.task_accepted", "tg.cp.route_completed",
-        "tg.cp.route_pending", "tg.delivery.accepted", "tg.delivery.rejected",
-        "tg.agent.run_finished_received",
-    }
-    def event_payload(event):
-        metadata = event.get("$metadata") or event.get("metadata") or {}
-        source = event.get("source")
-        for candidate in (
-            source,
-            source.get("message") if isinstance(source, dict) else None,
-            metadata.get("message"),
-        ):
-            if isinstance(candidate, str):
-                try:
-                    candidate = json.loads(candidate)
-                except (TypeError, ValueError):
-                    continue
-            if isinstance(candidate, dict) and candidate.get("event") in allowed:
-                return candidate
-        return None
-
     event_items = response.get("result", {}).get("events", {}).get("events", [])
     safe_events = []
     json_message_shapes = {}
@@ -248,6 +251,41 @@ if VIEW == "events":
             "message_type": type((item.get("$metadata") or item.get("metadata") or {}).get("message")).__name__,
         } for item in event_items[:3] if isinstance(item, dict)],
     }, indent=2))
+    raise SystemExit(0)
+
+if VIEW == "invocations":
+    invocations = response.get("result", {}).get("invocations", {})
+    summaries = []
+    for request_id, invocation_events in invocations.items():
+        if not isinstance(invocation_events, list):
+            continue
+        record = {"trigger": "POST /webhook"}
+        times = [event.get("timestamp") for event in invocation_events
+                 if isinstance(event, dict) and isinstance(event.get("timestamp"), (int, float))]
+        if times:
+            record["firstEventAt"] = datetime.fromtimestamp(min(times) / 1000, timezone.utc).isoformat()
+        event_types = {}
+        lifecycle = []
+        for event in invocation_events:
+            if not isinstance(event, dict):
+                continue
+            metadata = event.get("$metadata") or event.get("metadata") or {}
+            event_type = metadata.get("type")
+            if isinstance(event_type, str):
+                event_types[event_type] = event_types.get(event_type, 0) + 1
+            payload = event_payload(event)
+            if payload:
+                safe = {"event": payload["event"]}
+                for key in ("component", "status", "outcome", "reasonCode", "route", "answerPresent", "generation", "attempt"):
+                    value = payload.get(key)
+                    if isinstance(value, (str, bool, int)) and len(str(value)) <= 120:
+                        safe[key] = value
+                lifecycle.append(safe)
+        record["eventTypes"] = event_types
+        record["lifecycleEvents"] = lifecycle
+        summaries.append(record)
+    print(json.dumps({"worker": WORKER, "view": "invocations", "window_minutes": 60,
+        "invocation_count": len(summaries), "invocations": summaries}, indent=2))
     raise SystemExit(0)
 
 trace_items = response.get("result", {}).get("traces", [])
