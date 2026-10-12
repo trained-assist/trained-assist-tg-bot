@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
+import { summarizeProductionE2eDelivery } from './production-e2e-evidence.mjs';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
@@ -53,6 +54,15 @@ const cpTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
   };
 }));
 
+const deliveryTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
+  const response = await fetch(`${worker}/operator/test-delivery/${encodeURIComponent(task.userTaskId)}?chatId=1714048`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(20_000),
+  }).catch(() => null);
+  const payload = response ? await response.json().catch(() => ({})) : {};
+  return summarizeProductionE2eDelivery(payload, response?.status ?? null, '1714048');
+}));
+
 const summary = {
   ok: true,
   mode: 'read-only',
@@ -90,6 +100,7 @@ const summary = {
     })),
     historyTypes: (task.historyTypes ?? []).filter(type => typeof type === 'string' && /^[a-z0-9_-]{1,80}$/i.test(type)),
     cpStatus: cpTasks[(evidence.tasks ?? []).indexOf(task)],
+    delivery: deliveryTasks[(evidence.tasks ?? []).indexOf(task)],
   })),
   answerTextLogged: false,
   promptTextLogged: false,
