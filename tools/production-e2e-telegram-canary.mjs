@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const PROFILE_ID = 'production-e2e-telegram-v1';
@@ -165,22 +166,35 @@ async function waitForDelivery(taskId, chatId) {
   throw new Error(`production_canary_delivery_timeout_${result?.terminal?.status ?? 'not_queued'}`);
 }
 
-function summarizeLaunch(launch) {
+function controlPlaneBarrierCounts(collector) {
+  const barrier = collector?.controlPlaneBarrier ?? {};
+  return {
+    busyRequestCount: Number.isSafeInteger(barrier.busyRequestCount) ? barrier.busyRequestCount : 0,
+    unresolvedLaunchCount: Number.isSafeInteger(barrier.unresolvedLaunchCount) ? barrier.unresolvedLaunchCount : 0,
+  };
+}
+
+export function summarizeLaunch(launch) {
   const collector = launch?.collector ?? {};
+  const barrier = controlPlaneBarrierCounts(collector);
   return {
     callbackAccepted: launch?.ok === true,
     pendingCount: Number.isSafeInteger(collector.pendingCount) ? collector.pendingCount : null,
     busy: collector.busy === true,
     launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null,
-    controlPlaneBarrierPresent: !!collector.controlPlaneBarrier,
+    controlPlaneBarrierPresent: collector.controlPlaneBarrier !== null && collector.controlPlaneBarrier !== undefined,
+    ...barrier,
   };
 }
 
-function launchWasDispatched(launch) {
+export function launchWasDispatched(launch, beforeCollector = {}) {
   const collector = launch?.collector ?? {};
+  const beforeBarrier = controlPlaneBarrierCounts(beforeCollector);
+  const afterBarrier = controlPlaneBarrierCounts(collector);
   return collector.pendingCount === 0 || collector.busy === true ||
     (Array.isArray(collector.launchingMessageIds) && collector.launchingMessageIds.length > 0) ||
-    !!collector.controlPlaneBarrier;
+    afterBarrier.busyRequestCount > beforeBarrier.busyRequestCount ||
+    afterBarrier.unresolvedLaunchCount > beforeBarrier.unresolvedLaunchCount;
 }
 
 async function cleanupIfTerminalAndIdle(username) {
@@ -266,7 +280,9 @@ async function main() {
     assert.equal(launched.ok, true, 'production_canary_launch_callback_failed');
     const launchState = launched.collector ?? {};
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
-        !(launchState.launchingMessageIds ?? []).length && !launchState.controlPlaneBarrier) {
+        !(launchState.launchingMessageIds ?? []).length &&
+        !(Number(launchState.controlPlaneBarrier?.busyRequestCount) > 0) &&
+        !(Number(launchState.controlPlaneBarrier?.unresolvedLaunchCount) > 0)) {
       throw new Error(`production_canary_launch_not_dispatched_pending_${launchState.pendingCount ?? 'unknown'}`);
     }
 
@@ -299,13 +315,17 @@ async function main() {
       { accepted: true, pendingCount: Number.isSafeInteger(followupInput.collector?.pendingCount)
         ? followupInput.collector.pendingCount : null }] });
     assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
+    assert.equal(followupInput.collector?.busy, false, 'production_canary_followup_lane_busy');
+    const followupBarrier = controlPlaneBarrierCounts(followupInput.collector);
+    assert.equal(followupBarrier.busyRequestCount, 0, 'production_canary_followup_busy_request_present');
+    assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'production_canary_followup_unresolved_launch_present');
     const followupLaunch = await pressCurrentLaunchButton();
     assert.equal(followupLaunch.ok, true, 'production_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
       safeTaskSummary(firstTask, { matchedPriorNonce: true }),
       { accepted: true, launch: summarizeLaunch(followupLaunch) },
     ] });
-    assert(launchWasDispatched(followupLaunch), 'production_canary_followup_launch_not_dispatched');
+    assert(launchWasDispatched(followupLaunch, followupInput.collector), 'production_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
     task = followupObserved.task;
     await checkpoint('followup_turn_terminal', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
@@ -345,7 +365,7 @@ async function main() {
   }
 }
 
-main().catch(async error => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(async error => {
   // Assertions include a multiline expected/actual diff. Keep only a safe
   // first-line slug so failure evidence stays useful without ever emitting
   // transcripts, user input, answers, or credentials.

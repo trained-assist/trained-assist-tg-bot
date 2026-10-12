@@ -138,7 +138,7 @@ jobs:
           set -euo pipefail
           node tools/render-production-e2e-worker-config.mjs paused wrangler.production-e2e-paused.generated.toml
           tools/retry-cloudflare-command.sh npx wrangler deploy --strict --config wrangler.production-e2e-paused.generated.toml \
-            --message "production-backend-canary-paused-${GITHUB_SHA}"
+            --var "BUILD_SHA:${GITHUB_SHA}" --message "production-backend-canary-paused-${GITHUB_SHA}"
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
       - name: Enable the pinned production backend test lane
@@ -150,7 +150,7 @@ jobs:
           set -euo pipefail
           node tools/render-production-e2e-worker-config.mjs live wrangler.production-e2e-live.generated.toml
           tools/retry-cloudflare-command.sh npx wrangler deploy --strict --config wrangler.production-e2e-live.generated.toml \
-            --message "production-backend-canary-live-${GITHUB_SHA}"
+            --var "BUILD_SHA:${GITHUB_SHA}" --message "production-backend-canary-live-${GITHUB_SHA}"
 
       - name: Run read-only question, France VM execution, persistence, and real Telegram delivery
         if: ${{ inputs.run_canary == true }}
