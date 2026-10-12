@@ -107,7 +107,7 @@ jobs:
             --var CONTROL_PLANE_PRINCIPAL:production-e2e-telegram-v1 \
             --var CONTROL_PLANE_PROFILE:production-e2e-telegram-v1 \
             --var SESSION_NAMESPACE:integrator-production-e2e-v1 \
-            --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true \
+            --var 'TG_SLICE_INGRESS_PAUSED:"true"' --var 'TG_SLICE_DELIVERY_PAUSED:"true"' \
             --message "production-backend-canary-paused-${GITHUB_SHA}"
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
@@ -121,7 +121,7 @@ jobs:
             --var CONTROL_PLANE_PRINCIPAL:production-e2e-telegram-v1 \
             --var CONTROL_PLANE_PROFILE:production-e2e-telegram-v1 \
             --var SESSION_NAMESPACE:integrator-production-e2e-v1 \
-            --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false \
+            --var 'TG_SLICE_INGRESS_PAUSED:"false"' --var 'TG_SLICE_DELIVERY_PAUSED:"false"' \
             --message "production-backend-canary-live-${GITHUB_SHA}"
 
       - name: Run read-only question, France VM execution, persistence, and real Telegram delivery
@@ -151,8 +151,8 @@ jobs:
           set -euo pipefail
           node tools/production-e2e-restore-guard.mjs
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true \
+            --var 'TG_SLICE_INGRESS_PAUSED:"true"' --var 'TG_SLICE_DELIVERY_PAUSED:"true"' \
             --message "sandbox3-restored-paused-${GITHUB_SHA}"
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
-            --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false \
+            --var 'TG_SLICE_INGRESS_PAUSED:"false"' --var 'TG_SLICE_DELIVERY_PAUSED:"false"' \
             --message "sandbox3-restored-live-${GITHUB_SHA}"

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IntakeBuffer, IntakeBufferReset } from '../src/sandbox-tg/existing-ux.js';
 
 class Storage {
@@ -42,8 +42,20 @@ describe('sandbox-only Intake DO reset', () => {
         runs: [{ status: 'success', generation: 1, session_id: 'persisted-session', started_at: 10, finished_at: 20 }],
       }); } } };
     const intake = new IntakeBuffer(state, env);
-    const response = await intake.fetch(new Request('https://intake/operator/test-evidence', { method: 'POST',
-      body: JSON.stringify({ challenge: 'PROD-E2E-ABCD1234' }) }));
+    const cpResponse = { taskStore: { id: 'ut-1', profile_id: 'production-e2e-telegram-v1', status: 'done', generation: 1,
+      result: { answer: 'private answer text PROD-E2E-ABCD1234' } },
+    runs: [{ status: 'success', generation: 1, session_id: 'persisted-session', started_at: 10, finished_at: 20 }] };
+    const networkFetch = vi.fn(async () => Response.json(cpResponse));
+    vi.stubGlobal('fetch', networkFetch);
+    let response;
+    try {
+      response = await intake.fetch(new Request('https://intake/operator/test-evidence', { method: 'POST',
+        body: JSON.stringify({ challenge: 'PROD-E2E-ABCD1234' }) }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(networkFetch).toHaveBeenCalledOnce();
+    expect(String(networkFetch.mock.calls[0][0])).toContain('trained-assist-cp-production.skillset-apply.workers.dev/status');
     expect(response.status).toBe(200);
     const evidence = await response.json();
     expect(evidence).toMatchObject({ profileId: 'production-e2e-telegram-v1', tasks: [{

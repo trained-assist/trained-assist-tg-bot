@@ -4,11 +4,12 @@ import { chatAllowed, readTgSliceConfig } from '../sandbox-tg/config.js';
 import { ControlPlaneClient } from '../sandbox-tg/control-plane-client.js';
 import { KvConversationStore, ConversationIndex } from '../sandbox-tg/conversation.js';
 import { TgDeliveryOwnerClient } from '../sandbox-tg/delivery-owner.js';
+import { sandboxControlPlaneFetch } from '../sandbox-tg/operator-lane.js';
 
 export function controlPlaneClient(env) {
   const config = readTgSliceConfig(env);
   return new ControlPlaneClient(config, {
-    fetchImpl: env.CONTROL_PLANE_SERVICE?.fetch.bind(env.CONTROL_PLANE_SERVICE),
+    fetchImpl: sandboxControlPlaneFetch(env),
   });
 }
 
