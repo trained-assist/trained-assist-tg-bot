@@ -21,6 +21,7 @@ on:
           - stop
           - retry-mid-run
           - file-intake
+          - artifact-export
           - playwright-artifact
         default: basic
       delivery_mode:
@@ -56,8 +57,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$REF" = "refs/heads/main"
-          if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != file-intake && "$SCENARIO" != playwright-artifact ]]; then
-            echo 'Capture delivery mode currently supports only file-intake and playwright-artifact scenarios.'
+          if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != file-intake && "$SCENARIO" != artifact-export && "$SCENARIO" != playwright-artifact ]]; then
+            echo 'Capture delivery mode currently supports only file-intake, artifact-export, and playwright-artifact scenarios.'
             exit 1
           fi
 
