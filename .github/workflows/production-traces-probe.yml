@@ -2,20 +2,30 @@ name: Production traces probe
 
 on:
   workflow_dispatch:
+    inputs:
+      view:
+        description: Read-only Cloudflare telemetry view
+        required: true
+        type: choice
+        options:
+          - events
+          - invocations
+          - traces
 
 permissions:
   contents: read
 
 jobs:
   query:
-    if: github.ref_name == 'main'
+    if: github.ref_name == 'main' || github.ref_name == 'debug/production-message-events'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_OBSERVABILITY_TOKEN: ${{ secrets.CF_OBSERVABILITY_TOKEN }}
       CF_WORKER_NAME: trained-assist-tg-bot
-      CF_GENERATE_HEALTH_TRAFFIC: "true"
+      CF_GENERATE_HEALTH_TRAFFIC: "false"
+      CF_QUERY_VIEW: ${{ inputs.view }}
     steps:
       - uses: actions/checkout@v4
       - name: Query production trace summaries
