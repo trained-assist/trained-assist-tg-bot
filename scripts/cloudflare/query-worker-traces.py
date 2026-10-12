@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 
@@ -156,6 +157,7 @@ if VIEW == "events":
     log_event_counts = {}
     trigger_counts = {}
     worker_event_type_counts = {}
+    webhook_invocations = []
     for item in event_items:
         metadata = item.get("$metadata") or item.get("metadata") or {}
         trigger = metadata.get("trigger")
@@ -163,6 +165,26 @@ if VIEW == "events":
             match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
             bucket = f"{match.group(1)} {match.group(2).split('/')[1] if len(match.group(2).split('/')) > 1 else '/'}" if match else "other"
             trigger_counts[bucket] = trigger_counts.get(bucket, 0) + 1
+            if match and match.group(1) == "POST" and match.group(2).split("?")[0] == "/webhook":
+                workers = item.get("$workers") or {}
+                record = {"trigger": "POST /webhook"}
+                timestamp = item.get("timestamp")
+                if isinstance(timestamp, (int, float)):
+                    record["timestamp"] = datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat()
+                event_type = workers.get("eventType")
+                if isinstance(event_type, str):
+                    record["eventType"] = event_type
+                outcome = workers.get("outcome")
+                if isinstance(outcome, str) and len(outcome) <= 80:
+                    record["outcome"] = outcome
+                duration = metadata.get("duration")
+                if isinstance(duration, (int, float)):
+                    record["durationMs"] = duration
+                status = metadata.get("statusCode") or metadata.get("httpStatus")
+                if isinstance(status, int):
+                    record["statusCode"] = status
+                record["errorPresent"] = bool(metadata.get("error"))
+                webhook_invocations.append(record)
         workers = item.get("$workers") or {}
         event_type = workers.get("eventType")
         if isinstance(event_type, str):
@@ -208,6 +230,7 @@ if VIEW == "events":
         "log_event_name_counts": log_event_counts,
         "trigger_counts_by_method_and_first_path_segment": trigger_counts,
         "worker_event_type_counts": worker_event_type_counts,
+        "webhook_invocations": webhook_invocations,
         "event_shape_sample": [{
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
