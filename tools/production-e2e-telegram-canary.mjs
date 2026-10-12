@@ -55,6 +55,32 @@ async function capture(text, extra = {}) {
     delivery: 'capture', text, updateId: Date.now() + Math.floor(Math.random() * 1000), ...extra });
 }
 
+async function pressCurrentLaunchButton() {
+  const { chatId, userId } = identity();
+  const deadline = Date.now() + 60_000;
+  let lastCode = 'unknown';
+  while (Date.now() < deadline) {
+    const response = await fetch(`${WORKER}/operator/test-update`, { method: 'POST',
+      headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ target: TARGET, type: 'callback', chatId, userId,
+        delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + Math.floor(Math.random() * 1000) }),
+      signal: AbortSignal.timeout(60_000) });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return payload;
+    const code = typeof payload.error === 'string' ? payload.error : 'failed';
+    // The Worker refuses these two states before webhook dispatch. The Intake
+    // DO emits the collector button after its debounce, so retrying this
+    // no-side-effect readiness response waits for the real user-facing button.
+    if (response.status === 409 && ['no_current_button_message', 'no_current_button_revision'].includes(code)) {
+      lastCode = code;
+      await new Promise(resolve => setTimeout(resolve, 1_000));
+      continue;
+    }
+    throw new Error(`worker_callback_${response.status}_${code}`);
+  }
+  throw new Error(`production_canary_collector_button_timeout_${lastCode}`);
+}
+
 async function waitForLiveLane() {
   const deadline = Date.now() + 60_000;
   let lastReadiness = null;
@@ -146,8 +172,7 @@ async function main() {
     assert.equal(question.collector?.pendingCount, 1, 'production_canary_input_not_buffered');
 
     const { userId } = identity();
-    const launched = await workerRequest('/operator/test-update', { target: TARGET, type: 'callback', chatId, userId,
-      delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + 1 });
+    const launched = await pressCurrentLaunchButton();
     assert.equal(launched.ok, true, 'production_canary_launch_callback_failed');
     const launchState = launched.collector ?? {};
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
