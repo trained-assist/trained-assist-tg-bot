@@ -134,7 +134,12 @@ if VIEW == "events":
     }
     def event_payload(event):
         metadata = event.get("$metadata") or event.get("metadata") or {}
-        for candidate in (event.get("source"), metadata.get("message")):
+        source = event.get("source")
+        for candidate in (
+            source,
+            source.get("message") if isinstance(source, dict) else None,
+            metadata.get("message"),
+        ):
             if isinstance(candidate, str):
                 try:
                     candidate = json.loads(candidate)
