@@ -27,12 +27,20 @@ const cpTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
   const status = await statusResponse.json().catch(() => ({}));
   const engine = status.engine && typeof status.engine === 'object' ? status.engine : {};
   const row = status.taskStore && typeof status.taskStore === 'object' ? status.taskStore : {};
+  const engineError = String(engine.error ?? '').toLowerCase();
+  const workflowErrorCode = !engineError ? null
+    : /not found|no such instance/.test(engineError) ? 'workflow_instance_missing'
+      : /timeout|timed out/.test(engineError) ? 'workflow_status_timeout'
+        : 'workflow_status_unavailable';
   return {
     taskStatus: typeof row.status === 'string' ? row.status : null,
     taskStage: typeof row.stage === 'string' ? row.stage : null,
     generation: Number.isSafeInteger(row.generation) ? row.generation : null,
     workflowStatus: typeof engine.status === 'string' && /^[a-z_-]{1,40}$/i.test(engine.status)
       ? engine.status.toLowerCase() : null,
+    workflowStatusType: engine.status === null ? 'null' : typeof engine.status,
+    workflowEngineKeys: Object.keys(engine).filter(key => /^[a-zA-Z0-9_-]{1,40}$/.test(key)),
+    workflowErrorCode,
     workflowErrorName: typeof engine.error?.name === 'string' && /^[a-z_-]{1,40}$/i.test(engine.error.name)
       ? engine.error.name.toLowerCase() : null,
     runCount: Array.isArray(status.runs) ? status.runs.length : 0,
