@@ -55,6 +55,28 @@ function safeJson(text) {
 
 const MAX_TASK_ARTIFACT_BYTES = 10 * 1024 * 1024;
 
+function safeArtifactFilename(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 200
+    && value === value.trim() && value !== '.' && value !== '..'
+    && !/[\\/\x00-\x1f\x7f]/.test(value) ? value : null;
+}
+
+function artifactFilenameFromDisposition(value) {
+  if (typeof value !== 'string' || value.length > 2048 || /[\r\n\x00]/.test(value)) return null;
+  const extended = /(?:^|;)\s*filename\*\s*=\s*([^;]+)/i.exec(value)?.[1]?.trim();
+  if (extended) {
+    const encoded = /^UTF-8''(.+)$/i.exec(extended)?.[1];
+    if (encoded) {
+      try {
+        const decoded = safeArtifactFilename(decodeURIComponent(encoded));
+        if (decoded) return decoded;
+      } catch { /* Use the safe ASCII fallback below when the extended value is malformed. */ }
+    }
+  }
+  const quoted = /(?:^|;)\s*filename\s*=\s*"([^"\\/\r\n]{1,200})"/i.exec(value)?.[1];
+  return safeArtifactFilename(quoted);
+}
+
 export class ControlPlaneClient {
   constructor(config, options = {}) {
     this.config = config;
@@ -146,7 +168,7 @@ export class ControlPlaneClient {
     let offset = 0;
     for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
     const disposition = res.headers.get('content-disposition') ?? '';
-    const filename = /^attachment; filename="([^"\\/\r\n]{1,200})"$/i.exec(disposition)?.[1] ?? null;
+    const filename = artifactFilenameFromDisposition(disposition);
     return { body, filename, sizeBytes: size, sha256: res.headers.get('x-artifact-sha256'),
       artifactId: res.headers.get('x-artifact-id'), contentType: res.headers.get('content-type') };
   }

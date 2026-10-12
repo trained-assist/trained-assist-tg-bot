@@ -43,7 +43,7 @@ describe('sandbox durable single delivery owner', () => {
       requests.push({ url, init });
       if (url.pathname === '/artifact') return new Response(bytes, { status: 200, headers: {
         'content-type': 'text/markdown', 'content-length': String(bytes.length),
-        'content-disposition': 'attachment; filename="agent-note.md"',
+        'content-disposition': 'attachment; filename="agent-note.md"; filename*=UTF-8\'\'agent-note.md',
         'x-artifact-sha256': sha256, 'x-artifact-id': 'artifact-123',
       } });
       if (url.pathname.endsWith('/sendDocument')) return Response.json({ ok: true, result: { message_id: 2026 } });
