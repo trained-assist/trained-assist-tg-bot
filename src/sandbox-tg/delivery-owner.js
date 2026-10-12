@@ -27,7 +27,39 @@ const summary = record => record ? {
   legacyStatus: record.legacyStatus ?? null,
 } : null;
 
+function isPinnedProductionE2eLane(env, config) {
+  return env.TG_ACCEPT_ONLY_ENVIRONMENT === 'sandbox' &&
+    env.TG_SANDBOX_TEST_API_ENABLED === 'true' &&
+    env.TG_SANDBOX_BOT_USERNAME === 'ptichka_status_bot' &&
+    env.CONTROL_PLANE_URL === 'https://trained-assist-cp-production.skillset-apply.workers.dev' &&
+    env.CONTROL_PLANE_PRINCIPAL === 'production-e2e-telegram-v1' &&
+    env.CONTROL_PLANE_PROFILE === 'production-e2e-telegram-v1' &&
+    env.SESSION_NAMESPACE === 'integrator-production-e2e-v1' &&
+    config.botUsername === 'ptichka_status_bot' &&
+    config.controlPlaneUrl === 'https://trained-assist-cp-production.skillset-apply.workers.dev' &&
+    config.profileId === 'production-e2e-telegram-v1';
+}
+
+function productionE2eEmptyCutoverManifest() {
+  return {
+    version: 'tg-delivery-cutover-v1',
+    botUsername: 'ptichka_status_bot',
+    profileId: 'production-e2e-telegram-v1',
+    cutoverId: 'production-e2e-empty-cutover-v1',
+    // Stable across Worker restarts so the dedicated owner namespace keeps
+    // the same immutable fingerprint for the lifetime of this test lane.
+    cutoverAt: 1_700_000_000_000,
+    oldTaskIds: [],
+    deliveries: [],
+  };
+}
+
 export function cutoverManifest(env, config = readTgSliceConfig(env)) {
+  // The pinned production E2E lane has its own Durable Object namespace and
+  // must not import sandbox3's secret manifest of legacy destinations. Its
+  // owner starts empty; the strict lane check prevents this exception from
+  // weakening any ordinary sandbox or production configuration.
+  if (isPinnedProductionE2eLane(env, config)) return productionE2eEmptyCutoverManifest();
   const raw = env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST;
   if (typeof raw !== 'string' || new TextEncoder().encode(raw).length > 65536) throw new TgSliceConfigError('cutover manifest required', 'TG_SLICE_DELIVERY_CUTOVER_MANIFEST');
   let manifest;
