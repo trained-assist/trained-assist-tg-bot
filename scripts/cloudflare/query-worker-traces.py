@@ -154,7 +154,19 @@ if VIEW == "events":
     safe_events = []
     json_message_shapes = {}
     log_event_counts = {}
+    trigger_counts = {}
+    worker_event_type_counts = {}
     for item in event_items:
+        metadata = item.get("$metadata") or item.get("metadata") or {}
+        trigger = metadata.get("trigger")
+        if isinstance(trigger, str):
+            match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
+            bucket = f"{match.group(1)} {match.group(2).split('/')[1] if len(match.group(2).split('/')) > 1 else '/'}" if match else "other"
+            trigger_counts[bucket] = trigger_counts.get(bucket, 0) + 1
+        workers = item.get("$workers") or {}
+        event_type = workers.get("eventType")
+        if isinstance(event_type, str):
+            worker_event_type_counts[event_type] = worker_event_type_counts.get(event_type, 0) + 1
         source = item.get("source") if isinstance(item, dict) else None
         message = source.get("message") if isinstance(source, dict) else None
         if not isinstance(message, str):
@@ -194,6 +206,8 @@ if VIEW == "events":
         "lifecycle_events": safe_events,
         "message_shapes": json_message_shapes,
         "log_event_name_counts": log_event_counts,
+        "trigger_counts_by_method_and_first_path_segment": trigger_counts,
+        "worker_event_type_counts": worker_event_type_counts,
         "event_shape_sample": [{
             "top_level_keys": sorted(str(key) for key in item.keys()),
             "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
