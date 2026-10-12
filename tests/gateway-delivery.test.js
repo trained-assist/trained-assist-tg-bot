@@ -46,6 +46,7 @@ function env() {
   return {
     BOT_TOKEN: 'bt',
     AGENT_SECRET: 'test-secret',
+    BUILD_SHA: 'test-build',
     SESSIONS,
     INTAKE: { idFromName: (n) => n, get: () => ({ fetch: vi.fn(async () => new Response('{}')) }) },
     USERS: SESSIONS,
@@ -73,8 +74,9 @@ describe('POST /deliver — реальный адаптер канала (arch#1
   });
 
   it('stuck_input уходит в чат С КНОПКОЙ запуска и возвращает providerMessageId', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const res = await deliver({
-      deliveryId: 'd-1', channel: 'telegram', destinationId: '-5496844108',
+      deliveryId: 'd-1', userTaskId: 'ut-delivery-1', channel: 'telegram', destinationId: '-5496844108',
       message: { kind: 'stuck_input', text: '⏳ Всё ещё жду запуска', actions: ['launch'] },
     });
     expect(res.status).toBe(200);
@@ -91,9 +93,15 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     expect(JSON.stringify(rows)).toContain('intake_run');
     // Адрес доставки — отрицательный id группы, он не теряется.
     expect(Number(sendMessageWithKeyboard.mock.calls[0][1])).toBe(-5496844108);
+    const event = JSON.parse(log.mock.calls.map(call => call[0]).find(line => line.includes('tg.delivery.accepted')));
+    expect(event).toMatchObject({ deliveryId: 'd-1', taskId: 'ut-delivery-1', status: 'sent', providerMessageId: 556 });
+    expect(JSON.stringify(event)).not.toContain('-5496844108');
+    expect(JSON.stringify(event)).not.toContain('Всё ещё жду запуска');
+    log.mockRestore();
   });
 
   it('канал не принял сообщение — НЕ доставка: 502 без providerMessageId', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     sendMessageWithKeyboard.mockResolvedValue({ ok: false, description: 'Bad Request: chat not found' });
     const res = await deliver({
       deliveryId: 'd-2', channel: 'telegram', destinationId: '42',
@@ -101,6 +109,10 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     });
     expect(res.status).toBe(502);
     expect((await res.json()).providerMessageId).toBeUndefined();
+    const event = JSON.parse(log.mock.calls.map(call => call[0]).find(line => line.includes('tg.delivery.rejected')));
+    expect(event).toMatchObject({ deliveryId: 'd-2', status: 'rejected', reasonCode: 'provider_not_accepted' });
+    expect(JSON.stringify(event)).not.toContain('chat not found');
+    log.mockRestore();
   });
 
   it('канал недоступен полностью — 502, а не «успех без message_id»', async () => {

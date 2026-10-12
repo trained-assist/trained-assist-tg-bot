@@ -17,6 +17,7 @@ import { shouldDebounce, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from '
 import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, botWasAddedToGroup, groupWelcomeText, noContentNudgeText } from './group-routing.js';
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
+import { logLifecycleEvent } from './lib/lifecycle-log.js';
 
 const app = new Hono();
 
@@ -49,16 +50,19 @@ app.post('/internal/run-finished', async c => {
   const consumed = Array.isArray(body?.consumed) ? body.consumed.map(Number).filter(Number.isSafeInteger).slice(0, 200) : [];
   // Test mode (DESIGN §2.1/§2.2): the run went out under a reserve chatId —
   // translate back BEFORE choosing the IntakeBuffer, or `busy` never releases.
-  // Journal lines: run-finished when this is a test chat, agent-answer whenever
-  // the agent returned its answer (contract: only sent with delivery:"log").
+  // Keep a safe lifecycle record for correlation. The answer itself is never
+  // written to Worker logs; test harnesses inspect it at their controlled edge.
   const realChat = realChatId(c.env, chatId);
   const answer = typeof body?.answer === 'string' && body.answer ? body.answer.slice(0, 8000) : null;
   const outcome = ['done', 'error', 'stopped', 'quick'].includes(body?.outcome) ? body.outcome : null;
-  if (isTestChat(c.env, realChat) && outcome) {
-    console.log(`[test-mode] kind=run-finished chat=${realChat} requestId=${requestId || '-'} outcome=${outcome}`);
-  }
-  if (answer != null) {
-    console.log(`[test-mode] kind=agent-answer chat=${realChat} requestId=${requestId || '-'} len=${answer.length} text=${answer.slice(0, 4000)}`);
+  if (requestId || outcome || answer != null) {
+    logLifecycleEvent({ event: 'tg.agent.run_finished_received', component: 'gateway',
+      ...(requestId ? { correlationId: requestId, requestId } : {}),
+      ...(typeof body?.taskId === 'string' ? { taskId: body.taskId } : {}),
+      ...(Number.isSafeInteger(body?.generation) && body.generation >= 0 ? { generation: body.generation } : {}),
+      ...(outcome ? { outcome } : {}), status: 'callback_received',
+      answerPresent: answer != null, ...(answer != null ? { answerLength: answer.length } : {}),
+    }, c.env);
   }
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(realChat, threadId)));
   const res = await stub.fetch('https://intake/run-finished', {
@@ -132,9 +136,15 @@ app.post('/deliver', async c => {
   if (!providerMessageId) {
     // Канал не принял: это НЕ доставка. Честный отказ, чтобы control plane
     // повторил, а не записал «успех».
+    logLifecycleEvent({ event: 'tg.delivery.rejected', component: 'gateway', deliveryId,
+      ...(typeof body?.userTaskId === 'string' ? { taskId: body.userTaskId } : {}),
+      status: 'rejected', reasonCode: 'provider_not_accepted' }, c.env);
     return c.json({ error: 'channel did not accept', description: result?.description || null }, 502);
   }
   await recordGatewaySent(c.env, chatId, providerMessageId);
+  logLifecycleEvent({ event: 'tg.delivery.accepted', component: 'gateway', deliveryId,
+    ...(typeof body?.userTaskId === 'string' ? { taskId: body.userTaskId } : {}),
+    status: 'sent', providerMessageId }, c.env);
   return c.json({ providerMessageId, kind, deliveryId });
 });
 
@@ -338,7 +348,10 @@ async function dispatch(update, env) {
   try {
     await dispatchInner(update, env);
   } catch (err) {
-    console.error(`[dispatch] unhandled error chatId=${chatId}:`, err?.message, err?.stack);
+    const updateId = Number.isSafeInteger(update?.update_id) ? String(update.update_id) : null;
+    logLifecycleEvent({ event: 'tg.dispatch.failed', component: 'gateway',
+      ...(updateId ? { correlationId: updateId } : {}), status: 'failed',
+      reasonCode: typeof err?.code === 'string' ? err.code : 'unhandled_error' }, env);
     if (chatId) {
       try {
         await sendMessage(env.BOT_TOKEN, chatId, `❌ Внутренняя ошибка: ${err?.message || err}`, threadExtra(threadId));
