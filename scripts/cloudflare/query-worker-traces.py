@@ -169,6 +169,8 @@ if VIEW == "events":
     worker_event_type_counts = {}
     metadata_type_counts = {}
     webhook_invocations = []
+    recent_route_activity = []
+    recent_cutoff_ms = int(time.time() * 1000) - 15 * 60 * 1000
     for item in event_items:
         metadata = item.get("$metadata") or item.get("metadata") or {}
         metadata_type = metadata.get("type")
@@ -179,6 +181,18 @@ if VIEW == "events":
             match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
             bucket = f"{match.group(1)} {match.group(2).split('/')[1] if len(match.group(2).split('/')) > 1 else '/'}" if match else "other"
             trigger_counts[bucket] = trigger_counts.get(bucket, 0) + 1
+            timestamp = item.get("timestamp")
+            route = match.group(2).split("?")[0] if match else ""
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms and route in {
+                "/webhook", "/ingest", "/append", "/collector-state", "/debug", "/health",
+            }:
+                record = {"method": match.group(1), "route": route,
+                    "timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "eventType": (item.get("$workers") or {}).get("eventType")}
+                status = metadata.get("statusCode") or metadata.get("httpStatus")
+                if isinstance(status, int):
+                    record["statusCode"] = status
+                recent_route_activity.append(record)
             if match and match.group(1) == "POST" and match.group(2).split("?")[0] == "/webhook":
                 workers = item.get("$workers") or {}
                 record = {"trigger": "POST /webhook"}
@@ -246,6 +260,7 @@ if VIEW == "events":
         "worker_event_type_counts": worker_event_type_counts,
         "metadata_type_counts": metadata_type_counts,
         "webhook_invocations": webhook_invocations,
+        "recent_route_activity": sorted(recent_route_activity, key=lambda record: record["timestamp"])[-100:],
         "worker_log_settings": {
             key: value for key, value in (read_worker_settings().get("result", {}).get("observability", {}).get("logs", {}) or {}).items()
             if key in {"enabled", "persist", "invocation_logs", "head_sampling_rate"}
