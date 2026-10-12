@@ -1,0 +1,11 @@
+# Production backend Telegram E2E canary
+
+This canary sends one read-only question through the isolated `ptichka_status_bot` sandbox ingress, the production Control Plane profile `production-e2e-telegram-v1`, the production Runner API, and the France VM execution worker. The answer is delivered to the pinned test chat `1714048` through Telegram.
+
+The production Telegram bot and its routes are not changed. The sandbox Worker is temporarily deployed with the production CP URL, principal, profile, and a distinct `integrator-production-e2e-v1` session namespace. The HMAC signature is a Worker secret and is scoped to the E2E principal. Runner production health must report `eu-vm-agent-run` before the workflow proceeds.
+
+The test creates a random, temporary Telegram login, sends a nonce challenge, and checks the durable CP task, successful run, stored session identifier, nonce match, and Telegram delivery receipt. Evidence contains task/run IDs and status only; prompt, answer, password, and credentials are not logged. CP task history and Runner session/workspace data are retained as production evidence.
+
+Cleanup is limited to the pinned test chat's sandbox Intake Durable Object state, namespaced Telegram login session, and the generated `production_e2e_<12 hex>` login. It does not delete CP tasks/results, profile data, Runner sessions/workspaces, shared KV namespaces, or any other chat's state. Cleanup refuses an active Intake operation. The workflow restores sandbox3 routing only after the lane reports terminal tasks and empty buffers; if outcome is unknown, it leaves the isolated test ingress in place for recovery rather than disconnecting it from its production task.
+
+Run `.github/workflows/production-backend-telegram-e2e.yml` manually from `main` with `run_canary=true`. It is serialized with the sandbox3 E2E workflow. Required Actions secrets are `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `TG_SANDBOX3_CHAT_ID`, `TG_SANDBOX3_OPERATOR_TOKEN`, `TG_STAGING_TEST_USER_ID`, and the scoped `CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE`.

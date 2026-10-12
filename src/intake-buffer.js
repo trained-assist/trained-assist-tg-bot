@@ -430,6 +430,55 @@ export class IntakeBuffer {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === '/operator/test-evidence' && request.method === 'POST') {
+      const lane = sandboxOperatorLane(this.env);
+      if (!['sandbox3', 'productionE2e'].includes(lane) || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+          this.env.EXECUTION_BACKEND !== 'control-plane') return json({ error: 'sandbox_identity_mismatch' }, 409);
+      const probe = await request.clone().json().catch(() => ({}));
+      const challenge = probe?.challenge;
+      if (challenge !== undefined && (typeof challenge !== 'string' || !/^[A-Z0-9-]{10,64}$/.test(challenge))) {
+        return json({ error: 'invalid_test_challenge' }, 400);
+      }
+      const profileId = controlPlaneClient(this.env).config.profileId;
+      const stored = await this.state.storage.list({ prefix: 'cp-acceptance:', limit: 100 });
+      const client = controlPlaneClient(this.env);
+      const tasks = [];
+      for (const value of stored.values()) {
+        const receipt = value?.receipt;
+        if (receipt?.profileId !== profileId || typeof receipt.userTaskId !== 'string') continue;
+        let status;
+        try { status = (await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } })).value; }
+        catch (error) {
+          tasks.push({ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
+            status: 'unavailable', httpStatus: Number.isInteger(error?.status) ? error.status : null });
+          continue;
+        }
+        const row = status.taskStore ?? {};
+        const answer = typeof row.result?.answer === 'string' ? row.result.answer : '';
+        tasks.push({ requestId: receipt.requestId, userTaskId: row.id ?? receipt.userTaskId,
+          acceptedAt: receipt.providerAcceptedAt ?? null,
+          status: row.status ?? 'unknown', generation: row.generation ?? 0,
+          resultPresent: !!row.result, answerPresent: !!answer.trim(),
+          answerMatchesChallenge: !!challenge && answer.includes(challenge),
+          historyTypes: [...new Set((Array.isArray(row.history) ? row.history : [])
+            .map(event => event.type ?? event.kind ?? event.event_type).filter(type => typeof type === 'string'))],
+          runs: (Array.isArray(status.runs) ? status.runs : []).map(run => ({ status: run.status,
+            generation: run.generation, hasSessionId: typeof run.session_id === 'string' && !!run.session_id,
+            hasStartedAt: Number.isSafeInteger(run.started_at), hasFinishedAt: Number.isSafeInteger(run.finished_at) })) });
+      }
+      tasks.sort((left, right) => (right.acceptedAt ?? 0) - (left.acceptedAt ?? 0));
+      const debug = await this.fetch(new Request('https://intake/debug'));
+      const state = debug.ok ? await debug.json().catch(() => ({})) : {};
+      const pendingCount = [...(state.buf ?? []), ...(state.retryBatch ?? [])]
+        .filter(item => item.hasText || item.mediaPending).length;
+      return json({ profileId, tasks: tasks.slice(0, 20), buffer: {
+        pendingCount, busy: state.busy === true,
+        launching: Array.isArray(state.launching) ? state.launching.length : 0,
+        stranded: state.stranded === true,
+        unresolvedLaunchCount: state.controlPlaneBarrier?.unresolvedLaunchCount ?? null,
+        busyRequestCount: state.controlPlaneBarrier?.busyRequestCount ?? null,
+      } });
+    }
     if (url.pathname === '/_sandbox-test/seed-capture-collector' && request.method === 'POST') {
       const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
       const source = await request.json().catch(() => null);

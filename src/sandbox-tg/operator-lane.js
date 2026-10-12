@@ -9,7 +9,15 @@ const LANES = Object.freeze({
     botUsername: 'ptichka_status_bot',
     sessionNamespace: 'integrator-sandbox3-v1',
     controlPlaneUrl: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
+    principalId: 'integration-sandbox3-v1',
     profileId: 'integration-sandbox3-v1',
+  }),
+  productionE2e: Object.freeze({
+    botUsername: 'ptichka_status_bot',
+    sessionNamespace: 'integrator-production-e2e-v1',
+    controlPlaneUrl: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+    principalId: 'production-e2e-telegram-v1',
+    profileId: 'production-e2e-telegram-v1',
   }),
 });
 
@@ -22,18 +30,22 @@ export function sandboxOperatorLane(env) {
       : String(env.CONTROL_PLANE_URL ?? '').replace(/\/+$/, '') === expected.controlPlaneUrl
         && env.CONTROL_PLANE_PROFILE === expected.profileId;
     if (String(env.TG_SANDBOX_BOT_USERNAME ?? '').replace(/^@/, '') === expected.botUsername
-      && env.SESSION_NAMESPACE === expected.sessionNamespace && correctControlPlane) return target;
+      && env.SESSION_NAMESPACE === expected.sessionNamespace && correctControlPlane
+      && (!expected.principalId || env.CONTROL_PLANE_PRINCIPAL === expected.principalId)) return target;
   }
   return null;
 }
 
 export function sandboxOperatorToken(env, target) {
-  return String(env?.[target === 'sandbox3' ? 'TG_SANDBOX3_OPERATOR_TOKEN' : 'TG_SANDBOX_CLEANUP_TOKEN'] ?? '').trim();
+  return String(env?.[target === 'sandbox3' || target === 'productionE2e'
+    ? 'TG_SANDBOX3_OPERATOR_TOKEN' : 'TG_SANDBOX_CLEANUP_TOKEN'] ?? '').trim();
 }
+
+const isPinnedTestLane = target => target === 'sandbox3' || target === 'productionE2e';
 
 export function sandboxOperatorChatAllowed(env, config, target, chatId) {
   const value = String(chatId);
-  if (target === 'sandbox3') {
+  if (isPinnedTestLane(target)) {
     const pinnedChatId = String(env?.TG_SANDBOX_E2E_CHAT_ID ?? '').trim();
     return /^-?[1-9]\d*$/.test(pinnedChatId) && value === pinnedChatId
       && String(env?.TG_SANDBOX_E2E_USER_ID ?? '').trim().match(/^[1-9]\d*$/) !== null;
@@ -42,13 +54,17 @@ export function sandboxOperatorChatAllowed(env, config, target, chatId) {
 }
 
 export function sandboxOperatorUserAllowed(env, target, userId) {
-  if (target !== 'sandbox3') return true;
+  if (!isPinnedTestLane(target)) return true;
   const pinnedUserId = String(env?.TG_SANDBOX_E2E_USER_ID ?? '').trim();
   return /^[1-9]\d*$/.test(pinnedUserId) && String(userId) === pinnedUserId;
 }
 
 export function sandboxOperatorResetChat(env, target) {
-  if (target !== 'sandbox3') return null;
+  if (!isPinnedTestLane(target)) return null;
   const value = String(env?.TG_SANDBOX_E2E_CHAT_ID ?? '').trim();
   return /^-?[1-9]\d*$/.test(value) ? value : null;
+}
+
+export function sandboxOperatorPinnedTestLane(target) {
+  return isPinnedTestLane(target);
 }

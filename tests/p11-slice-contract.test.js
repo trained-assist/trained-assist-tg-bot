@@ -24,6 +24,17 @@ describe('config — production-bot guard + env-only', () => {
     expect(() => readTgSliceConfig(makeEnv({ CONTROL_PLANE_PRINCIPAL: '' }))).toThrow('CONTROL_PLANE_PRINCIPAL');
     expect(() => readTgSliceConfig(makeEnv({ CONTROL_PLANE_PROFILE: '' }))).toThrow('CONTROL_PLANE_PROFILE');
   });
+  it('uses a separate scoped signature for the exact production E2E sandbox lane', () => {
+    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_TEST_API_ENABLED: 'true',
+      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+      CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
+      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
+      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'sandbox-signature', CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'production-e2e-signature',
+      CONTROL_PLANE_SESSION_ID: 'old-sandbox-session', TG_SLICE_CHAT_PROFILES: '1714048:integration-sandbox3-v1' });
+    expect(readTgSliceConfig(env)).toMatchObject({ principalSignature: 'production-e2e-signature', sessionId: null, chatProfiles: {} });
+    expect(() => readTgSliceConfig({ ...env, SESSION_NAMESPACE: 'integrator-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
+    expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
+  });
   it('allowlist empty → no chat served (fail closed)', () => {
     const config = readTgSliceConfig(makeEnv({ TG_SLICE_ALLOWED_CHATS: '' }));
     expect(profileForUpdate(config, { message: { chat: { id: 1001 } } })).toBeNull();
