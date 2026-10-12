@@ -50,22 +50,29 @@ def read_worker_settings() -> dict:
 
 def query(view: str) -> dict:
     now = int(time.time() * 1000)
+    window_ms = (60 * 60 * 1000) if view == "events" else 24 * 60 * 60 * 1000
+    filters = [{
+        "key": "$metadata.service",
+        "operation": "eq",
+        "type": "string",
+        "value": WORKER,
+    }]
+    if view == "events":
+        filters.append({
+            "key": "$metadata.trigger",
+            "operation": "eq",
+            "type": "string",
+            "value": "POST /webhook",
+        })
     body = {
         "queryId": f"adhoc-{WORKER}-{view}",
-        "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
+        "timeframe": {"from": now - window_ms, "to": now},
         "view": view,
         "dry": True,
         "limit": 500,
         "parameters": {
             "datasets": ["cloudflare-workers"],
-            "filters": [
-                {
-                    "key": "$metadata.service",
-                    "operation": "eq",
-                    "type": "string",
-                    "value": WORKER,
-                }
-            ],
+            "filters": filters,
         },
     }
     request = urllib.request.Request(
@@ -222,7 +229,7 @@ if VIEW == "events":
     print(json.dumps({
         "worker": WORKER,
         "view": "events",
-        "window_hours": 24,
+        "window_minutes": 60,
         "returned_event_count": len(event_items),
         "truncated": response.get("result", {}).get("truncated", False),
         "lifecycle_events": safe_events,
