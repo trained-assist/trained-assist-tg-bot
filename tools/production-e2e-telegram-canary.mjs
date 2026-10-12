@@ -98,6 +98,10 @@ async function main() {
   const { chatId } = identity();
   const before = await workerRequest('/operator/test-evidence');
   assert.equal(before.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+  if (before.readiness?.testApiEnabled !== true || before.readiness?.ingressPaused !== false ||
+      before.readiness?.deliveryPaused !== false) {
+    throw new Error(`production_canary_lane_not_ready_${before.readiness?.testApiEnabled ? 'paused' : 'test_api_disabled'}`);
+  }
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
     throw new Error('production_canary_intake_not_idle');

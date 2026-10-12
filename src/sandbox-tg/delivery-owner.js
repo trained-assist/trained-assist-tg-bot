@@ -1,6 +1,7 @@
 import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
 import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
+import { sandboxControlPlaneFetch } from './operator-lane.js';
 
 const reference = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
 const artifactReference = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)
@@ -220,8 +221,7 @@ export class TgDeliveryOwner {
     try {
       let result;
       if (claim.type === 'artifact') {
-        const client = new ControlPlaneClient(config, { fetchImpl: this.env.CONTROL_PLANE_SERVICE
-          ? this.env.CONTROL_PLANE_SERVICE.fetch.bind(this.env.CONTROL_PLANE_SERVICE) : undefined });
+        const client = new ControlPlaneClient(config, { fetchImpl: sandboxControlPlaneFetch(this.env) });
         const downloaded = await client.artifact(claim.userTaskId, claim.artifact.ref);
         const actualSha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', downloaded.body))]
           .map(value => value.toString(16).padStart(2, '0')).join('');

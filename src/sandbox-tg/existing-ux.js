@@ -15,7 +15,7 @@ import { isTerminalTaskStatus } from './contract.js';
 import { cmdLogin, handleCommand } from '../handlers/commands.js';
 import { handleUserMgmt, isUserMgmtCommand } from '../handlers/user-mgmt.js';
 import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
-import { sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorPinnedTestLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
+import { sandboxControlPlaneFetch, sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorPinnedTestLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
 import { mediaOf } from '../media-jobs.js';
 import { prepareIntake } from '../intake-preflight.js';
 
@@ -153,8 +153,12 @@ app.get('/operator/test-evidence', async context => {
   const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
   const response = await stub.fetch('https://intake/operator/test-evidence', { method: 'POST',
     body: JSON.stringify(challenge ? { challenge } : {}) });
-  return new Response(response.body, { status: response.status,
-    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  const evidence = await response.json().catch(() => ({}));
+  return context.json({ ...evidence, readiness: {
+    testApiEnabled: env.TG_SANDBOX_TEST_API_ENABLED === 'true',
+    ingressPaused: env.TG_SLICE_INGRESS_PAUSED === 'true',
+    deliveryPaused: env.TG_SLICE_DELIVERY_PAUSED !== 'false',
+  } }, response.status, { 'cache-control': 'no-store' });
 });
 
 // Clear only this pinned Telegram chat's Intake DO, login session, and optional
@@ -250,8 +254,7 @@ app.post('/operator/stop-window', async context => {
     const conversation = `^tg-${pinnedUserId}${source.threadId == null
       ? '' : `-t${source.threadId}`}-s[0-9a-f]{24}$`;
     const taskId = source.taskId;
-    const client = new ControlPlaneClient(config, { fetchImpl: env.CONTROL_PLANE_SERVICE
-      ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined });
+    const client = new ControlPlaneClient(config, { fetchImpl: sandboxControlPlaneFetch(env) });
     const refused = (reason, details = {}) => context.json({ refused: true, reason, ...details }, 409);
     const upstreamCode = error => {
       const code = error?.body?.code ?? error?.body?.reasonCode;
@@ -740,7 +743,7 @@ app.post('/webhook', async context => {
       && (command === '/start' || registrationInProgress)) {
     const clientConfig = { ...config, telegramUserId: String(sender.id) };
     const registrationClient = new ControlPlaneClient(clientConfig, {
-      fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
+      fetchImpl: sandboxControlPlaneFetch(env),
       logSink: line => console.log(line),
     });
     let registration;

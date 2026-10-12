@@ -284,6 +284,7 @@ describe('signed existing-UX ingress', () => {
     }), env);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ profileId: 'production-e2e-telegram-v1',
+      readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
       tasks: [{ userTaskId: 'ut-test', status: 'done', resultPresent: true, answerPresent: true,
         runs: [{ status: 'success', hasSessionId: true }] }] });
     expect(observed).toMatchObject({ name: '1714048', path: '/operator/test-evidence', method: 'POST',

@@ -7,6 +7,7 @@ import { KvBatchStore } from './batch.js';
 import { TgSliceController, MODE } from './worker.js';
 import { profileForUpdate } from './profile.js';
 import { prepareTelegramArtifact } from './media-intake.js';
+import { sandboxControlPlaneFetch } from './operator-lane.js';
 
 const app = new Hono();
 
@@ -75,7 +76,7 @@ const webhook = app;
 
 export function createController(env, config = readTgSliceConfig(env)) {
   const client = new ControlPlaneClient(config, {
-    fetchImpl: env.CONTROL_PLANE_SERVICE ? env.CONTROL_PLANE_SERVICE.fetch.bind(env.CONTROL_PLANE_SERVICE) : undefined,
+    fetchImpl: sandboxControlPlaneFetch(env),
     logSink: line => console.log(line),
   });
   const outbox = new TgDeliveryOwnerClient(env, config);
