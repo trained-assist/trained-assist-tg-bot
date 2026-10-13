@@ -1,0 +1,304 @@
+#!/usr/bin/env node
+// Two-move production canary on the REAL production bot path (BACKLOG B1 /
+// milestone PROD exit criterion 2): message -> «▶️ Запустить» -> task done ->
+// answer delivered into chat 1714048, twice, with the second answer proving
+// the first turn's context survived the round trip through CP -> Runner ->
+// France VM -> gateway delivery.
+//
+// Unlike prod-principal-telegram-canary.mjs (lane=prod-principal, test bot
+// ptichka_status_bot via the sandbox3 operator lane) this canary injects
+// synthetic Telegram updates straight into the production worker webhook
+// (continuous-dev/TESTING.md §2). The lane is pinned by machine-checkable
+// bot identity: a run that ever targets another bot fails loudly (E6 lesson).
+//
+// Oracle (R12): PASS/FAIL is decided by deterministic checks over worker
+// debug state + Telegram provider evidence — never by free-text judgement.
+// The only human judgement left (operator eye-check of the delivered
+// messages in the chat) is explicitly out of scope here.
+//
+// Secrets via env only (R9), never argv/logs: WEBHOOK_SECRET, AGENT_SECRET,
+// BOT_TOKEN. Optional: WORKER_URL, CHAT_ID, EVIDENCE_OUT.
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
+import { controlPlaneBarrierCounts } from './e2e-oracle.mjs';
+
+const WORKER = process.env.WORKER_URL ?? 'https://trained-assist-tg-bot.skillset-apply.workers.dev';
+const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
+const LANE = 'production';
+const EXPECTED_BOT_USERNAME = 'super_personal_assistant_bot';
+const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
+const POLL_MS = 5_000;
+const COLLECTOR_TIMEOUT_MS = 120_000;
+const DELIVERY_TIMEOUT_MS = 300_000;
+
+const secrets = {
+  webhook: process.env.WEBHOOK_SECRET,
+  agent: process.env.AGENT_SECRET,
+  bot: process.env.BOT_TOKEN,
+};
+for (const [name, value] of Object.entries(secrets)) {
+  assert.ok(value, `missing_secret_env:${name}`);
+}
+
+let evidence = {
+  ok: false,
+  scenario: 'prod-two-move-canary-context-and-delivery',
+  lane: LANE,
+  botUsername: null,
+  targetWorkerUrl: WORKER,
+  chatId: CHAT_ID,
+  buildSha: null,
+  phase: 'starting',
+  moves: [],
+  failures: [],
+};
+
+async function checkpoint(phase, patch = {}) {
+  evidence = { ...evidence, ...patch, phase };
+  await writeFile(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+}
+
+function fail(phase, error) {
+  const message = error?.message ?? String(error);
+  evidence.failures.push({ phase, error: message });
+  return { phase, error: message };
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function isTransientNetworkError(error) {
+  const text = `${error?.message ?? ''} ${error?.cause?.message ?? ''} ${error?.cause?.code ?? ''}`;
+  return /fetch failed|network|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR/i.test(text);
+}
+
+async function withRetry(fn, attempts = 3) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientNetworkError(error) || attempt === attempts - 1) throw error;
+      await sleep(1500 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function workerGet(path, token, header = 'Authorization') {
+  const res = await withRetry(() => fetch(`${WORKER}${path}`, { headers: { [header]: `Bearer ${token}` } }));
+  if (!res.ok) throw new Error(`worker_${path.replace(/\W+/g, '_')}_${res.status}`);
+  return res.json();
+}
+
+async function tg(method, payload) {
+  const res = await withRetry(() => fetch(`https://api.telegram.org/bot${secrets.bot}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  }));
+  const body = await res.json();
+  if (!body.ok) throw new Error(`telegram_${method}_${body.error_code ?? res.status}:${body.description ?? 'unknown'}`);
+  return body.result;
+}
+
+let updateSeq = Date.now();
+function nextUpdateId() {
+  updateSeq += 1;
+  return updateSeq;
+}
+
+async function injectTextMessage(text) {
+  const updateId = nextUpdateId();
+  const res = await withRetry(() => fetch(`${WORKER}/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': secrets.webhook },
+    body: JSON.stringify({
+      update_id: updateId,
+      message: {
+        message_id: updateId,
+        from: { id: CHAT_ID, is_bot: false, first_name: 'T', username: 'kobzevvv' },
+        chat: { id: CHAT_ID, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text,
+      },
+    }),
+  }));
+  const body = await res.json().catch(() => ({}));
+  assert.ok(res.ok && body.ok === true, `webhook_inject_rejected_${res.status}`);
+  return updateId;
+}
+
+async function tapCollector(collectorMsgId, draftRevision) {
+  const callbackId = `cb-b1-${randomBytes(4).toString('hex')}`;
+  const res = await withRetry(() => fetch(`${WORKER}/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': secrets.webhook },
+    body: JSON.stringify({
+      update_id: nextUpdateId(),
+      callback_query: {
+        id: callbackId,
+        from: { id: CHAT_ID, is_bot: false, username: 'kobzevvv' },
+        message: { message_id: collectorMsgId, chat: { id: CHAT_ID, type: 'private' } },
+        data: `ws|auto|${draftRevision}`,
+      },
+    }),
+  }));
+  const body = await res.json().catch(() => ({}));
+  assert.ok(res.ok && body.ok === true, `collector_tap_rejected_${res.status}`);
+}
+
+async function waitForCollector() {
+  const deadline = Date.now() + COLLECTOR_TIMEOUT_MS;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    if (last.collectorMsgId && Number.isSafeInteger(last.collectorDraftRevision)) {
+      if (last.collectorDelivery?.state === 'sent') return last;
+    }
+    await sleep(POLL_MS);
+  }
+  throw new Error(`collector_not_ready:${JSON.stringify(summarizeIntake(last))}`);
+}
+
+async function waitForTerminalDelivery(since) {
+  const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
+  let last = null;
+  while (Date.now() < deadline) {
+    const { deliveries } = await workerGet(`/debug/deliveries?chatId=${CHAT_ID}`, secrets.agent);
+    last = deliveries ?? [];
+    const fresh = last
+      .filter(d => Number.isSafeInteger(d.createdAt) && d.createdAt >= since)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const sent = fresh.find(d => d.status === 'sent' && Number.isSafeInteger(d.providerMessageId));
+    if (sent) return { delivery: sent, deliveries: last };
+    const terminalFailure = fresh.find(d => ['failed', 'dead', 'gave_up'].includes(d.status));
+    if (terminalFailure) throw new Error(`delivery_failed:${terminalFailure.deliveryId}:${terminalFailure.reason}`);
+    await sleep(POLL_MS);
+  }
+  throw new Error(`delivery_timeout_after_${DELIVERY_TIMEOUT_MS}ms:${JSON.stringify(last?.slice(0, 3) ?? [])}`);
+}
+
+function summarizeIntake(intake) {
+  return {
+    busy: intake?.busy === true,
+    bufCount: Array.isArray(intake?.buf) ? intake.buf.length : null,
+    collectorMsgId: intake?.collectorMsgId ?? null,
+    stranded: intake?.stranded === true,
+    ...controlPlaneBarrierCounts(intake),
+  };
+}
+
+async function readDeliveredText(providerMessageId) {
+  const forwarded = await tg('forwardMessage', { chat_id: CHAT_ID, from_chat_id: CHAT_ID, message_id: providerMessageId });
+  try {
+    return typeof forwarded.text === 'string' ? forwarded.text : '';
+  } finally {
+    await tg('deleteMessage', { chat_id: CHAT_ID, message_id: forwarded.message_id }).catch(() => {});
+  }
+}
+
+async function runMove({ label, askText, nonce }) {
+  const startedAt = Date.now();
+  await injectTextMessage(askText);
+  const collector = await waitForCollector();
+  await tapCollector(collector.collectorMsgId, collector.collectorDraftRevision);
+  const { delivery } = await waitForTerminalDelivery(startedAt);
+  const answerText = await readDeliveredText(delivery.providerMessageId);
+  const move = {
+    label,
+    nonce,
+    collectorMsgId: collector.collectorMsgId,
+    draftRevision: collector.collectorDraftRevision,
+    deliveryId: delivery.deliveryId,
+    userTaskId: delivery.userTaskId,
+    status: delivery.status,
+    reason: delivery.reason,
+    providerMessageId: delivery.providerMessageId,
+    answerLength: answerText.length,
+    answerContainsNonce: nonce ? answerText.includes(nonce) : null,
+    answerSha256: null,
+    elapsedMs: Date.now() - startedAt,
+  };
+  if (answerText) {
+    const { createHash } = await import('node:crypto');
+    move.answerSha256 = createHash('sha256').update(answerText).digest('hex');
+  }
+  evidence.moves.push(move);
+  return { move, answerText };
+}
+
+async function preflight() {
+  const whoami = await workerGet('/debug/whoami', secrets.agent);
+  assert.equal(whoami?.bot?.username, EXPECTED_BOT_USERNAME, 'bot_identity_mismatch');
+  evidence.botUsername = whoami.bot.username;
+
+  const health = await workerGet('/health', secrets.agent);
+  assert.equal(health.executionBackend, 'control-plane', 'execution_backend_not_control_plane');
+  assert.equal(health.controlPlaneUrlConfigured, true, 'control_plane_url_not_configured');
+  assert.equal(health.ingressPaused, false, 'ingress_paused');
+  assert.equal(health.deliveryPaused, false, 'delivery_paused');
+  evidence.buildSha = health.buildSha ?? null;
+
+  const intake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+  assert.equal(intake.busy, false, 'intake_busy_at_preflight');
+  assert.equal(intake.stranded, false, 'intake_stranded_at_preflight');
+  assert.deepEqual(intake.buf ?? [], [], 'intake_buf_not_empty_at_preflight');
+  assert.deepEqual(intake.retryBatch ?? [], [], 'intake_retry_batch_not_empty_at_preflight');
+  assert.deepEqual(controlPlaneBarrierCounts(intake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'barrier_not_clean_at_preflight');
+  return { intakeSummary: summarizeIntake(intake) };
+}
+
+async function main() {
+  const baseline = await preflight();
+  await checkpoint('preflight_passed', { baseline: baseline.intakeSummary });
+
+  const nonce1 = `B1-${randomBytes(5).toString('hex')}`;
+  const first = await runMove({
+    label: 'move-1-store-context',
+    nonce: nonce1,
+    askText: `Кодовая метка канарейки: ${nonce1}. Запомни её, ничего больше не делай.`,
+  });
+  assert.equal(first.move.status, 'sent', 'move1_not_sent');
+  assert.equal(first.move.reason, 'provider_accepted', 'move1_not_provider_accepted');
+  await checkpoint('move1_delivered');
+
+  const nonce2 = `B1-${randomBytes(5).toString('hex')}`;
+  const second = await runMove({
+    label: 'move-2-recall-context',
+    nonce: null,
+    askText: 'Какую кодовую метку я просил запомнить? Ответь только меткой.',
+  });
+  assert.equal(second.move.status, 'sent', 'move2_not_sent');
+  assert.equal(second.move.reason, 'provider_accepted', 'move2_not_provider_accepted');
+  // Context-preservation oracle: the second answer must carry the first
+  // turn's nonce — deterministic, no judgement involved.
+  assert.ok(second.answerText.includes(nonce1), 'context_lost_move2_answer_misses_nonce');
+
+  const finalIntake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+  assert.equal(finalIntake.busy, false, 'intake_busy_at_final');
+  assert.deepEqual(controlPlaneBarrierCounts(finalIntake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'barrier_not_clean_at_final');
+  assert.equal(finalIntake.stranded, false, 'intake_stranded_at_final');
+
+  await checkpoint('passed', {
+    ok: true,
+    finalIntake: summarizeIntake(finalIntake),
+    contextPreserved: true,
+    recalledNonce: nonce1,
+  });
+  console.log(`PASS lane=${LANE} bot=${EXPECTED_BOT_USERNAME} buildSha=${evidence.buildSha} ` +
+    `moves=${evidence.moves.map(m => `${m.deliveryId}->${m.providerMessageId}`).join(',')} ` +
+    `contextPreserved=true evidence=${EVIDENCE_PATH}`);
+}
+
+main().catch(async error => {
+  const state = fail(evidence.phase, error);
+  let finalIntake = null;
+  try {
+    finalIntake = summarizeIntake(await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent));
+  } catch { /* debug read failed during failure handling — keep null */ }
+  await checkpoint(`failed:${state.phase}`, finalIntake ? { finalIntake } : {});
+  console.error(`FAIL phase=${state.phase} error=${state.error} evidence=${EVIDENCE_PATH}`);
+  process.exitCode = 1;
+});
