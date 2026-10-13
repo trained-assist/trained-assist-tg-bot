@@ -9,6 +9,7 @@ function fixture() {
   const receipts = new Map();
   const fake = new FakeControlPlane();
   let routeFails = false;
+  let intakeFailure = null;
   const env = makeEnv({ TG_SLICE: new MemKV(), CONTROL_PLANE_SESSION_ID: 'source-session', BUILD_SHA: 'test-build' });
   const stub = { async fetch(url, options = {}) {
     const address = new URL(url);
@@ -33,13 +34,16 @@ function fixture() {
     const body = JSON.parse(options.body);
     calls.push({ pathname, body });
     if (pathname === '/route' && routeFails) throw new Error('route acknowledgement unknown');
+    if (pathname === '/intake' && intakeFailure) {
+      return Response.json({ error: 'control plane unavailable' }, { status: intakeFailure });
+    }
     const result = await fake.fetch(url, options);
     return Response.json(result.value, { status: result.status });
   } };
   const input = { userId: 1001, username: 'integrator', requestId: 'batch-1', sessionId: 'dialog-1',
     task: '[Сообщение 1]\nработает?\n\n[Сообщение 2]\nпосчитай расходы', initialMsgId: 123,
     inputItems: [{ msg: { text: 'работает?', message_id: 11 } }, { msg: { text: 'посчитай расходы', message_id: 12 } }] };
-  return { env, input, calls, snapshots, receipts, fake, failRoute: value => { routeFails = value; } };
+  return { env, input, calls, snapshots, receipts, fake, failRoute: value => { routeFails = value; }, failIntake: value => { intakeFailure = value; } };
 }
 
 describe('existing collector control-plane execution boundary', () => {
@@ -157,5 +161,25 @@ describe('existing collector control-plane execution boundary', () => {
     const ack = await runControlPlaneTask(state.env, state.input);
     expect(ack).toMatchObject({ durable: true, controlPlane: true });
     expect(state.calls.map(call => call.pathname)).toEqual(['/intake', '/route']);
+  });
+
+  it('leaves no durable receipt behind when CP /intake fails with 500', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const state = fixture();
+    state.failIntake(500);
+    await expect(runControlPlaneTask(state.env, state.input)).rejects.toThrow();
+    expect(state.calls.map(call => call.pathname)).toEqual(['/intake']);
+    expect(state.receipts.size).toBe(0);
+    log.mockRestore();
+  });
+
+  it('leaves no durable receipt behind when CP /intake fails with 404', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const state = fixture();
+    state.failIntake(404);
+    await expect(runControlPlaneTask(state.env, state.input)).rejects.toThrow();
+    expect(state.calls.map(call => call.pathname)).toEqual(['/intake']);
+    expect(state.receipts.size).toBe(0);
+    log.mockRestore();
   });
 });
