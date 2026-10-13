@@ -214,6 +214,30 @@ describe('signed existing-UX ingress', () => {
     expect(resetCalls).toContain('accept-only:/operator/reset-all');
   });
 
+  it('ignores a reset lock whose KV delete never propagated (stale lock)', async () => {
+    const state = fixture();
+    const { env } = state;
+    configureProbabilityOperator(env);
+    const lockKey = `sandbox-state-reset:${env.SESSION_NAMESPACE}`;
+    const post = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/reset-sandbox-state', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }), env);
+    const staleLock = String(Date.now() - 300_000);
+    env.TG_SLICE.data.set(lockKey, staleLock);
+    const inspected = await post({ target: 'sandbox', mode: 'inspect' });
+    expect(inspected.status).toBe(200);
+    const cleared = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
+    expect(cleared.status).toBe(200);
+    expect(env.TG_SLICE.data.get(lockKey)).toBeUndefined();
+    env.TG_SLICE.data.set(lockKey, String(Date.now()));
+    const blockedInspect = await post({ target: 'sandbox', mode: 'inspect' });
+    expect(blockedInspect.status).toBe(409);
+    expect(await blockedInspect.json()).toMatchObject({ error: 'reset_in_progress' });
+    const blockedClear = await post({ target: 'sandbox', mode: 'clear', confirm: 'CLEAR_ALL_SANDBOX_STATE' });
+    expect(blockedClear.status).toBe(409);
+    expect(await blockedClear.json()).toMatchObject({ error: 'reset_already_in_progress' });
+  });
+
   it('enables the Worker test API only for the pinned sandbox3 identity, CP, and user', async () => {
     const { env } = fixture();
     configureSandbox3Operator(env);
