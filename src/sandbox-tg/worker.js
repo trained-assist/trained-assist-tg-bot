@@ -289,6 +289,14 @@ export class TgSliceController {
       });
       if (result.item) effects.push({ type: 'batch_item', item: result.item });
       if (media.error) effects.push({ type: 'media_pending', reason: media.error });
+    } else if (attachment.type === 'google_doc') {
+      const result = await collector.add(profile.conversationId, {
+        type: 'google_doc', sourceRef: profile.ingressRef, text: attachment.text ?? null,
+        url: attachment.url ?? null, fileName: 'google-docs-link.txt', fileSize: attachment.fileSize ?? null,
+        mimeType: 'text/plain', summary: attachment.text ? `Ссылка Google Docs: ${attachment.url || attachment.text}` : undefined,
+        mediaError: null, receivedAt: Date.now(),
+      });
+      if (result.item) effects.push({ type: 'batch_item', item: result.item });
     } else if ((attachment.type === 'document' || attachment.type === 'photo') && attachment.fileId) {
       if (isTooLarge(attachment.fileSize)) {
         effects.push({ type: 'refused', text: tooLargeMessage(attachment.fileName) });
