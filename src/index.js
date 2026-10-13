@@ -207,6 +207,20 @@ app.get('/debug/webhook', async (c) => {
 
 // Debug: dump the bot's identity (id, username, first_name) so a quick
 // /debug/whoami tells us whose token the worker is actually wired to.
+app.get('/debug/sendTest', async (c) => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const token = c.env.BOT_TOKEN;
+  const chatId = Number(c.req.query('chatId') || 1714048);
+  const res = await fetch(`https://api.telegram.org/bot${token}/getChat?chat_id=${chatId}`);
+  const chatData = await res.json();
+  const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text: 'debug sendTest probe', parse_mode: 'HTML' }),
+  });
+  const sendData = await sendRes.json();
+  return c.json({ chatId, whoamiBotOk: true, chatData, sendData });
+});
+
 app.get('/debug/whoami', async (c) => {
   const token = c.env.BOT_TOKEN;
   try {
