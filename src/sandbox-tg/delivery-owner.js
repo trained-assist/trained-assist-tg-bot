@@ -56,7 +56,24 @@ function productionE2eEmptyCutoverManifest(botUsername) {
   };
 }
 
+function productionEmptyCutoverManifest(botUsername) {
+  return {
+    version: 'tg-delivery-cutover-v1',
+    botUsername,
+    profileId: 'trained-assist-production',
+    cutoverId: 'production-empty-cutover-v1',
+    // Stable across Worker restarts so the ordinary production owner namespace
+    // keeps the same immutable fingerprint from the moment the lane is enabled.
+    cutoverAt: 1_700_000_000_000,
+    oldTaskIds: [],
+    deliveries: [],
+  };
+}
+
 export function cutoverManifest(env, config = readTgSliceConfig(env)) {
+  // The ordinary production lane starts from an empty delivery owner, exactly
+  // like the pinned production E2E lane: no legacy destinations to import.
+  if (config.productionMode) return productionEmptyCutoverManifest(config.botUsername);
   // The pinned production E2E lane has its own Durable Object namespace and
   // must not import sandbox3's secret manifest of legacy destinations. Its
   // owner starts empty; the strict lane check prevents this exception from
