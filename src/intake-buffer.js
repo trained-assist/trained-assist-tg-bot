@@ -109,6 +109,10 @@ const MEDIA_DEADLINE_MS = 15 * 60_000; // don't wait on a media job forever: pas
 const ARM_WATCHDOG_MS = 60_000;
 
 const RECEIPT_MS = 1500;
+// A collector send whose ACK was lost (thrown fetch / unparseable response) is
+// fenced as 'unknown' so a blind retry can't double the launch button. But the
+// fence must expire — otherwise a single lost ACK silences the chat forever.
+const COLLECTOR_UNKNOWN_RETRY_MS = 30_000;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
 const WORK_STYLES = ['explore', 'answer', 'auto'];
@@ -2417,7 +2421,6 @@ export class IntakeBuffer {
     this.uiMutation = new Promise(resolve => { release = resolve; });
     await previous;
     try {
-      console.log('[collector] enter', JSON.stringify({ chatId, count, replyToMessageId, threadId, override: !!override, fresh }));
       if (!chatId) return null;
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
@@ -2514,9 +2517,13 @@ export class IntakeBuffer {
           // don't create a second bubble after recovering its durable claim.
           if (stopPending && items.length) freshCollector = false;
         }
-        if (claim?.state === 'sending' || claim?.state === 'unknown') {
-          if (claim.state === 'sending') await this.state.storage.put(claimKey, { ...claim, state: 'unknown' });
+        if (claim?.state === 'sending') {
+          await this.state.storage.put(claimKey, { ...claim, state: 'unknown', ts: Date.now() });
           return null;
+        }
+        if (claim?.state === 'unknown') {
+          if (Date.now() - (Number(claim.ts) || 0) < COLLECTOR_UNKNOWN_RETRY_MS) return null;
+          await this.state.storage.delete(claimKey);
         }
       }
       if (prevId && !freshCollector) {
@@ -2545,10 +2552,9 @@ export class IntakeBuffer {
         }
       }
       if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
-      console.log('[collector] sending', chatId, JSON.stringify({ text: String(text).slice(0, 40), keys: keyboard.length }));
-      const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
+      const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId)
+        .catch((e) => { console.error('[collector] send threw', String(e?.message ?? e)); return null; });
       const id = sent?.result?.message_id;
-      console.log('[collector] sent', JSON.stringify({ id, ok: sent?.ok, description: sent?.description ?? null }));
       // A provider's explicit ok:false is proof it did not accept the send; let
       // the next receipt retry it. A thrown fetch or malformed ACK remains
       // unknown and fenced, since retrying could create a duplicate collector.
@@ -2556,7 +2562,7 @@ export class IntakeBuffer {
         ? { state: 'sent', messageId: id }
         : sent?.ok === false
           ? { state: 'rejected', ...(Number.isSafeInteger(sent.error_code) ? { errorCode: sent.error_code } : {}) }
-          : { state: 'unknown' });
+          : { state: 'unknown', ts: Date.now() });
       // A fresh bubble becomes THE collector: the older one is edited to a neutral
       // line so two launch buttons never compete (same reason as /stop).
       if (id && (freshCollector || stopPending && items.length)) {
@@ -3495,7 +3501,6 @@ export class IntakeBuffer {
     if (receiptDue) {
       const receiptExpired = Date.now() >= receiptDue || (await this.state.storage.get('debounceExpiresAt')) <= Date.now();
       const cpBusy = this.env.EXECUTION_BACKEND === 'control-plane' && await this.state.storage.get('busy');
-      console.log('[alarm] receipt', JSON.stringify({ receiptDue, receiptExpired, cpBusy, now: Date.now() }));
       if (!receiptExpired && !cpBusy) { await this.state.storage.setAlarm(receiptDue); return; }
       if (receiptExpired) {
         await this.state.storage.delete('receiptDue');
