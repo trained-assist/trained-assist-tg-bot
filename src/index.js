@@ -616,3 +616,4 @@ export { RetryQueue } from './retry-queue.js';
 
 export { MediaJob } from './media-jobs.js';
 export { ProductionE2eIntakeBuffer, ProductionE2eTgDeliveryOwner } from './sandbox-tg/production-e2e-classes.js';
+export { TgDeliveryOwner } from './sandbox-tg/delivery-owner.js';
