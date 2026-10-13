@@ -1563,7 +1563,7 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls.some(call => String(call[2]).includes('Кнопки в сообщении выше запустят'))).toBe(false);
     expect(handleMessage).not.toHaveBeenCalled();
     expect(await storage.get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'stop-window' });
-    expect([...(await storage.list({ prefix: 'cp-collector-send:' })).values()]).toContainEqual({ state: 'unknown' });
+    expect([...(await storage.list({ prefix: 'cp-collector-send:' })).values()]).toContainEqual({ state: 'unknown', ts: expect.any(Number) });
 
     const second = await owner.fetch(rpc('/append', { text: 'ещё текст', msg: {
       message_id: 9, chat: { id: 42 }, text: 'ещё текст' }, telegramUpdateId: 109 }));
@@ -1771,10 +1771,10 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage, env } = fixture();
     await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
     send.mockRejectedValue(new Error('ack lost'));
-    await storage.put('receiptDue', Date.now() - 1);
-    await owner.alarm();
-    const batch = await storage.get('pendingBatch');
-    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'unknown' });
+     await storage.put('receiptDue', Date.now() - 1);
+     await owner.alarm();
+     const batch = await storage.get('pendingBatch');
+     expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'unknown', ts: expect.any(Number) });
     const restarted = new IntakeBuffer({ storage }, env);
     await storage.put('receiptDue', Date.now() - 1);
     await restarted.alarm();
