@@ -3311,6 +3311,36 @@ export class IntakeBuffer {
             await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
             return false;
           }
+          const hasActiveRun = runs.length > 0;
+          const startAttempts = Number.isFinite(latestRecord?.controlPlaneStartAttempts)
+            ? latestRecord.controlPlaneStartAttempts : 0;
+          const needControlPlaneStart = !hasActiveRun && row.status !== 'running' && row.status !== 'waiting'
+            && latestRecord?.controlPlaneStarted !== true && startAttempts < 3;
+          if (needControlPlaneStart) {
+            reconcileStage = 'start';
+            try {
+              await client.start(receipt.userTaskId);
+              await this._exclusive(async () => this.state.storage.transaction(async tx => {
+                const key = `cp-acceptance:${requestId}`;
+                const current = await tx.get(key);
+                if (current?.receipt?.requestId !== requestId) return;
+                await tx.put(key, { ...current, controlPlaneStarted: true,
+                  controlPlaneStartAttempts: startAttempts + 1, reconciliationFailure: null });
+              }));
+            } catch (startError) {
+              await this._exclusive(async () => this.state.storage.transaction(async tx => {
+                const key = `cp-acceptance:${requestId}`;
+                const current = await tx.get(key);
+                if (current?.receipt?.requestId !== requestId) return;
+                await tx.put(key, { ...current, controlPlaneStartAttempts: startAttempts + 1,
+                  reconciliationFailure: { stage: 'start',
+                    httpStatus: Number.isInteger(startError?.status) ? startError.status : null,
+                    errorName: (typeof startError?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(startError.name))
+                      ? startError.name : 'Error', at: Date.now() } });
+              })).catch(() => {});
+              throw startError;
+            }
+          }
           let routed;
           const routingKnown = latestRecord?.routingOutcome?.known === true && latestRecord.routingOutcome.publicationComplete === true;
           const routingDeferred = stopPending && controlPlaneStopDisabled(this.env);
