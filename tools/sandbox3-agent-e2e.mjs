@@ -5,6 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 import { summarizeStopDiagnostics } from './sandbox3-stop-diagnostics.mjs';
 import { summarizeSandbox3E2eFailure } from './sandbox3-e2e-failure-evidence.mjs';
+import { launchWasDispatched } from './e2e-oracle.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -738,10 +739,7 @@ async function main() {
         assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
         const collector = freshLaunch.collector ?? {};
         const barrier = collector.controlPlaneBarrier ?? {};
-        const dispatched = collector.pendingCount === 0
-          || collector.launchingMessageIds?.length > 0
-          || Number(barrier.busyRequestCount ?? 0) > 1
-          || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+        const dispatched = launchWasDispatched(freshLaunch, freshQuestion.collector);
         console.log(JSON.stringify({ scenario: 'next-task-launched-during-stop', pendingCount: collector.pendingCount ?? null,
           busyRequestCount: barrier.busyRequestCount ?? null, unresolvedLaunchCount: barrier.unresolvedLaunchCount ?? null,
           launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null }));
@@ -780,8 +778,7 @@ async function main() {
       assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
       const collector = freshLaunch.collector ?? {};
       const barrier = collector.controlPlaneBarrier ?? {};
-      const dispatched = collector.pendingCount === 0 || collector.launchingMessageIds?.length > 0
-        || Number(barrier.busyRequestCount ?? 0) > 0 || Number(barrier.unresolvedLaunchCount ?? 0) > 0;
+      const dispatched = launchWasDispatched(freshLaunch, freshQuestion.collector);
       console.log(JSON.stringify({ scenario: 'next-task-launched-after-stop', pendingCount: collector.pendingCount ?? null,
         busyRequestCount: barrier.busyRequestCount ?? null, unresolvedLaunchCount: barrier.unresolvedLaunchCount ?? null,
         launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null }));
