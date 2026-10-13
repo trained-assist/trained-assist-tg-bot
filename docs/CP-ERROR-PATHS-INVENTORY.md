@@ -61,7 +61,7 @@ alarm-тике (см. GAP-3 про риск при исключении в са�
 
 | Строка | Условие | Класс | Комментарий |
 |---|---|---|---|
-| 3247 | `_recoverControlPlaneLaunch()` бросает | ❌ **wedge** | один poisoned checkpoint клинит обслуживание всех admitted-записей DO → **GAP-3** (#661) |
+| 3247 | `_recoverControlPlaneLaunch()` бросает | ✅ fixed | catch больше не завершает poll возвратом `false`; checkpoint передаётся в `_handleControlPlaneLaunchFailure` для досборки/уведомления → **GAP-3** (частично закрыт в PR #676; точечный probe A9) |
 | 3248 | `cpDispatches` или `_activeUnresolvedLaunches().length` | guard | корректно: идёт recovery запуска |
 | 3250 | `cpBusyRequests` пуст | — | нормальный выход |
 | 3263 | receipt невалиден (`!receipt` / несовпадение `requestId`/`profileId` / `durable !== true`) | ❌ **wedge** | тихо, без аудита → **GAP-2** (#660) |
@@ -81,9 +81,9 @@ alarm-тике (см. GAP-3 про риск при исключении в са�
 
 | Gap | Суть | Issue | Якоря |
 |---|---|---|---|
-| GAP-1 | У CP-ветки busy-релиза нет hard TTL (non-CP имеет `BUSY_MAX_MS=45min`); любой wedge держит барьер бесконечно без эскалации — нарушение INV-1 контракта A3 | #659 | `src/intake-buffer.js:3626-3631` vs `3633-3650` |
+| GAP-1 | ~~У CP-ветки busy-релиза нет hard TTL~~ → **закрыт**: hard cap symmetric with non-CP path; `BUSY_MAX_MS` освобождает wedged busy window | #659 (#676) | `src/intake-buffer.js:3647-3666` |
 | GAP-2 | Desync-пути `return false` (invalid receipt, row desync, snapshot mismatch, invalid generation) навсегда клинят poll; одной плохой записи достаточно (нет `continue`); тихо — без аудита и без сообщения пользователю | #660 | `src/intake-buffer.js:3263, 3276, 3309, 3333-3334, 3338-3340` |
-| GAP-3 | Ошибка `_recoverControlPlaneLaunch` клинит весь poll (L3247); checkpoint не retire'ится — в отличие от пути «launch без ack» (L3153-3161) | #661 | `src/intake-buffer.js:3247` |
+| GAP-3 | ~~Ошибка `_recoverControlPlaneLaunch` клинит весь poll~~ → **wedge снят** в PR #676 (L3269); checkpoint передаётся в `_handleControlPlaneLaunchFailure` для досборки/уведомления; полный retry-test в `tests/intake-buffer-control-plane.test.js` (A9) | #661 | `src/intake-buffer.js:3247,3269` |
 | GAP-4 | `/route`: 404 в poll'е → вечный ретрай (не классифицируется как unknown-outcome, в отличие от 404 на `/status`); в intake-пути ошибка глотается (`routingPending`) — пользователь не информирован | #662 | `src/intake-buffer.js:3299-3301`; `src/lib/control-plane-execution.js:162-173` |
 | GAP-5 | `/start` никогда не ретрайтится poll'ом; batch lane при провале `/start` после успешного `/intake` молча оставляет принятую незапущенную задачу | #663 | `src/sandbox-tg/worker.js:139-145`; `src/sandbox-tg/conversation.js:320` |
 

@@ -1892,6 +1892,21 @@ describe('existing collector control-plane ownership', () => {
     expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).reconciliationFailure).toMatchObject({ stage: 'status', httpStatus: 500 });
   });
 
+  it('continues the CP poll when control-plane launch recovery throws (A9 #661)', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    owner._recoverControlPlaneLaunch = vi.fn().mockRejectedValue(new Error('boom recovery'));
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done', generation: 1 } } });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(owner._recoverControlPlaneLaunch).toHaveBeenCalled();
+    expect(request).toHaveBeenCalled();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+  });
+
   it('pins session selector first-wins across concurrent requests and restart', async () => {
     const { owner, storage, env } = fixture();
     const requestId = `tg-${'a'.repeat(64)}`;
