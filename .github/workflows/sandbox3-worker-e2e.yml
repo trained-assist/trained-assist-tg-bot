@@ -164,7 +164,11 @@ jobs:
           const url = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/operator/delivery-cutover-v1';
           let responseOk = false;
           let state = {};
-          for (let attempt = 0; attempt < 10; attempt += 1) {
+          // Edges can keep serving the prior live Worker revision for tens of
+          // seconds after an upload. Wait until the just-deployed paused revision
+          // is actually observed; proceeding on a stale lane risks real traffic.
+          const deadline = Date.now() + 120_000;
+          while (Date.now() < deadline) {
             const response = await fetch(url, {
               headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
               signal: AbortSignal.timeout(10_000),
