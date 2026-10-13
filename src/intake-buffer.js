@@ -2417,6 +2417,7 @@ export class IntakeBuffer {
     this.uiMutation = new Promise(resolve => { release = resolve; });
     await previous;
     try {
+      console.log('[collector] enter', JSON.stringify({ chatId, count, replyToMessageId, threadId, override: !!override, fresh }));
       if (!chatId) return null;
       const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
       if (!override && !items.length) return null;
@@ -2541,8 +2542,10 @@ export class IntakeBuffer {
         }
       }
       if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
+      console.log('[collector] sending', chatId, JSON.stringify({ text: String(text).slice(0, 40), keys: keyboard.length }));
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId).catch(() => null);
       const id = sent?.result?.message_id;
+      console.log('[collector] sent', JSON.stringify({ id, ok: sent?.ok, description: sent?.description ?? null }));
       // A provider's explicit ok:false is proof it did not accept the send; let
       // the next receipt retry it. A thrown fetch or malformed ACK remains
       // unknown and fenced, since retrying could create a duplicate collector.
@@ -3489,6 +3492,7 @@ export class IntakeBuffer {
     if (receiptDue) {
       const receiptExpired = Date.now() >= receiptDue || (await this.state.storage.get('debounceExpiresAt')) <= Date.now();
       const cpBusy = this.env.EXECUTION_BACKEND === 'control-plane' && await this.state.storage.get('busy');
+      console.log('[alarm] receipt', JSON.stringify({ receiptDue, receiptExpired, cpBusy, now: Date.now() }));
       if (!receiptExpired && !cpBusy) { await this.state.storage.setAlarm(receiptDue); return; }
       if (receiptExpired) {
         await this.state.storage.delete('receiptDue');
