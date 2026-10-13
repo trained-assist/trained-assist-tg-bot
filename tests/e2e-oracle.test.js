@@ -160,9 +160,9 @@ describe('e2e oracle adoption guard (C1.2)', () => {
   });
 
   it('keeps production lane buffer summaries on the shared oracle', () => {
-    expect(readTool('production-e2e-state-probe.mjs')).toMatch(/summarizeIntakeState\(evidence\.buffer\)/);
-    expect(readTool('production-e2e-restore-guard.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
-    expect(readTool('production-e2e-resume-held-input.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
+    expect(readTool('prod-principal-state-probe.mjs')).toMatch(/summarizeIntakeState\(evidence\.buffer\)/);
+    expect(readTool('prod-principal-restore-guard.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
+    expect(readTool('prod-principal-resume-held-input.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
     expect(readTool('sandbox-entry-smoke-lib.mjs')).toMatch(/controlPlaneBarrierCounts\(question\.collector\)/);
   });
 });

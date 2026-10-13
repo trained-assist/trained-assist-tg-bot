@@ -19,7 +19,7 @@ const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const LANE = 'prod-principal';
 const EXPECTED_BOT_USERNAME = 'ptichka_status_bot';
 const PROFILE_ID = 'production-e2e-telegram-v1';
-const TARGET = 'productionE2e';
+const TARGET = 'prod-principal';
 const RUN_FINISHED_EVENT = 'run_finished';
 let canaryProgress = {
   ok: false,
@@ -36,7 +36,7 @@ let canaryProgress = {
 
 async function checkpoint(phase, patch = {}) {
   canaryProgress = { ...canaryProgress, ...patch, phase };
-  await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(canaryProgress, null, 2)}\n`, { mode: 0o600 });
+  await writeFile('prod-principal-telegram-evidence.json', `${JSON.stringify(canaryProgress, null, 2)}\n`, { mode: 0o600 });
 }
 
 function safeTaskSummary(task, { matchedPriorNonce = false } = {}) {
@@ -80,8 +80,8 @@ function required(name) {
 function identity() {
   const chatId = Number(required('TG_SANDBOX_E2E_CHAT_ID'));
   const userId = Number(required('TG_SANDBOX_E2E_USER_ID'));
-  assert.equal(chatId, 1714048, 'production_canary_chat_mismatch');
-  assert.equal(userId, 1714048, 'production_canary_user_mismatch');
+  assert.equal(chatId, 1714048, 'prod_principal_canary_chat_mismatch');
+  assert.equal(userId, 1714048, 'prod_principal_canary_user_mismatch');
   return { chatId, userId };
 }
 
@@ -163,7 +163,7 @@ async function pressCurrentLaunchButton() {
     }
     throw new Error(`worker_callback_${response.status}_${code}`);
   }
-  throw new Error(`production_canary_collector_button_timeout_${lastCode}`);
+  throw new Error(`prod_principal_canary_collector_button_timeout_${lastCode}`);
 }
 
 async function waitForLiveLane() {
@@ -181,8 +181,8 @@ async function waitForLiveLane() {
     // readiness are both visible; do not send messages to that old lane.
     await new Promise(resolve => setTimeout(resolve, 2_000));
   }
-  if (!expectedProfileObserved) throw new Error('production_canary_profile_not_propagated');
-  throw new Error(`production_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
+  if (!expectedProfileObserved) throw new Error('prod_principal_canary_profile_not_propagated');
+  throw new Error(`prod_principal_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
 }
 
 async function waitForTask(baselineIds, startedAt, challenge) {
@@ -190,7 +190,7 @@ async function waitForTask(baselineIds, startedAt, challenge) {
   let task = null;
   while (Date.now() < deadline) {
     const evidence = await workerRequest(`/operator/test-evidence?challenge=${encodeURIComponent(challenge)}`);
-    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+    assert.equal(evidence.profileId, PROFILE_ID, 'prod_principal_canary_profile_mismatch');
     const candidates = (evidence.tasks ?? []).filter(candidate => !baselineIds.has(candidate.userTaskId)
       && Number(candidate.acceptedAt) >= startedAt);
     // Return any terminal task so the caller can report an answer mismatch
@@ -199,7 +199,7 @@ async function waitForTask(baselineIds, startedAt, challenge) {
     if (task && ['done', 'failed', 'cancelled'].includes(task.status)) return { task, buffer: evidence.buffer };
     await new Promise(resolve => setTimeout(resolve, 4_000));
   }
-  throw new Error(`production_canary_task_timeout_${task?.status ?? 'not_admitted'}`);
+  throw new Error(`prod_principal_canary_task_timeout_${task?.status ?? 'not_admitted'}`);
 }
 
 async function waitForDelivery(taskId, chatId) {
@@ -208,15 +208,15 @@ async function waitForDelivery(taskId, chatId) {
   while (Date.now() < deadline) {
     result = await workerRequest(`/operator/test-delivery/${encodeURIComponent(taskId)}`);
     if (result.terminal?.status === 'sent') {
-      assert.equal(String(result.terminal.chatId), String(chatId), 'production_canary_answer_chat_mismatch');
+      assert.equal(String(result.terminal.chatId), String(chatId), 'prod_principal_canary_answer_chat_mismatch');
       assert(Number.isSafeInteger(result.terminal.providerMessageId) && result.terminal.providerMessageId > 0,
-        'production_canary_provider_message_id_missing');
+        'prod_principal_canary_provider_message_id_missing');
       return result.terminal;
     }
-    if (['dead', 'unknown'].includes(result.terminal?.status)) throw new Error(`production_canary_delivery_${result.terminal.status}`);
+    if (['dead', 'unknown'].includes(result.terminal?.status)) throw new Error(`prod_principal_canary_delivery_${result.terminal.status}`);
     await new Promise(resolve => setTimeout(resolve, 3_000));
   }
-  throw new Error(`production_canary_delivery_timeout_${result?.terminal?.status ?? 'not_queued'}`);
+  throw new Error(`prod_principal_canary_delivery_timeout_${result?.terminal?.status ?? 'not_queued'}`);
 }
 
 export function liveLaneIsReady(evidence) {
@@ -250,7 +250,7 @@ async function waitForIntakeIdle() {
   let lastCheckpointAt = 0;
   while (Date.now() < deadline) {
     const evidence = await workerRequest('/operator/test-evidence');
-    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_profile_mismatch');
+    assert.equal(evidence.profileId, PROFILE_ID, 'prod_principal_canary_profile_mismatch');
     lastState = summarizeIntakeState(evidence.buffer);
     if (intakeIsIdle(evidence.buffer)) return lastState;
     if (Date.now() - lastCheckpointAt >= 10_000) {
@@ -260,14 +260,14 @@ async function waitForIntakeIdle() {
     await new Promise(resolve => setTimeout(resolve, 2_000));
   }
   await checkpoint('first_turn_intake_idle_timeout', { followupReadiness: lastState });
-  throw new Error('production_canary_first_turn_intake_idle_timeout');
+  throw new Error('prod_principal_canary_first_turn_intake_idle_timeout');
 }
 
 async function cleanupIfTerminalAndIdle(username) {
   let lastCheckpointAt = 0;
   const readiness = await waitForCleanupReadiness(async () => {
     const evidence = await workerRequest('/operator/test-evidence');
-    assert.equal(evidence.profileId, PROFILE_ID, 'production_canary_cleanup_profile_mismatch');
+    assert.equal(evidence.profileId, PROFILE_ID, 'prod_principal_canary_cleanup_profile_mismatch');
     return evidence;
   }, { onPending: async state => {
     if (Date.now() - lastCheckpointAt < 10_000) return;
@@ -295,22 +295,22 @@ async function cleanupIfTerminalAndIdle(username) {
     loginSessionDeleted: cleanup.loginSessionDeleted === true,
   } });
   if (cleanup.ok !== true || cleanup.testProfileDeleted !== true || cleanup.loginSessionDeleted !== true) {
-    throw new Error('production_canary_cleanup_incomplete');
+    throw new Error('prod_principal_canary_cleanup_incomplete');
   }
   return true;
 }
 
 async function main() {
-  if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('production_canary_target_required');
+  if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('prod_principal_canary_target_required');
   const { chatId } = identity();
   const laneIdentity = await verifyLiveLaneIdentity();
   const before = await waitForLiveLane();
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
-    throw new Error('production_canary_intake_not_idle');
+    throw new Error('prod_principal_canary_intake_not_idle');
   }
   if ((before.tasks ?? []).some(task => !['done', 'failed', 'cancelled'].includes(task.status))) {
-    throw new Error('production_canary_previous_task_not_terminal');
+    throw new Error('prod_principal_canary_previous_task_not_terminal');
   }
   await checkpoint('lane_ready', { priorTaskCount: (before.tasks ?? []).length, intakeIdle: true,
     botUsername: laneIdentity.botUsername });
@@ -321,22 +321,22 @@ async function main() {
   const clean = await workerRequest('/operator/test-cleanup', {
     target: TARGET, confirm: 'CLEAN_PINNED_TEST_CHAT',
   });
-  assert.equal(clean.ok, true, 'production_canary_initial_cleanup_failed');
+  assert.equal(clean.ok, true, 'prod_principal_canary_initial_cleanup_failed');
   const cleaned = await workerRequest('/operator/test-evidence');
-  assert.equal(cleaned.buffer?.pendingCount, 0, 'production_canary_buffer_not_clean');
+  assert.equal(cleaned.buffer?.pendingCount, 0, 'prod_principal_canary_buffer_not_clean');
   await checkpoint('initial_cleanup_complete', { intakeIdle: true });
 
-  const username = `production_e2e_${randomBytes(6).toString('hex')}`;
+  const username = `prod_principal_${randomBytes(6).toString('hex')}`;
   let task = null;
   try {
     const created = await capture(`/adduser ${username} Production E2E`, { admin: true });
-    assert.equal(created.ok, true, 'production_canary_profile_create_failed');
+    assert.equal(created.ok, true, 'prod_principal_canary_profile_create_failed');
     const text = (created.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
     const password = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(text)?.[1];
-    assert(password, 'production_canary_profile_password_missing');
+    assert(password, 'prod_principal_canary_profile_password_missing');
 
     const login = await send(`/login ${username} ${password}`);
-    assert.equal(login.admission?.authenticated, true, 'production_canary_login_failed');
+    assert.equal(login.admission?.authenticated, true, 'prod_principal_canary_login_failed');
     await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
 
     const nonce = `PROD-PRINCIPAL-${randomBytes(8).toString('hex').toUpperCase()}`;
@@ -344,37 +344,37 @@ async function main() {
     // Use a concrete user task so Communication routing cannot reasonably
     // classify an echo-only probe as the deterministic system-health quick answer.
     const question = await send(`Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`);
-    assert.equal(question.ok, true, 'production_canary_question_rejected');
+    assert.equal(question.ok, true, 'prod_principal_canary_question_rejected');
     await checkpoint('first_turn_accepted', { turns: [{ accepted: true,
       pendingCount: Number.isSafeInteger(question.collector?.pendingCount) ? question.collector.pendingCount : null }] });
-    assert.equal(question.collector?.pendingCount, 1, 'production_canary_input_not_buffered');
+    assert.equal(question.collector?.pendingCount, 1, 'prod_principal_canary_input_not_buffered');
 
     const { userId } = identity();
     const launched = await pressCurrentLaunchButton();
-    assert.equal(launched.ok, true, 'production_canary_launch_callback_failed');
+    assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
     const launchState = launched.collector ?? {};
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
         !(launchState.launchingMessageIds ?? []).length &&
         !(Number(launchState.controlPlaneBarrier?.busyRequestCount) > 0) &&
         !(Number(launchState.controlPlaneBarrier?.unresolvedLaunchCount) > 0)) {
-      throw new Error(`production_canary_launch_not_dispatched_pending_${launchState.pendingCount ?? 'unknown'}`);
+      throw new Error(`prod_principal_canary_launch_not_dispatched_pending_${launchState.pendingCount ?? 'unknown'}`);
     }
 
     const observed = await waitForTask(baselineIds, startedAt, nonce);
     task = observed.task;
     const firstTurn = safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true });
-    assert(durableTurnVerdict(firstTurn), 'production_canary_terminal_state_not_durable');
+    assert(durableTurnVerdict(firstTurn), 'prod_principal_canary_terminal_state_not_durable');
     await checkpoint('first_turn_terminal', { turns: [firstTurn] });
-    assert.equal(task.status, 'done', 'production_canary_task_not_done');
-    assert.equal(task.resultPresent, true, 'production_canary_result_not_persisted');
-    assert.equal(task.answerPresent, true, 'production_canary_answer_not_persisted');
-    assert.equal(task.answerMatchesChallenge, true, 'production_canary_answer_mismatch');
-    assert.equal(task.runs?.length, 1, 'production_canary_run_count_mismatch');
-    assert.equal(task.runs[0].status, 'success', 'production_canary_runner_not_successful');
-    assert.equal(task.runs[0].hasSessionId, true, 'production_canary_session_not_persisted');
-    assert.equal(task.runs[0].hasStartedAt, true, 'production_canary_run_start_not_persisted');
-    assert.equal(task.runs[0].hasFinishedAt, true, 'production_canary_run_finish_not_persisted');
-    assert(observed.buffer?.pendingCount === 0, 'production_canary_buffer_not_drained');
+    assert.equal(task.status, 'done', 'prod_principal_canary_task_not_done');
+    assert.equal(task.resultPresent, true, 'prod_principal_canary_result_not_persisted');
+    assert.equal(task.answerPresent, true, 'prod_principal_canary_answer_not_persisted');
+    assert.equal(task.answerMatchesChallenge, true, 'prod_principal_canary_answer_mismatch');
+    assert.equal(task.runs?.length, 1, 'prod_principal_canary_run_count_mismatch');
+    assert.equal(task.runs[0].status, 'success', 'prod_principal_canary_runner_not_successful');
+    assert.equal(task.runs[0].hasSessionId, true, 'prod_principal_canary_session_not_persisted');
+    assert.equal(task.runs[0].hasStartedAt, true, 'prod_principal_canary_run_start_not_persisted');
+    assert.equal(task.runs[0].hasFinishedAt, true, 'prod_principal_canary_run_finish_not_persisted');
+    assert(observed.buffer?.pendingCount === 0, 'prod_principal_canary_buffer_not_drained');
 
     const firstTask = task;
     const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
@@ -389,37 +389,37 @@ async function main() {
     // intentionally omits the nonce; only the preceding conversation contains it.
     const followupStartedAt = Date.now();
     const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
-    assert.equal(followupInput.ok, true, 'production_canary_followup_rejected');
+    assert.equal(followupInput.ok, true, 'prod_principal_canary_followup_rejected');
     await checkpoint('followup_turn_accepted', { turns: [firstTurnSummary,
       { accepted: true, pendingCount: Number.isSafeInteger(followupInput.collector?.pendingCount)
         ? followupInput.collector.pendingCount : null }] });
-    assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
-    assert.equal(followupInput.collector?.busy, false, 'production_canary_followup_lane_busy');
+    assert.equal(followupInput.collector?.pendingCount, 1, 'prod_principal_canary_followup_not_buffered');
+    assert.equal(followupInput.collector?.busy, false, 'prod_principal_canary_followup_lane_busy');
     const followupBarrier = controlPlaneBarrierCounts(followupInput.collector);
-    assert.equal(followupBarrier.busyRequestCount, 0, 'production_canary_followup_busy_request_present');
-    assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'production_canary_followup_unresolved_launch_present');
+    assert.equal(followupBarrier.busyRequestCount, 0, 'prod_principal_canary_followup_busy_request_present');
+    assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'prod_principal_canary_followup_unresolved_launch_present');
     const followupLaunch = await pressCurrentLaunchButton();
-    assert.equal(followupLaunch.ok, true, 'production_canary_followup_launch_failed');
+    assert.equal(followupLaunch.ok, true, 'prod_principal_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
       firstTurnSummary,
       { accepted: true, launch: summarizeLaunch(followupLaunch) },
     ] });
-    assert(launchWasDispatched(followupLaunch, followupInput.collector), 'production_canary_followup_launch_not_dispatched');
+    assert(launchWasDispatched(followupLaunch, followupInput.collector), 'prod_principal_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
     task = followupObserved.task;
     const followupTurn = safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true });
-    assert(durableTurnVerdict(followupTurn), 'production_canary_followup_state_not_durable');
+    assert(durableTurnVerdict(followupTurn), 'prod_principal_canary_followup_state_not_durable');
     await checkpoint('followup_turn_terminal', { turns: [firstTurnSummary, followupTurn] });
-    assert.equal(task.status, 'done', 'production_canary_followup_task_not_done');
-    assert.equal(task.resultPresent, true, 'production_canary_followup_result_not_persisted');
-    assert.equal(task.answerPresent, true, 'production_canary_followup_answer_not_persisted');
-    assert.equal(task.answerMatchesChallenge, true, 'production_canary_followup_lost_prior_context');
-    assert.equal(task.runs?.length, 1, 'production_canary_followup_run_count_mismatch');
-    assert.equal(task.runs[0].status, 'success', 'production_canary_followup_runner_not_successful');
-    assert.equal(task.runs[0].hasSessionId, true, 'production_canary_followup_session_not_persisted');
-    assert.equal(task.runs[0].hasStartedAt, true, 'production_canary_followup_run_start_not_persisted');
-    assert.equal(task.runs[0].hasFinishedAt, true, 'production_canary_followup_run_finish_not_persisted');
-    assert(followupObserved.buffer?.pendingCount === 0, 'production_canary_followup_buffer_not_drained');
+    assert.equal(task.status, 'done', 'prod_principal_canary_followup_task_not_done');
+    assert.equal(task.resultPresent, true, 'prod_principal_canary_followup_result_not_persisted');
+    assert.equal(task.answerPresent, true, 'prod_principal_canary_followup_answer_not_persisted');
+    assert.equal(task.answerMatchesChallenge, true, 'prod_principal_canary_followup_lost_prior_context');
+    assert.equal(task.runs?.length, 1, 'prod_principal_canary_followup_run_count_mismatch');
+    assert.equal(task.runs[0].status, 'success', 'prod_principal_canary_followup_runner_not_successful');
+    assert.equal(task.runs[0].hasSessionId, true, 'prod_principal_canary_followup_session_not_persisted');
+    assert.equal(task.runs[0].hasStartedAt, true, 'prod_principal_canary_followup_run_start_not_persisted');
+    assert.equal(task.runs[0].hasFinishedAt, true, 'prod_principal_canary_followup_run_finish_not_persisted');
+    assert(followupObserved.buffer?.pendingCount === 0, 'prod_principal_canary_followup_buffer_not_drained');
 
     const followupDelivery = await waitForDelivery(task.userTaskId, chatId);
     await checkpoint('followup_turn_delivered', { turns: [
@@ -452,7 +452,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // transcripts, user input, answers, or credentials.
   const firstLine = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
   const reason = /^[a-z0-9][a-z0-9_:.-]{0,159}$/i.test(firstLine)
-    ? firstLine.toLowerCase() : 'production_canary_failed';
+    ? firstLine.toLowerCase() : 'prod_principal_canary_failed';
   await checkpoint(canaryProgress.phase, { ok: false, failureReasonCode: reason }).catch(() => {});
   console.error(JSON.stringify({ lane: TARGET, ok: false,
     reasonCode: reason }));

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
-import { summarizeProductionE2eDelivery } from './production-e2e-evidence.mjs';
-import { summarizeCpRouting } from './production-e2e-cp-evidence.mjs';
+import { summarizeProdPrincipalDelivery } from './prod-principal-evidence.mjs';
+import { summarizeCpRouting } from './prod-principal-cp-evidence.mjs';
 import { summarizeIntakeState } from './e2e-oracle.mjs';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
@@ -15,7 +15,7 @@ const response = await fetch(`${worker}/operator/test-evidence`, {
 });
 const evidence = await response.json().catch(() => ({}));
 if (!response.ok || evidence.profileId !== 'production-e2e-telegram-v1') {
-  throw new Error('production_e2e_readonly_probe_unavailable');
+  throw new Error('prod_principal_readonly_probe_unavailable');
 }
 
 const cpTasks = await Promise.all((evidence.tasks ?? []).map(async task => {
@@ -63,7 +63,7 @@ const deliveryTasks = await Promise.all((evidence.tasks ?? []).map(async task =>
     signal: AbortSignal.timeout(20_000),
   }).catch(() => null);
   const payload = response ? await response.json().catch(() => ({})) : {};
-  return summarizeProductionE2eDelivery(payload, response?.status ?? null, '1714048');
+  return summarizeProdPrincipalDelivery(payload, response?.status ?? null, '1714048');
 }));
 
 const summary = {
@@ -102,5 +102,5 @@ const summary = {
   mutationPerformed: false,
 };
 
-await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+await writeFile('prod-principal-telegram-evidence.json', `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
 console.log(JSON.stringify(summary));

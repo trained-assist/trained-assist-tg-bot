@@ -173,7 +173,7 @@ app.post('/operator/test-wake-pending-task', async context => {
   // returning a bounded reason for each failed precondition. A single generic
   // identity error made live recovery failures impossible to distinguish from
   // a lane misconfiguration without exposing any configuration values.
-  if (target !== 'productionE2e') return context.json({ error: 'production_e2e_lane_mismatch' }, 409);
+  if (target !== 'prod-principal') return context.json({ error: 'prod_principal_lane_mismatch' }, 409);
   if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'test_api_disabled' }, 409);
   if (env.TG_SLICE_INGRESS_PAUSED === 'true') return context.json({ error: 'test_ingress_paused' }, 409);
   if (env.TG_SLICE_DELIVERY_PAUSED !== 'false') return context.json({ error: 'test_delivery_paused' }, 409);
@@ -206,13 +206,13 @@ app.post('/operator/test-cleanup', async context => {
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (target !== 'productionE2e' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !env.INTAKE) {
+  if (target !== 'prod-principal' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !env.INTAKE) {
     return context.json({ error: 'sandbox_identity_mismatch' }, 409);
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== target || source.confirm !== 'CLEAN_PINNED_TEST_CHAT' ||
       Object.keys(source).some(key => !['target', 'confirm', 'username'].includes(key)) ||
-      source.username !== undefined && !/^production_e2e_[a-z0-9]{12}$/.test(source.username)) {
+      source.username !== undefined && !/^prod_principal_[a-z0-9]{12}$/.test(source.username)) {
     return context.json({ error: 'explicit_test_cleanup_required' }, 400);
   }
   const chatId = sandboxOperatorResetChat(env, target);

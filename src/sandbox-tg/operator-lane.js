@@ -12,7 +12,7 @@ const LANES = Object.freeze({
     principalId: 'integration-sandbox3-v1',
     profileId: 'integration-sandbox3-v1',
   }),
-  productionE2e: Object.freeze({
+  'prod-principal': Object.freeze({
     botUsername: 'ptichka_status_bot',
     sessionNamespace: 'integrator-production-e2e-v1',
     controlPlaneUrl: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
@@ -23,7 +23,7 @@ const LANES = Object.freeze({
 
 /** Return a fixed sandbox lane only when its bot, state namespace and CP agree. */
 export function sandboxControlPlaneFetch(env) {
-  if (sandboxOperatorLane(env) === 'productionE2e') return undefined;
+  if (sandboxOperatorLane(env) === 'prod-principal') return undefined;
   return env?.CONTROL_PLANE_SERVICE?.fetch?.bind(env.CONTROL_PLANE_SERVICE);
 }
 
@@ -42,11 +42,11 @@ export function sandboxOperatorLane(env) {
 }
 
 export function sandboxOperatorToken(env, target) {
-  return String(env?.[target === 'sandbox3' || target === 'productionE2e'
+  return String(env?.[target === 'sandbox3' || target === 'prod-principal'
     ? 'TG_SANDBOX3_OPERATOR_TOKEN' : 'TG_SANDBOX_CLEANUP_TOKEN'] ?? '').trim();
 }
 
-const isPinnedTestLane = target => target === 'sandbox3' || target === 'productionE2e';
+const isPinnedTestLane = target => target === 'sandbox3' || target === 'prod-principal';
 
 export function sandboxOperatorChatAllowed(env, config, target, chatId) {
   const value = String(chatId);

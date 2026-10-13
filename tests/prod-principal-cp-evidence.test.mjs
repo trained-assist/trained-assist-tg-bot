@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { summarizeCpRouting } from '../tools/production-e2e-cp-evidence.mjs';
+import { summarizeCpRouting } from '../tools/prod-principal-cp-evidence.mjs';
 
 describe('production E2E CP evidence', () => {
   it('summarizes route and result kind without copying prompts or answers', () => {

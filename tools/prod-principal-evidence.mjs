@@ -2,8 +2,8 @@ const DELIVERY_STATES = new Set(['pending', 'retrying', 'sending', 'sent', 'dead
 const safeCode = value => typeof value === 'string' && /^[a-z0-9_.:-]{1,100}$/i.test(value)
   ? value.toLowerCase() : null;
 
-/** Return only bounded delivery metadata for the pinned production E2E report. */
-export function summarizeProductionE2eDelivery(payload, httpStatus, expectedChatId) {
+/** Return only bounded delivery metadata for the pinned prod-principal report. */
+export function summarizeProdPrincipalDelivery(payload, httpStatus, expectedChatId) {
   const terminal = payload?.terminal && typeof payload.terminal === 'object' ? payload.terminal : null;
   const receipt = payload?.receipt && typeof payload.receipt === 'object' ? payload.receipt : null;
   const terminalStatus = DELIVERY_STATES.has(terminal?.status) ? terminal.status : null;

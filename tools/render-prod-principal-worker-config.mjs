@@ -33,8 +33,8 @@ function omitCronTriggerTable(source) {
   return lines.join('\n');
 }
 
-export function renderProductionE2eWorkerConfig(source, { paused }) {
-  if (typeof source !== 'string' || typeof paused !== 'boolean') throw new Error('invalid_production_e2e_config_input');
+export function renderProdPrincipalWorkerConfig(source, { paused }) {
+  if (typeof source !== 'string' || typeof paused !== 'boolean') throw new Error('invalid_prod_principal_config_input');
   let output = source;
   const vars = {
     CONTROL_PLANE_URL: PRODUCTION_CONTROL_PLANE_URL,
@@ -63,15 +63,15 @@ export function renderProductionE2eWorkerConfig(source, { paused }) {
       !output.includes('[exports.ProductionE2eTgDeliveryOwner]') ||
       output.includes('class_name = "IntakeBuffer"') ||
       output.includes('class_name = "TgDeliveryOwner"')) {
-    throw new Error('production_e2e_state_namespaces_not_isolated');
+    throw new Error('prod_principal_state_namespaces_not_isolated');
   }
   return output;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [mode, target] = process.argv.slice(2);
-  if (!['paused', 'live'].includes(mode) || !target) throw new Error('usage: render-production-e2e-worker-config.mjs paused|live output.toml');
+  if (!['paused', 'live'].includes(mode) || !target) throw new Error('usage: render-prod-principal-worker-config.mjs paused|live output.toml');
   const source = await readFile(new URL('../wrangler.sandbox-tg-sandbox3.toml', import.meta.url), 'utf8');
-  const rendered = renderProductionE2eWorkerConfig(source, { paused: mode === 'paused' });
+  const rendered = renderProdPrincipalWorkerConfig(source, { paused: mode === 'paused' });
   await writeFile(target, rendered, { mode: 0o600 });
 }
