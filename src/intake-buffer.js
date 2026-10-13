@@ -444,7 +444,7 @@ export class IntakeBuffer {
       const chatId = Number(body?.chatId || 1714048);
       const text = 'probe from DO';
       const result = await sendMessage(this.env.BOT_TOKEN, chatId, text, {});
-      return json({ envHasBotToken: !!this.env.BOT_TOKEN, chatId, result });
+      return json({ envHasBotToken: !!this.env.BOT_TOKEN, envKeys: Object.keys(this.env), chatId, result });
     }
     if (url.pathname === '/operator/test-evidence' && request.method === 'POST') {
 
