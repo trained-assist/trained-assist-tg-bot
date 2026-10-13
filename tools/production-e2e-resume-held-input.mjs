@@ -7,6 +7,7 @@ const cp = 'https://trained-assist-cp-production.skillset-apply.workers.dev';
 const profileId = 'production-e2e-telegram-v1';
 const target = 'productionE2e';
 const retryRoute = process.env.PRODUCTION_E2E_RETRY_ROUTE === 'true';
+const RUN_FINISHED_EVENT = 'run_finished';
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -144,6 +145,7 @@ async function main() {
       answerPersisted: taskEvidence.answerPresent === true,
       answerMatchedChallenge: taskEvidence.answerMatchesChallenge === true,
       eventTypes: taskEvidence.historyTypes ?? [],
+      runFinishedEventPersisted: (taskEvidence.historyTypes ?? []).includes(RUN_FINISHED_EVENT),
     } : null,
     cp: cpView ? safeStatus(cpView) : null,
     telegramDeliveryStatus: null,
@@ -167,7 +169,7 @@ async function main() {
     assert.equal(taskEvidence.runs[0].hasSessionId, true, 'production_e2e_session_not_persisted');
     assert.equal(taskEvidence.runs[0].hasStartedAt, true, 'production_e2e_run_start_not_persisted');
     assert.equal(taskEvidence.runs[0].hasFinishedAt, true, 'production_e2e_run_finish_not_persisted');
-    assert((taskEvidence.historyTypes ?? []).includes('run_finished'), 'production_e2e_finish_event_not_persisted');
+    // A7: run_finished event presence is diagnostic only, never a verdict gate.
     const delivery = await workerRequest(`/operator/test-delivery/${encodeURIComponent(task.userTaskId)}`);
     assert.equal(delivery.terminal?.status, 'sent', 'production_e2e_delivery_not_sent');
     assert.equal(String(delivery.terminal.chatId), String(chatId), 'production_e2e_delivery_chat_mismatch');

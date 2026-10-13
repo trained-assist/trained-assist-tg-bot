@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const PROFILE_ID = 'production-e2e-telegram-v1';
 const TARGET = 'productionE2e';
+const RUN_FINISHED_EVENT = 'run_finished';
 let canaryProgress = {
   ok: false,
   scenario: 'production-telegram-two-turn-session-context-and-delivery',
@@ -39,7 +40,19 @@ function safeTaskSummary(task, { matchedPriorNonce = false } = {}) {
     startTimePersisted: run?.hasStartedAt === true,
     finishTimePersisted: run?.hasFinishedAt === true,
     eventTypes: (task?.historyTypes ?? []).filter(type => typeof type === 'string' && /^[a-z0-9_-]{1,80}$/i.test(type)),
+    // A7: diagnostic only — event/history presence never gates the verdict.
+    runFinishedEventPersisted: (task?.historyTypes ?? []).includes(RUN_FINISHED_EVENT),
   };
+}
+
+// A7: the acceptance verdict is a pure function of durable task-store state.
+// Recorded events (eventTypes, runFinishedEventPersisted) are diagnostics and
+// are deliberately not inputs here, so a canary run with logging disabled
+// produces the same PASS/FAIL as a run with full event history.
+export function durableTurnVerdict(turn = {}) {
+  return turn.taskStatus === 'done' && turn.runCount === 1 && turn.runStatus === 'success' &&
+    turn.sessionPersisted === true && turn.resultPersisted === true && turn.answerPersisted === true &&
+    turn.answerMatchedPriorNonce === true && turn.startTimePersisted === true && turn.finishTimePersisted === true;
 }
 
 function required(name) {
@@ -365,7 +378,9 @@ async function main() {
 
     const observed = await waitForTask(baselineIds, startedAt, nonce);
     task = observed.task;
-    await checkpoint('first_turn_terminal', { turns: [safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
+    const firstTurn = safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true });
+    assert(durableTurnVerdict(firstTurn), 'production_canary_terminal_state_not_durable');
+    await checkpoint('first_turn_terminal', { turns: [firstTurn] });
     assert.equal(task.status, 'done', 'production_canary_task_not_done');
     assert.equal(task.resultPresent, true, 'production_canary_result_not_persisted');
     assert.equal(task.answerPresent, true, 'production_canary_answer_not_persisted');
@@ -375,25 +390,23 @@ async function main() {
     assert.equal(task.runs[0].hasSessionId, true, 'production_canary_session_not_persisted');
     assert.equal(task.runs[0].hasStartedAt, true, 'production_canary_run_start_not_persisted');
     assert.equal(task.runs[0].hasFinishedAt, true, 'production_canary_run_finish_not_persisted');
-    assert((task.historyTypes ?? []).includes('run_finished'), 'production_canary_terminal_event_not_persisted');
     assert(observed.buffer?.pendingCount === 0, 'production_canary_buffer_not_drained');
 
     const firstTask = task;
     const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
-    await checkpoint('first_turn_delivered', { turns: [{ ...safeTaskSummary(firstTask, { matchedPriorNonce: true }),
-      deliveryStatus: firstDelivery.status, providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) }] });
+    const firstTurnSummary = { ...firstTurn, deliveryStatus: firstDelivery.status,
+      providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) };
+    await checkpoint('first_turn_delivered', { turns: [firstTurnSummary] });
     const intakeAfterFirstTurn = await waitForIntakeIdle();
-    await checkpoint('first_turn_delivery_and_intake_idle', { turns: [{
-      ...safeTaskSummary(firstTask, { matchedPriorNonce: true }),
-      deliveryStatus: firstDelivery.status, providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId),
-    }], followupReadiness: intakeAfterFirstTurn });
+    await checkpoint('first_turn_delivery_and_intake_idle', { turns: [firstTurnSummary],
+      followupReadiness: intakeAfterFirstTurn });
 
     // Verify session context across separate Telegram turns. The follow-up
     // intentionally omits the nonce; only the preceding conversation contains it.
     const followupStartedAt = Date.now();
     const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
     assert.equal(followupInput.ok, true, 'production_canary_followup_rejected');
-    await checkpoint('followup_turn_accepted', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+    await checkpoint('followup_turn_accepted', { turns: [firstTurnSummary,
       { accepted: true, pendingCount: Number.isSafeInteger(followupInput.collector?.pendingCount)
         ? followupInput.collector.pendingCount : null }] });
     assert.equal(followupInput.collector?.pendingCount, 1, 'production_canary_followup_not_buffered');
@@ -404,14 +417,15 @@ async function main() {
     const followupLaunch = await pressCurrentLaunchButton();
     assert.equal(followupLaunch.ok, true, 'production_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
-      safeTaskSummary(firstTask, { matchedPriorNonce: true }),
+      firstTurnSummary,
       { accepted: true, launch: summarizeLaunch(followupLaunch) },
     ] });
     assert(launchWasDispatched(followupLaunch, followupInput.collector), 'production_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
     task = followupObserved.task;
-    await checkpoint('followup_turn_terminal', { turns: [safeTaskSummary(firstTask, { matchedPriorNonce: true }),
-      safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true })] });
+    const followupTurn = safeTaskSummary(task, { matchedPriorNonce: task.answerMatchesChallenge === true });
+    assert(durableTurnVerdict(followupTurn), 'production_canary_followup_state_not_durable');
+    await checkpoint('followup_turn_terminal', { turns: [firstTurnSummary, followupTurn] });
     assert.equal(task.status, 'done', 'production_canary_followup_task_not_done');
     assert.equal(task.resultPresent, true, 'production_canary_followup_result_not_persisted');
     assert.equal(task.answerPresent, true, 'production_canary_followup_answer_not_persisted');
@@ -421,14 +435,12 @@ async function main() {
     assert.equal(task.runs[0].hasSessionId, true, 'production_canary_followup_session_not_persisted');
     assert.equal(task.runs[0].hasStartedAt, true, 'production_canary_followup_run_start_not_persisted');
     assert.equal(task.runs[0].hasFinishedAt, true, 'production_canary_followup_run_finish_not_persisted');
-    assert((task.historyTypes ?? []).includes('run_finished'), 'production_canary_followup_finish_event_not_persisted');
     assert(followupObserved.buffer?.pendingCount === 0, 'production_canary_followup_buffer_not_drained');
 
     const followupDelivery = await waitForDelivery(task.userTaskId, chatId);
     await checkpoint('followup_turn_delivered', { turns: [
-      { ...safeTaskSummary(firstTask, { matchedPriorNonce: true }), deliveryStatus: firstDelivery.status,
-        providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) },
-      { ...safeTaskSummary(task, { matchedPriorNonce: true }), deliveryStatus: followupDelivery.status,
+      firstTurnSummary,
+      { ...followupTurn, deliveryStatus: followupDelivery.status,
         providerMessageIdPresent: Number.isSafeInteger(followupDelivery.providerMessageId) },
     ] });
     const report = { ok: true, scenario: 'production-telegram-two-turn-session-context-and-delivery',
