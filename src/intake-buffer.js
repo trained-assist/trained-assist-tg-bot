@@ -439,13 +439,6 @@ export class IntakeBuffer {
 
   async fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname === '/_debugSend' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const chatId = Number(body?.chatId || 1714048);
-      const text = 'probe from DO';
-      const result = await sendMessage(this.env.BOT_TOKEN, chatId, text, {});
-      return json({ envHasBotToken: !!this.env.BOT_TOKEN, envKeys: Object.keys(this.env), chatId, result });
-    }
     if (url.pathname === '/operator/test-evidence' && request.method === 'POST') {
 
       const lane = sandboxOperatorLane(this.env);
@@ -2576,7 +2569,6 @@ export class IntakeBuffer {
         }
       }
       if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
-      console.error('[collector-debug] chatId=', chatId, 'typeof=', typeof chatId, 'envBotToken=', !!this.env.BOT_TOKEN, 'envAgentSecret=', !!this.env.AGENT_SECRET);
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId)
         .catch((e) => { console.error('[collector] send threw', String(e?.message ?? e)); return null; });
       const id = sent?.result?.message_id;
