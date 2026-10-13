@@ -3,8 +3,10 @@
 
 import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 
@@ -19,6 +21,9 @@ ALLOWED_WORKERS = {
 if WORKER not in ALLOWED_WORKERS:
     raise SystemExit("CF_WORKER_NAME must name an approved sandbox or production Worker")
 HEALTH_PROBE_COUNT = 80
+VIEW = os.environ.get("CF_QUERY_VIEW", "traces")
+if VIEW not in {"traces", "events", "invocations"}:
+    raise SystemExit("CF_QUERY_VIEW must be traces, events, or invocations")
 API = (
     "https://api.cloudflare.com/client/v4/accounts/"
     f"{ACCOUNT_ID}/workers/observability/telemetry/query"
@@ -45,22 +50,29 @@ def read_worker_settings() -> dict:
 
 def query(view: str) -> dict:
     now = int(time.time() * 1000)
+    window_ms = (60 * 60 * 1000) if view in {"events", "invocations"} else 24 * 60 * 60 * 1000
+    filters = [{
+        "key": "$metadata.service",
+        "operation": "eq",
+        "type": "string",
+        "value": WORKER,
+    }]
+    if view == "invocations":
+        filters.append({
+            "key": "$metadata.trigger",
+            "operation": "eq",
+            "type": "string",
+            "value": "POST /webhook",
+        })
     body = {
         "queryId": f"adhoc-{WORKER}-{view}",
-        "timeframe": {"from": now - 24 * 60 * 60 * 1000, "to": now},
+        "timeframe": {"from": now - window_ms, "to": now},
         "view": view,
         "dry": True,
         "limit": 500,
         "parameters": {
             "datasets": ["cloudflare-workers"],
-            "filters": [
-                {
-                    "key": "$metadata.service",
-                    "operation": "eq",
-                    "type": "string",
-                    "value": WORKER,
-                }
-            ],
+            "filters": filters,
         },
     }
     request = urllib.request.Request(
@@ -114,23 +126,284 @@ if os.environ.get("CF_GENERATE_HEALTH_TRAFFIC") == "true":
         time.sleep(0.25)
 
 
-traces_response = query("traces")
-if not traces_response.get("success"):
-    print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+response = query(VIEW)
+if not response.get("success"):
+    print(json.dumps({"errors": response.get("errors", [])}), file=sys.stderr)
     raise SystemExit(1)
 
-trace_items = traces_response.get("result", {}).get("traces", [])
+ALLOWED_LIFECYCLE_EVENTS = {
+    "tg.dispatch.failed", "tg.cp.snapshot_started", "tg.cp.snapshot_persisted",
+    "tg.cp.snapshot_failed", "tg.cp.receipt_read_failed", "tg.cp.intake_failed",
+    "tg.cp.receipt_persist_failed", "tg.cp.task_accepted", "tg.cp.route_completed",
+    "tg.cp.route_pending", "tg.delivery.accepted", "tg.delivery.rejected",
+    "tg.agent.run_finished_received",
+}
+
+
+def event_payload(event):
+    metadata = event.get("$metadata") or event.get("metadata") or {}
+    source = event.get("source")
+    for candidate in (
+        source,
+        source.get("message") if isinstance(source, dict) else None,
+        metadata.get("message"),
+    ):
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+        if isinstance(candidate, dict) and candidate.get("event") in ALLOWED_LIFECYCLE_EVENTS:
+            return candidate
+    return None
+
+
+def safe_error_class(message):
+    text = str(message or "").lower()
+    if "chat not found" in text:
+        return "chat_not_found"
+    if "bot was blocked" in text:
+        return "bot_blocked"
+    if "message thread not found" in text:
+        return "thread_not_found"
+    if "message to edit not found" in text:
+        return "message_to_edit_not_found"
+    if "message is not modified" in text:
+        return "message_not_modified"
+    if "can't parse entities" in text or "cant parse entities" in text:
+        return "message_format_rejected"
+    if "too many requests" in text:
+        return "rate_limited"
+    if "[sendmessage]" in text or "sendmessage failed" in text:
+        return "telegram_send_rejected"
+    if "cp_http_" in text:
+        return "control_plane_http_error"
+    if "control_plane_" in text or "control plane" in text:
+        return "control_plane_error"
+    return "other_worker_error"
+
+
+def safe_log_category(message):
+    text = str(message or "").lower()
+    for marker, category in (
+        ("launch outcome unknown", "intake_launch_outcome_unknown"),
+        ("batch preparation failed", "intake_batch_preparation_failed"),
+        ("[setmycommands]", "telegram_command_registration"),
+        ("[sendmessage]", "telegram_message_send"),
+        ("[webhook]", "webhook_configuration"),
+        ("[intake prepare]", "intake_message_preparation"),
+        ("[recovery]", "recovery_worker"),
+        ("[pending-intake]", "pending_intake_registration"),
+        ("[supplement]", "supplement_operation"),
+        ("[stop]", "stop_operation"),
+    ):
+        if marker in text:
+            return category
+    return "unclassified"
+
+
+def safe_status_code(message):
+    match = re.search(r"\b(?:http\s*)?(401|403|404|408|409|422|429|500|502|503|504)\b", str(message or ""), re.I)
+    return int(match.group(1)) if match else None
+
+
+if VIEW == "events":
+    # Return only bounded lifecycle metadata. Worker logs may also contain user
+    # text and identifiers, so never print a raw event or arbitrary log message.
+    event_items = response.get("result", {}).get("events", {}).get("events", [])
+    safe_events = []
+    json_message_shapes = {}
+    log_event_counts = {}
+    trigger_counts = {}
+    worker_event_type_counts = {}
+    metadata_type_counts = {}
+    webhook_invocations = []
+    recent_route_activity = []
+    recent_worker_logs = []
+    recent_cutoff_ms = int(time.time() * 1000) - 60 * 60 * 1000
+    for item in event_items:
+        metadata = item.get("$metadata") or item.get("metadata") or {}
+        metadata_type = metadata.get("type")
+        if isinstance(metadata_type, str):
+            metadata_type_counts[metadata_type] = metadata_type_counts.get(metadata_type, 0) + 1
+        trigger = metadata.get("trigger")
+        if metadata_type == "cf-worker":
+            source = item.get("source") or {}
+            message = source.get("message") if isinstance(source, dict) else source
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms:
+                record = {"timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "level": metadata.get("level") if metadata.get("level") in {"debug", "info", "log", "warn", "error"} else "unknown",
+                    "sendFailurePresent": isinstance(message, str) and any(marker in message.lower() for marker in (
+                        "[sendmessage]", "sendmessage failed", "telegram_rejected", "chat not found", "bot was blocked",
+                    ))}
+                if record["level"] == "error":
+                    record["errorClass"] = safe_error_class(message)
+                    record["logCategory"] = safe_log_category(message)
+                    status = safe_status_code(message)
+                    if status is not None:
+                        record["statusCode"] = status
+                try:
+                    parsed_log = json.loads(message) if isinstance(message, str) else None
+                except (TypeError, ValueError):
+                    parsed_log = None
+                if isinstance(parsed_log, dict) and parsed_log.get("event") in ALLOWED_LIFECYCLE_EVENTS:
+                    record["lifecycleEvent"] = parsed_log["event"]
+                recent_worker_logs.append(record)
+        if isinstance(trigger, str) and trigger.lower() == "alarm":
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms:
+                recent_route_activity.append({"method": "ALARM", "route": "Durable Object alarm",
+                    "timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "eventType": (item.get("$workers") or {}).get("eventType")})
+        if isinstance(trigger, str):
+            match = re.match(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+([^?\s]+)", trigger)
+            bucket = f"{match.group(1)} {match.group(2).split('/')[1] if len(match.group(2).split('/')) > 1 else '/'}" if match else "other"
+            trigger_counts[bucket] = trigger_counts.get(bucket, 0) + 1
+            timestamp = item.get("timestamp")
+            route = match.group(2).split("?")[0] if match else ""
+            if isinstance(timestamp, (int, float)) and timestamp >= recent_cutoff_ms and route in {
+                "/webhook", "/ingest", "/append", "/collector-state", "/debug", "/health",
+            }:
+                record = {"method": match.group(1), "route": route,
+                    "timestamp": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                    "eventType": (item.get("$workers") or {}).get("eventType")}
+                status = metadata.get("statusCode") or metadata.get("httpStatus")
+                if isinstance(status, int):
+                    record["statusCode"] = status
+                recent_route_activity.append(record)
+            if match and match.group(1) == "POST" and match.group(2).split("?")[0] == "/webhook":
+                workers = item.get("$workers") or {}
+                record = {"trigger": "POST /webhook"}
+                timestamp = item.get("timestamp")
+                if isinstance(timestamp, (int, float)):
+                    record["timestamp"] = datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat()
+                event_type = workers.get("eventType")
+                if isinstance(event_type, str):
+                    record["eventType"] = event_type
+                outcome = workers.get("outcome")
+                if isinstance(outcome, str) and len(outcome) <= 80:
+                    record["outcome"] = outcome
+                duration = metadata.get("duration")
+                if isinstance(duration, (int, float)):
+                    record["durationMs"] = duration
+                status = metadata.get("statusCode") or metadata.get("httpStatus")
+                if isinstance(status, int):
+                    record["statusCode"] = status
+                record["errorPresent"] = bool(metadata.get("error"))
+                webhook_invocations.append(record)
+        workers = item.get("$workers") or {}
+        event_type = workers.get("eventType")
+        if isinstance(event_type, str):
+            worker_event_type_counts[event_type] = worker_event_type_counts.get(event_type, 0) + 1
+        source = item.get("source") if isinstance(item, dict) else None
+        message = source.get("message") if isinstance(source, dict) else None
+        if not isinstance(message, str):
+            continue
+        for name in re.findall(r"\b(tg\.[A-Za-z0-9_.:-]{1,90})\b", message):
+            log_event_counts[name] = log_event_counts.get(name, 0) + 1
+        try:
+            parsed = json.loads(message)
+        except (TypeError, ValueError):
+            shape = "non_json"
+        else:
+            if isinstance(parsed, dict):
+                name = parsed.get("event")
+                shape = f"json_event:{name}" if isinstance(name, str) and name.replace(".", "").replace("_", "").isalnum() else "json_object"
+            else:
+                shape = f"json_{type(parsed).__name__}"
+        json_message_shapes[shape] = json_message_shapes.get(shape, 0) + 1
+    for item in event_items:
+        payload = event_payload(item)
+        if payload is None:
+            continue
+        record = {"event": payload["event"]}
+        timestamp = item.get("timestamp") or (item.get("$metadata") or {}).get("timestamp")
+        if isinstance(timestamp, (int, float)):
+            record["timestamp"] = timestamp
+        for key in ("component", "status", "outcome", "reasonCode", "route", "answerPresent", "generation", "attempt"):
+            value = payload.get(key)
+            if isinstance(value, (str, bool, int)) and len(str(value)) <= 120:
+                record[key] = value
+        safe_events.append(record)
+    print(json.dumps({
+        "worker": WORKER,
+        "view": "events",
+        "window_minutes": 60,
+        "returned_event_count": len(event_items),
+        "truncated": response.get("result", {}).get("truncated", False),
+        "lifecycle_events": safe_events,
+        "message_shapes": json_message_shapes,
+        "log_event_name_counts": log_event_counts,
+        "trigger_counts_by_method_and_first_path_segment": trigger_counts,
+        "worker_event_type_counts": worker_event_type_counts,
+        "metadata_type_counts": metadata_type_counts,
+        "webhook_invocations": webhook_invocations,
+        "recent_route_activity": sorted(recent_route_activity, key=lambda record: record["timestamp"])[-100:],
+        "recent_worker_logs": sorted(recent_worker_logs, key=lambda record: record["timestamp"])[-100:],
+        "worker_log_settings": {
+            key: value for key, value in (read_worker_settings().get("result", {}).get("observability", {}).get("logs", {}) or {}).items()
+            if key in {"enabled", "persist", "invocation_logs", "head_sampling_rate"}
+        },
+        "event_shape_sample": [{
+            "top_level_keys": sorted(str(key) for key in item.keys()),
+            "metadata_keys": sorted(str(key) for key in (item.get("$metadata") or item.get("metadata") or {}).keys()),
+            "source_type": type(item.get("source")).__name__,
+            "source_keys": sorted(str(key) for key in item.get("source", {}).keys()) if isinstance(item.get("source"), dict) else [],
+            "source_nested_keys": {str(key): sorted(str(nested_key) for nested_key in value.keys())
+                for key, value in item.get("source", {}).items() if isinstance(value, dict)},
+            "message_type": type((item.get("$metadata") or item.get("metadata") or {}).get("message")).__name__,
+        } for item in event_items[:3] if isinstance(item, dict)],
+    }, indent=2))
+    raise SystemExit(0)
+
+if VIEW == "invocations":
+    invocations = response.get("result", {}).get("invocations", {})
+    summaries = []
+    for request_id, invocation_events in invocations.items():
+        if not isinstance(invocation_events, list):
+            continue
+        record = {"trigger": "POST /webhook"}
+        times = [event.get("timestamp") for event in invocation_events
+                 if isinstance(event, dict) and isinstance(event.get("timestamp"), (int, float))]
+        if times:
+            record["firstEventAt"] = datetime.fromtimestamp(min(times) / 1000, timezone.utc).isoformat()
+        event_types = {}
+        lifecycle = []
+        for event in invocation_events:
+            if not isinstance(event, dict):
+                continue
+            metadata = event.get("$metadata") or event.get("metadata") or {}
+            event_type = metadata.get("type")
+            if isinstance(event_type, str):
+                event_types[event_type] = event_types.get(event_type, 0) + 1
+            payload = event_payload(event)
+            if payload:
+                safe = {"event": payload["event"]}
+                for key in ("component", "status", "outcome", "reasonCode", "route", "answerPresent", "generation", "attempt"):
+                    value = payload.get(key)
+                    if isinstance(value, (str, bool, int)) and len(str(value)) <= 120:
+                        safe[key] = value
+                lifecycle.append(safe)
+        record["eventTypes"] = event_types
+        record["lifecycleEvents"] = lifecycle
+        summaries.append(record)
+    print(json.dumps({"worker": WORKER, "view": "invocations", "window_minutes": 60,
+        "invocation_count": len(summaries), "invocations": summaries}, indent=2))
+    raise SystemExit(0)
+
+trace_items = response.get("result", {}).get("traces", [])
 if health_probe_count:
     for _ in range(3):
         has_worker_trace = any(belongs_to_worker(trace) for trace in trace_items)
         if has_worker_trace:
             break
         time.sleep(15)
-        traces_response = query("traces")
-        if not traces_response.get("success"):
-            print(json.dumps({"errors": traces_response.get("errors", [])}), file=sys.stderr)
+        response = query("traces")
+        if not response.get("success"):
+            print(json.dumps({"errors": response.get("errors", [])}), file=sys.stderr)
             raise SystemExit(1)
-        trace_items = traces_response.get("result", {}).get("traces", [])
+        trace_items = response.get("result", {}).get("traces", [])
 trace_candidate_count = len(trace_items)
 matching_traces = []
 for trace in trace_items:
@@ -185,7 +458,7 @@ print(
             "health_probe_count": health_probe_count,
             "trace_count": len(matching_traces),
             "trace_candidate_count": trace_candidate_count,
-            "traces_truncated": traces_response.get("result", {}).get("truncated", False),
+            "traces_truncated": response.get("result", {}).get("truncated", False),
             "root_span_counts": root_span_counts,
             "root_span_duration_ms": {
                 name: {
