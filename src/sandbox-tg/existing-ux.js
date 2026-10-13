@@ -346,6 +346,19 @@ app.post('/operator/stop-window', async context => {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 });
 
+// The reset lock is a KV put/delete pair. KV deletes propagate eventually
+// across edge copies, so a delete can land on an edge that never observed the
+// put and leave a stale lock for the full TTL. Readers ignore locks older than
+// this window (a real clear takes ~10s; 240s gives 24x headroom).
+const RESET_LOCK_STALE_MS = 240_000;
+
+async function resetLockVisible(env, lockKey) {
+  const raw = await env.TG_SLICE?.get?.(lockKey);
+  if (typeof raw !== 'string') return false;
+  const setAt = Number(raw);
+  return Number.isSafeInteger(setAt) && setAt > 0 && Date.now() - setAt < RESET_LOCK_STALE_MS;
+}
+
 // Full reset for this dedicated sandbox lane. This is intentionally unavailable
 // in the production Worker: it removes every namespaced session/retry key and
 // every Intake DO reached from those chat/topic keys, regardless of stale profile
@@ -363,9 +376,9 @@ app.post('/operator/reset-sandbox-state', async context => {
       Object.keys(body).some(key => !['target', 'mode', 'confirm'].includes(key))) return context.json({ error: 'explicit_sandbox_confirmation_required' }, 400);
   const lockKey = `sandbox-state-reset:${env.SESSION_NAMESPACE}`;
   if (body.mode === 'clear') {
-    if (await env.TG_SLICE.get(lockKey)) return context.json({ error: 'reset_already_in_progress' }, 409);
+    if (await resetLockVisible(env, lockKey)) return context.json({ error: 'reset_already_in_progress' }, 409);
     await env.TG_SLICE.put(lockKey, String(Date.now()), { expirationTtl: 900 });
-  } else if (await env.TG_SLICE.get(lockKey)) return context.json({ error: 'reset_in_progress' }, 409);
+  } else if (await resetLockVisible(env, lockKey)) return context.json({ error: 'reset_in_progress' }, 409);
 
   try {
   const chatIds = new Set();
@@ -526,7 +539,7 @@ app.post('/operator/test-buffer-message', async context => {
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (await env.TG_SLICE?.get?.(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
+  if (await resetLockVisible(env, `sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
   const configuredBufferChatId = sandboxOperatorPinnedTestLane(target)
     ? sandboxOperatorResetChat(env, target) : env.TG_SANDBOX_BUFFER_TEST_CHAT_ID;
   const configuredBufferUserId = sandboxOperatorPinnedTestLane(target)
@@ -588,7 +601,7 @@ app.post('/operator/test-update', async context => {
   const target = sandboxOperatorLane(env);
   const token = sandboxOperatorToken(env, target);
   if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (await env.TG_SLICE.get(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
+  if (await resetLockVisible(env, `sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'reset_in_progress' }, 503);
   if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !target ||
       env.TG_SLICE_INGRESS_PAUSED === 'true' || env.TG_SLICE_DELIVERY_PAUSED !== 'false') {
     return context.json({ error: 'sandbox_test_api_not_ready' }, 409);
@@ -748,7 +761,7 @@ app.post('/webhook', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
   if (!config.webhookSecret || context.req.header('x-telegram-bot-api-secret-token') !== config.webhookSecret) return context.json({ error: 'unsigned update refused' }, 401);
-  if (await env.TG_SLICE?.get?.(`sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'sandbox state reset in progress' }, 503);
+  if (await resetLockVisible(env, `sandbox-state-reset:${env.SESSION_NAMESPACE}`)) return context.json({ error: 'sandbox state reset in progress' }, 503);
   if (context.env.TG_SLICE_INGRESS_PAUSED === 'true') return context.json({ error: 'sandbox ingress paused' }, 503);
   const update = await context.req.json().catch(() => null);
   if (!Number.isSafeInteger(update?.update_id)) return context.json({ error: 'bad update' }, 400);
