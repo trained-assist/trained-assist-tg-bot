@@ -426,7 +426,10 @@ export class IntakeBuffer {
     const queued = !!(await this.state.storage.get('launchQueued')) || !!(await this.state.storage.get('stopLaunch'));
     if (queued) return data === 'intake_cancel';
     if (/^intake_discard\|\d+$/.test(data)) return Number(data.split('|')[1]) === await this.state.storage.get('draftRevision');
-    if (styleLaunch) return Number(styleLaunch[2]) === await this.state.storage.get('draftRevision');
+    if (styleLaunch) {
+      if (await this.state.storage.get('collectorDraftRevision') === null) return true;
+      return Number(styleLaunch[2]) === await this.state.storage.get('draftRevision');
+    }
       if (data === 'intake_run') return false; // CP collector buttons are revision-bound workStyle actions.
     if (['intake_parallel', 'intake_stopsupp', 'intake_stopnew'].includes(data)) return !!(await this.state.storage.get('busy'));
     return false;
@@ -1747,6 +1750,9 @@ export class IntakeBuffer {
       // the old draft and _callbackOwned refuses the tap (E4.3).
       const collectorRevision = await this.state.storage.get('collectorDraftRevision');
       const currentRevision = await this.state.storage.get('draftRevision');
+      // E4.3: an input bump invalidates the revision-bound collector buttons.
+      // Re-edit the collector when a tracked revision predates the bump. A
+      // collector with no tracked revision is legacy/orphaned: the callback side
       if (collectorRevision && Number.isSafeInteger(currentRevision) && collectorRevision !== currentRevision
           && !(await this.state.storage.get('busy'))) {
         await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
