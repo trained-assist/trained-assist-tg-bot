@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
 import { assertSandboxStateEventuallyEmpty } from './sandbox-buffer-assertions.mjs';
 import { runSandboxEntryScenario } from './sandbox-entry-smoke-lib.mjs';
 
@@ -24,6 +25,11 @@ function required(name) {
   return value;
 }
 
+export function isResetLock409(path, payload) {
+  return path === '/operator/reset-sandbox-state'
+    && ['reset_in_progress', 'reset_already_in_progress'].includes(payload?.error);
+}
+
 async function workerRequest(path, body) {
   const readyDeadline = Date.now() + 60_000;
   while (true) {
@@ -42,8 +48,7 @@ async function workerRequest(path, body) {
     // The reset lock lives in KV, whose deletes propagate eventually across
     // edge copies. An inspect right after a clear can still observe the
     // just-released lock; wait for convergence instead of failing the run.
-    const resetLockVisible = path === '/operator/reset-sandbox-state'
-      && ['reset_in_progress', 'reset_already_in_progress'].includes(payload.error);
+    const resetLockVisible = isResetLock409(path, payload);
     if (response.status === 409 && (readinessRefusal || resetLockVisible) && Date.now() < readyDeadline) {
       await new Promise(resolve => setTimeout(resolve, 2_000));
       continue;
@@ -171,11 +176,13 @@ async function testUserEntry() {
   console.log(JSON.stringify(report));
 }
 
-const mode = process.argv[2];
-if (mode === 'inspect') {
-  await inspectUntilEmpty();
-  console.log(JSON.stringify({ ok: true, cpEmpty: true, tgEmpty: true }));
-} else if (mode === 'reset') await reset();
-else if (mode === 'test-buffers') await testBuffers();
-else if (mode === 'test-user-entry') await testUserEntry();
-else throw new Error('usage: node tools/sandbox-buffer-cycle.mjs inspect|reset|test-buffers|test-user-entry');
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const mode = process.argv[2];
+  if (mode === 'inspect') {
+    await inspectUntilEmpty();
+    console.log(JSON.stringify({ ok: true, cpEmpty: true, tgEmpty: true }));
+  } else if (mode === 'reset') await reset();
+  else if (mode === 'test-buffers') await testBuffers();
+  else if (mode === 'test-user-entry') await testUserEntry();
+  else throw new Error('usage: node tools/sandbox-buffer-cycle.mjs inspect|reset|test-buffers|test-user-entry');
+}
