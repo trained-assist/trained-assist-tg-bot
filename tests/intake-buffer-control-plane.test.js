@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
-  handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), send: vi.fn(), edit: vi.fn(),
+const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
+  handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), start: vi.fn(), send: vi.fn(), edit: vi.fn(),
   stopTargets: vi.fn(),
   publishRoutingDegradation: vi.fn(),
   enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
@@ -18,7 +18,7 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets }),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -69,6 +69,7 @@ async function accept(owner, inputReceipt = receipt) {
 beforeEach(() => {
   vi.clearAllMocks();
   route.mockResolvedValue({});
+  start.mockResolvedValue({ taskId: receipt.userTaskId, instanceId: receipt.userTaskId, created: true, instanceCreated: true, generation: 1, runId: 'run-start' });
   stopTargets.mockImplementation(async input => ({ snapshotId: 'snapshot-test', profileId: 'test-profile',
     conversationId: input.conversationId, tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
       profileId: receipt.profileId, receiptId: 'receipt:test' }], unresolved: false, stopConfirmed: true }));
