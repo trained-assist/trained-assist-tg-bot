@@ -240,7 +240,9 @@ export class IntakeBuffer {
     // wrapper. Without this, session reads inside the DO ignore the namespace and
     // can find sessions from a different bot (cross-bot auto-login bug).
     this.env = applySessionNamespace(env.EXECUTION_BACKEND === 'control-plane'
-      ? { ...env, BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN, BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME }
+      ? { ...env,
+          BOT_TOKEN: env.TG_SANDBOX_BOT_TOKEN || env.BOT_TOKEN,
+          BOT_USERNAME: env.TG_SANDBOX_BOT_USERNAME || env.BOT_USERNAME }
       : env);
     // Test mode init point #2 — every send this accumulator makes goes through
     // lib/telegram.js, which reads the module cache (DESIGN §2.2).
