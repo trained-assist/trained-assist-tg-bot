@@ -18,6 +18,7 @@ import { isAddressedToBot, hasContent, shouldHandleAmbient, stripBotMention, bot
 import { captureSupplement, cancelSupplement, showSupplementConfirm } from './lib/supplement.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 import { logLifecycleEvent } from './lib/lifecycle-log.js';
+import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 
 const app = new Hono();
 
@@ -248,6 +249,28 @@ app.post('/debug/intake/:chatId/flush', async c => {
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
   const res = await stub.fetch('https://intake/flush', { method: 'POST' });
   return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// Debug: delivery-owner records for one chat — the only machine-checkable
+// delivery proof. The outbox stores Telegram's provider outcome
+// (status=sent + telegramMessageId) but no route exposed it, so a completed
+// launch had no evidence of the answer reaching the chat (E4.3 acceptance).
+// Summaries only: never the message text. Gated on AGENT_SECRET like the
+// other /debug routes.
+app.get('/debug/deliveries', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const chatId = Number(c.req.query('chatId'));
+  if (!Number.isSafeInteger(chatId)) return c.json({ error: 'invalid chatId' }, 400);
+  const limitParam = c.req.query('limit');
+  const limit = limitParam === undefined ? undefined : Number(limitParam);
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) return c.json({ error: 'invalid limit' }, 400);
+  try {
+    const client = new TgDeliveryOwnerClient(c.env);
+    const { deliveries } = await client.list(chatId, { limit });
+    return c.json({ botUsername: c.env.BOT_USERNAME || null, buildSha: c.env.BUILD_SHA || null, deliveries });
+  } catch (e) {
+    return c.json({ error: 'delivery_owner_unavailable', detail: String(e?.message ?? e) }, 503);
+  }
 });
 
 // Debug: POST raw audio bytes, get back what speech_transcribe returned (or the

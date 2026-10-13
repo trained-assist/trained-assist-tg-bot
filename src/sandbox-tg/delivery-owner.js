@@ -208,6 +208,18 @@ export class TgDeliveryOwner {
             .sort((first, second) => first.deliveryId.localeCompare(second.deliveryId));
           return Response.json(response);
         }
+        if (route === '/list-deliveries') {
+          const chatId = Number(body.chatId);
+          if (!Number.isSafeInteger(chatId)) return Response.json({ error: 'invalid_chatId' }, { status: 400 });
+          if (!chatAllowed(config, chatId)) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
+          const limit = Number.isSafeInteger(body.limit) && body.limit > 0 ? Math.min(body.limit, 100) : 20;
+          const records = [...(await this.state.storage.list({ prefix: 'delivery:' })).values()]
+            .filter(record => Number(record.destination?.chatId) === chatId)
+            .sort((first, second) => (second.createdAt ?? 0) - (first.createdAt ?? 0))
+            .slice(0, limit)
+            .map(record => ({ ...summary(record), createdAt: record.createdAt ?? null, sentAt: record.sentAt ?? null }));
+          return Response.json({ deliveries: records });
+        }
         if (route === '/drain') {
           const deliveryPaused = typeof body.deliveryPaused === 'boolean'
             ? body.deliveryPaused : this.env.TG_SLICE_DELIVERY_PAUSED !== 'false';
@@ -341,6 +353,7 @@ export class TgDeliveryOwnerClient {
   }); }
   load(deliveryId) { return this.call('load', { deliveryId }); }
   read(taskId, options = {}) { return this.call('read', { taskId, ...(options.includeArtifacts === true ? { includeArtifacts: true } : {}) }); }
+  list(chatId, options = {}) { return this.call('list-deliveries', { chatId, ...(options.limit !== undefined ? { limit: options.limit } : {}) }); }
   discovery() { return this.call('discovery', {}); }
   async advanceDiscovery(revision, next) { return (await this.call('advance-discovery', { revision, next })).advanced; }
   async drain() { return (await this.call('drain', {
