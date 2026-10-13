@@ -937,7 +937,7 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage } = fixture();
     await accept(owner);
     await storage.put('busy', true);
-    await storage.put('busySince', Date.now() - 90 * 60_000);
+    await storage.put('busySince', Date.now() - 10 * 60_000);
     await storage.put('launching', items);
     request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status } } });
     await owner.alarm();
@@ -1116,7 +1116,7 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage } = fixture();
     await storage.put('busy', true);
     await storage.put('launching', items);
-    await storage.put('busySince', Date.now() - 90 * 60_000);
+    await storage.put('busySince', Date.now() - 10 * 60_000);
     await owner.fetch(rpc('/run-finished', {}));
     await owner.alarm();
     expect(await storage.get('busy')).toBe(true);
