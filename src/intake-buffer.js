@@ -2476,6 +2476,7 @@ export class IntakeBuffer {
         : LAUNCH_BTN;
       if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');
+      console.log('[collector] state', JSON.stringify({ prevId, freshCollector, claimKey, batchId: batch?.batchId ?? null }));
       const previousCollectorId = prevId;
       const batch = cpMode ? await this._exclusive(async () => this._batchIdLocked(chatId, threadId)) : null;
       const previousCollectorBatch = cpMode ? await this.state.storage.get('collectorBatchId') : null;
@@ -2497,6 +2498,7 @@ export class IntakeBuffer {
       let currentRevisionClaimSent = false;
       if (claimKey && (!prevId || freshCollector)) {
         const claim = await this.state.storage.get(claimKey);
+        console.log('[collector] claimread', JSON.stringify({ claimKey, claim }));
         if (!claim && claimKey !== baseClaimKey) {
           const previousSent = await this.state.storage.get(baseClaimKey);
           if (previousSent?.state === 'sent' && previousSent.messageId) {
@@ -2520,6 +2522,7 @@ export class IntakeBuffer {
       if (prevId && !freshCollector) {
         const edited = await editMessage(this.env.BOT_TOKEN, chatId, prevId, text,
           { reply_markup: { inline_keyboard: keyboard } }).catch(() => null);
+        console.log('[collector] edit', JSON.stringify({ prevId, ok: edited?.ok, description: edited?.description ?? null }));
         if (edited?.ok || /message is not modified/i.test(edited?.description || '')) {
           if (unknownDismiss) await this.state.storage.put(`cp-unknown-dismiss:${unknownDismiss.token}`, { ...unknownDismiss, messageId: prevId });
           if (cpMode && batch?.batchId) {
