@@ -37,6 +37,7 @@ export function summarizeIntakeState(buffer = {}) {
     unresolvedLaunchCount: Number.isSafeInteger(buffer.unresolvedLaunchCount) ? buffer.unresolvedLaunchCount : 0,
     busyRequestCount: Number.isSafeInteger(buffer.busyRequestCount) ? buffer.busyRequestCount : 0,
     alarmPresent: Number.isSafeInteger(buffer.alarmAt),
+    alarmAt: Number.isSafeInteger(buffer.alarmAt) ? buffer.alarmAt : null,
     stranded: buffer.stranded === true,
   };
 }

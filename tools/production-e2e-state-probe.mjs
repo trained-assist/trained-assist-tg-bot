@@ -2,6 +2,7 @@
 import { writeFile } from 'node:fs/promises';
 import { summarizeProductionE2eDelivery } from './production-e2e-evidence.mjs';
 import { summarizeCpRouting } from './production-e2e-cp-evidence.mjs';
+import { summarizeIntakeState } from './e2e-oracle.mjs';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
@@ -70,15 +71,7 @@ const summary = {
   mode: 'read-only',
   profileId: evidence.profileId,
   readiness: evidence.readiness ?? null,
-  buffer: evidence.buffer ? {
-    pendingCount: evidence.buffer.pendingCount ?? null,
-    busy: evidence.buffer.busy === true,
-    launching: evidence.buffer.launching ?? 0,
-    unresolvedLaunchCount: evidence.buffer.unresolvedLaunchCount ?? 0,
-    busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
-    alarmAt: Number.isSafeInteger(evidence.buffer.alarmAt) ? evidence.buffer.alarmAt : null,
-    stranded: evidence.buffer.stranded === true,
-  } : null,
+  buffer: evidence.buffer ? summarizeIntakeState(evidence.buffer) : null,
   tasks: (evidence.tasks ?? []).map(task => ({
     userTaskId: task.userTaskId,
     status: task.status,
