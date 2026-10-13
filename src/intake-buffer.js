@@ -1741,6 +1741,17 @@ export class IntakeBuffer {
       });
       if (buf === null) return json({ duplicate: true });
 
+      // An orphaned-launch recovery above runs BEFORE the revision bump, so a
+      // collector it re-showed carries the stale revision. Re-edit it now that
+      // the bump landed — otherwise the launch button stays revision-bound to
+      // the old draft and _callbackOwned refuses the tap (E4.3).
+      const collectorRevision = await this.state.storage.get('collectorDraftRevision');
+      const currentRevision = await this.state.storage.get('draftRevision');
+      if (collectorRevision && Number.isSafeInteger(currentRevision) && collectorRevision !== currentRevision
+          && !(await this.state.storage.get('busy'))) {
+        await this._showCollector(msg.chat?.id, buf.length, msg.message_id, threadIdOf(msg));
+      }
+
       const independentForceLaunch = flush && pendingStopWindow && cpMode && FORCE_RUN_RE.test(text || '');
       if (((await this.state.storage.get('busy')) === true && !independentForceLaunch)
           || heldBehindPendingUnsupportedLaunch || (pendingStopWindow && !independentForceLaunch)) {
