@@ -2566,6 +2566,7 @@ export class IntakeBuffer {
         }
       }
       if (claimKey) await this.state.storage.put(claimKey, { state: 'sending' });
+      console.error('[collector-debug] chatId=', chatId, 'typeof=', typeof chatId, 'envBotToken=', !!this.env.BOT_TOKEN, 'envAgentSecret=', !!this.env.AGENT_SECRET);
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId)
         .catch((e) => { console.error('[collector] send threw', String(e?.message ?? e)); return null; });
       const id = sent?.result?.message_id;
