@@ -50,7 +50,7 @@ describe('клиент регистрации пакета (arch#132 R9)', () =>
     expect(ok).toBe(true);
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe('https://cp.test/intake/pending');
-    expect(init.method).toBe('PUT');
+    expect(init.method).toBe('POST');
     const body = JSON.parse(init.body);
     expect(body).toMatchObject({
       batchId: '-5111318625#1', profileId: 'vova-cloud-god',

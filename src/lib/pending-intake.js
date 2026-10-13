@@ -55,7 +55,7 @@ export async function registerPendingBatch(env, batch) {
   if (!headers || !batch?.batchId) return false;
   try {
     const res = await fetch(`${env.CONTROL_PLANE_URL.replace(/\/$/, '')}/intake/pending`, {
-      method: 'PUT',
+      method: 'POST',
       headers,
       body: JSON.stringify({
         batchId: batch.batchId,

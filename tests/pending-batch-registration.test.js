@@ -49,6 +49,7 @@ const ENV = () => ({
   CONTROL_PLANE_URL: 'https://cp.test',
   CONTROL_PLANE_SECRET: 'shhh',
   CONTROL_PLANE_PRINCIPAL: 'gateway',
+  CONTROL_PLANE_PROFILE: 'trained-assist-production',
 });
 
 let msgId = 100;
@@ -85,7 +86,7 @@ describe('накопитель регистрирует пакет наружу 
 
     expect(paths()).toEqual(['/intake/pending']);
     const [body] = bodies();
-    expect(body).toMatchObject({ profileId: 'vova-cloud-god', destinationId: '42', prepState: 'collecting' });
+    expect(body).toMatchObject({ profileId: 'trained-assist-production', destinationId: '42', prepState: 'collecting' });
     expect(typeof body.firstMessageAt).toBe('number');
     expect(body.deadlineMs).toBeGreaterThan(60_000); // щедрая граница: пользователь законно думает
   });
