@@ -1420,7 +1420,7 @@ export class IntakeBuffer {
       if (res === null) return new Response('Stop scope mismatch', { status: 409 });
       if (res.clearedBatchId) await this._closePending(this.env, res.clearedBatchId, 'cleared');
       if (res.independentBatchId) await this._announcePending(this.env, { batchId: res.independentBatchId }, {
-        profileId: source.username, destinationId: String(reqChatId), prepState: 'collecting',
+        profileId: source.profileId, destinationId: String(reqChatId), prepState: 'collecting',
         deadlineMs: PENDING_BATCH_DEADLINE_MS,
       });
       console.log(`[stop] intake chat=${res.last?.chat?.id ?? reqChatId} held=${res.held} busy=${res.busy} hadIntent=${res.hadIntent}`);
@@ -1597,9 +1597,8 @@ export class IntakeBuffer {
       // пакета НЕ перебивается новыми — иначе возраст самого старого ввода
       // подменялся бы свежими.
       const batch = await this._exclusive(async () => this._batchIdLocked(msg.chat.id, threadIdOf(msg)));
-      const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg)).catch(() => null);
       await this._announcePending(this.env, batch, {
-        profileId: session?.username ?? null,
+        profileId: controlPlaneClient(this.env).config.profileId,
         destinationId: String(msg.chat.id),
         prepState: 'collecting',
         deadlineMs: PENDING_BATCH_DEADLINE_MS,
