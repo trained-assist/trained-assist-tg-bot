@@ -1,4 +1,5 @@
 import { conversationKey, threadIdOf } from './conversation-context.js';
+import { mediaExtensionForMime } from './sandbox-tg/media-intake.js';
 // Per-attachment durable state machine. No byte transfer in intake/webhook requests.
 import { checkMediaResponse } from './lib/media-retry.js';
 import { transcribeAudio } from './lib/speech.js';
@@ -10,7 +11,8 @@ export function mediaOf(msg) {
   return msg.voice || msg.audio || msg.video || msg.photo?.at(-1) || msg.document;
 }
 export function needsTranscript(msg) {
-  return !!(msg.voice || msg.audio || msg.video || /^(audio|video)\//i.test(msg.document?.mime_type || ''));
+  const mime = msg?.document?.mime_type || msg?.audio?.mime_type || msg?.voice?.mime_type || '';
+  return !!(msg.voice || msg.audio || msg.video || /^(audio|video)\//i.test(mime));
 }
 export function ackText(msg) {
   if (needsTranscript(msg)) return '🎙 Принял голосовое, расшифровываю…';
@@ -126,7 +128,8 @@ export class MediaJob {
           const bytes = await boundedBytes(await fetch(`${tg}/file/bot${this.env.BOT_TOKEN}/${meta.result.file_path}`, { signal: AbortSignal.timeout(120000) }));
           const expected = meta.result.file_size ?? file.file_size;
           if (expected != null && expected !== bytes.byteLength) throw new Error('Incomplete Telegram file');
-          const name = (file.file_name || (job.msg.photo ? 'photo.jpg' : job.msg.video ? 'video.mp4' : job.msg.voice || job.msg.audio ? 'audio.ogg' : 'file')).replace(/[^a-zA-Z0-9._() -]/g, '_').slice(0, 200);
+          const audioExt = mediaExtensionForMime(file.mime_type || 'audio/ogg', 'ogg');
+          const name = (file.file_name || (job.msg.photo ? 'photo.jpg' : job.msg.video ? 'video.mp4' : job.msg.voice || job.msg.audio ? `audio.${audioExt}` : 'file')).replace(/[^a-zA-Z0-9._() -]/g, '_').slice(0, 200);
           job.fileRef = await saveObject(this.env, job.username, job.id, bytes, name, file.mime_type || (job.msg.photo ? 'image/jpeg' : job.msg.voice ? 'audio/ogg' : job.msg.video ? 'video/mp4' : 'application/octet-stream'));
         }
         job.stage = needsTranscript(job.msg) && this.env.EXECUTION_BACKEND !== 'control-plane' ? 'transcribe' : 'deliver';

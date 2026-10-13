@@ -1,4 +1,5 @@
 import { retryMedia, readMedia, checkMediaResponse } from './media-retry.js';
+import { mediaExtensionForMime } from '../sandbox-tg/media-intake.js';
 import { Buffer } from 'node:buffer';
 // Files go directly to durable disk. KV/DO retain only these small references.
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -28,8 +29,9 @@ export async function storeTelegramFile(msg, file, env, session) {
   if (file.file_size > MAX_BYTES) throw new Error('Файл больше 20 MB');
   const id = await identity(msg, file);
   if (msg.fileRef?.id === id) return msg.fileRef;
-  const name = file.file_name || (msg.photo ? 'photo.jpg' : msg.video ? 'video.mp4' : 'audio.ogg');
-  const mime = file.mime_type || (msg.photo ? 'image/jpeg' : 'application/octet-stream');
+  const audioExt = mediaExtensionForMime(file.mime_type, 'ogg');
+  const name = file.file_name || (msg.photo ? 'photo.jpg' : msg.video ? 'video.mp4' : (msg.voice || msg.audio || /^(audio|video)\//i.test(file.mime_type || '') ? `audio.${audioExt}` : 'file'));
+  const mime = file.mime_type || (msg.photo ? 'image/jpeg' : msg.video ? 'video/mp4' : (msg.voice || msg.audio || /^(audio)\//i.test(file.mime_type || '') ? 'audio/ogg' : 'application/octet-stream'));
   // Migrate a legacy cached attachment if present; never create another cache entry.
   if (msg.attachmentKey) {
     const cached = await env.SESSIONS.get(msg.attachmentKey, { type: 'json' });
