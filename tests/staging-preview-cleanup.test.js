@@ -22,19 +22,16 @@ describe('preview Worker cleanup', () => {
     expect(previewWorkerForBranch('')).toBeNull();
   });
 
-  it('deletes only the matching same-repository closed-PR preview without force', async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(json([]))
-      .mockResolvedValueOnce(json({ success: true, result: {} }));
+  it('defers closed-PR preview deletion so a follow-up push can redeploy it', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(json([]));
     const result = await handleCleanupEvent({
       repository: { full_name: repository },
       pull_request: { head: { ref: 'fix/closed-preview', repo: { full_name: repository } } },
     }, { ...baseContext, eventName: 'pull_request', fetchImpl });
     const worker = previewWorkerForBranch('fix/closed-preview');
-    expect(result[0]).toMatchObject({ status: 'deleted', worker });
-    expect(fetchImpl.mock.calls[1][0]).toBe(`${cloudflareBase}/${worker}`);
-    expect(fetchImpl.mock.calls[1][1].method).toBe('DELETE');
-    expect(fetchImpl.mock.calls[1][0]).not.toContain('force=');
+    expect(result[0]).toMatchObject({ status: 'deferred', branch: 'fix/closed-preview' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(worker).toMatch(/^ta-tg-staging-/);
   });
 
   it('keeps a preview when another open PR still uses the branch', async () => {
@@ -79,7 +76,11 @@ describe('preview Worker cleanup', () => {
     const recent = previewWorkerForBranch('deleted/recent-branch');
     const active = previewWorkerForBranch('active/branch');
     const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(json([{ name: 'main' }, { name: 'active/branch' }]))
+      .mockResolvedValueOnce(json([
+        { name: 'main', commit: { commit: { committer: { date: '2026-10-07T00:00:00Z' } } } },
+        { name: 'deleted/old-branch', commit: { commit: { committer: { date: '2026-10-01T00:00:00Z' } } } },
+        { name: 'active/branch', commit: { commit: { committer: { date: '2026-10-07T23:00:00Z' } } } },
+      ]))
       .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json({
         success: true,

@@ -97,6 +97,13 @@ async function hasOpenPullRequest(branch, context) {
   return data.length > 0;
 }
 
+function wasRecentlyUpdated(branch, now) {
+  const updated = Date.parse(branch.commit?.commit?.committer?.date ?? branch.commit?.commit?.author?.date ?? '');
+  // Fail closed: if GitHub omits the timestamp, preserve the preview until a
+  // later reconciliation can make a safe age decision.
+  return !Number.isFinite(updated) || now - updated < DAY_MS;
+}
+
 export async function handleCleanupEvent(event, context) {
   const repository = event.repository?.full_name;
   if (!repository || repository !== context.repository) return [{ status: 'skipped', reason: 'repository mismatch' }];
@@ -108,7 +115,13 @@ export async function handleCleanupEvent(event, context) {
     if (await hasOpenPullRequest(branch, context)) {
       return [{ status: 'preserved', branch, reason: 'another open pull request uses this branch' }];
     }
-    return [await deletePreview(branch, context)];
+    // Closing a PR does not mean the branch is done: pushes still trigger CI,
+    // and that CI redeploys the same preview Worker. Deleting it here races a
+    // follow-up push and can leave Cloudflare's just-deleted Worker unavailable
+    // when Wrangler publishes its uploaded version (API 10007). Branch deletion
+    // remains immediate; the scheduled sweep retires closed-PR previews after
+    // the existing one-day age/grace checks below.
+    return [{ status: 'deferred', branch, reason: 'closed-PR preview is retired by scheduled cleanup' }];
   }
 
   if (context.eventName === 'delete') {
@@ -121,11 +134,15 @@ export async function handleCleanupEvent(event, context) {
     return [{ status: 'skipped', reason: 'unsupported event' }];
   }
 
+  const now = context.now ?? Date.now();
   const [branches, openPullRequests] = await Promise.all([
     githubPages('branches', context),
     githubPages('pulls?state=open', context),
   ]);
-  const activeWorkers = new Set(branches.map(branch => workerNameForBranch(branch.name)).filter(Boolean));
+  const recentlyUpdatedWorkers = new Set(
+    branches.filter(branch => wasRecentlyUpdated(branch, now)).map(branch => workerNameForBranch(branch.name)).filter(Boolean),
+  );
+  const activeWorkers = new Set([workerNameForBranch(DEFAULT_BRANCH)]);
   for (const pullRequest of openPullRequests) {
     if (pullRequest.head?.repo?.full_name === repository) {
       const worker = workerNameForBranch(pullRequest.head.ref);
@@ -133,14 +150,13 @@ export async function handleCleanupEvent(event, context) {
     }
   }
   const workers = await cloudflarePages(context);
-  const now = context.now ?? Date.now();
   const dryRun = context.eventName === 'workflow_dispatch'
     && event.inputs?.dry_run !== false && event.inputs?.dry_run !== 'false';
   const outcomes = [];
   for (const item of workers) {
     const worker = item.id;
     if (typeof worker !== 'string' || !PREVIEW_NAME.test(worker)) continue;
-    if (activeWorkers.has(worker)) continue;
+    if (activeWorkers.has(worker) || recentlyUpdatedWorkers.has(worker)) continue;
     const lastModified = Date.parse(item.modified_on || item.created_on || '');
     if (!Number.isFinite(lastModified) || now - lastModified < DAY_MS) continue;
     if (dryRun) {
