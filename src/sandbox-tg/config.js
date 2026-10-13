@@ -52,7 +52,14 @@ export function readTgSliceConfig(env) {
   const productionE2eMode = env.TG_PRODUCTION_E2E_MODE === 'true';
   const botUsername = String(env.TG_SANDBOX_BOT_USERNAME ?? env.BOT_USERNAME ?? '').trim().replace(/^@/, '');
   if (!botUsername) throw new TgSliceConfigError('TG_SANDBOX_BOT_USERNAME or BOT_USERNAME is required', 'BOT_USERNAME');
-  if (PRODUCTION_BOT_USERNAMES.includes(botUsername) && !productionE2eMode) {
+  // Production bot identities run either as the pinned production E2E lane or
+  // as the ordinary production lane (control-plane, open allowlist). Anything
+  // else is a sandbox/slice misuse and fails closed.
+  const productionMode = PRODUCTION_BOT_USERNAMES.includes(botUsername)
+    && env.EXECUTION_BACKEND === 'control-plane'
+    && !productionE2eMode
+    && env.TG_ACCEPT_ONLY_ENVIRONMENT !== 'sandbox';
+  if (PRODUCTION_BOT_USERNAMES.includes(botUsername) && !productionE2eMode && !productionMode) {
     throw new TgSliceConfigError(
       `TG_SANDBOX_BOT_USERNAME "${botUsername}" is a production bot identity — the sandbox slice refuses to run as a production bot`,
       'TG_SANDBOX_BOT_USERNAME',
@@ -117,9 +124,11 @@ export function readTgSliceConfig(env) {
       || requireVar(env, 'TG_SANDBOX_BOT_TOKEN'),
     controlPlaneUrl,
     principalId: requireVar(env, 'CONTROL_PLANE_PRINCIPAL'),
-    principalSignature: productionE2e
-      ? requireVar(env, 'CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE')
-      : String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
+    principalSignature: productionMode
+      ? requireVar(env, 'CONTROL_PLANE_PRINCIPAL_SIGNATURE')
+      : productionE2e
+        ? requireVar(env, 'CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE')
+        : String(env['CONTROL_PLANE_PRINCIPAL_SIGNATURE'] ?? '').trim() || null,
     routeBeforeStart: env.TG_SLICE_ROUTER_ENABLED === 'true',
     profileId: requireVar(env, 'CONTROL_PLANE_PROFILE'),
     apiKey: String(env['CONTROL_PLANE_API_KEY'] ?? '').trim() || null,
@@ -138,11 +147,13 @@ export function readTgSliceConfig(env) {
     deliveryRetryBaseMs: num(env, 'TG_SLICE_DELIVERY_RETRY_BASE_MS', 1000, 100, 60000),
     eventTransport: transport,
     productionE2eMode,
+    productionMode,
     maxTurns: num(env, 'TG_SLICE_MAX_TURNS', 32, 1, 512),
   };
 }
 
 export function chatAllowed(config, chatId) {
+  if (config.productionMode) return true;
   return config.openSandbox === true || config.allowedChats.includes(String(chatId));
 }
 
