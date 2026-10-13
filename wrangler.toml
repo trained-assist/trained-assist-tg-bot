@@ -414,6 +414,12 @@ new_sqlite_classes = ["RunOutbox"]
 tag = "v5-production-e2e"
 new_sqlite_classes = ["ProductionE2eIntakeBuffer", "ProductionE2eTgDeliveryOwner"]
 
+# The ordinary production lane binds the plain delivery owner class; declare it
+# as a SQLite Durable Object so the binding is accepted by the API.
+[[migrations]]
+tag = "v6-production-delivery-owner"
+new_sqlite_classes = ["TgDeliveryOwner"]
+
 [[env.staging.durable_objects.bindings]]
 name = "RUN_OUTBOX"
 class_name = "RunOutbox"
