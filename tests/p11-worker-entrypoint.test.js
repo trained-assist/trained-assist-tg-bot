@@ -421,6 +421,28 @@ describe('P11 exported Worker composition', () => {
     expect(accepted.payload.inputItems).toHaveLength(2);
   });
 
+  it('keeps a batch collectable and notifies the user when /start fails (A9 #663)', async () => {
+    env.TG_SLICE_MODE = 'batch';
+    await webhook(emulator.pushMessage({ chatId: 1001, text: 'first item' }));
+    await webhook(emulator.pushMessage({ chatId: 1001, text: 'second item' }));
+    fake.setFault('startFailsOnce');
+    const response = await webhook(emulator.pushUpdate({ callback_query: {
+      id: 'launch-fail', data: 'tg-launch:tg-1001', message: { message_id: 10, chat: { id: 1001 } },
+    } }));
+    expect(response.status).toBe(200);
+    await worker.scheduled({}, env);
+    expect(JSON.parse(await env.TG_SLICE.get('batch:tg-1001')).status).toBe('collecting');
+    expect(emulator.messagesTo(1001).some(item => (item.message.text || '').includes('Не удалось запустить задачу'))).toBe(true);
+
+    const retry = await webhook(emulator.pushUpdate({ callback_query: {
+      id: 'launch-retry', data: 'tg-launch:tg-1001', message: { message_id: 10, chat: { id: 1001 } },
+    } }));
+    expect(retry.status).toBe(200);
+    await worker.scheduled({}, env);
+    expect(fake.tasks).toHaveLength(1);
+    expect(emulator.messagesTo(1001).some(item => (item.message.text || '').includes('запущена'))).toBe(true);
+  });
+
   it('refuses a batch with media lacking a durable manifest without launching or consuming it', async () => {
     env.TG_SLICE_MODE = 'batch';
     await webhook(emulator.pushMessage({ chatId: 1001, text: 'Посмотри аудио' }));

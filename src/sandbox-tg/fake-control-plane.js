@@ -19,6 +19,7 @@ export class FakeFaults {
     this.dropWakeDeliveryOnce = false;
     this.loseSignalResponseOnce = false;
     this.loseRunConnectionOnce = false;
+    this.startFailsOnce = false;
   }
 
   set(key) {
@@ -174,6 +175,7 @@ export class FakeControlPlane {
   }
 
   async start(taskId, body) {
+    if (this.faults.consume('startFailsOnce')) return json({ error: 'launch failed (injected)' }, 500);
     const task = this.tasks.find(t => t.user_task_id === taskId);
     if (!task) return json({ error: 'task not found' }, 404);
     if (task.status === 'done' || task.status === 'cancelled') {
