@@ -44,14 +44,14 @@ alarm-тике (см. GAP-3 про риск при исключении в са�
 |---|---|---|---|---|---|
 | Intake-путь: `src/lib/control-plane-execution.js:162` (catch L168-173) | **глотается** → `routingPending=true` + лог `tg.cp.route_pending` | идентично | поднят (receipt уже persisted) | **нет** | ❌ **GAP-4** (#662); текущее поведение зафиксировано тестом `tests/control-plane-execution.test.js:98` |
 | Poll-путь: `src/intake-buffer.js:3299` (невалидный ответ → L3301 `return false`) | throw → catch L3385 → `reconciliationFailure{stage:'route'}` → ретрай следующим тиком, **без ограничений** | идентично | поднят | **нет** | ❌ **GAP-4** (#662) + A2 (CP #280: ограниченные ретраи 5xx) |
-| Web slice: `src/sandbox-tg/conversation.js:311` (`routeBeforeStart`) | throw (409 обрабатывается только для `/start`, L328) | идентично | web-slice вне барьера IntakeBuffer | ошибка в web-хендлер | 🔍 вне A8 (web lane) |
+| Web slice: `src/sandbox-tg/conversation.js:315` (`routeBeforeStart`) | throw (409 обрабатывается только для `/start`, L324) | идентично | web-slice вне барьера IntakeBuffer | ошибка в web-хендлер | 🔍 вне A8 (web lane) |
 
 ### 1.3 `POST /start` (explicit запуск; repeat = same instance)
 
 | Call-site | 404 | 5xx / timeout | Барьер | Пользователь | Тест / Issue |
 |---|---|---|---|---|---|
 | Batch lane: `src/sandbox-tg/worker.js:145` (без try/catch) | throw → задача принята (`durable=true`), запуск не подтверждён; poll `/start` **не ретрайтит** (в `_pollControlPlaneTasks` нет вызова `/start` — только `/status` L3267 и `/route` L3299) | идентично | не применимо (batch lane) | **нет** | ❌ **GAP-5** (#663) |
-| Web slice: `src/sandbox-tg/conversation.js:320` (`startOrKeepTerminal`) | 409 → skip (терминальная задача, L328-331); остальные → throw | throw | вне барьера IntakeBuffer | ошибка в web-хендлер | 🔍 вне A8 (web lane) |
+| Web slice: `src/sandbox-tg/conversation.js:320` (`startOrKeepTerminal`) | 409 → skip (терминальная задача, L324-328); остальные → throw | throw | вне барьера IntakeBuffer | ошибка в web-хендлер | 🔍 вне A8 (web lane) |
 
 ## 2. Остаточные пути `return false` в `_pollControlPlaneTasks` (после A1-фикса)
 
