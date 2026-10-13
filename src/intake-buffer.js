@@ -2552,6 +2552,8 @@ export class IntakeBuffer {
       const sent = await sendKeyboardTracked(this.env, chatId, text, keyboard, anchor(replyToMessageId), threadId)
         .catch((e) => { console.error('[collector] send threw', String(e?.message ?? e)); return null; });
       const id = sent?.result?.message_id;
+      if (id) console.log('[collector] sent-ok', chatId, id);
+      else console.log('[collector] not-sent', chatId, JSON.stringify({ ok: sent?.ok, description: sent?.description ?? null }));
       // A provider's explicit ok:false is proof it did not accept the send; let
       // the next receipt retry it. A thrown fetch or malformed ACK remains
       // unknown and fenced, since retrying could create a duplicate collector.
