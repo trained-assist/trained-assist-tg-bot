@@ -442,7 +442,7 @@ export class IntakeBuffer {
     if (url.pathname === '/operator/test-evidence' && request.method === 'POST') {
 
       const lane = sandboxOperatorLane(this.env);
-      if (!['sandbox3', 'productionE2e'].includes(lane) || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      if (!['sandbox3', 'prod-principal'].includes(lane) || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
           this.env.EXECUTION_BACKEND !== 'control-plane') return json({ error: 'sandbox_identity_mismatch' }, 409);
       const probe = await request.clone().json().catch(() => ({}));
       const challenge = probe?.challenge;
@@ -515,7 +515,7 @@ export class IntakeBuffer {
       const lane = sandboxOperatorLane(this.env);
       const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
       const source = await request.json().catch(() => null);
-      if (lane !== 'productionE2e' || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !token ||
+      if (lane !== 'prod-principal' || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !token ||
           request.headers.get('authorization') !== `Bearer ${token}` ||
           !source || Object.keys(source).some(key => !['taskId', 'requestId', 'retryRoute'].includes(key)) ||
           typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||

@@ -6,7 +6,7 @@ import { intakeIsIdle, summarizeIntakeState } from './e2e-oracle.mjs';
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const cp = 'https://trained-assist-cp-production.skillset-apply.workers.dev';
 const profileId = 'production-e2e-telegram-v1';
-const target = 'productionE2e';
+const target = 'prod-principal';
 const retryRoute = process.env.PRODUCTION_E2E_RETRY_ROUTE === 'true';
 const RUN_FINISHED_EVENT = 'run_finished';
 
@@ -20,8 +20,8 @@ const operatorToken = required('TG_SANDBOX3_OPERATOR_TOKEN');
 const signature = required('PRODUCTION_E2E_SIGNATURE');
 const chatId = Number(required('TG_SANDBOX_E2E_CHAT_ID'));
 const userId = Number(required('TG_SANDBOX_E2E_USER_ID'));
-assert.equal(chatId, 1714048, 'production_e2e_chat_mismatch');
-assert.equal(userId, 1714048, 'production_e2e_user_mismatch');
+assert.equal(chatId, 1714048, 'prod_principal_chat_mismatch');
+assert.equal(userId, 1714048, 'prod_principal_user_mismatch');
 
 async function workerRequest(path, body) {
   const response = await fetch(`${worker}${path}`, {
@@ -71,45 +71,45 @@ function safeStatus(status) {
 
 async function main() {
   let evidence = await workerRequest('/operator/test-evidence');
-  assert.equal(evidence.profileId, profileId, 'production_e2e_profile_mismatch');
+  assert.equal(evidence.profileId, profileId, 'prod_principal_profile_mismatch');
   const activeTasks = (evidence.tasks ?? []).filter(task => !['done', 'failed', 'cancelled'].includes(task.status));
-  assert.equal(activeTasks.length, 1, 'production_e2e_expected_one_active_task');
+  assert.equal(activeTasks.length, 1, 'prod_principal_expected_one_active_task');
   const task = activeTasks[0];
-  assert.equal(task.status, 'active', 'production_e2e_task_not_active');
-  assert.equal(task.runs?.length, 0, 'production_e2e_task_already_has_run');
+  assert.equal(task.status, 'active', 'prod_principal_task_not_active');
+  assert.equal(task.runs?.length, 0, 'prod_principal_task_already_has_run');
   if (retryRoute) {
-    assert.equal(task.routingOutcome?.known, true, 'production_e2e_prior_route_not_confirmed');
-    assert.equal(task.routingOutcome?.continuationRequested, false, 'production_e2e_route_already_requested_continuation');
-    assert.equal(task.routingOutcome?.continuationIssued, false, 'production_e2e_route_already_issued_continuation');
-    assert([0, 1].includes(task.routingRetryCount), 'production_e2e_route_retry_state_invalid');
+    assert.equal(task.routingOutcome?.known, true, 'prod_principal_prior_route_not_confirmed');
+    assert.equal(task.routingOutcome?.continuationRequested, false, 'prod_principal_route_already_requested_continuation');
+    assert.equal(task.routingOutcome?.continuationIssued, false, 'prod_principal_route_already_issued_continuation');
+    assert([0, 1].includes(task.routingRetryCount), 'prod_principal_route_retry_state_invalid');
   }
-  assert.equal(evidence.buffer?.pendingCount, 0, 'production_e2e_unexpected_pending_input');
-  assert.equal(evidence.buffer?.busy, true, 'production_e2e_intake_not_waiting');
-  assert.equal(evidence.buffer?.busyRequestCount, 1, 'production_e2e_admission_scope_ambiguous');
+  assert.equal(evidence.buffer?.pendingCount, 0, 'prod_principal_unexpected_pending_input');
+  assert.equal(evidence.buffer?.busy, true, 'prod_principal_intake_not_waiting');
+  assert.equal(evidence.buffer?.busyRequestCount, 1, 'prod_principal_admission_scope_ambiguous');
 
   let status = await cpStatus(task.userTaskId);
-  assert.equal(status.taskStore?.id, task.userTaskId, 'production_e2e_cp_task_mismatch');
-  assert.equal(status.taskStore?.status, 'active', 'production_e2e_cp_task_not_active');
-  assert.equal(status.taskStore?.stage, 'queued', 'production_e2e_cp_stage_changed');
-  assert.equal(status.runs?.length, 0, 'production_e2e_cp_run_already_exists');
+  assert.equal(status.taskStore?.id, task.userTaskId, 'prod_principal_cp_task_mismatch');
+  assert.equal(status.taskStore?.status, 'active', 'prod_principal_cp_task_not_active');
+  assert.equal(status.taskStore?.stage, 'queued', 'prod_principal_cp_stage_changed');
+  assert.equal(status.runs?.length, 0, 'prod_principal_cp_run_already_exists');
   const challenge = /PROD-PRINCIPAL-[A-F0-9]{16}/.exec(JSON.stringify(status.taskStore))?.[0];
-  assert(challenge, 'production_e2e_challenge_not_found');
+  assert(challenge, 'prod_principal_challenge_not_found');
 
-  assert.equal(safeStatus(status).workflowErrorCode, 'workflow_instance_missing', 'production_e2e_workflow_instance_not_missing');
-  assert.equal(typeof task.requestId, 'string', 'production_e2e_request_id_missing');
+  assert.equal(safeStatus(status).workflowErrorCode, 'workflow_instance_missing', 'prod_principal_workflow_instance_not_missing');
+  assert.equal(typeof task.requestId, 'string', 'prod_principal_request_id_missing');
   // Wake the already-saved Intake DO alarm. In retry mode, the operator endpoint
   // also requires the exact pinned acceptance, zero CP runs, no prior continuation,
   // and a one-time retry budget before clearing the stale route receipt.
   const wake = await workerRequest('/operator/test-wake-pending-task', {
     target, taskId: task.userTaskId, requestId: task.requestId, ...(retryRoute ? { retryRoute: true } : {}),
   });
-  assert.equal(wake.ok, true, 'production_e2e_pending_task_wake_failed');
+  assert.equal(wake.ok, true, 'prod_principal_pending_task_wake_failed');
   const expectedAction = retryRoute ? 'wake_saved_acceptance_route_retry' : 'wake_saved_acceptance_reconciliation';
-  assert.equal(wake.action, expectedAction, 'production_e2e_pending_task_wake_action_mismatch');
-  if (retryRoute) assert.equal(wake.routingRetryCount, 1, 'production_e2e_route_retry_not_committed');
+  assert.equal(wake.action, expectedAction, 'prod_principal_pending_task_wake_action_mismatch');
+  if (retryRoute) assert.equal(wake.routingRetryCount, 1, 'prod_principal_route_retry_not_committed');
   const wakeOutcome = retryRoute ? 'route_retry_scheduled'
     : wake.action === expectedAction ? 'scheduled' : 'unknown';
-  assert.equal(wakeOutcome, retryRoute ? 'route_retry_scheduled' : 'scheduled', 'production_e2e_wake_not_scheduled');
+  assert.equal(wakeOutcome, retryRoute ? 'route_retry_scheduled' : 'scheduled', 'prod_principal_wake_not_scheduled');
 
   const deadline = Date.now() + 8 * 60_000;
   let taskEvidence;
@@ -163,20 +163,20 @@ async function main() {
   };
 
   if (terminal && taskEvidence.status === 'done') {
-    assert.equal(taskEvidence.resultPresent, true, 'production_e2e_result_not_persisted');
-    assert.equal(taskEvidence.answerPresent, true, 'production_e2e_answer_not_persisted');
-    assert.equal(taskEvidence.answerMatchesChallenge, true, 'production_e2e_answer_mismatch');
-    assert.equal(taskEvidence.runs?.length, 1, 'production_e2e_run_count_mismatch');
-    assert.equal(taskEvidence.runs[0].status, 'success', 'production_e2e_runner_not_successful');
-    assert.equal(taskEvidence.runs[0].hasSessionId, true, 'production_e2e_session_not_persisted');
-    assert.equal(taskEvidence.runs[0].hasStartedAt, true, 'production_e2e_run_start_not_persisted');
-    assert.equal(taskEvidence.runs[0].hasFinishedAt, true, 'production_e2e_run_finish_not_persisted');
+    assert.equal(taskEvidence.resultPresent, true, 'prod_principal_result_not_persisted');
+    assert.equal(taskEvidence.answerPresent, true, 'prod_principal_answer_not_persisted');
+    assert.equal(taskEvidence.answerMatchesChallenge, true, 'prod_principal_answer_mismatch');
+    assert.equal(taskEvidence.runs?.length, 1, 'prod_principal_run_count_mismatch');
+    assert.equal(taskEvidence.runs[0].status, 'success', 'prod_principal_runner_not_successful');
+    assert.equal(taskEvidence.runs[0].hasSessionId, true, 'prod_principal_session_not_persisted');
+    assert.equal(taskEvidence.runs[0].hasStartedAt, true, 'prod_principal_run_start_not_persisted');
+    assert.equal(taskEvidence.runs[0].hasFinishedAt, true, 'prod_principal_run_finish_not_persisted');
     // A7: run_finished event presence is diagnostic only, never a verdict gate.
     const delivery = await workerRequest(`/operator/test-delivery/${encodeURIComponent(task.userTaskId)}`);
-    assert.equal(delivery.terminal?.status, 'sent', 'production_e2e_delivery_not_sent');
-    assert.equal(String(delivery.terminal.chatId), String(chatId), 'production_e2e_delivery_chat_mismatch');
+    assert.equal(delivery.terminal?.status, 'sent', 'prod_principal_delivery_not_sent');
+    assert.equal(String(delivery.terminal.chatId), String(chatId), 'prod_principal_delivery_chat_mismatch');
     assert(Number.isSafeInteger(delivery.terminal.providerMessageId) && delivery.terminal.providerMessageId > 0,
-      'production_e2e_provider_message_id_missing');
+      'prod_principal_provider_message_id_missing');
     report.ok = true;
     report.telegramDeliveryStatus = delivery.terminal.status;
     report.telegramProviderMessageIdPresent = true;
@@ -186,24 +186,24 @@ async function main() {
     const cleanup = await workerRequest('/operator/test-cleanup', {
       target, confirm: 'CLEAN_PINNED_TEST_CHAT',
     });
-    if (cleanup.ok !== true || cleanup.loginSessionDeleted !== true) throw new Error('production_e2e_scoped_cleanup_failed');
+    if (cleanup.ok !== true || cleanup.loginSessionDeleted !== true) throw new Error('prod_principal_scoped_cleanup_failed');
     report.bufferCleaned = true;
   } else {
     report.bufferCleaned = false;
   }
 
-  await writeFile('production-e2e-telegram-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+  await writeFile('prod-principal-telegram-evidence.json', `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify(report));
-  if (!terminal) throw new Error('production_e2e_task_not_terminal_after_resume');
+  if (!terminal) throw new Error('prod_principal_task_not_terminal_after_resume');
   if (taskEvidence.status !== 'done') throw new Error(`production_e2e_task_${safeCode(taskEvidence.status)}`);
-  if (!report.ok) throw new Error('production_e2e_resume_checks_failed');
-  if (!report.bufferCleaned) throw new Error('production_e2e_buffer_not_clean');
+  if (!report.ok) throw new Error('prod_principal_resume_checks_failed');
+  if (!report.bufferCleaned) throw new Error('prod_principal_buffer_not_clean');
 }
 
 main().catch(error => {
   const firstLine = error instanceof Error ? error.message.split(/\r?\n/, 1)[0] : '';
   const reasonCode = /^[a-z0-9][a-z0-9_:.-]{0,159}$/i.test(firstLine)
-    ? firstLine.toLowerCase() : 'production_e2e_resume_failed';
+    ? firstLine.toLowerCase() : 'prod_principal_resume_failed';
   console.error(JSON.stringify({ ok: false, reasonCode, answerTextLogged: false, promptTextLogged: false }));
   process.exitCode = 1;
 });

@@ -44,7 +44,7 @@
 | `/operator/test-evidence` | GET | 401 | Корреляция CP acceptance → task store → delivery. Возвращает tasks[], buffer state. |
 | `/operator/test-delivery/:taskId` | GET | 401 | Read-only чтение delivery receipt + terminal + artifacts по taskId. |
 | `/operator/test-update` | POST | exists (404 на GET probe) | Отправка Telegram-shaped message/callback в webhook. Возвращает bot replies как JSON. |
-| `/operator/test-wake-pending-task` | POST | exists (404 на GET probe) | Wake alarm для уже accepted queued task (только productionE2e lane). |
+| `/operator/test-wake-pending-task` | POST | exists (404 на GET probe) | Wake alarm для уже accepted queued task (только prod-principal lane). |
 | `/operator/test-cleanup` | POST | exists (404 на GET probe) | Очистка sandbox state. |
 | `/operator/test-buffer-message` | POST | exists (404 на GET probe) | Буферизация сообщения в intake. |
 | `/operator/delivery-cutover` | GET | — | Состояние delivery cutover. |

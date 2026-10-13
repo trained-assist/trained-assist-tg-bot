@@ -281,16 +281,16 @@ describe('signed existing-UX ingress', () => {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }), env);
-    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714049, userId: 1714048, text: '/help' })).status).toBe(403);
-    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714049, text: '/help' })).status).toBe(403);
-    const response = await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714048,
+    expect((await request({ target: 'prod-principal', type: 'message', chatId: 1714049, userId: 1714048, text: '/help' })).status).toBe(403);
+    expect((await request({ target: 'prod-principal', type: 'message', chatId: 1714048, userId: 1714049, text: '/help' })).status).toBe(403);
+    const response = await request({ target: 'prod-principal', type: 'message', chatId: 1714048, userId: 1714048,
       delivery: 'capture', text: '/help' });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, chatId: 1714048, userId: 1714048, delivery: 'capture',
       admission: { ok: true } });
     expect(intakeCalls.map(call => call.path)).toEqual(['/debug', '/debug']);
     env.CONTROL_PLANE_PRINCIPAL = 'integration-sandbox3-v1';
-    expect((await request({ target: 'productionE2e', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' })).status).toBe(401);
+    expect((await request({ target: 'prod-principal', type: 'message', chatId: 1714048, userId: 1714048, text: '/help' })).status).toBe(401);
   });
 
   it('returns only redacted production E2E task evidence from the pinned Telegram Intake object', async () => {
@@ -329,7 +329,7 @@ describe('signed existing-UX ingress', () => {
     } }) };
     const response = await worker.fetch(new Request('https://worker/operator/test-wake-pending-task', {
       method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ target: 'productionE2e', taskId: 'ut-recovery-fixture',
+      body: JSON.stringify({ target: 'prod-principal', taskId: 'ut-recovery-fixture',
         requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true }),
     }), env);
     expect(response.status).toBe(502);
@@ -344,7 +344,7 @@ describe('signed existing-UX ingress', () => {
       env.CONTROL_PLANE_PROFILE = 'integration-sandbox3-v1';
       env.CONTROL_PLANE_PRINCIPAL = 'integration-sandbox3-v1';
       env.SESSION_NAMESPACE = 'integrator-sandbox3-v1';
-    }, 'production_e2e_lane_mismatch'],
+    }, 'prod_principal_lane_mismatch'],
     ['disabled test API', env => { env.TG_SANDBOX_TEST_API_ENABLED = 'false'; }, 'test_api_disabled'],
     ['paused ingress', env => { env.TG_SLICE_INGRESS_PAUSED = 'true'; }, 'test_ingress_paused'],
     ['paused delivery', env => { env.TG_SLICE_DELIVERY_PAUSED = 'true'; }, 'test_delivery_paused'],
@@ -355,7 +355,7 @@ describe('signed existing-UX ingress', () => {
     change(env);
     const response = await worker.fetch(new Request('https://worker/operator/test-wake-pending-task', {
       method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ target: 'productionE2e', taskId: 'ut-recovery-fixture',
+      body: JSON.stringify({ target: 'prod-principal', taskId: 'ut-recovery-fixture',
         requestId: `tgcp-${'a'.repeat(64)}`, retryRoute: true }),
     }), env);
     expect(response.status).toBe(409);
@@ -368,7 +368,7 @@ describe('signed existing-UX ingress', () => {
     const calls = [];
     let active = false;
     let keys = 2;
-    const testUsername = 'production_e2e_012345abcdef';
+    const testUsername = 'prod_principal_012345abcdef';
     await env.TG_SLICE.put(`user:${testUsername}`, { name: 'Temporary canary user' });
     await env.TG_SLICE.put('user:preserve-this-user', { name: 'Unrelated sandbox account' });
     await env.SESSIONS.put('integrator-production-e2e-v1:1714048', { username: testUsername });
@@ -384,14 +384,14 @@ describe('signed existing-UX ingress', () => {
       method: 'POST', headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }), env);
-    expect((await request({ target: 'productionE2e', confirm: 'wrong' })).status).toBe(400);
-    expect((await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT', username: 'real-user' })).status).toBe(400);
+    expect((await request({ target: 'prod-principal', confirm: 'wrong' })).status).toBe(400);
+    expect((await request({ target: 'prod-principal', confirm: 'CLEAN_PINNED_TEST_CHAT', username: 'real-user' })).status).toBe(400);
     active = true;
-    expect((await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT' })).status).toBe(409);
+    expect((await request({ target: 'prod-principal', confirm: 'CLEAN_PINNED_TEST_CHAT' })).status).toBe(409);
     expect(calls.map(call => call.path)).toEqual(['/operator/reset-inspect']);
     active = false;
     calls.length = 0;
-    const response = await request({ target: 'productionE2e', confirm: 'CLEAN_PINNED_TEST_CHAT', username: testUsername });
+    const response = await request({ target: 'prod-principal', confirm: 'CLEAN_PINNED_TEST_CHAT', username: testUsername });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, chatId: '1714048', clearedBindings: ['intake'],
       cpHistoryTouched: false, productionProfileDataTouched: false, sharedKvNamespaceReset: false,

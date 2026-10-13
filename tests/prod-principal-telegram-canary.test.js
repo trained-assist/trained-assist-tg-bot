@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
-  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness } from '../tools/production-e2e-telegram-canary.mjs';
+  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness } from '../tools/prod-principal-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
@@ -105,11 +105,11 @@ describe('production Telegram canary lane identity (E6)', () => {
 
   it('no longer emits the misleading PROD-E2E nonce and labels the lane prod-principal', () => {
     const readTool = name => readFileSync(fileURLToPath(new URL(`../tools/${name}`, import.meta.url)), 'utf8');
-    expect(readTool('production-e2e-telegram-canary.mjs')).not.toMatch(/PROD-E2E-/);
-    expect(readTool('production-e2e-telegram-canary.mjs')).toMatch(/PROD-PRINCIPAL-/);
-    expect(readTool('production-e2e-telegram-canary.mjs')).toMatch(/prod-principal/);
-    expect(readTool('production-e2e-resume-held-input.mjs')).not.toMatch(/PROD-E2E-/);
-    expect(readTool('production-e2e-resume-held-input.mjs')).toMatch(/PROD-PRINCIPAL-/);
+    expect(readTool('prod-principal-telegram-canary.mjs')).not.toMatch(/PROD-E2E-/);
+    expect(readTool('prod-principal-telegram-canary.mjs')).toMatch(/PROD-PRINCIPAL-/);
+    expect(readTool('prod-principal-telegram-canary.mjs')).toMatch(/prod-principal/);
+    expect(readTool('prod-principal-resume-held-input.mjs')).not.toMatch(/PROD-E2E-/);
+    expect(readTool('prod-principal-resume-held-input.mjs')).toMatch(/PROD-PRINCIPAL-/);
   });
 });
 
@@ -142,7 +142,7 @@ describe('production Telegram canary durable-state verdict (A7)', () => {
 
   it('keeps event presence out of verdict gates in canary tooling', () => {
     const readTool = name => readFileSync(fileURLToPath(new URL(`../tools/${name}`, import.meta.url)), 'utf8');
-    for (const name of ['production-e2e-telegram-canary.mjs', 'production-e2e-resume-held-input.mjs']) {
+    for (const name of ['prod-principal-telegram-canary.mjs', 'prod-principal-resume-held-input.mjs']) {
       expect(readTool(name)).not.toMatch(/assert\([^;\n]*historyTypes[^;\n]*includes/);
     }
   });
