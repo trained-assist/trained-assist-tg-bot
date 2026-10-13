@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { controlPlaneBarrierCounts } from './e2e-oracle.mjs';
 
 export async function runSandboxEntryScenario(workerRequest, {
   target = 'sandbox', chatId = -1000000000236, userId = 900000236, delivery = 'capture',
@@ -39,8 +40,9 @@ export async function runSandboxEntryScenario(workerRequest, {
     'anonymous_question_did_not_prompt_login');
   assert.equal(question.collector?.pendingCount, 0, 'anonymous_question_was_added_to_intake');
   assert.equal(question.collector?.busy, false, 'anonymous_question_started_work');
-  assert.equal(question.collector?.controlPlaneBarrier?.busyRequestCount ?? 0, 0);
-  assert.equal(question.collector?.controlPlaneBarrier?.unresolvedLaunchCount ?? 0, 0);
+  const barrier = controlPlaneBarrierCounts(question.collector);
+  assert.equal(barrier.busyRequestCount, 0, 'anonymous_question_created_busy_request');
+  assert.equal(barrier.unresolvedLaunchCount, 0, 'anonymous_question_created_unresolved_launch');
 
   return { ok: true, scenario: 'new-user-entry-before-login',
     helpReply: true, statusIdle: true, loginPrompted: true, anonymousInputNotQueued: true };

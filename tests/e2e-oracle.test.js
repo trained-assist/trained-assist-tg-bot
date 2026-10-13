@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, controlPlaneBarrierCounts, dispatched, intakeIsIdle,
   launchWasDispatched, summarizeIntakeState, summarizeLaunch } from '../tools/e2e-oracle.mjs';
@@ -69,7 +71,13 @@ describe('e2e oracle intake state', () => {
     expect(intakeIsIdle({ pendingCount: 0, busy: false, launching: 0,
       unresolvedLaunchCount: 0, busyRequestCount: 1 })).toBe(false);
     expect(summarizeIntakeState({ pendingCount: 1, busy: false, stranded: true })).toMatchObject({
-      pendingCount: 1, busy: false, stranded: true, alarmPresent: false,
+      pendingCount: 1, busy: false, stranded: true, alarmPresent: false, alarmAt: null,
+    });
+    expect(summarizeIntakeState({ alarmAt: 1791878000000 })).toMatchObject({
+      alarmPresent: true, alarmAt: 1791878000000,
+    });
+    expect(summarizeIntakeState({ alarmAt: 'soon' })).toMatchObject({
+      alarmPresent: false, alarmAt: null,
     });
   });
 
@@ -98,5 +106,63 @@ describe('e2e oracle identity dispatch check', () => {
     expect(dispatched(null, ['task-0'])).toBe(false);
     expect(dispatched(undefined, [])).toBe(false);
     expect(dispatched('task-1')).toBe(true);
+  });
+});
+
+describe('e2e oracle sandbox3 after-stop launch checks (C1.2)', () => {
+  const launch = barrier => ({ ok: true, collector: { pendingCount: 1, busy: false,
+    launchingMessageIds: [], controlPlaneBarrier: barrier } });
+
+  it('replaces the during-stop busyRequestCount > 1 check with a baseline delta', () => {
+    const duringStopBaseline = { controlPlaneBarrier: { busyRequestCount: 1, unresolvedLaunchCount: 0 } };
+
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 2, unresolvedLaunchCount: 0 }), duringStopBaseline)).toBe(true);
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 1, unresolvedLaunchCount: 1 }), duringStopBaseline)).toBe(true);
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 1, unresolvedLaunchCount: 0 }), duringStopBaseline)).toBe(false);
+    expect(launchWasDispatched({ ok: true, collector: { pendingCount: 0, busy: false,
+      launchingMessageIds: [], controlPlaneBarrier: { busyRequestCount: 1, unresolvedLaunchCount: 0 } } },
+    duringStopBaseline)).toBe(true);
+  });
+
+  it('replaces the after-stop busyRequestCount > 0 check with an empty baseline', () => {
+    const afterStopBaseline = {};
+
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 1, unresolvedLaunchCount: 0 }), afterStopBaseline)).toBe(true);
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 0, unresolvedLaunchCount: 1 }), afterStopBaseline)).toBe(true);
+    expect(launchWasDispatched(
+      launch({ busyRequestCount: 0, unresolvedLaunchCount: 0 }), afterStopBaseline)).toBe(false);
+    expect(launchWasDispatched({ ok: true, collector: { pendingCount: 0, busy: false,
+      launchingMessageIds: [], controlPlaneBarrier: { busyRequestCount: 0, unresolvedLaunchCount: 0 } } },
+    afterStopBaseline)).toBe(true);
+  });
+
+  it('does not attribute a pre-existing during-stop barrier entry to the new launch', () => {
+    const before = { controlPlaneBarrier: { busyRequestCount: 1, unresolvedLaunchCount: 1 } };
+    const after = { ok: true, collector: { pendingCount: 1, busy: false, launchingMessageIds: [],
+      controlPlaneBarrier: { busyRequestCount: 1, unresolvedLaunchCount: 1 } } };
+
+    expect(launchWasDispatched(after, before)).toBe(false);
+  });
+});
+
+describe('e2e oracle adoption guard (C1.2)', () => {
+  const readTool = name => readFileSync(fileURLToPath(new URL(`../tools/${name}`, import.meta.url)), 'utf8');
+
+  it('keeps sandbox3 after-stop dispatch checks on the shared oracle', () => {
+    const source = readTool('sandbox3-agent-e2e.mjs');
+    expect(source).toMatch(/launchWasDispatched\(freshLaunch, freshQuestion\.collector\)/);
+    expect(source).not.toMatch(/busyRequestCount \?\? 0\) > \d/);
+  });
+
+  it('keeps production lane buffer summaries on the shared oracle', () => {
+    expect(readTool('production-e2e-state-probe.mjs')).toMatch(/summarizeIntakeState\(evidence\.buffer\)/);
+    expect(readTool('production-e2e-restore-guard.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
+    expect(readTool('production-e2e-resume-held-input.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
+    expect(readTool('sandbox-entry-smoke-lib.mjs')).toMatch(/controlPlaneBarrierCounts\(question\.collector\)/);
   });
 });

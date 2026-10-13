@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
+import { intakeIsIdle, summarizeIntakeState } from './e2e-oracle.mjs';
 
 const worker = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 const cp = 'https://trained-assist-cp-production.skillset-apply.workers.dev';
@@ -122,6 +123,7 @@ async function main() {
   }
 
   const terminal = ['done', 'failed', 'cancelled'].includes(taskEvidence?.status);
+  const bufferState = summarizeIntakeState(evidence.buffer);
   const report = {
     ok: false,
     scenario: 'resume-existing-pinned-production-e2e-task',
@@ -151,10 +153,10 @@ async function main() {
     telegramDeliveryStatus: null,
     telegramProviderMessageIdPresent: false,
     buffer: evidence.buffer ? {
-      pendingCount: evidence.buffer.pendingCount ?? null,
-      busy: evidence.buffer.busy === true,
-      busyRequestCount: evidence.buffer.busyRequestCount ?? 0,
-      alarmAt: Number.isSafeInteger(evidence.buffer.alarmAt) ? evidence.buffer.alarmAt : null,
+      pendingCount: bufferState.pendingCount,
+      busy: bufferState.busy,
+      busyRequestCount: bufferState.busyRequestCount,
+      alarmAt: bufferState.alarmAt,
     } : null,
     answerTextLogged: false,
     promptTextLogged: false,
@@ -180,8 +182,7 @@ async function main() {
     report.telegramProviderMessageIdPresent = true;
   }
 
-  if (terminal && !evidence.buffer?.busy && !evidence.buffer?.pendingCount &&
-      !evidence.buffer?.busyRequestCount && !evidence.buffer?.unresolvedLaunchCount) {
+  if (terminal && intakeIsIdle(evidence.buffer)) {
     const cleanup = await workerRequest('/operator/test-cleanup', {
       target, confirm: 'CLEAN_PINNED_TEST_CHAT',
     });
