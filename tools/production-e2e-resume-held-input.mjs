@@ -92,7 +92,7 @@ async function main() {
   assert.equal(status.taskStore?.status, 'active', 'production_e2e_cp_task_not_active');
   assert.equal(status.taskStore?.stage, 'queued', 'production_e2e_cp_stage_changed');
   assert.equal(status.runs?.length, 0, 'production_e2e_cp_run_already_exists');
-  const challenge = /PROD-E2E-[A-F0-9]{16}/.exec(JSON.stringify(status.taskStore))?.[0];
+  const challenge = /PROD-PRINCIPAL-[A-F0-9]{16}/.exec(JSON.stringify(status.taskStore))?.[0];
   assert(challenge, 'production_e2e_challenge_not_found');
 
   assert.equal(safeStatus(status).workflowErrorCode, 'workflow_instance_missing', 'production_e2e_workflow_instance_not_missing');
