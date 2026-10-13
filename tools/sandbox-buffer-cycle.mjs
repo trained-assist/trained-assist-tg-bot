@@ -39,7 +39,12 @@ async function workerRequest(path, body) {
       && payload.error === 'sandbox_test_api_not_ready'
       || path === '/operator/test-buffer-message'
       && payload.error === 'sandbox_buffer_test_not_ready';
-    if (response.status === 409 && readinessRefusal && Date.now() < readyDeadline) {
+    // The reset lock lives in KV, whose deletes propagate eventually across
+    // edge copies. An inspect right after a clear can still observe the
+    // just-released lock; wait for convergence instead of failing the run.
+    const resetLockVisible = path === '/operator/reset-sandbox-state'
+      && ['reset_in_progress', 'reset_already_in_progress'].includes(payload.error);
+    if (response.status === 409 && (readinessRefusal || resetLockVisible) && Date.now() < readyDeadline) {
       await new Promise(resolve => setTimeout(resolve, 2_000));
       continue;
     }
