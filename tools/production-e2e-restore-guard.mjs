@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { intakeIsIdle } from './e2e-oracle.mjs';
 const url = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/operator/test-evidence';
 const token = process.env.TG_SANDBOX3_OPERATOR_TOKEN?.trim();
 if (!token) throw new Error('operator_token_required');
@@ -8,9 +9,7 @@ if (!response.ok || evidence.profileId !== 'production-e2e-telegram-v1') {
   console.log(JSON.stringify({ safeToRestore: false, reasonCode: 'production_lane_evidence_unavailable' }));
   process.exitCode = 1;
 } else {
-  const buffer = evidence.buffer ?? {};
-  const active = buffer.busy === true || buffer.pendingCount !== 0 || buffer.launching !== 0 ||
-    buffer.unresolvedLaunchCount !== 0 || buffer.busyRequestCount !== 0;
+  const active = !intakeIsIdle(evidence.buffer);
   const nonterminal = (evidence.tasks ?? []).some(task => !['done', 'failed', 'cancelled'].includes(task.status));
   const safeToRestore = !active && !nonterminal;
   console.log(JSON.stringify({ safeToRestore, reasonCode: safeToRestore ? 'terminal_and_idle' : 'production_task_or_buffer_not_terminal',
