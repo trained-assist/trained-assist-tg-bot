@@ -257,6 +257,13 @@ app.post('/debug/intake/:chatId/restore', async c => {
 // timer, no ▶️ tap available): flush it as if the button had been pressed —
 // same /flush path, so a live run is never doubled (it queues instead). Added
 // with #248: the live dead-end of 2026-09-29 was only fixable by a tap in chat.
+app.post('/debug/intake/:chatId/sendTest', async c => {
+  if (c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
+  const res = await stub.fetch('https://intake/_debugSend', { method: 'POST', body: await c.req.text() || JSON.stringify({ chatId: c.req.param('chatId') }) });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 app.post('/debug/intake/:chatId/flush', async c => {
   if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
   const stub = c.env.INTAKE.get(c.env.INTAKE.idFromName(conversationKey(c.req.param('chatId'), Number(c.req.query('threadId')))));
