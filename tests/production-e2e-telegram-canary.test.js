@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { cleanupReadiness, intakeIsIdle, launchWasDispatched, liveLaneIsReady, summarizeIntakeState, summarizeLaunch,
-  waitForCleanupReadiness } from '../tools/production-e2e-telegram-canary.mjs';
+import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
+  summarizeIntakeState, summarizeLaunch, waitForCleanupReadiness } from '../tools/production-e2e-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
@@ -83,5 +85,40 @@ describe('production Telegram canary launch evidence', () => {
     });
 
     expect(result).toMatchObject({ ready: false, tasksTerminal: true, intakeIdle: false });
+  });
+});
+
+describe('production Telegram canary durable-state verdict (A7)', () => {
+  const durableTurn = {
+    taskId: 'ut-1a39728c42c4dde793b0', taskStatus: 'done', runCount: 1, runStatus: 'success',
+    sessionPersisted: true, resultPersisted: true, answerPersisted: true, answerMatchedPriorNonce: true,
+    startTimePersisted: true, finishTimePersisted: true,
+  };
+
+  it('passes with full event history recorded (logging on)', () => {
+    expect(durableTurnVerdict({ ...durableTurn, eventTypes: ['task_accepted', 'run_started', 'run_finished'],
+      runFinishedEventPersisted: true })).toBe(true);
+  });
+
+  it('passes with no events recorded (logging disabled) — same verdict', () => {
+    expect(durableTurnVerdict({ ...durableTurn, eventTypes: [], runFinishedEventPersisted: false })).toBe(true);
+  });
+
+  it('fails on missing durable state regardless of recorded events', () => {
+    for (const [field, value] of [['taskStatus', 'active'], ['runStatus', 'running'], ['runCount', 0],
+      ['sessionPersisted', false], ['resultPersisted', false], ['answerPersisted', false],
+      ['answerMatchedPriorNonce', false], ['startTimePersisted', false], ['finishTimePersisted', false]]) {
+      const broken = { ...durableTurn, [field]: value };
+      expect(durableTurnVerdict({ ...broken, eventTypes: ['run_finished'], runFinishedEventPersisted: true }))
+        .toBe(false);
+      expect(durableTurnVerdict({ ...broken, eventTypes: [], runFinishedEventPersisted: false })).toBe(false);
+    }
+  });
+
+  it('keeps event presence out of verdict gates in canary tooling', () => {
+    const readTool = name => readFileSync(fileURLToPath(new URL(`../tools/${name}`, import.meta.url)), 'utf8');
+    for (const name of ['production-e2e-telegram-canary.mjs', 'production-e2e-resume-held-input.mjs']) {
+      expect(readTool(name)).not.toMatch(/assert\([^;\n]*historyTypes[^;\n]*includes/);
+    }
   });
 });
