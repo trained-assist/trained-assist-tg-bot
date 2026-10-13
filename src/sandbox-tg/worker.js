@@ -131,18 +131,34 @@ export class TgSliceController {
       });
       return [{ type: 'refused', reason: 'unmaterialized_media', userTaskId: null, conversationId }];
     }
+    const inputItems = BatchCollector.toInputItems(batch);
+    const requestId = messageKey(conversationId, batch.items.length + 1);
+    let receipt;
+    try {
+      receipt = await this.client.intake({
+        requestId,
+        text: `batch:${batch.items.length} items`,
+        conversationId,
+        inputItems,
+      });
+      await this.client.start(receipt.userTaskId);
+    } catch (error) {
+      this.log({ event: 'tg.launch.failed', profileId: profile.profileId, conversationId, reason: error?.status ?? error?.code ?? error?.name });
+      await this.outbox?.enqueue({
+        deliveryId: `launch-failed:${requestId}`,
+        taskAcceptedAt: Date.now(),
+        conversationId,
+        userTaskId: receipt?.userTaskId ?? `tg-batch:${requestId}`,
+        destination: { chatId: profile.destination.chatId, threadId: profile.destination.threadId },
+        requestId,
+        type: 'message',
+        text: 'Не удалось запустить задачу. Черновик сохранён — нажми «Запустить» ещё раз.',
+      });
+      return [{ type: 'refused', reason: 'launch_failed', userTaskId: receipt?.userTaskId ?? null, conversationId, text: 'Не удалось запустить задачу. Черновик сохранён — нажми «Запустить» ещё раз.' }];
+    }
     batch.status = BATCH_STATUS.launched;
     batch.launchedAt = Date.now();
     await this.batchStore.save(batch);
-    const inputItems = BatchCollector.toInputItems(batch);
-    const requestId = messageKey(conversationId, batch.items.length + 1);
-    const receipt = await this.client.intake({
-      requestId,
-      text: `batch:${batch.items.length} items`,
-      conversationId,
-      inputItems,
-    });
-    await this.client.start(receipt.userTaskId);
     const index = await this.store.load(conversationId) ?? new ConversationIndex(conversationId, profile.profileId);
     index.destination = profile.destination;
     index.requestingBot = profile.requestingBot;
