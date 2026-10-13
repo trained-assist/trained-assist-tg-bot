@@ -1862,6 +1862,36 @@ describe('existing collector control-plane ownership', () => {
     expect(await (await owner.fetch(rpc('/callback-owner', source))).json()).toEqual({ owned: false });
   });
 
+  it('clears the barrier when CP returns 404 for task status (A1 fix)', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockRejectedValue(Object.assign(new Error('control plane POST /status -> 404'), {
+      name: 'ControlPlaneError', status: 404,
+    }));
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).toBe(true);
+  });
+
+  it('keeps the barrier on CP 500 during status poll (A1: limited retries)', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockRejectedValue(Object.assign(new Error('control plane POST /status -> 500'), {
+      name: 'ControlPlaneError', status: 500,
+    }));
+
+    expect(await owner._pollControlPlaneTasks()).toBe(false);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('cpBusyRequests')).toEqual([receipt.requestId]);
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).reconciliationFailure).toMatchObject({ stage: 'status', httpStatus: 500 });
+  });
+
   it('pins session selector first-wins across concurrent requests and restart', async () => {
     const { owner, storage, env } = fixture();
     const requestId = `tg-${'a'.repeat(64)}`;

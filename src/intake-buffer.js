@@ -3262,7 +3262,16 @@ export class IntakeBuffer {
         const receipt = record?.receipt;
         if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId || receipt.durable !== true) return false;
         reconcileStage = 'status';
-        const { value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } });
+        let value;
+        try {
+          ({ value } = await client.request('POST', '/status', { body: { taskId: receipt.userTaskId } }));
+        } catch (statusError) {
+          if (statusError?.name === 'ControlPlaneError' && statusError.status === 404) {
+            terminal.push(requestId);
+            continue;
+          }
+          throw statusError;
+        }
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
         const runs = Array.isArray(value?.runs) ? value.runs : [];
