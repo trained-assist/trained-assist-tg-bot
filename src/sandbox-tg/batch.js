@@ -171,6 +171,7 @@ export function normalizeItem(item, seq) {
     return {
       ...base,
       text: null,
+      url: item.url ?? null,
       fileName: 'google-docs-link.txt',
       fileSize: item.fileSize ?? null,
       mimeType: 'text/plain',
