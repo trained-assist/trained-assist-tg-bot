@@ -37,6 +37,7 @@
 ### 3.1 sandbox3 (`trained-assist-tg-sandbox3`) — полный набор
 
 Все эндпоинты требуют `Authorization: Bearer <TG_SANDBOX3_OPERATOR_TOKEN>`.
+Источник токена и рабочий канал — §11 (runbook S4).
 
 | Endpoint | Метод | Probe (без токена) | Описание |
 |---|---|---|---|
@@ -151,4 +152,33 @@ Production worker (`src/index.js`) имеет только: `/health`, `/webhook
 
 - **S2:** Реализовать сценарий «сгенерировать пароль → записать сообщение в 1714048 → получить ответ» на sandbox3, используя operator-эндпоинты.
 - **S3:** Продумать prod-путь (или зафиксировать ограничение).
-- **S4:** Интегрировать e2e-user/worker с этой средой.
+- **S4:** Интегрировать e2e-user/worker с этой средой → runbook-источник токена: §11.
+
+## 11. Runbook: источник `TG_SANDBOX3_OPERATOR_TOKEN` (S4)
+
+**Факт (probe 2026-10-13):** локальная keychain-копия токена устарела —
+`curl -H "Authorization: Bearer <keychain token>" …/operator/test-evidence`
+на sandbox3 возвращает **401** (как и запрос без токена). Значения ключа
+здесь не приводятся (R9).
+
+| Канал | Источник значения | Статус |
+|---|---|---|
+| **CI-dispatch (рабочий)** | GitHub Actions **repo secret** `TG_SANDBOX3_OPERATOR_TOKEN` (`trained-assist/trained-assist-tg-bot`, updatedAt 2026-10-10); workflow подставляет его в Worker через `wrangler secret put TG_SANDBOX3_OPERATOR_TOKEN --config wrangler.sandbox-tg-sandbox3.toml` | ✅ единственный проверенный канал (E2E-REPORTS: прогоны 38348837920, 38349472846, 38358741038, 38359301343 — все PASS) |
+| Keychain `trained-assist-tg-bot-sandbox` (acct `sandbox-cleanup`) | локальная копия в login keychain | ❌ устарела: 401 |
+| GitHub API (`gh secret`) | — | ❌ значения не отдаёт API |
+
+**Как выполнить локальный/self-test прогон (рабочий путь):**
+
+1. Диспатч защищённого CI-харнесса с protected main:
+   `gh workflow run sandbox3-worker-e2e.yml -R trained-assist/trained-assist-tg-bot`
+   (workflow `Sandbox3 Telegram worker E2E`, `workflow_dispatch`; опции сценария
+   см. в `.github/workflows/sandbox3-worker-e2e.yml`).
+2. Workflow сам: выкатывает sandbox3, ставит оператор-секреты, прогоняет
+   сценарий test-update → Intake → CP → Runner → Telegram и сохраняет
+   evidence JSON. Локальный токен не нужен.
+3. Прямые HTTP-вызовы `/operator/*` с локальной машины **невозможны**, пока
+   keychain-копия не ротирована (ротация — E1: runbook кредов; не плодить
+   параллельных источников).
+
+**Правила:** значения секретов нигде не записываются (R9); найденный сбой
+самой среды — блокер, чинится первым (BACKLOG S4).
