@@ -3266,7 +3266,7 @@ export class IntakeBuffer {
 
   async _pollControlPlaneTasks({ launch = false } = {}) {
     if (this.cpDispatches) return false;
-    try { await this._recoverControlPlaneLaunch(); } catch { return false; }
+    try { await this._recoverControlPlaneLaunch(); } catch { } // a failed recovery must not wedge the whole poll (GAP-1 class)
     if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length) return false;
     const ids = (await this.state.storage.get('cpBusyRequests')) || [];
     if (!ids.length) return false;
@@ -3647,9 +3647,24 @@ export class IntakeBuffer {
     // release the collector below re-offers the launch button for held input.
     if ((await this.state.storage.get('busy')) === true) {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
-        const released = await this._pollControlPlaneTasks();
-        if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
-        else if (receiptDue) await this._ensureAlarmBy(receiptDue);
+        const since = await this.state.storage.get('busySince');
+        const hasBusySince = Number.isFinite(since);
+        const age = hasBusySince ? Date.now() - since : 0;
+        if (!hasBusySince || age < BUSY_MAX_MS) {
+          const released = await this._pollControlPlaneTasks();
+          if (!released) await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
+          else if (receiptDue) await this._ensureAlarmBy(receiptDue);
+          return;
+        }
+        // Hard cap (INV-1): a busy window that outlived BUSY_MAX_MS is wedged;
+        // release it symmetrically with the non-CP branch so the next input can
+        // run instead of waiting forever for a task the CP never returns terminal.
+        await this._exclusive(async () => {
+          const launching = (await this.state.storage.get('launching')) || [];
+          if (launching.length) await this.state.storage.put('retryBatch', launching);
+          await this._releaseBusyLocked();
+        });
+        await this._afterBusyRelease();
         return;
       }
       const since = (await this.state.storage.get('busySince')) || 0;
