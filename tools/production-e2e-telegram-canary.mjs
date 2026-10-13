@@ -447,10 +447,12 @@ async function main() {
       profileId: PROFILE_ID, turns: [
         { taskId: firstTask.userTaskId, taskStatus: firstTask.status, runStatus: firstTask.runs[0].status,
           sessionPersisted: firstTask.runs[0].hasSessionId, resultPersisted: firstTask.resultPresent,
-          answerMatchedNonce: true, telegramDeliveryStatus: firstDelivery.status },
+          answerMatchedNonce: true, telegramDeliveryStatus: firstDelivery.status,
+          runFinishedEventPersisted: firstTurn.runFinishedEventPersisted },
         { taskId: task.userTaskId, taskStatus: task.status, runStatus: task.runs[0].status,
           sessionPersisted: task.runs[0].hasSessionId, resultPersisted: task.resultPresent,
-          answerRecoveredPriorNonce: true, telegramDeliveryStatus: followupDelivery.status },
+          answerRecoveredPriorNonce: true, telegramDeliveryStatus: followupDelivery.status,
+          runFinishedEventPersisted: followupTurn.runFinishedEventPersisted },
       ], telegramProviderMessageIdPresent: true, answerTextLogged: false };
     await checkpoint('complete', { ...report, ok: true });
     console.log(JSON.stringify(report));
