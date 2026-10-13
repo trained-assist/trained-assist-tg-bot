@@ -19,7 +19,7 @@ export const AUTO_LAUNCH_RE = /^\s*(продолжай|продолжи|дейс
 
 /** Does this message carry anything worth accumulating (text or media)? */
 export function hasIntakeContent(msg) {
-  return !!(msg && (msg.text || msg.photo || msg.voice || msg.audio || msg.document || msg.video));
+  return !!(msg && (msg.text || msg.photo || msg.voice || msg.audio || msg.document || msg.video || msg.url || msg.googleDocUrl));
 }
 
 /** True when user content belongs in intake; deployment faults never bypass it. */

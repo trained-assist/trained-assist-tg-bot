@@ -39,9 +39,48 @@ async function boundedResponseBytes(response) {
   return bytes;
 }
 
+export function mediaExtensionForMime(mime, fallback = 'bin') {
+  const value = String(mime || '').toLowerCase();
+  if (value.includes('ogg')) return 'ogg';
+  if (value.includes('mpeg') || value.includes('mp3')) return 'mp3';
+  if (value.includes('wav')) return 'wav';
+  if (value.includes('webm')) return 'webm';
+  if (value.includes('flac')) return 'flac';
+  if (value.includes('mp4') || value.includes('m4a') || value.includes('x-m4a') || value.includes('aac')) return 'm4a';
+  if (value.includes('pdf')) return 'pdf';
+  if (value.includes('json')) return 'json';
+  if (value.includes('csv')) return 'csv';
+  if (value.includes('msword') || value.includes('wordprocessingml')) return 'docx';
+  if (value.includes('text/plain')) return 'txt';
+  return fallback;
+}
+
+export function googleDocUrlOf(value) {
+  const text = Array.isArray(value) ? value.join('\n') : String(value ?? '');
+  const match = text.match(/https?:\/\/[^\s<>"')]+/i);
+  if (!match) return null;
+  try {
+    const url = new URL(match[0]);
+    const host = url.hostname.toLowerCase();
+    if (!host.includes('docs.google.com') && !host.includes('drive.google.com')) return null;
+    if (!/(document|spreadsheets|presentation|forms)\/d\//i.test(url.pathname)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function nameForAttachment(attachment) {
-  const fallback = attachment.type === 'voice' ? 'voice.ogg' : attachment.type === 'photo' ? 'photo.jpg' : 'attachment';
-  return String(attachment.fileName || fallback).replace(/[\/\\\u0000-\u001f\u007f]/g, '_').slice(0, 200) || fallback;
+  let fallback = 'attachment';
+  if (attachment?.type === 'voice') {
+    const mime = attachment.mimeType || attachment.mime || '';
+    fallback = mime ? `audio.${mediaExtensionForMime(mime, 'ogg')}` : 'voice.ogg';
+  } else if (attachment?.type === 'photo') {
+    fallback = 'photo.jpg';
+  } else if (attachment?.type === 'google_doc') {
+    fallback = 'google-docs-link.txt';
+  }
+  return String(attachment?.fileName || fallback).replace(/[\/\\\u0000-\u001f\u007f]/g, '_').slice(0, 200) || fallback;
 }
 
 export async function prepareTelegramArtifact({ message, attachment, profile, config, buffer, bufferToken, fetchImpl = fetch }) {

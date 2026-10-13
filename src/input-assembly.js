@@ -4,7 +4,15 @@
 // any engine). So instead of a redundant "Вложение 1: audio.ogg" line we emit a
 // compact format marker and mark the raw ref `note:false` so the agent skips its
 // "[Файл сохранён: .../audio.ogg]" note too (the file is still copied/pinned).
-const MEDIA_MARKER = m => m.voice ? '[голосовое]' : m.audio ? '[аудио]' : m.video ? '[видео]' : null;
+const MEDIA_MARKER = m => {
+  const docMime = (m.document?.mime_type || m.fileRef?.mime || '').toLowerCase();
+  const isAudioDoc = m.document && /^(audio)\//i.test(docMime);
+  const isVideoDoc = m.document && /^(video)\//i.test(docMime);
+  return m.voice ? '[голосовое]'
+    : m.audio || isAudioDoc ? '[аудио]'
+    : m.video || isVideoDoc ? '[видео]'
+    : null;
+};
 
 // taskId the agent assigns to this dispatched run — mirrors the agent's /run
 // derivation (`${requestOwner}-${requestId}`, owner = audience-scoped username;
