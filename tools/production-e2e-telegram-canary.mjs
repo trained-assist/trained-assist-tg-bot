@@ -10,13 +10,24 @@ export { cleanupReadiness, intakeIsIdle, launchWasDispatched, summarizeIntakeSta
   summarizeLaunch };
 
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
+// E6: this canary proves production-principle of the CP/Runner (real production
+// CP profile -> real production Runner on the France VM), NOT the real production
+// bot path. It is pinned to the shared test bot ptichka_status_bot in the private
+// operator chat 1714048. The lane label and bot assertion make that honesty
+// machine-readable so a run that ever targets the real production bot
+// (super_personal_assistant_bot) fails loudly instead of relabelling a test lane.
+const LANE = 'prod-principal';
+const EXPECTED_BOT_USERNAME = 'ptichka_status_bot';
 const PROFILE_ID = 'production-e2e-telegram-v1';
 const TARGET = 'productionE2e';
 const RUN_FINISHED_EVENT = 'run_finished';
 let canaryProgress = {
   ok: false,
-  scenario: 'production-telegram-two-turn-session-context-and-delivery',
+  scenario: 'prod-principal-two-turn-session-context-and-delivery',
   profileId: PROFILE_ID,
+  lane: LANE,
+  targetWorkerUrl: WORKER,
+  buildSha: process.env.GITHUB_SHA ?? null,
   phase: 'starting',
   turns: [],
   answerTextLogged: false,
@@ -72,6 +83,27 @@ function identity() {
   assert.equal(chatId, 1714048, 'production_canary_chat_mismatch');
   assert.equal(userId, 1714048, 'production_canary_user_mismatch');
   return { chatId, userId };
+}
+
+// Pure lane-identity verdict: the canary is honest only when the Worker it talks
+// to is the pinned test bot. Any other bot — including the real production bots —
+// is a mismatch, so the canary can never silently run the prod bot under a
+// "production" label.
+export function verifyLaneIdentity(health = {}) {
+  const bot = typeof health?.bot === 'string'
+    ? health.bot.trim().replace(/^@/, '').toLowerCase() : null;
+  return { lane: LANE, botUsername: bot, expectedBotUsername: EXPECTED_BOT_USERNAME,
+    botMatches: bot === EXPECTED_BOT_USERNAME };
+}
+
+async function verifyLiveLaneIdentity() {
+  const response = await fetch(`${WORKER}/health`, { signal: AbortSignal.timeout(15_000) });
+  const health = await response.json().catch(() => ({}));
+  const identity = verifyLaneIdentity(health);
+  if (!identity.botMatches) {
+    throw new Error(`prod_principal_bot_mismatch_expected_${EXPECTED_BOT_USERNAME}_got_${identity.botUsername ?? 'missing'}`);
+  }
+  return identity;
 }
 
 async function workerRequest(path, body) {
@@ -271,6 +303,7 @@ async function cleanupIfTerminalAndIdle(username) {
 async function main() {
   if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('production_canary_target_required');
   const { chatId } = identity();
+  const laneIdentity = await verifyLiveLaneIdentity();
   const before = await waitForLiveLane();
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
@@ -279,7 +312,8 @@ async function main() {
   if ((before.tasks ?? []).some(task => !['done', 'failed', 'cancelled'].includes(task.status))) {
     throw new Error('production_canary_previous_task_not_terminal');
   }
-  await checkpoint('lane_ready', { priorTaskCount: (before.tasks ?? []).length, intakeIdle: true });
+  await checkpoint('lane_ready', { priorTaskCount: (before.tasks ?? []).length, intakeIdle: true,
+    botUsername: laneIdentity.botUsername });
   const baselineIds = new Set((before.tasks ?? []).map(task => task.userTaskId));
   // A prior interrupted canary may leave only an unlaunched draft. The pinned
   // test cleanup endpoint clears this exact chat's Intake/session state and
@@ -305,7 +339,7 @@ async function main() {
     assert.equal(login.admission?.authenticated, true, 'production_canary_login_failed');
     await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
 
-    const nonce = `PROD-E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
+    const nonce = `PROD-PRINCIPAL-${randomBytes(8).toString('hex').toUpperCase()}`;
     const startedAt = Date.now();
     // Use a concrete user task so Communication routing cannot reasonably
     // classify an echo-only probe as the deterministic system-health quick answer.
@@ -393,8 +427,9 @@ async function main() {
       { ...followupTurn, deliveryStatus: followupDelivery.status,
         providerMessageIdPresent: Number.isSafeInteger(followupDelivery.providerMessageId) },
     ] });
-    const report = { ok: true, scenario: 'production-telegram-two-turn-session-context-and-delivery',
-      profileId: PROFILE_ID, turns: [
+    const report = { ok: true, scenario: 'prod-principal-two-turn-session-context-and-delivery',
+      profileId: PROFILE_ID, lane: LANE, botUsername: laneIdentity.botUsername,
+      targetWorkerUrl: WORKER, buildSha: process.env.GITHUB_SHA ?? null, turns: [
         { taskId: firstTask.userTaskId, taskStatus: firstTask.status, runStatus: firstTask.runs[0].status,
           sessionPersisted: firstTask.runs[0].hasSessionId, resultPersisted: firstTask.resultPresent,
           answerMatchedNonce: true, telegramDeliveryStatus: firstDelivery.status,
