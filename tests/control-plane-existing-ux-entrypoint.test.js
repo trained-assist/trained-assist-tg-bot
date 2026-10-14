@@ -67,6 +67,18 @@ function configureProductionE2eOperator(env) {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('exposes only the configured public bot identity and deployed source revision in health', async () => {
+    const { env } = fixture();
+    Object.assign(env, { TG_SANDBOX_BOT_USERNAME: '@ptichka_status_bot', BUILD_SHA: 'a'.repeat(40),
+      TG_SANDBOX_BOT_TOKEN: 'must-not-appear' });
+    const response = await worker.fetch(new Request('https://worker/health'), env);
+    expect(response.status).toBe(200);
+    const health = await response.json();
+    expect(health).toMatchObject({ status: 'ok', mode: 'existing-ux-control-plane',
+      bot: 'ptichka_status_bot', buildSha: 'a'.repeat(40) });
+    expect(JSON.stringify(health)).not.toContain('must-not-appear');
+  });
+
   it('keeps synthetic buffer-test sessions out of the shared sandbox KV', async () => {
     const state = fixture();
     const { env } = state;
