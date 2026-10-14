@@ -507,13 +507,17 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       });
       expect(launch.status).toBe(200);
       expect(providerMessages).toHaveLength(0);
-      expect(cpIntakes).toHaveLength(1);
+      expect(cpIntakes).toHaveLength(0);
+      await state(true); // The durable launch checkpoint is admitted by the background alarm.
+      const finalState = await intakeStub.fetch('https://intake/debug');
+      const finalStateBody = await finalState.json();
+      expect(cpIntakes, JSON.stringify({ lastDispatchOutcome: finalStateBody.lastDispatchOutcome,
+        barrier: finalStateBody.controlPlaneBarrier })).toHaveLength(1);
       expect(cpIntakes[0].inputItems[0].artifacts).toMatchObject([{
         ref: manifest.ref, version: manifest.version, ownerProfileId: 'integration-sandbox3-v1',
       }]);
       expect(cpIntakes[0].inputItems[0].text).toContain('sandbox-intake-fixture.txt');
-      const finalState = await intakeStub.fetch('https://intake/debug');
-      expect(await finalState.json()).toMatchObject({ buf: [], collectorMsgId: null, busy: true });
+      expect(finalStateBody).toMatchObject({ buf: [], collectorMsgId: null, busy: true });
       return;
     }
     if (boundary === 'operator-test-api') {
@@ -813,9 +817,13 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
             .find(button => button.callback_data.startsWith('ws|auto|')).callback_data,
           message: { message_id: latestCollector.messageId, chat: { id: 42, type: 'private' } } } });
         expect(independentLaunch.status).toBe(200);
+        expect(cpIntakes).toHaveLength(beforeLaunchCount);
+        await state(true);
+        const independentState = await state();
         expect(cpIntakes).toHaveLength(beforeLaunchCount + 1);
+        expect(independentState.get('lastDispatchOutcome')).toMatchObject({ status: 'accepted', reasonCode: 'durable_cp_receipt' });
         expect(cpIntakes.at(-1).inputItems.map(item => item.text)).toEqual([testText, secondText]);
-        expect(providerMessages.some(item => item.text.includes('Запускаю параллельно — новая сессия'))).toBe(true);
+        expect(providerMessages.some(item => item.text.includes('Запускаю параллельно — новая сессия'))).toBe(false);
         expect(admittedTasks.get(`${env.CONTROL_PLANE_PROFILE}:${cpIntakes.at(-1).requestId}`).taskId).not.toBe('ut-workerd-old');
         const launchedState = await state();
         expect(launchedState.get('cpStopWindow')).toMatchObject({ pending: true,
@@ -872,6 +880,11 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       : { update_id: 105, callback_query: { id: 'workerd-launch', from: { id: 43, is_bot: false },
         data: `ws|auto|${launchRevision}`, message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(launch)).status).toBe(200);
+    expect(cpIntakes).toHaveLength(0);
+    const queuedLaunch = await state();
+    expect(queuedLaunch.get('cpUnresolvedLaunches')).toHaveLength(1);
+    await state(true); // DO alarm owns the CP admission after webhook return.
+    await workerdWaitFor(() => cpIntakes.length === 1);
     expect(cpIntakes).toHaveLength(1);
     expect(admitted.inputItems.map(item => item.text)).toEqual([
       'category,amount\nfood,100\nfood,50', 'travel,275', 'Write outputs/category-results.csv',
@@ -941,6 +954,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         ? { outcomeUnknown: true, terminal: false } : { terminal: true });
       expect(cpIntakes).toHaveLength(1);
       expect((await webhook(message(107, 'Запустить агента'))).status).toBe(200);
+      await state(true);
       expect(cpIntakes).toHaveLength(2);
       expect(cpIntakes[1].inputItems.map(item => item.text)).toEqual([
         'Следующая самостоятельная задача', 'Запустить агента',
@@ -988,6 +1002,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect(latestTelegramButton('intake_stopyes|new')).toBeUndefined();
       expect(visibleTelegramMessages().some(entry => entry.messageId === confirmationButton.messageId
         && entry.body.text.includes('старая может продолжить работу'))).toBe(true);
+      await state(true);
       expect(cpStopRequests.length).toBeGreaterThanOrEqual(1);
       for (const stopRequest of cpStopRequests) expect(stopRequest.admissionRequestIds).toEqual([admitted.requestId]);
       expect(cpIntakes).toHaveLength(2);
@@ -1123,6 +1138,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       from: { id: 43, is_bot: false }, data: `ws|explore|${followupRevision}`,
       message: { message_id: followupCollectorId, chat: { id: 42, type: 'private' } } } };
     expect((await webhook(followupLaunch)).status).toBe(200);
+    await state(true);
     expect(admittedTasks.size).toBe(2);
     const followup = [...admittedTasks.values()].find(task => task.taskId === 'ut-workerd-followup');
     expect(followup.envelope.requestId).not.toBe(admitted.requestId);

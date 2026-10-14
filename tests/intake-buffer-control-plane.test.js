@@ -61,8 +61,8 @@ async function snapshot(owner, inputReceipt = receipt, inputItems = items) {
   }));
 }
 
-async function accept(owner, inputReceipt = receipt) {
-  await snapshot(owner, inputReceipt);
+async function accept(owner, inputReceipt = receipt, inputItems = items) {
+  await snapshot(owner, inputReceipt, inputItems);
   return owner.fetch(rpc('/cp-acceptance', { requestId: inputReceipt.requestId, receipt: inputReceipt }));
 }
 
@@ -84,7 +84,7 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
-  it('dispatches the live buffer when an empty retry batch exists', async () => {
+  it('durably queues the live buffer and lets the DO alarm admit it after the request returns', async () => {
     const { owner, storage } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
     owner._callbackOwned = vi.fn().mockResolvedValue(true);
@@ -97,11 +97,24 @@ describe('existing collector control-plane ownership', () => {
       callbackData: 'ws|auto|3', username: 'test-profile' }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ flushed: true });
+    expect(await response.json()).toMatchObject({ queued: true, asynchronous: true });
     expect(owner._callbackOwned).toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual(['[12]']);
+    expect(await storage.get('cp-launch:[12]')).toMatchObject({ dispatchState: 'queued',
+      msg: { text: 'production canary input' } });
+    expect(await storage.get('lastDispatchOutcome')).toMatchObject({ status: 'queued', reasonCode: 'awaiting_background_dispatch' });
+    handleMessage.mockImplementationOnce(async (message, env, options) => {
+      await accept(owner, receipt, message.intakeItems);
+      options.onRunAccepted({ taskId: receipt.userTaskId, userTaskId: receipt.userTaskId,
+        requestId: receipt.requestId, durable: true, controlPlane: true });
+    });
+    await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('production canary input');
     expect(handleMessage.mock.calls[0][0].intakeItems).toHaveLength(1);
+    expect(await storage.get('cpUnresolvedLaunches') ?? []).not.toContain('[12]');
+    expect(await storage.get('lastDispatchOutcome')).toMatchObject({ status: 'accepted', reasonCode: 'durable_cp_receipt' });
   });
 
   it.each([
@@ -205,10 +218,12 @@ describe('existing collector control-plane ownership', () => {
     expect(await owner._callbackOwned(launch)).toBe(true);
     const launched = await owner.fetch(rpc('/flush', { parallel: true, ...launch }));
     expect(launched.status).toBe(200);
+    expect(await launched.json()).toMatchObject({ queued: true, asynchronous: true });
+    await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('новая задача');
     expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true, workStyle: 'answer' });
-    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey, '[2]']);
+    expect(await storage.get('cpUnresolvedLaunches')).toEqual([launchKey]);
   });
 
   it.each(['stop-disabled', 'busy'])('real %s scheduling preserves an earlier alarm even without cleanup entries', async branch => {
@@ -675,12 +690,14 @@ describe('existing collector control-plane ownership', () => {
     expect(targets.tasks).toEqual([{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
       profileId: receipt.profileId, receiptId: 'receipt:test' }]);
     expect(targets.unresolved).toBe(true);
-    await restarted.fetch(rpc('/append', { text: 'запускай', msg: { chat: { id: 42 }, message_id: 2, text: 'запускай' }, telegramUpdateId: 102, flush: true }));
+    const launch = await restarted.fetch(rpc('/append', { text: 'запускай', msg: { chat: { id: 42 }, message_id: 2, text: 'запускай' }, telegramUpdateId: 102, flush: true }));
+    expect(await launch.json()).toMatchObject({ queued: true, asynchronous: true });
+    await restarted.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true });
     expect(await storage.get('stopped')).toBeUndefined();
     expect((await storage.get('buf')) || []).toEqual([]);
-    expect((await storage.get('cpStopWindow')).pending).toBe(true);
+    expect((await storage.get('cpStopWindow')).pending).toBe(false);
   });
 
   it('stop clears only the local unlaunched draft and keeps old task evidence for reconciliation', async () => {
@@ -709,7 +726,8 @@ describe('existing collector control-plane ownership', () => {
     const result = await owner.fetch(rpc('/stop-launch', { mode: 'new', ...source,
       messageId: 150, callbackData: 'intake_stopyes|new' }));
     expect(result.status).toBe(200);
-    expect(await result.json()).toMatchObject({ launching: true, count: 1 });
+    expect(await result.json()).toMatchObject({ launching: true, count: 1, queued: true, asynchronous: true });
+    await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(handleMessage.mock.calls[0][0].text).toBe('independent');
     expect(handleMessage.mock.calls[0][2]).toMatchObject({ parallel: true });
@@ -721,7 +739,7 @@ describe('existing collector control-plane ownership', () => {
       userTaskId: independent.userTaskId, taskId: independent.userTaskId }, independentItems);
     const preparedStop = await owner._readControlPlaneStopTargets(source);
     expect(preparedStop.tasks.map(task => task.userTaskId)).toEqual([receipt.userTaskId]);
-    expect((await storage.get('cpStopWindow'))).toMatchObject({ pending: true, stopConfirmed: false,
+    expect((await storage.get('cpStopWindow'))).toMatchObject({ pending: false, stopConfirmed: true,
       admissionRequestIds: [receipt.requestId] });
   });
 
@@ -869,7 +887,11 @@ describe('existing collector control-plane ownership', () => {
       options.onRunAccepted({ taskId: receipt.userTaskId, userTaskId: receipt.userTaskId,
         requestId: receipt.requestId, durable: true, controlPlane: true });
     });
-    expect((await owner.fetch(rpc('/flush', source))).status).toBe(200);
+    const launch = await owner.fetch(rpc('/flush', source));
+    expect(launch.status).toBe(200);
+    expect(await launch.json()).toMatchObject({ queued: true, asynchronous: true });
+    expect(handleMessage).not.toHaveBeenCalled();
+    await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     expect(await storage.get('launchWorkStyle')).toBeUndefined();
     expect((await owner.fetch(rpc('/flush', source))).status).toBe(409);
@@ -905,6 +927,9 @@ describe('existing collector control-plane ownership', () => {
       text: 'запускай', msg: { message_id: 2, chat: { id: 42 }, text: 'запускай' }, telegramUpdateId: 101, flush: true,
     }));
     expect(launch.status).toBe(200);
+    expect(await launch.json()).toMatchObject({ queued: true, asynchronous: true });
+    expect(handleMessage).not.toHaveBeenCalled();
+    await owner.alarm();
     expect(handleMessage).toHaveBeenCalledTimes(1);
     const before = await storage.get('cpBusyRequests');
     expect((await owner.fetch(rpc('/flush', {}))).status).toBe(409);
@@ -1356,6 +1381,7 @@ describe('existing collector control-plane ownership', () => {
         requestId: receipt.requestId, durable: true, controlPlane: true, routingPending: true });
     });
     await restarted.alarm();
+    await restarted.alarm(); // Reconcile CP routing on the alarm after admission recovery.
     expect(handleMessage).toHaveBeenCalledTimes(2);
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('cpUnresolvedLaunches')).toEqual([]);

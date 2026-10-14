@@ -506,6 +506,14 @@ export class IntakeBuffer {
         pendingCount, busy: state.busy === true,
         launching: Array.isArray(state.launching) ? state.launching.length : 0,
         alarmAt: Number.isSafeInteger(state.alarm) ? state.alarm : null,
+        lastDispatchOutcome: state.lastDispatchOutcome && typeof state.lastDispatchOutcome === 'object' ? {
+          at: Number.isSafeInteger(state.lastDispatchOutcome.at) ? state.lastDispatchOutcome.at : null,
+          status: ['not_started', 'claimed', 'queued', 'dispatching', 'accepted', 'not_accepted', 'outcome_unknown'].includes(state.lastDispatchOutcome.status)
+            ? state.lastDispatchOutcome.status : null,
+          reasonCode: typeof state.lastDispatchOutcome.reasonCode === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(state.lastDispatchOutcome.reasonCode)
+            ? state.lastDispatchOutcome.reasonCode : null,
+          itemCount: Number.isSafeInteger(state.lastDispatchOutcome.itemCount) ? state.lastDispatchOutcome.itemCount : null,
+        } : null,
         stranded: state.stranded === true,
         unresolvedLaunchCount: state.controlPlaneBarrier?.unresolvedLaunchCount ?? null,
         busyRequestCount: state.controlPlaneBarrier?.busyRequestCount ?? null,
@@ -1077,6 +1085,7 @@ export class IntakeBuffer {
         debounceExpiresAt: debounceExpiresAt || null, gateLevel: gateLevel || null,
         alarm: alarm || null, receiptDue: receiptDue || null, collectorMsgId: collectorMsgId || null,
         collectorDraftRevision: Number.isSafeInteger(collectorDraftRevision) ? collectorDraftRevision : null,
+        lastDispatchOutcome: await this.state.storage.get('lastDispatchOutcome') || null,
         gateConsulted: !!gateConsulted, gateErrAttempts: gateErrAttempts || 0,
         parkedAt: parkedAt || null, parkReoffers: parkReoffers || 0,
         stopped: (await this.state.storage.get('stopped')) || null,
@@ -1801,8 +1810,9 @@ export class IntakeBuffer {
             await this.state.storage.put('launchParallel', true);
             await this.state.storage.delete('stopped');
           }
-          await this._dispatch();
-          return json({ flushed: true });
+          const dispatch = await this._dispatch(undefined, undefined, { deferControlPlaneExecution: true });
+          if (dispatch?.started === false) return Response.json({ error: 'launch_not_claimed', reasonCode: dispatch.reasonCode }, { status: 409 });
+          return json(dispatch?.queued ? { queued: true, asynchronous: true } : { flushed: true });
         }
         // Force word (запускай/го) — launch immediately, coalescing everything.
         return this.fetch(new Request('https://intake/flush', { method: 'POST' }));
@@ -1899,8 +1909,11 @@ export class IntakeBuffer {
             }
             // Take the batch right now — _dispatch joins the open window (its
             // ack appends this run's requestId; the hold drops after the LAST one).
-            await this._dispatch();
-            return json({ busy: true, parallel: true });
+            const dispatch = await this._dispatch(undefined, undefined, { deferControlPlaneExecution: true });
+            if (dispatch?.started === false) return Response.json({ error: 'launch_not_claimed', reasonCode: dispatch.reasonCode }, { status: 409 });
+            return json(dispatch?.queued
+              ? { queued: true, parallel: true, asynchronous: true }
+              : { busy: true, parallel: true });
           }
           await this.state.storage.put('launchAfterRelease', true);
           // Turn ▶️ into its own undo right away (owner 29.09): a tap that leaves
@@ -1936,7 +1949,12 @@ export class IntakeBuffer {
         return json({ preparing: true, queued: true });
       }
       if (parallel) await this.state.storage.put('launchParallel', true);
-      await this._dispatch(authorized === true ? undefined : authorized.buffer, authorized === true ? undefined : authorized.retry);
+      const dispatch = await this._dispatch(authorized === true ? undefined : authorized.buffer,
+        authorized === true ? undefined : authorized.retry, { deferControlPlaneExecution: true });
+      if (dispatch?.queued) return json({ queued: true, asynchronous: true });
+      if (dispatch?.started === false) {
+        return Response.json({ error: 'launch_not_claimed', reasonCode: dispatch.reasonCode }, { status: 409 });
+      }
       return json(parallel ? { flushed: true, parallel: true } : { flushed: true });
     }
 
@@ -2015,7 +2033,11 @@ export class IntakeBuffer {
         return { launching: true, count: items.length };
       });
       if (res === null) return new Response('Callback ownership mismatch', { status: 409 });
-      if (res.launching) await this._dispatch();
+      if (res.launching) {
+        const dispatch = await this._dispatch(undefined, undefined, { deferControlPlaneExecution: true });
+        if (dispatch?.started === false) return Response.json({ error: 'launch_not_claimed', reasonCode: dispatch.reasonCode }, { status: 409 });
+        return json(dispatch?.queued ? { ...res, queued: true, asynchronous: true } : res);
+      }
       return json(res);
     }
 
@@ -2636,19 +2658,29 @@ export class IntakeBuffer {
 
   // Coalesce the buffer into one message and run it. Marks the chat busy so
   // anything sent during the run is held (surfaced with a fresh button afterwards).
-  async _dispatch(expectedBuffer, expectedRetryBatch) {
+  async _dispatch(expectedBuffer, expectedRetryBatch, { deferControlPlaneExecution = false } = {}) {
     const parallel = !!(await this.state.storage.get('launchParallel'));
     let launchWorkStyle = 'auto';
     let launchWorkStyleSource = 'default';
+    let noDispatchReason = null;
     const buf = await this._exclusive(async () => {
-      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) return [];
+      if (this.env.EXECUTION_BACKEND === 'control-plane' && (await this.state.storage.get('cpStopWindow'))?.pending && !parallel) {
+        noDispatchReason = 'pending_stop_window';
+        return [];
+      }
       // A parallel dispatch (RC-03) is allowed to start while the window is
       // open — it JOINS it; every other dispatch still waits for the release.
-      if ((await this.state.storage.get('busy')) && !parallel) return [];
+      if ((await this.state.storage.get('busy')) && !parallel) { noDispatchReason = 'busy'; return []; }
       // ⛔ Стоп holds the batch: only /flush (which lifts the hold first) may launch.
-      if (await this.state.storage.get('stopped')) return [];
-      if (expectedBuffer !== undefined && JSON.stringify((await this.state.storage.get('buf')) || []) !== expectedBuffer) return [];
-      if (expectedRetryBatch !== undefined && JSON.stringify(await this.state.storage.get('retryBatch')) !== expectedRetryBatch) return [];
+      if (await this.state.storage.get('stopped')) { noDispatchReason = 'stopped'; return []; }
+      if (expectedBuffer !== undefined && JSON.stringify((await this.state.storage.get('buf')) || []) !== expectedBuffer) {
+        noDispatchReason = 'buffer_changed';
+        return [];
+      }
+      if (expectedRetryBatch !== undefined && JSON.stringify(await this.state.storage.get('retryBatch')) !== expectedRetryBatch) {
+        noDispatchReason = 'retry_batch_changed';
+        return [];
+      }
       // Cancel any pending debounce alarm — dispatch is happening now (manually or
       // via the timer itself). Without this the alarm could fire a second dispatch.
       await this.state.storage.delete('debounceExpiresAt');
@@ -2657,8 +2689,11 @@ export class IntakeBuffer {
       await this.state.storage.delete('parkReoffers');
       const retryBatch = (await this.state.storage.get('retryBatch')) || [];
       const items = retryBatch.length ? retryBatch : ((await this.state.storage.get('buf')) || []);
-      if (!items.length) return [];
-      if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
+      if (!items.length) { noDispatchReason = 'empty'; return []; }
+      if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) {
+        noDispatchReason = 'media_preparing';
+        return [];
+      }
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
       const selectedStyle = await this.state.storage.get('launchWorkStyle');
       launchWorkStyle = WORK_STYLES.includes(selectedStyle) ? selectedStyle : 'auto';
@@ -2673,6 +2708,7 @@ export class IntakeBuffer {
           msg: { ...base, text: coalesceBuffer(items), intakeItems: items, intakeRoute: continuation?.intakeRoute },
           initialMsgId: null, parallel, workStyle: launchWorkStyle, workStyleSource: launchWorkStyleSource,
           profileId: client.config.profileId, botUsername: client.config.botUsername,
+          ...(deferControlPlaneExecution ? { dispatchState: 'queued', queuedAt: Date.now() } : {}),
         });
         await this.state.storage.put('cpUnresolvedLaunches', [...new Set([...unresolved, launchKey])]);
         this.cpDispatches++;
@@ -2698,7 +2734,11 @@ export class IntakeBuffer {
       await this.state.storage.delete('launchWorkStyleSource');
       return items;
     });
-    if (!buf.length) return;
+    if (!buf.length) {
+      const outcome = { at: Date.now(), status: 'not_started', reasonCode: noDispatchReason || 'empty' };
+      await this.state.storage.put('lastDispatchOutcome', outcome);
+      return { started: false, ...outcome };
+    }
 
     const base = buf[buf.length - 1].msg;
     const chatId = base.chat?.id;
@@ -2722,19 +2762,27 @@ export class IntakeBuffer {
     }
 
     await this.state.storage.delete('receiptDue');
-    const initialMsgId = await this._showCollector(chatId, buf.length, base.message_id, threadId,
+    const backgroundControlPlaneLaunch = deferControlPlaneExecution && this.env.EXECUTION_BACKEND === 'control-plane';
+    const initialMsgId = backgroundControlPlaneLaunch ? null : await this._showCollector(chatId, buf.length, base.message_id, threadId,
       this.env.EXECUTION_BACKEND === 'control-plane'
         ? '📨 Передаю собранный ввод на определение интента…'
         : '📨 Передаю собранный input агенту…').catch(error => {
           if (this.env.EXECUTION_BACKEND !== 'control-plane') throw error;
           return null;
         });
-    if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
-    await this.state.storage.delete('collectorMsgId');
+    if (!backgroundControlPlaneLaunch) {
+      if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
+      await this.state.storage.delete('collectorMsgId');
+    }
 
     // Safety net: only fires if the run never reports back (lost run-finished
     // push, agent crash). The per-minute alarm ticks poll /tasks/running first.
-    await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
+    // Give the ingress request a clean return boundary before the alarm starts
+    // network work. Cloudflare also treats alarms as a separate DO invocation;
+    // a one-second handoff avoids overlapping the request that wrote the claim.
+    await this.state.storage.setAlarm(Date.now() + (backgroundControlPlaneLaunch ? 1_000 : BUSY_POLL_MS));
+    await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'claimed',
+      itemCount: buf.length, ...(deferControlPlaneExecution ? { reasonCode: 'awaiting_background_dispatch' } : {}) });
 
     let runAck = null;
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
@@ -2743,6 +2791,15 @@ export class IntakeBuffer {
       await this.state.storage.put(`cp-launch:${launchKey}`, { ...checkpoint, initialMsgId });
     }
     try {
+      // Manual Control Plane launches only need to durably claim the immutable
+      // batch in the Telegram request. The Durable Object alarm resumes this
+      // checkpoint through _recoverControlPlaneLaunch; CP admission and routing
+      // no longer hold the Telegram callback/webhook open.
+      if (backgroundControlPlaneLaunch) {
+        await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'queued',
+          itemCount: buf.length, reasonCode: 'awaiting_background_dispatch' });
+        return { queued: true, launchKey: JSON.stringify(buf.map(item => item.msg?.message_id)) };
+      }
       // Dynamic import avoids a circular import at module load.
       // mode:'deep' — «▶️ Запустить проработку» запускает НАДЁЖНУЮ (deep) сессию на всём
       // накопленном буфере (#530 §A/§B: единый явный запуск проработки). Утилитарные
@@ -2761,6 +2818,8 @@ export class IntakeBuffer {
       if (runAck) {
         if (this.env.EXECUTION_BACKEND === 'control-plane') {
           await this._recordControlPlaneAck(runAck, buf);
+          await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'accepted',
+            itemCount: buf.length, reasonCode: 'durable_cp_receipt' });
         }
         // Пакет стал задачей: снимаем ожидание наружу и СВЯЗЫВАЕМ его с taskId
         // (arch#132 R9). Связь берётся из ack'а запуска, поэтому гонять batchId
@@ -2791,13 +2850,22 @@ export class IntakeBuffer {
         // busy intentionally KEPT: the run's lifetime owns it now (#1527 F1).
         await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       } else {
-        if (this.env.EXECUTION_BACKEND === 'control-plane') return;
+        if (this.env.EXECUTION_BACKEND === 'control-plane') {
+          await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'not_accepted',
+            itemCount: buf.length, reasonCode: 'handler_returned_without_receipt' });
+          return;
+        }
         // handleMessage resolved without reaching the agent (project picker,
         // oversized file, supplement draft, …) — no run to wait for.
         await this._exclusive(async () => this._releaseBusyLocked());
       }
     } catch (err) {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
+        await this.state.storage.put('lastDispatchOutcome', { at: Date.now(),
+          status: err?.code === 'CONTROL_PLANE_NO_ADMISSION' ? 'not_accepted' : 'outcome_unknown',
+          itemCount: buf.length,
+          reasonCode: typeof err?.code === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(err.code)
+            ? err.code.toLowerCase() : 'synchronous_dispatch_failed' });
         await this._handleControlPlaneLaunchFailure(err, buf);
         await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
         return;
@@ -3172,11 +3240,20 @@ export class IntakeBuffer {
   async _recoverControlPlaneLaunch() {
     const checkpoint = await this._exclusive(async () => {
       if (this.cpDispatches) return null;
-      const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
+      const unresolved = await this._activeUnresolvedLaunches();
       if (!unresolved.length) return null;
-      const saved = await this.state.storage.get(`cp-launch:${unresolved[0]}`);
+      const stopWindow = await this.state.storage.get('cpStopWindow');
+      let saved = null;
+      for (const key of unresolved) {
+        const candidate = await this.state.storage.get(`cp-launch:${key}`);
+        if (!candidate) continue;
+        // While a stop is unresolved, only recover a separately-authorized
+        // parallel launch that was not part of the stop's frozen admission set.
+        if (stopWindow?.pending && (!candidate.parallel || stopWindow.admissionLaunchKeys?.includes(key))) continue;
+        saved = candidate;
+        break;
+      }
       if (!saved) return null;
-      if ((await this.state.storage.get('cpStopWindow'))?.pending && !saved.parallel) return null;
       const client = controlPlaneClient(this.env);
       if (saved.profileId !== client.config.profileId || saved.botUsername !== client.config.botUsername) return null;
       this.cpDispatches++;
@@ -3184,17 +3261,30 @@ export class IntakeBuffer {
     });
     if (!checkpoint) return false;
     try {
+      await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'dispatching',
+        itemCount: checkpoint.msg.intakeItems?.length ?? 1, reasonCode: 'background_recovery_started' });
+      const launchItems = checkpoint.msg.intakeItems || [checkpoint.msg];
+      const last = launchItems.at(-1)?.msg ?? checkpoint.msg;
+      const initialMsgId = await this._showCollector(last.chat?.id, launchItems.length, last.message_id,
+        threadIdOf(last), '📨 Передаю собранный ввод на определение интента…').catch(() => null);
+      if (initialMsgId) await this.state.storage.put('preparingMsgId', initialMsgId);
+      await this.state.storage.delete('collectorMsgId');
+      await this.state.storage.put(`cp-launch:${JSON.stringify(launchItems.map(item => item.msg?.message_id))}`, {
+        ...checkpoint, initialMsgId,
+      });
       let ack;
       const { handleMessage } = await import('./handlers/message.js');
       await handleMessage(checkpoint.msg, this.env, {
         mode: 'deep', ...(checkpoint.parallel ? { parallel: true } : {}),
         workStyle: WORK_STYLES.includes(checkpoint.workStyle) ? checkpoint.workStyle : 'auto',
         workStyleSource: checkpoint.workStyleSource === 'explicit' ? 'explicit' : 'default',
-        initialMsgId: checkpoint.initialMsgId,
+        initialMsgId,
         collectorStatusHandled: true,
         onRunAccepted: value => { ack = value; },
       });
       if (!ack) {
+        await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'not_accepted',
+          itemCount: checkpoint.msg.intakeItems?.length ?? 0, reasonCode: 'handler_returned_without_receipt' });
         // handleMessage only returns without an ACK on paths that finish before
         // runTask/CP admission (for example an oversized or unsupported item).
         // Retire this exact checkpoint so the busy window cannot wedge forever.
@@ -3205,6 +3295,8 @@ export class IntakeBuffer {
         return false;
       }
       await this._recordControlPlaneAck(ack, checkpoint.msg.intakeItems);
+      await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'accepted',
+        itemCount: checkpoint.msg.intakeItems.length, reasonCode: 'durable_cp_receipt' });
       const batchId = await this._exclusive(async () => this._nextBatchLocked(
         checkpoint.msg.chat.id, threadIdOf(checkpoint.msg)));
       await this._closePending(this.env, batchId, 'launched', ack.taskId);
@@ -3215,6 +3307,11 @@ export class IntakeBuffer {
       }
       return true;
     } catch (error) {
+      await this.state.storage.put('lastDispatchOutcome', { at: Date.now(),
+        status: error?.code === 'CONTROL_PLANE_NO_ADMISSION' ? 'not_accepted' : 'outcome_unknown',
+        itemCount: checkpoint.msg.intakeItems?.length ?? 1,
+        reasonCode: typeof error?.code === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(error.code)
+          ? error.code.toLowerCase() : 'background_recovery_failed' });
       await this._handleControlPlaneLaunchFailure(error, checkpoint.msg.intakeItems);
       return false;
     } finally {
@@ -3288,7 +3385,11 @@ export class IntakeBuffer {
 
   async _pollControlPlaneTasks({ launch = false } = {}) {
     if (this.cpDispatches) return false;
-    try { await this._recoverControlPlaneLaunch(); } catch { } // a failed recovery must not wedge the whole poll (GAP-1 class)
+    let recoveredLaunch = false;
+    try { recoveredLaunch = await this._recoverControlPlaneLaunch(); } catch { } // a failed recovery must not wedge the whole poll (GAP-1 class)
+    // Admission/routing may have just succeeded in this alarm. Reconcile on the
+    // next tick so one recovery pass cannot immediately route the same task again.
+    if (recoveredLaunch) return false;
     if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length) return false;
     let ids = (await this.state.storage.get('cpBusyRequests')) || [];
     if (!ids.length) return false;
@@ -3582,7 +3683,11 @@ export class IntakeBuffer {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
       await this._recoverMedia();
       await this._recoverControlPlaneCollectorCleanup();
+      // Resume an independent parallel admission before reconciling a pending
+      // stop. The stop barrier must not strand work explicitly launched beside
+      // the stopped run; _recoverControlPlaneLaunch filters by the frozen scope.
       const stopWindow = await this.state.storage.get('cpStopWindow');
+      if (stopWindow?.pending) await this._recoverControlPlaneLaunch().catch(() => false);
       if (stopWindow?.pending && controlPlaneStopDisabled(this.env)) {
         await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
       } else if (stopWindow?.pending) {

@@ -206,9 +206,20 @@ describe('E4.3 stale collector button', () => {
     await append(owner, 1, 'first');
     await advanceAndAlarm(owner, T0, 2000);
     const collectorId = await storage.get('collectorMsgId');
+    const acceptedReceipt = { requestId: 'scoped-request', profileId: 'test-profile', userTaskId: 'ut-test',
+      durable: true, providerAcceptedAt: 1700000000000 };
+    handleMessage.mockImplementationOnce(async (message, _env, options) => {
+      await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: acceptedReceipt.requestId,
+        controlPlaneEnvelope: { requestId: acceptedReceipt.requestId, profileId: acceptedReceipt.profileId,
+          conversationRef: 'tg-42-ssaved' } }, items: message.intakeItems }));
+      await owner.fetch(rpc('/cp-acceptance', { requestId: acceptedReceipt.requestId, receipt: acceptedReceipt }));
+      options.onRunAccepted({ taskId: acceptedReceipt.userTaskId, userTaskId: acceptedReceipt.userTaskId,
+        requestId: acceptedReceipt.requestId, durable: true, controlPlane: true });
+    });
 
     const tap = await owner.fetch(rpc('/flush', { messageId: collectorId, callbackData: 'ws|answer|1', username: 'test-profile' }));
     expect(tap.status).toBe(200);
+    await owner.alarm(); // Background checkpoint owns the collector transition now.
     expect(await storage.get('collectorMsgId')).toBeUndefined();
 
     await owner.fetch(rpc('/run-finished', {}));
