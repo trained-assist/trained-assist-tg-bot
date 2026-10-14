@@ -183,6 +183,10 @@ export function summarizeCallbackResponse(payload = {}) {
   const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
   const outcomeCodes = transcript.map(entry => {
     const text = typeof entry?.text === 'string' ? entry.text : '';
+    if (entry?.kind === 'answerCallbackQuery' && /выбираю подходящий способ/i.test(text)) return 'launch_callback_ack';
+    if (entry?.kind === 'answerCallbackQuery' && /сначала войди/i.test(text)) return 'callback_unauthenticated';
+    if (entry?.kind === 'answerCallbackQuery' && /функция ещё не подключена/i.test(text)) return 'callback_unsupported';
+    if (entry?.kind === 'answerCallbackQuery' && /кнопка устарела|актуальность не подтверждена/i.test(text)) return 'callback_owner_refused';
     if (/кнопка.*устарела/i.test(text)) return 'callback_stale';
     if (text.includes('не удалось подтвердить запуск')) return 'launch_not_confirmed';
     if (text.includes('Передаю собранный ввод') || text.includes('Передаю задачу агенту')) return 'launch_handoff_started';
@@ -216,12 +220,12 @@ async function capture(text, extra = {}) {
     delivery: 'capture', text, updateId: Date.now() + Math.floor(Math.random() * 1000), ...extra });
 }
 
-async function pressCurrentLaunchButton() {
+async function pressCurrentLaunchButton(delivery = 'telegram') {
   const { chatId, userId } = identity();
   // Keep one updateId across retries. Each retryable response is produced
   // before the synthetic webhook is dispatched, so this remains idempotent.
   return workerRequest('/operator/test-update', { target: TARGET, type: 'callback', chatId, userId,
-    delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + Math.floor(Math.random() * 1000) });
+    delivery, callbackData: 'auto', updateId: Date.now() + Math.floor(Math.random() * 1000) });
 }
 
 export async function waitForLiveLane(readEvidence, { expectedBuildSha, timeoutMs = 180_000, intervalMs = 2_000,
@@ -422,7 +426,10 @@ async function main() {
 
     const { userId } = identity();
     await checkpoint('launching_first_turn');
-    const launched = await pressCurrentLaunchButton();
+    // Capture this callback ack without sending any run result to Telegram.
+    // If the real handler refuses after the outer owner preflight, this exposes
+    // the reason. The follow-up turn still verifies actual Bot API delivery.
+    const launched = await pressCurrentLaunchButton('capture');
     assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
     assert.equal(launched.callbackOwnedBeforeDispatch, true, 'prod_principal_canary_callback_not_currently_owned');
     const launchState = launched.collector ?? {};
@@ -454,9 +461,8 @@ async function main() {
     assert(observed.buffer?.pendingCount === 0, 'prod_principal_canary_buffer_not_drained');
 
     const firstTask = task;
-    const firstDelivery = await waitForDelivery(firstTask.userTaskId, chatId);
-    const firstTurnSummary = { ...firstTurn, deliveryStatus: firstDelivery.status,
-      providerMessageIdPresent: Number.isSafeInteger(firstDelivery.providerMessageId) };
+    const firstTurnSummary = { ...firstTurn, deliveryStatus: 'suppressed_for_callback_diagnostics',
+      providerMessageIdPresent: false };
     await checkpoint('first_turn_delivered', { turns: [firstTurnSummary] });
     const intakeAfterFirstTurn = await waitForIntakeIdle();
     await checkpoint('first_turn_delivery_and_intake_idle', { turns: [firstTurnSummary],
@@ -477,7 +483,7 @@ async function main() {
     assert.equal(followupBarrier.busyRequestCount, 0, 'prod_principal_canary_followup_busy_request_present');
     assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'prod_principal_canary_followup_unresolved_launch_present');
     await checkpoint('launching_followup_turn');
-    const followupLaunch = await pressCurrentLaunchButton();
+    const followupLaunch = await pressCurrentLaunchButton('telegram');
     assert.equal(followupLaunch.ok, true, 'prod_principal_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
       firstTurnSummary,
