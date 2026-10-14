@@ -156,7 +156,8 @@ app.get('/operator/test-evidence', async context => {
   const response = await stub.fetch('https://intake/operator/test-evidence', { method: 'POST',
     body: JSON.stringify(challenge ? { challenge } : {}) });
   const evidence = await response.json().catch(() => ({}));
-  return context.json({ ...evidence, readiness: {
+  return context.json({ ...evidence, workerProfileId: env.CONTROL_PLANE_PROFILE ?? null,
+    buildSha: env.BUILD_SHA ?? null, readiness: {
     testApiEnabled: env.TG_SANDBOX_TEST_API_ENABLED === 'true',
     ingressPaused: env.TG_SLICE_INGRESS_PAUSED === 'true',
     deliveryPaused: env.TG_SLICE_DELIVERY_PAUSED !== 'false',

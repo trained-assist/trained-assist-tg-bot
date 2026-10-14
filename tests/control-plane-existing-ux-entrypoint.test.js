@@ -308,6 +308,7 @@ describe('signed existing-UX ingress', () => {
   it('returns only redacted production E2E task evidence from the pinned Telegram Intake object', async () => {
     const { env } = fixture();
     configureProductionE2eOperator(env);
+    env.BUILD_SHA = 'b'.repeat(40);
     let observed;
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, init) {
       observed = { name, path: new URL(url).pathname, method: init.method,
@@ -322,6 +323,7 @@ describe('signed existing-UX ingress', () => {
     }), env);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ profileId: 'production-e2e-telegram-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: 'b'.repeat(40),
       readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
       tasks: [{ userTaskId: 'ut-test', status: 'done', resultPresent: true, answerPresent: true,
         routingOutcome: { known: true, degraded: false, routeReasonCode: 'task_needs_agent',
