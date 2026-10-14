@@ -185,23 +185,30 @@ async function pressCurrentLaunchButton() {
   throw new Error(`prod_principal_canary_collector_button_timeout_${lastCode}`);
 }
 
-export async function waitForLiveLane(readEvidence, { timeoutMs = 180_000, intervalMs = 2_000,
+export async function waitForLiveLane(readEvidence, { expectedBuildSha, timeoutMs = 180_000, intervalMs = 2_000,
   now = () => Date.now(), sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
   const deadline = now() + timeoutMs;
   let lastReadiness = null;
-  let expectedProfileObserved = false;
+  let workerProfileObserved = false;
+  let intakeProfileObserved = false;
+  let expectedRevisionObserved = expectedBuildSha === undefined;
   while (now() < deadline) {
     const evidence = await readEvidence();
-    expectedProfileObserved ||= evidence.profileId === PROFILE_ID;
+    workerProfileObserved ||= evidence.workerProfileId === PROFILE_ID;
+    intakeProfileObserved ||= evidence.profileId === PROFILE_ID;
+    expectedRevisionObserved ||= evidence.buildSha === expectedBuildSha;
     lastReadiness = evidence.readiness ?? {};
-    if (liveLaneIsReady(evidence)) return evidence;
+    if (liveLaneIsReady(evidence) && evidence.workerProfileId === PROFILE_ID && evidence.profileId === PROFILE_ID
+      && (expectedBuildSha === undefined || evidence.buildSha === expectedBuildSha)) return evidence;
     // The isolated live config is deployed immediately after a paused version.
     // Some Cloudflare edges can briefly serve the prior Worker version, whose
     // profile identity differs. Poll until the intended profile and live
     // readiness are both visible; do not send messages to that old lane.
     await sleep(Math.min(intervalMs, deadline - now()));
   }
-  if (!expectedProfileObserved) throw new Error('prod_principal_canary_profile_not_propagated');
+  if (!workerProfileObserved) throw new Error('prod_principal_canary_worker_profile_not_propagated');
+  if (!expectedRevisionObserved) throw new Error('prod_principal_canary_worker_revision_not_propagated');
+  if (!intakeProfileObserved) throw new Error('prod_principal_canary_intake_profile_not_propagated');
   throw new Error(`prod_principal_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
 }
 
@@ -324,7 +331,9 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('prod_principal_canary_target_required');
   const { chatId } = identity();
   const laneIdentity = await verifyLiveLaneIdentity();
-  const before = await waitForLiveLane(() => workerRequest('/operator/test-evidence'));
+  const before = await waitForLiveLane(() => workerRequest('/operator/test-evidence'), {
+    expectedBuildSha: process.env.GITHUB_SHA,
+  });
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
     throw new Error('prod_principal_canary_intake_not_idle');

@@ -9,14 +9,16 @@ describe('production Telegram canary launch evidence', () => {
   it('waits through delayed profile propagation before admitting any input', async () => {
     let now = 0;
     let reads = 0;
-    const staleLane = { profileId: 'integration-sandbox3-v1', readiness: {
+    const staleLane = { profileId: 'integration-sandbox3-v1', workerProfileId: 'integration-sandbox3-v1',
+      buildSha: 'old-build', readiness: {
       testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
     } };
-    const liveLane = { profileId: 'production-e2e-telegram-v1', readiness: {
+    const liveLane = { profileId: 'production-e2e-telegram-v1', workerProfileId: 'production-e2e-telegram-v1',
+      buildSha: 'a'.repeat(40), readiness: {
       testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
     } };
     const evidence = await waitForLiveLane(async () => ++reads < 32 ? staleLane : liveLane, {
-      timeoutMs: 180_000, intervalMs: 2_000, now: () => now,
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 180_000, intervalMs: 2_000, now: () => now,
       sleep: async milliseconds => { now += milliseconds; },
     });
 
@@ -27,11 +29,33 @@ describe('production Telegram canary launch evidence', () => {
 
   it('fails closed when the expected profile is never observed during propagation wait', async () => {
     let now = 0;
-    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1', readiness: {
+    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1',
+      workerProfileId: 'integration-sandbox3-v1', buildSha: 'a'.repeat(40), readiness: {
       testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
     } }), { timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
       sleep: async milliseconds => { now += milliseconds; } }))
-      .rejects.toThrow('prod_principal_canary_profile_not_propagated');
+      .rejects.toThrow('prod_principal_canary_worker_profile_not_propagated');
+  });
+
+  it('distinguishes the Worker profile from a stale Durable Object profile', async () => {
+    let now = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: 'a'.repeat(40), readiness: {
+        testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+      } }), { expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } }))
+      .rejects.toThrow('prod_principal_canary_intake_profile_not_propagated');
+  });
+
+  it('waits for the exact Worker revision in operator evidence', async () => {
+    let now = 0;
+    let reads = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'production-e2e-telegram-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: ++reads < 3 ? 'old-build' : 'a'.repeat(40),
+      readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
+    }), { expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } })).resolves.toMatchObject({ buildSha: 'a'.repeat(40) });
+    expect(reads).toBe(3);
   });
 
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
