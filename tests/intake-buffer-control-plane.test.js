@@ -84,6 +84,26 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('dispatches the live buffer when an empty retry batch exists', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    owner._callbackOwned = vi.fn().mockResolvedValue(true);
+    await storage.put('buf', [{ text: 'production canary input', msg: { message_id: 12, chat: { id: 42 }, text: 'production canary input' } }]);
+    await storage.put('retryBatch', []);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+
+    const response = await owner.fetch(rpc('/flush', { messageId: 99,
+      callbackData: 'ws|auto|3', username: 'test-profile' }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ flushed: true });
+    expect(owner._callbackOwned).toHaveBeenCalled();
+    expect(handleMessage).toHaveBeenCalledTimes(1);
+    expect(handleMessage.mock.calls[0][0].text).toBe('production canary input');
+    expect(handleMessage.mock.calls[0][0].intakeItems).toHaveLength(1);
+  });
+
   it.each([
     ['callback_in_flight', owner => { owner.cpCallbackInFlight = true; }],
     ['callback_no_longer_owned', owner => { owner._callbackOwned = vi.fn().mockResolvedValue(false); }],
