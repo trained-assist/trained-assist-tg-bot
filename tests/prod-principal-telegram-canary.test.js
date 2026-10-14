@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
   summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
   waitForLaneIdentity, waitForLiveLane, shouldRetryTestUpdate,
-  summarizeCallbackResponse, summarizeTestUpdateRequest } from '../tools/prod-principal-telegram-canary.mjs';
+  summarizeCallbackResponse, summarizeTestUpdateRequest, summarizeTelegramDelivery } from '../tools/prod-principal-telegram-canary.mjs';
 
 describe('production canary retries only pre-dispatch test endpoint readiness', () => {
   it('retries test API propagation and callback collector readiness before webhook dispatch', () => {
@@ -21,6 +21,17 @@ describe('production canary retries only pre-dispatch test endpoint readiness', 
 });
 
 describe('production canary failure evidence excludes prompts and credentials', () => {
+  it('confirms only successful Telegram sendMessage responses without retaining content', () => {
+    const summary = summarizeTelegramDelivery({ transcript: [
+      { kind: 'sendMessage', text: 'sensitive response', telegramOk: true, messageId: 42 },
+      { kind: 'sendMessage', text: 'another response', telegramOk: false, errorClass: 'bot_blocked' },
+      { kind: 'sendMessage', text: 'capture-only response' },
+    ] });
+    expect(summary).toEqual({ attempted: 3, delivered: 1, rejected: 1,
+      providerMessageIdPresent: true, rejectionClasses: ['bot_blocked'] });
+    expect(JSON.stringify(summary)).not.toContain('sensitive response');
+  });
+
   it('records only safe request shape and pinned identity matches', () => {
     const summary = summarizeTestUpdateRequest({ target: 'prod-principal', type: 'message', delivery: 'telegram',
       chatId: 1714048, userId: 1714048, updateId: 123, text: '/login secret-user secret-password' });

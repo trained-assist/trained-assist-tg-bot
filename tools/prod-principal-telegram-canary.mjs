@@ -208,6 +208,21 @@ export function summarizeCallbackResponse(payload = {}) {
   };
 }
 
+export function summarizeTelegramDelivery(payload = {}) {
+  const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+  const sends = transcript.filter(entry => entry?.kind === 'sendMessage');
+  const delivered = sends.filter(entry => entry.telegramOk === true && Number.isSafeInteger(entry.messageId));
+  const rejected = sends.filter(entry => entry.telegramOk === false);
+  return {
+    attempted: sends.length,
+    delivered: delivered.length,
+    rejected: rejected.length,
+    providerMessageIdPresent: delivered.length > 0,
+    rejectionClasses: rejected.map(entry => typeof entry.errorClass === 'string' && /^[a-z_]{1,48}$/.test(entry.errorClass)
+      ? entry.errorClass : 'unknown'),
+  };
+}
+
 async function send(text, extra = {}) {
   const { chatId, userId } = identity();
   return workerRequest('/operator/test-update', { target: TARGET, type: 'message', chatId, userId,
@@ -411,7 +426,10 @@ async function main() {
     await checkpoint('authenticating_test_profile');
     const login = await send(`/login ${username} ${password}`);
     assert.equal(login.admission?.authenticated, true, 'prod_principal_canary_login_failed');
-    await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
+    const loginDelivery = summarizeTelegramDelivery(login);
+    assert(loginDelivery.delivered > 0, 'prod_principal_canary_telegram_outbound_not_confirmed');
+    await checkpoint('test_profile_authenticated', { loginAuthenticated: true,
+      telegramOutbound: { verified: true, ...loginDelivery } });
 
     const nonce = `PROD-PRINCIPAL-${randomBytes(8).toString('hex').toUpperCase()}`;
     const startedAt = Date.now();
