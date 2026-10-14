@@ -35,4 +35,39 @@ describe('prod-principal safe restore guard', () => {
     });
     expect(missing).toMatchObject({ safeToRestore: false, reasonCode: 'prod_principal_lane_evidence_unavailable' });
   });
+
+  it('cleans only a quiescent pinned draft after all tasks are terminal, then permits restore', async () => {
+    let now = 0;
+    let reads = 0;
+    let cleanups = 0;
+    const result = await waitForProdPrincipalRestore(async () => {
+      reads += 1;
+      return { status: 200, evidence: { profileId: 'production-e2e-telegram-v1', tasks: [],
+        buffer: reads === 1
+          ? { pendingCount: 1, busy: false, launching: 0, unresolvedLaunchCount: 0, busyRequestCount: 0, alarmAt: null }
+          : { pendingCount: 0, busy: false, launching: 0, unresolvedLaunchCount: 0, busyRequestCount: 0 } } };
+    }, { cleanupStrandedDraft: async () => { cleanups += 1; return true; },
+      timeoutMs: 5_000, intervalMs: 1_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } });
+
+    expect(cleanups).toBe(1);
+    expect(reads).toBe(2);
+    expect(result).toMatchObject({ safeToRestore: true,
+      reasonCode: 'terminal_idle_after_scoped_draft_cleanup', strandedDraftCleaned: true, tasksTerminal: true, intakeIdle: true });
+  });
+
+  it('does not clear a draft with a live alarm or an in-flight launch barrier', async () => {
+    let now = 0;
+    let cleanups = 0;
+    const result = await waitForProdPrincipalRestore(async () => ({ status: 200,
+      evidence: { profileId: 'production-e2e-telegram-v1', tasks: [],
+        buffer: { pendingCount: 1, busy: false, launching: 0, unresolvedLaunchCount: 0,
+          busyRequestCount: 0, alarmAt: 1 } } }), {
+      cleanupStrandedDraft: async () => { cleanups += 1; return true; },
+      timeoutMs: 2_000, intervalMs: 1_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; },
+    });
+    expect(cleanups).toBe(0);
+    expect(result).toMatchObject({ safeToRestore: false, reasonCode: 'prod_principal_task_or_buffer_not_terminal' });
+  });
 });

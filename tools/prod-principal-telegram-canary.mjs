@@ -382,6 +382,9 @@ async function main() {
     const launched = await pressCurrentLaunchButton();
     assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
     const launchState = launched.collector ?? {};
+    await checkpoint('first_turn_launch_callback', { turns: [{ accepted: true,
+      launch: summarizeLaunch(launched), admissionCode: typeof launched.admission?.code === 'string'
+        ? launched.admission.code : null, callbackAccepted: launched.admission?.ok === true }] });
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
         !(launchState.launchingMessageIds ?? []).length &&
         !(Number(launchState.controlPlaneBarrier?.busyRequestCount) > 0) &&
