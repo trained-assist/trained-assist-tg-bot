@@ -11,6 +11,7 @@ on:
           - events
           - invocations
           - traces
+          - intake
 
 permissions:
   contents: read
@@ -26,7 +27,59 @@ jobs:
       CF_WORKER_NAME: trained-assist-tg-bot
       CF_GENERATE_HEALTH_TRAFFIC: "false"
       CF_QUERY_VIEW: ${{ inputs.view }}
+      AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - name: Query production trace summaries
+        if: inputs.view != 'intake'
         run: python3 scripts/cloudflare/query-worker-traces.py
+      - name: Read only the fixed production test-account intake state
+        if: inputs.view == 'intake'
+        run: |
+          node --input-type=module <<'NODE'
+          const base = 'https://trained-assist-tg-bot.skillset-apply.workers.dev';
+          const chatId = '1714048';
+          const secret = process.env.AGENT_SECRET?.trim();
+          if (!secret) throw new Error('agent_secret_missing');
+          const read = async (path, headers = {}) => {
+            const response = await fetch(new URL(path, base), { headers, signal: AbortSignal.timeout(15000) });
+            const body = await response.json().catch(() => null);
+            if (!response.ok) throw new Error(`probe_http_${response.status}`);
+            return body;
+          };
+          const [health, raw] = await Promise.all([
+            read('/health'),
+            read(`/debug/intake/${chatId}`, { authorization: `Bearer ${secret}` }),
+          ]);
+          const safeTime = value => Number.isSafeInteger(value) && value > 0 ? new Date(value).toISOString() : null;
+          const barrier = raw.controlPlaneBarrier ?? {};
+          const last = raw.lastDispatchOutcome ?? {};
+          console.log(JSON.stringify({
+            chatId,
+            health: { status: health.status ?? null, buildSha: health.buildSha ?? null,
+              executionBackend: health.executionBackend ?? null, ingressPaused: health.ingressPaused ?? null,
+              deliveryPaused: health.deliveryPaused ?? null },
+            intake: { busy: raw.busy === true, busySince: safeTime(raw.busySince),
+              bufferCount: Array.isArray(raw.buf) ? raw.buf.length : null,
+              retryBatchCount: Array.isArray(raw.retryBatch) ? raw.retryBatch.length : null,
+              launchingCount: Array.isArray(raw.launching) ? raw.launching.length : null,
+              retryBatchAttempts: Number.isSafeInteger(raw.retryBatchAttempts) ? raw.retryBatchAttempts : null,
+              alarmAt: safeTime(raw.alarm), receiptDue: safeTime(raw.receiptDue),
+              debounceExpiresAt: safeTime(raw.debounceExpiresAt), stranded: raw.stranded === true,
+              collectorPresent: Number.isSafeInteger(raw.collectorMsgId),
+              collectorDeliveryState: ['sent','pending','failed','unknown'].includes(raw.collectorDelivery?.state)
+                ? raw.collectorDelivery.state : null,
+              lastDispatchOutcome: { at: safeTime(last.at), status: ['not_started','claimed','queued','dispatching','accepted','not_accepted','outcome_unknown'].includes(last.status) ? last.status : null,
+                reasonCode: typeof last.reasonCode === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(last.reasonCode) ? last.reasonCode : null,
+                itemCount: Number.isSafeInteger(last.itemCount) ? last.itemCount : null },
+              controlPlaneBarrier: { busyRequestCount: Number.isSafeInteger(barrier.busyRequestCount) ? barrier.busyRequestCount : null,
+                unresolvedLaunchCount: Number.isSafeInteger(barrier.unresolvedLaunchCount) ? barrier.unresolvedLaunchCount : null,
+                stopPending: barrier.stopPending === true,
+                busyRequests: Array.isArray(barrier.busyRequests) ? barrier.busyRequests.map(item => ({
+                  userTaskId: typeof item.userTaskId === 'string' && /^ut-[A-Za-z0-9_-]{1,80}$/.test(item.userTaskId) ? item.userTaskId : null,
+                  terminal: item.terminal === true, outcomeUnknown: item.outcomeUnknown === true, stale: item.stale === true,
+                })) : [] },
+            },
+            sideEffects: 'read_only; fixed private test-account chat only',
+          }));
+          NODE
