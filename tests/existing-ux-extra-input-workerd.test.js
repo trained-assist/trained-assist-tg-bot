@@ -175,7 +175,9 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
       from: { id: 43, is_bot: false }, data: `ws|answer|${await draftRevision()}`,
       message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
     await sendUpdate(launch);
+    expect(intakes).toHaveLength(0);
     await sendUpdate(launch);
+    await alarm();
     expect(intakes).toHaveLength(1);
     expect(intakes[0].inputItems).toEqual([{ text: first.message.text, artifactRefs: [] },
       { text: extra.message.text, artifactRefs: [] }]);

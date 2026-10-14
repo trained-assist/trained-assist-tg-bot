@@ -754,6 +754,7 @@ app.post('/operator/test-update', async context => {
     collectorDraftRevision: after.collectorDraftRevision ?? null,
     launchingMessageIds: (after.launching ?? []).map(item => item.messageId).filter(Number.isSafeInteger),
     controlPlaneBarrier: after.controlPlaneBarrier ?? null,
+    lastDispatchOutcome: after.lastDispatchOutcome ?? null,
     artifacts: (after.buf ?? []).flatMap(item => {
       const manifest = item.msg?.artifactManifest;
       return manifest ? [{ name: manifest.name, sizeBytes: manifest.sizeBytes,

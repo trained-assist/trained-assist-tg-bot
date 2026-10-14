@@ -701,6 +701,10 @@ export async function handleCallbackQuery(cq, env) {
         return;
       }
       const r = await response.json().catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
+      // The durable intake checkpoint is the acknowledgement. Leave all further
+      // Telegram edits and CP routing to the DO alarm so webhook latency cannot
+      // depend on another Telegram API call or runner admission.
+      if (r?.asynchronous) return;
       // RC-03: an accepted parallel launch says so — it is a DIFFERENT claim
       // from «запущу после текущей» and must not reuse that wording.
       if (r?.parallel) {

@@ -14,6 +14,10 @@ export function summarizeLaunch(launch) {
     pendingCount: Number.isSafeInteger(collector.pendingCount) ? collector.pendingCount : null,
     busy: collector.busy === true,
     launchingCount: Array.isArray(collector.launchingMessageIds) ? collector.launchingMessageIds.length : null,
+    dispatchStatus: ['not_started', 'claimed', 'queued', 'dispatching', 'accepted', 'not_accepted', 'outcome_unknown'].includes(collector.lastDispatchOutcome?.status)
+      ? collector.lastDispatchOutcome.status : null,
+    dispatchReasonCode: typeof collector.lastDispatchOutcome?.reasonCode === 'string'
+      ? collector.lastDispatchOutcome.reasonCode : null,
     controlPlaneBarrierPresent: collector.controlPlaneBarrier !== null && collector.controlPlaneBarrier !== undefined,
     ...barrier,
   };
