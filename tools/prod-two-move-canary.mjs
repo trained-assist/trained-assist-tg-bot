@@ -5,9 +5,8 @@
 // the first turn's context survived the round trip through CP -> Runner ->
 // France VM -> gateway delivery.
 //
-// Unlike prod-principal-telegram-canary.mjs (lane=prod-principal, test bot
-// ptichka_status_bot via the sandbox3 operator lane) this canary injects
-// synthetic Telegram updates straight into the production worker webhook
+// This check injects synthetic Telegram updates straight into the production
+// worker webhook
 // (continuous-dev/TESTING.md §2). The lane is pinned by machine-checkable
 // bot identity: a run that ever targets another bot fails loudly (E6 lesson).
 //
@@ -27,6 +26,7 @@ const WORKER = process.env.WORKER_URL ?? 'https://trained-assist-tg-bot.skillset
 const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
 const LANE = 'production';
 const EXPECTED_BOT_USERNAME = 'super_personal_assistant_bot';
+const EXPECTED_BUILD_SHA = process.env.EXPECTED_BUILD_SHA ?? '';
 const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
 const POLL_MS = 5_000;
 const COLLECTOR_TIMEOUT_MS = 120_000;
@@ -240,6 +240,7 @@ async function preflight() {
   assert.equal(health.ingressPaused, false, 'ingress_paused');
   assert.equal(health.deliveryPaused, false, 'delivery_paused');
   evidence.buildSha = health.buildSha ?? null;
+  if (EXPECTED_BUILD_SHA) assert.equal(health.buildSha, EXPECTED_BUILD_SHA, 'production_build_sha_mismatch');
 
   const intake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
   assert.equal(intake.busy, false, 'intake_busy_at_preflight');

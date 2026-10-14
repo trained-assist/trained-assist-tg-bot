@@ -1,0 +1,59 @@
+name: Production Telegram test account E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: Send two verification tasks through the ordinary production bot and CP route
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trained-assist-production-test-account-e2e
+  cancel-in-progress: false
+
+jobs:
+  production-test-account-e2e:
+    if: ${{ inputs.run_e2e == true && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require protected main and fixed production test account
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$REF" = "refs/heads/main"
+          echo 'Target is the existing production bot and private test account 1714048.'
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run two-move production test through the real Worker, CP, Runner, and Telegram delivery
+        env:
+          WORKER_URL: https://trained-assist-tg-bot.skillset-apply.workers.dev
+          CHAT_ID: '1714048'
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
+          WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          EVIDENCE_OUT: prod-two-move-canary-evidence.json
+        run: node tools/prod-two-move-canary.mjs
+
+      - name: Preserve redacted test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-test-account-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: prod-two-move-canary-evidence.json
+          if-no-files-found: warn

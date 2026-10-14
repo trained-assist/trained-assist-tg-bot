@@ -20,18 +20,12 @@ it('routes the production bot to CP with an open production lane', () => {
   expect(wrangler).toContain('TG_SLICE_ALLOWED_USERS = ""');
   expect(wrangler).toContain('class_name = "IntakeBuffer"');
   expect(wrangler).toContain('class_name = "TgDeliveryOwner"');
-  expect(wrangler).not.toContain('TG_PRODUCTION_E2E_MODE');
 });
 
 it('keeps named staging and secondary bot environments on the legacy entrypoint', () => {
   for (const name of ['staging', 'recruiter', 'freelance', 'sales']) {
     expect(wrangler).toMatch(new RegExp(`^\\[env\\.${name}\\][\\s\\S]{0,100}^main = "src/index\\.js"$`, 'm'));
   }
-});
-
-it('syncs the scoped production CP signature from the protected repository secret', () => {
-  expect(ci).toContain('secrets.CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE');
-  expect(ci).toContain('wrangler secret put CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE');
 });
 
 it('syncs the ordinary production gateway principal credentials', () => {

@@ -27,35 +27,6 @@ const summary = record => record ? {
   legacyStatus: record.legacyStatus ?? null,
 } : null;
 
-function isPinnedProductionE2eLane(env, config) {
-  const pinnedSandboxE2e = env.TG_ACCEPT_ONLY_ENVIRONMENT === 'sandbox' &&
-    env.TG_SANDBOX_TEST_API_ENABLED === 'true' && env.TG_SANDBOX_BOT_USERNAME === 'ptichka_status_bot';
-  const pinnedProductionBotE2e = env.TG_PRODUCTION_E2E_MODE === 'true' &&
-    env.TG_ACCEPT_ONLY_ENVIRONMENT === 'production-e2e' && env.BOT_USERNAME === 'super_personal_assistant_bot';
-  return (pinnedSandboxE2e || pinnedProductionBotE2e) &&
-    env.CONTROL_PLANE_URL === 'https://trained-assist-cp-production.skillset-apply.workers.dev' &&
-    env.CONTROL_PLANE_PRINCIPAL === 'production-e2e-telegram-v1' &&
-    env.CONTROL_PLANE_PROFILE === 'production-e2e-telegram-v1' &&
-    env.SESSION_NAMESPACE === 'integrator-production-e2e-v1' &&
-    config.botUsername === (pinnedProductionBotE2e ? 'super_personal_assistant_bot' : 'ptichka_status_bot') &&
-    config.controlPlaneUrl === 'https://trained-assist-cp-production.skillset-apply.workers.dev' &&
-    config.profileId === 'production-e2e-telegram-v1';
-}
-
-function productionE2eEmptyCutoverManifest(botUsername) {
-  return {
-    version: 'tg-delivery-cutover-v1',
-    botUsername,
-    profileId: 'production-e2e-telegram-v1',
-    cutoverId: 'production-e2e-empty-cutover-v1',
-    // Stable across Worker restarts so the dedicated owner namespace keeps
-    // the same immutable fingerprint for the lifetime of this test lane.
-    cutoverAt: 1_700_000_000_000,
-    oldTaskIds: [],
-    deliveries: [],
-  };
-}
-
 function productionEmptyCutoverManifest(botUsername) {
   return {
     version: 'tg-delivery-cutover-v1',
@@ -71,14 +42,9 @@ function productionEmptyCutoverManifest(botUsername) {
 }
 
 export function cutoverManifest(env, config = readTgSliceConfig(env)) {
-  // The ordinary production lane starts from an empty delivery owner, exactly
-  // like the pinned production E2E lane: no legacy destinations to import.
+  // The ordinary production lane starts from an empty delivery owner; no
+  // legacy destinations are imported.
   if (config.productionMode) return productionEmptyCutoverManifest(config.botUsername);
-  // The pinned production E2E lane has its own Durable Object namespace and
-  // must not import sandbox3's secret manifest of legacy destinations. Its
-  // owner starts empty; the strict lane check prevents this exception from
-  // weakening any ordinary sandbox or production configuration.
-  if (isPinnedProductionE2eLane(env, config)) return productionE2eEmptyCutoverManifest(config.botUsername);
   const raw = env.TG_SLICE_DELIVERY_CUTOVER_MANIFEST;
   if (typeof raw !== 'string' || new TextEncoder().encode(raw).length > 65536) throw new TgSliceConfigError('cutover manifest required', 'TG_SLICE_DELIVERY_CUTOVER_MANIFEST');
   let manifest;

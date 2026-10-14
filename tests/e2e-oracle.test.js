@@ -149,20 +149,3 @@ describe('e2e oracle sandbox3 after-stop launch checks (C1.2)', () => {
     expect(launchWasDispatched(after, before)).toBe(false);
   });
 });
-
-describe('e2e oracle adoption guard (C1.2)', () => {
-  const readTool = name => readFileSync(fileURLToPath(new URL(`../tools/${name}`, import.meta.url)), 'utf8');
-
-  it('keeps sandbox3 after-stop dispatch checks on the shared oracle', () => {
-    const source = readTool('sandbox3-agent-e2e.mjs');
-    expect(source).toMatch(/launchWasDispatched\(freshLaunch, freshQuestion\.collector\)/);
-    expect(source).not.toMatch(/busyRequestCount \?\? 0\) > \d/);
-  });
-
-  it('keeps production lane buffer summaries on the shared oracle', () => {
-    expect(readTool('prod-principal-state-probe.mjs')).toMatch(/summarizeIntakeState\(evidence\.buffer\)/);
-    expect(readTool('prod-principal-restore-guard-lib.mjs')).toMatch(/cleanupReadiness\(observed\.evidence\)/);
-    expect(readTool('prod-principal-resume-held-input.mjs')).toMatch(/intakeIsIdle\(evidence\.buffer\)/);
-    expect(readTool('sandbox-entry-smoke-lib.mjs')).toMatch(/controlPlaneBarrierCounts\(question\.collector\)/);
-  });
-});

@@ -12,18 +12,10 @@ const LANES = Object.freeze({
     principalId: 'integration-sandbox3-v1',
     profileId: 'integration-sandbox3-v1',
   }),
-  'prod-principal': Object.freeze({
-    botUsername: 'ptichka_status_bot',
-    sessionNamespace: 'integrator-production-e2e-v1',
-    controlPlaneUrl: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
-    principalId: 'production-e2e-telegram-v1',
-    profileId: 'production-e2e-telegram-v1',
-  }),
 });
 
 /** Return a fixed sandbox lane only when its bot, state namespace and CP agree. */
 export function sandboxControlPlaneFetch(env) {
-  if (sandboxOperatorLane(env) === 'prod-principal') return undefined;
   return env?.CONTROL_PLANE_SERVICE?.fetch?.bind(env.CONTROL_PLANE_SERVICE);
 }
 
@@ -42,11 +34,11 @@ export function sandboxOperatorLane(env) {
 }
 
 export function sandboxOperatorToken(env, target) {
-  return String(env?.[target === 'sandbox3' || target === 'prod-principal'
+  return String(env?.[target === 'sandbox3'
     ? 'TG_SANDBOX3_OPERATOR_TOKEN' : 'TG_SANDBOX_CLEANUP_TOKEN'] ?? '').trim();
 }
 
-const isPinnedTestLane = target => target === 'sandbox3' || target === 'prod-principal';
+const isPinnedTestLane = target => target === 'sandbox3';
 
 export function sandboxOperatorChatAllowed(env, config, target, chatId) {
   const value = String(chatId);

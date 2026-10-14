@@ -44,8 +44,6 @@
 | `/operator/test-evidence` | GET | 401 | Корреляция CP acceptance → task store → delivery. Возвращает tasks[], buffer state. |
 | `/operator/test-delivery/:taskId` | GET | 401 | Read-only чтение delivery receipt + terminal + artifacts по taskId. |
 | `/operator/test-update` | POST | exists (404 на GET probe) | Отправка Telegram-shaped message/callback в webhook. Возвращает bot replies как JSON. |
-| `/operator/test-wake-pending-task` | POST | exists (404 на GET probe) | Wake alarm для уже accepted queued task (только prod-principal lane). |
-| `/operator/test-cleanup` | POST | exists (404 на GET probe) | Очистка sandbox state. |
 | `/operator/test-buffer-message` | POST | exists (404 на GET probe) | Буферизация сообщения в intake. |
 | `/operator/delivery-cutover` | GET | — | Состояние delivery cutover. |
 | `/operator/delivery-cutover-v1` | GET | — | Состояние delivery cutover v1. |
@@ -117,14 +115,14 @@ Production worker (`src/index.js`) имеет только: `/health`, `/webhook
 | `/pass_reset username` | Генерация тестового пароля + команда входа. | `src/handlers/user-mgmt.js` |
 | `/login username password` | Вход в sandbox. | `src/handlers/user-mgmt.js` |
 
-**Примечание:** это Telegram bot commands, а не HTTP endpoints. Для E2E сценария «сгенерировать пароль → записать сообщение → получить ответ» используется sandbox3 с пинned chat 1714048.
+**Примечание:** это Telegram bot commands, а не HTTP endpoints. Sandbox E2E использует отдельного тестового пользователя sandbox-бота. Production E2E проводится через настоящий production Worker и существующий тестовый аккаунт.
 
 ## 7. Test chat 1714048
 
 | Среда | Конфигурация | Статус |
 |---|---|---|
-| sandbox3 | `TG_SANDBOX_E2E_CHAT_ID = "1714048"`, `TG_SANDBOX_E2E_USER_ID = "1714048"` | Пинned, operator-эндпоинты принимают только этот chatId. |
-| production | `TG_SLICE_ALLOWED_CHATS = "1714048"` | Allowlisted, но operator-эндпоинтов нет. |
+| sandbox3 | `TG_SANDBOX_E2E_CHAT_ID` / `TG_SANDBOX_E2E_USER_ID` задаются секретами workflow | Отдельный sandbox bot + sandbox CP; pinned только внутри sandbox. |
+| production | Существующий приватный тестовый чат/user `1714048` | Реальный production bot + обычный `gateway` principal и `trained-assist-production` profile. Запуск: `Production Telegram test account E2E` из `main`. |
 
 ## 8. Сводная матрица: среда × эндпоинт × статус
 
@@ -134,8 +132,6 @@ Production worker (`src/index.js`) имеет только: `/health`, `/webhook
 | `/operator/test-evidence` | 401 (exists) | 401 (exists) | 404 |
 | `/operator/test-delivery/:taskId` | 401 (exists) | 401 (exists) | 404 |
 | `/operator/test-update` | exists (POST) | — | 404 |
-| `/operator/test-wake-pending-task` | exists (POST) | — | 404 |
-| `/operator/test-cleanup` | exists (POST) | — | 404 |
 | `/operator/test-buffer-message` | exists (POST) | — | 404 |
 | `/internal/health/*` | exists | — | exists |
 | `/v1/runs/*` (Runner) | 200 (healthz) | — | — |
@@ -148,11 +144,9 @@ Production worker (`src/index.js`) имеет только: `/health`, `/webhook
 4. **Runner API не имеет выделенных self-test эндпоинтов.** Тестирование через `/v1/runs` (создание ранна) + `/healthz/workers`.
 5. **CP internal эндпоинты** существуют в коде, но не probe'ились в этой сессии (требуют auth/параметры).
 
-## 10. Следующие шаги
+## 10. Production E2E
 
-- **S2:** Реализовать сценарий «сгенерировать пароль → записать сообщение в 1714048 → получить ответ» на sandbox3, используя operator-эндпоинты.
-- **S3:** Продумать prod-путь (или зафиксировать ограничение).
-- **S4:** Интегрировать e2e-user/worker с этой средой → runbook-источник токена: §11.
+Production не имеет operator/self-test endpoints. Тест проходит через обычный production Worker, bot `@super_personal_assistant_bot` и существующий приватный тестовый аккаунт `1714048`. Protected workflow `Production Telegram test account E2E` проверяет identity, build SHA, включённый ingress/delivery и пустое состояние Intake перед двумя сообщениями, затем сохраняет redacted evidence. Никогда не направлять sandbox bot/Worker в production CP.
 
 ## 11. Runbook: источник `TG_SANDBOX3_OPERATOR_TOKEN` (S4)
 
