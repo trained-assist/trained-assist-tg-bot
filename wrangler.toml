@@ -57,6 +57,13 @@ class_name = "TgDeliveryOwner"
 name = "RETRY_QUEUE"
 class_name = "RetryQueue"
 
+# Production webhook updates are acknowledged only after this Durable Object
+# has persisted the immutable update envelope. Other named environments remain
+# on their existing webhook path until separately migrated.
+[[durable_objects.bindings]]
+name = "TELEGRAM_UPDATE_INBOX"
+class_name = "TelegramUpdateInbox"
+
 # NOTE (2026-09-18): existing deploys already created IntakeBuffer /
 # RetryQueue / MediaJob namespaces in their respective environments with
 # SQLite storage, so re-declaring `new_sqlite_classes` here fails CF API
@@ -121,6 +128,10 @@ TEST_CHAT_IDS = ""
 [[env.staging.durable_objects.bindings]]
 name = "INTAKE"
 class_name = "IntakeBuffer"
+
+[[env.staging.durable_objects.bindings]]
+name = "TELEGRAM_UPDATE_INBOX"
+class_name = "TelegramUpdateInbox"
 
 # Dedicated staging KV; checked before mandatory replay
 [[env.staging.kv_namespaces]]
@@ -391,6 +402,10 @@ class_name = "MediaJob"
 tag = "v4-media"
 new_sqlite_classes = ["MediaJob"]
 
+[[env.staging.migrations]]
+tag = "v5-telegram-update-inbox"
+new_sqlite_classes = ["TelegramUpdateInbox"]
+
 [[env.recruiter.durable_objects.bindings]]
 name = "MEDIA_JOBS"
 class_name = "MediaJob"
@@ -423,6 +438,10 @@ new_sqlite_classes = ["ProductionE2eIntakeBuffer", "ProductionE2eTgDeliveryOwner
 [[migrations]]
 tag = "v6-production-delivery-owner"
 new_sqlite_classes = ["TgDeliveryOwner"]
+
+[[migrations]]
+tag = "v7-telegram-update-inbox"
+new_sqlite_classes = ["TelegramUpdateInbox"]
 
 [[env.staging.durable_objects.bindings]]
 name = "RUN_OUTBOX"
