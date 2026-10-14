@@ -7,7 +7,7 @@ import { cleanupReadiness, controlPlaneBarrierCounts, intakeIsIdle, launchWasDis
   summarizeIntakeState, summarizeLaunch } from './e2e-oracle.mjs';
 
 export { cleanupReadiness, intakeIsIdle, launchWasDispatched, summarizeIntakeState,
-  summarizeLaunch };
+  summarizeLaunch, waitForLiveLane };
 
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 // E6: this canary proves production-principle of the CP/Runner (real production
@@ -127,8 +127,8 @@ export async function waitForLaneIdentity(readHealth, { expectedBuildSha, timeou
 
 async function workerRequest(path, body) {
   const method = body === undefined ? 'GET' : 'POST';
-  const response = await fetch(`${WORKER}${path}`, { method,
-    headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`,
+  const response = await fetch(`${WORKER}${path}`, { method, cache: 'no-store',
+    headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'cache-control': 'no-cache',
       ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(60_000) });
@@ -185,12 +185,13 @@ async function pressCurrentLaunchButton() {
   throw new Error(`prod_principal_canary_collector_button_timeout_${lastCode}`);
 }
 
-async function waitForLiveLane() {
-  const deadline = Date.now() + 60_000;
+export async function waitForLiveLane(readEvidence, { timeoutMs = 180_000, intervalMs = 2_000,
+  now = () => Date.now(), sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const deadline = now() + timeoutMs;
   let lastReadiness = null;
   let expectedProfileObserved = false;
-  while (Date.now() < deadline) {
-    const evidence = await workerRequest('/operator/test-evidence');
+  while (now() < deadline) {
+    const evidence = await readEvidence();
     expectedProfileObserved ||= evidence.profileId === PROFILE_ID;
     lastReadiness = evidence.readiness ?? {};
     if (liveLaneIsReady(evidence)) return evidence;
@@ -198,7 +199,7 @@ async function waitForLiveLane() {
     // Some Cloudflare edges can briefly serve the prior Worker version, whose
     // profile identity differs. Poll until the intended profile and live
     // readiness are both visible; do not send messages to that old lane.
-    await new Promise(resolve => setTimeout(resolve, 2_000));
+    await sleep(Math.min(intervalMs, deadline - now()));
   }
   if (!expectedProfileObserved) throw new Error('prod_principal_canary_profile_not_propagated');
   throw new Error(`prod_principal_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
@@ -323,7 +324,7 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('prod_principal_canary_target_required');
   const { chatId } = identity();
   const laneIdentity = await verifyLiveLaneIdentity();
-  const before = await waitForLiveLane();
+  const before = await waitForLiveLane(() => workerRequest('/operator/test-evidence'));
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
     throw new Error('prod_principal_canary_intake_not_idle');

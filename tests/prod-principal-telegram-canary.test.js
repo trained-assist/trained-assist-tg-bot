@@ -3,9 +3,37 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
   summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
-  waitForLaneIdentity } from '../tools/prod-principal-telegram-canary.mjs';
+  waitForLaneIdentity, waitForLiveLane } from '../tools/prod-principal-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
+  it('waits through delayed profile propagation before admitting any input', async () => {
+    let now = 0;
+    let reads = 0;
+    const staleLane = { profileId: 'integration-sandbox3-v1', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } };
+    const liveLane = { profileId: 'production-e2e-telegram-v1', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } };
+    const evidence = await waitForLiveLane(async () => ++reads < 32 ? staleLane : liveLane, {
+      timeoutMs: 180_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; },
+    });
+
+    expect(reads).toBe(32);
+    expect(now).toBe(62_000);
+    expect(evidence).toBe(liveLane);
+  });
+
+  it('fails closed when the expected profile is never observed during propagation wait', async () => {
+    let now = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } }), { timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } }))
+      .rejects.toThrow('prod_principal_canary_profile_not_propagated');
+  });
+
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
     expect(liveLaneIsReady({ profileId: 'integration-sandbox3-v1', readiness: {
       testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
