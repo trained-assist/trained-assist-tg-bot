@@ -64,7 +64,7 @@ alarm-тике (см. GAP-3 про риск при исключении в са�
 | 3247 | `_recoverControlPlaneLaunch()` бросает | ✅ fixed | catch больше не завершает poll возвратом `false`; checkpoint передаётся в `_handleControlPlaneLaunchFailure` для досборки/уведомления → **GAP-3** (частично закрыт в PR #676; точечный probe A9) |
 | 3248 | `cpDispatches` или `_activeUnresolvedLaunches().length` | guard | корректно: идёт recovery запуска |
 | 3250 | `cpBusyRequests` пуст | — | нормальный выход |
-| 3263 | receipt невалиден (`!receipt` / несовпадение `requestId`/`profileId` / `durable !== true`) | ❌ **wedge** | тихо, без аудита → **GAP-2** (#660) |
+| 3263 | receipt невалиден (`!receipt` / несовпадение `requestId`/`profileId` / `durable !== true`) | ✅ fixed (#267) | wedge снят stale-sweep'ом `_dropStaleControlPlaneLocks` до цикла: id помечается `stale: true`, удаляется из `cpBusyRequests`, busy снимается сразу (не до BUSY_MAX_MS); тесты «releases a stale latch id…», «drops only the stale ids…», «treats a profile-mismatched acceptance record as a stale latch» |
 | 3267-3273 | `/status`: 404 → terminal (A1 ✅); не-404 → `throw` | ⚠️ wedge (5xx) | ретрай без лимита → A2 (CP #280); тест «keeps the barrier on CP 500» (`tests/intake-buffer-control-plane.test.js:1883`) |
 | 3276 | `row.id`/`row.profile_id` ≠ receipt | ❌ **wedge** | рассинхрон строк → **GAP-2** (#660) |
 | 3286-3331 | non-terminal → route-путь: L3290 `routingRetryClaim` defer; L3296 stopPending defer; L3301 невалидный routed → `return false`; L3309 snapshot mismatch → `return false` | ❌ **wedge** (L3301, L3309) | → **GAP-2** (#660) |
@@ -82,7 +82,7 @@ alarm-тике (см. GAP-3 про риск при исключении в са�
 | Gap | Суть | Issue | Якоря |
 |---|---|---|---|
 | GAP-1 | ~~У CP-ветки busy-релиза нет hard TTL~~ → **закрыт**: hard cap symmetric with non-CP path; `BUSY_MAX_MS` освобождает wedged busy window | #659 (#676) | `src/intake-buffer.js:3647-3666` |
-| GAP-2 | Desync-пути `return false` (invalid receipt, row desync, snapshot mismatch, invalid generation) навсегда клинят poll; одной плохой записи достаточно (нет `continue`); тихо — без аудита и без сообщения пользователю | #660 | `src/intake-buffer.js:3263, 3276, 3309, 3333-3334, 3338-3340` |
+| GAP-2 | Desync-пути `return false` (invalid receipt, row desync, snapshot mismatch, invalid generation) навсегда клинят poll; одной плохой записи достаточно (нет `continue`); тихо — без аудита и без сообщения пользователю | #660 | `src/intake-buffer.js:3263, 3276, 3309, 3333-3334, 3338-3340` | **invalid-receipt wedge закрыт #267** (stale-sweep до цикла); остальные GAP-2 пути открыты |
 | GAP-3 | ~~Ошибка `_recoverControlPlaneLaunch` клинит весь poll~~ → **wedge снят** в PR #676 (L3269); checkpoint передаётся в `_handleControlPlaneLaunchFailure` для досборки/уведомления; полный retry-test в `tests/intake-buffer-control-plane.test.js` (A9) | #661 | `src/intake-buffer.js:3247,3269` |
 | GAP-4 | `/route`: 404 в poll'е → вечный ретрай (не классифицируется как unknown-outcome, в отличие от 404 на `/status`); в intake-пути ошибка глотается (`routingPending`) — пользователь не информирован | #662 | `src/intake-buffer.js:3299-3301`; `src/lib/control-plane-execution.js:162-173` |
 | GAP-5 | `/start` никогда не ретрайтится poll'ом; batch lane при провале `/start` после успешного `/intake` молча оставляет принятую незапущенную задачу | #663 | `src/sandbox-tg/worker.js:139-145`; `src/sandbox-tg/conversation.js:320` |
