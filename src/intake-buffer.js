@@ -1,7 +1,7 @@
 import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
-import { mediaEnabled, mediaOf, mediaId, enqueueMedia } from './media-jobs.js';
+import { mediaEnabled, mediaOf, mediaId, enqueueMedia, cpMediaSupported } from './media-jobs.js';
 import { getSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
@@ -1623,10 +1623,10 @@ export class IntakeBuffer {
       if (diverted) return diverted;
       const cpMode = this.env.EXECUTION_BACKEND === 'control-plane';
       const pendingStopWindow = cpMode && (await this.state.storage.get('cpStopWindow'))?.pending === true;
-      const unsupportedMedia = cpMode && !!mediaOf(msg) && !msg.artifactManifest && !mediaEnabled(this.env);
+      const unsupportedMedia = cpMode && !!mediaOf(msg) && !msg.artifactManifest && !cpMediaSupported(this.env);
       let heldBehindPendingUnsupportedLaunch = false;
       const hasUnsupportedUnresolvedLaunch = async () => {
-        if (!cpMode || mediaEnabled(this.env)) return false;
+        if (!cpMode || cpMediaSupported(this.env)) return false;
         const unresolved = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
         for (const launchKey of unresolved) {
           const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
@@ -1635,7 +1635,7 @@ export class IntakeBuffer {
         }
         return false;
       };
-      const hasUnsupportedDraft = async () => cpMode && !mediaEnabled(this.env) &&
+      const hasUnsupportedDraft = async () => cpMode && !cpMediaSupported(this.env) &&
         [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || []),
           ...((await this.state.storage.get('launching')) || [])]
           .some(item => !!mediaOf(item.msg) && !item.msg?.fileRef && !item.msg?.artifactManifest) || await hasUnsupportedUnresolvedLaunch();
@@ -2940,7 +2940,7 @@ export class IntakeBuffer {
     const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
     const base = items.at(-1)?.msg;
     const checkpoint = await this.state.storage.get(`cp-launch:${launchKey}`);
-    const refusedMedia = !mediaEnabled(this.env) && items.some(item => !!mediaOf(item.msg)
+    const refusedMedia = !cpMediaSupported(this.env) && items.some(item => !!mediaOf(item.msg)
       && !item.msg?.fileRef && !item.msg?.artifactManifest);
     const snapshotRequestId = checkpoint?.snapshotRequestId;
     const acceptance = snapshotRequestId && await this.state.storage.get(`cp-acceptance:${snapshotRequestId}`);

@@ -20,7 +20,7 @@ head_sampling_rate = 0.05
 crons = ["* * * * *"]
 
 [vars]
-MEDIA_PIPELINE = "r2" # Release controller enables only after both VM readers pass.
+MEDIA_PIPELINE = "ingress-buffer" # H3: prod intake uses ingress-buffer artifacts into CP executor.
 RECOVERY_IMPORT_LEGACY = "on"
 BOT_USERNAME = "super_personal_assistant_bot"
 INTAKE_DEBOUNCE = "on"  # Intake accumulator — default ON; set "off" to kill-switch (routes messages straight to the agent, no collect/button).
@@ -41,6 +41,10 @@ TG_SLICE_ALLOWED_CHATS = ""
 TG_SLICE_ALLOWED_USERS = ""
 
 # Intake accumulator Durable Object — collects a chat's messages until the user taps ▶️ Запустить (or types a force word).
+[[services]]
+binding = "INGRESS_BUFFER"
+service = "trained-assist-ingress-buffer-production"
+
 [[durable_objects.bindings]]
 name = "INTAKE"
 class_name = "IntakeBuffer"
