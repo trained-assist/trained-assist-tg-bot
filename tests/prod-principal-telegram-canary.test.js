@@ -3,7 +3,21 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
   summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
-  waitForLaneIdentity, waitForLiveLane } from '../tools/prod-principal-telegram-canary.mjs';
+  waitForLaneIdentity, waitForLiveLane, shouldRetryTestUpdate } from '../tools/prod-principal-telegram-canary.mjs';
+
+describe('production canary retries only pre-dispatch test endpoint readiness', () => {
+  it('retries test API propagation and callback collector readiness before webhook dispatch', () => {
+    expect(shouldRetryTestUpdate(409, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(true);
+    expect(shouldRetryTestUpdate(409, 'no_current_button_message', { type: 'callback' })).toBe(true);
+    expect(shouldRetryTestUpdate(409, 'no_current_button_revision', { type: 'callback' })).toBe(true);
+  });
+
+  it('does not retry ambiguous, unauthorized, or potentially dispatched errors', () => {
+    expect(shouldRetryTestUpdate(409, 'sandbox_test_identity_not_allowed', { type: 'callback' })).toBe(false);
+    expect(shouldRetryTestUpdate(401, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(false);
+    expect(shouldRetryTestUpdate(503, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(false);
+  });
+});
 
 describe('production Telegram canary launch evidence', () => {
   it('waits through delayed profile propagation before admitting any input', async () => {
