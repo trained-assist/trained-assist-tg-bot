@@ -7,7 +7,7 @@ import { cleanupReadiness, controlPlaneBarrierCounts, intakeIsIdle, launchWasDis
   summarizeIntakeState, summarizeLaunch } from './e2e-oracle.mjs';
 
 export { cleanupReadiness, intakeIsIdle, launchWasDispatched, summarizeIntakeState,
-  summarizeLaunch, waitForLiveLane };
+  summarizeLaunch };
 
 const WORKER = 'https://trained-assist-tg-sandbox3.skillset-apply.workers.dev';
 // E6: this canary proves production-principle of the CP/Runner (real production
