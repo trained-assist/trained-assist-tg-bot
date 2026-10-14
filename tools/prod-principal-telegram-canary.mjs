@@ -97,13 +97,32 @@ export function verifyLaneIdentity(health = {}) {
 }
 
 async function verifyLiveLaneIdentity() {
-  const response = await fetch(`${WORKER}/health`, { signal: AbortSignal.timeout(15_000) });
-  const health = await response.json().catch(() => ({}));
+  return waitForLaneIdentity(async () => {
+    const response = await fetch(`${WORKER}/health`, { cache: 'no-store', headers: { 'cache-control': 'no-cache' },
+      signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error('health_not_ready');
+    return response.json().catch(() => ({}));
+  }, { expectedBuildSha: process.env.GITHUB_SHA });
+}
+
+export async function waitForLaneIdentity(readHealth, { expectedBuildSha, timeoutMs = 120_000,
+  intervalMs = 2_000, now = () => Date.now(), sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const deadline = now() + timeoutMs;
+  let health = {};
+  while (now() <= deadline) {
+    try { health = await readHealth(); } catch { health = {}; }
+    const identity = verifyLaneIdentity(health);
+    const revisionMatches = typeof expectedBuildSha === 'string' && /^[a-f0-9]{40}$/.test(expectedBuildSha)
+      && health?.buildSha === expectedBuildSha;
+    if (identity.botMatches && revisionMatches) return { ...identity, buildSha: health.buildSha };
+    if (now() >= deadline) break;
+    await sleep(Math.min(intervalMs, deadline - now()));
+  }
   const identity = verifyLaneIdentity(health);
   if (!identity.botMatches) {
     throw new Error(`prod_principal_bot_mismatch_expected_${EXPECTED_BOT_USERNAME}_got_${identity.botUsername ?? 'missing'}`);
   }
-  return identity;
+  throw new Error('prod_principal_worker_revision_not_propagated');
 }
 
 async function workerRequest(path, body) {

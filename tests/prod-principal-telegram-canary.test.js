@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
-  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness } from '../tools/prod-principal-telegram-canary.mjs';
+  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
+  waitForLaneIdentity } from '../tools/prod-principal-telegram-canary.mjs';
 
 describe('production Telegram canary launch evidence', () => {
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
@@ -101,6 +102,32 @@ describe('production Telegram canary lane identity (E6)', () => {
     const identity = verifyLaneIdentity({ bot: 'ptichka_status_bot' });
     expect(identity).toMatchObject({ lane: 'prod-principal', botUsername: 'ptichka_status_bot',
       expectedBotUsername: 'ptichka_status_bot', botMatches: true });
+  });
+
+  it('waits for the exact deployed Worker revision before accepting lane identity', async () => {
+    let now = 0;
+    let reads = 0;
+    const stale = { bot: 'ptichka_status_bot', buildSha: 'b'.repeat(40) };
+    const live = { bot: '@ptichka_status_bot', buildSha: 'a'.repeat(40) };
+    const identity = await waitForLaneIdentity(async () => ++reads === 1 ? stale : live, {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    });
+    expect(reads).toBe(2);
+    expect(identity).toMatchObject({ botMatches: true, buildSha: 'a'.repeat(40) });
+  });
+
+  it('does not accept missing bot identity or a mismatched source SHA', async () => {
+    let now = 0;
+    await expect(waitForLaneIdentity(async () => ({ buildSha: 'a'.repeat(40) }), {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 2_000, intervalMs: 1_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    })).rejects.toThrow('prod_principal_bot_mismatch_expected_ptichka_status_bot_got_missing');
+    now = 0;
+    await expect(waitForLaneIdentity(async () => ({ bot: 'ptichka_status_bot', buildSha: 'b'.repeat(40) }), {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 2_000, intervalMs: 1_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    })).rejects.toThrow('prod_principal_worker_revision_not_propagated');
   });
 
   it('no longer emits the misleading PROD-E2E nonce and labels the lane prod-principal', () => {

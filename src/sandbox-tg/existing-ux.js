@@ -46,7 +46,9 @@ app.get('/health', context => {
   const mediaIntake = context.env.MEDIA_PIPELINE !== 'ingress-buffer' ? 'disabled'
     : context.env.INGRESS_BUFFER?.fetch && String(context.env.INGRESS_BUFFER_TOKEN ?? '').trim()
       ? 'configured' : 'not_configured';
-  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', capabilities: { mediaIntake } });
+  const bot = String(context.env.TG_SANDBOX_BOT_USERNAME ?? context.env.BOT_USERNAME ?? '').trim().replace(/^@/, '') || null;
+  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', bot,
+    buildSha: context.env.BUILD_SHA ?? null, capabilities: { mediaIntake } });
 });
 
 app.get('/cron', async context => {
