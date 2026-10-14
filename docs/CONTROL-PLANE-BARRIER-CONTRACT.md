@@ -32,7 +32,7 @@ TTL); стороны CP и Runner.
 | `cpUnresolvedLaunches` | set `launchKey` — unresolved записи (admission не подтверждён) | `_dispatch` (L2633) | `_recordControlPlaneAck` (L3123); `_handleControlPlaneLaunchFailure` (L2940); `_releaseBusyLocked` (L2847) |
 | `cp-launch:{launchKey}` | checkpoint батча для recovery | `_dispatch` (L2628) | L3124, L2941, operator reset |
 | `cpBusyRequests` | set `requestId` — admitted записи (ядро барьера) | POST `/cp-acceptance` (L895–901); `_recordControlPlaneAck` (L3113–3115) | `_releaseBusyLocked` (L2846) |
-| `cp-acceptance:{requestId}` | record: `receipt`, `terminal`, `outcomeUnknown`, `routingOutcome`, `routingRetry*`, `reconciliationFailure` | POST `/cp-acceptance` (L896); poll (L3320, L3365, L3372, L3396) | не стирается — durable-аудит (только operator reset) |
+| `cp-acceptance:{requestId}` | record: `receipt`, `terminal`, `outcomeUnknown`, `routingOutcome`, `routingRetry*`, `reconciliationFailure`, `stale` (#267) | POST `/cp-acceptance` (L896); poll (L3320, L3365, L3372, L3396); stale-sweep `_dropStaleControlPlaneLocks` (#267) | не стирается — durable-аудит (только operator reset) |
 | alarm | тик поллинга | `setAlarm` / `_ensureAlarmBy` | `_releaseBusyLocked` (L2862) |
 
 Единственная точка снятия барьера — `_releaseBusyLocked` (L2845): удаляет оба
@@ -91,6 +91,7 @@ TTL); стороны CP и Runner.
 | 10 | admitted → unknown_outcome → cleared | task/runs `status=unknown` (settled, `awaiting` не open) | `_pollControlPlaneTasks` | L3279–3285, L3369–3373 |
 | 11 | admitted → admitted + `reconciliationFailure` | 5xx/timeout — исход неизвестен, барьер сохраняется | catch `_pollControlPlaneTasks` | L3385–3400 |
 | 12 | * → cleared | единственная точка снятия (guard см. ниже) | `_releaseBusyLocked` + `_afterBusyRelease` | L2845–2899 |
+| 13 | admitted → stale → cleared | latch-id без matching (current-profile, durable) `cp-acceptance` — снять немедленно, не ждать BUSY_MAX_MS (**#267**) | `_dropStaleControlPlaneLocks` (вызов из `_pollControlPlaneTasks`) | L3294–3301, L3489–3524 |
 
 Замечания:
 
@@ -98,6 +99,16 @@ TTL); стороны CP и Runner.
   (остаёмся admitted, ретрай следующим тиком): L3263, L3276. Одинаково
   консервативно: при смене `cpBusyRequests` между поллингом и release-guard
   release не происходит (L3362).
+- **#267 stale-latch sweep (#267):** до фикса запись `cpBusyRequests` без
+  matching `cp-acceptance` (invalid/missing receipt, см. §3) клинца поллинг в
+  `return false` до BUSY_MAX_MS (45 мин молчания чата). Sweep до цикла
+  реконсиляции помечает такие id `stale: true` +
+  `reconciliationFailure{stage:'acceptance', errorName:'StaleControlPlaneLatch'}`,
+  удаляет их из `cpBusyRequests` и, если нечего больше реконсилировать, снимает
+  busy в той же транзакции (`_releaseBusyLocked`). Release-guard sweep'а
+  повторяет проверки основного: `_exclusive`, re-read списка (идемпотентность
+  повторных тиков), `cpDispatches == 0`, `cpUnresolvedLaunches` пуст,
+  `cpStopWindow` не pending, `busy == true`.
 - Release-guard (L3360–3362): под `_exclusive`; release только если
   `cpDispatches == 0`, `cpUnresolvedLaunches` **пуст (сырой список)**,
   `busy == true` и `cpBusyRequests` не изменился с начала поллинга.
@@ -118,6 +129,7 @@ TTL); стороны CP и Runner.
 | hard cap (non-CP) | `BUSY_MAX_MS = 45 min` → release (L3633–3650) | ✅ |
 | CP 404 → снятие немедленно | A1, PR #655 (L3266–3274) | ✅ |
 | CP 5xx/timeout → **ограниченные** ретраи | сейчас ретраи не ограничены (L3385–3400) | ❌ **A2** |
+| stale latch (нет matching acceptance) → снятие немедленно | #267: `_dropStaleControlPlaneLocks` снимает busy без ожидания BUSY_MAX_MS | ✅ |
 | hard cap в CP-ветке | не применяется: alarm-ветка CP только поллит (L3627–3631) | ❌ **нарушение INV-1 → A2** |
 
 Следствие: при устойчивой недоступности CP запись admitted живёт неограниченно
@@ -146,7 +158,9 @@ TTL); стороны CP и Runner.
 ## 4. Наблюдаемость (durable, не логи)
 
 - `/debug` state dump → `controlPlaneBarrier: { unresolvedLaunchCount,
-  busyRequestCount, stopPending }` (L1062–1067).
+  busyRequestCount, stopPending }` (L1062–1067). **#267:** добавлен
+  `busyRequests: [{ requestId, userTaskId, terminal, outcomeUnknown, stale }]`
+  — operator reconcile без внутреннего KV-доступа (L1052–1058, L1085–1091).
 - `/operator/test-evidence` → per-task `routingOutcome`,
   `reconciliationFailure`, `routingRetryCount` + счётчики барьера (L433–502).
 - Record-флаги: `terminal`, `outcomeUnknown`,
@@ -167,6 +181,7 @@ TTL); стороны CP и Runner.
 | hard TTL в CP-ветке | ❌ A2 | L3627–3631 — cap не вызывается |
 | ошибка одной записи не прерывает остальных | ❌ A2 | `throw` L3273 прерывает цикл |
 | сообщение пользователю при 404-unknown | ❌ A2 | A1 снимает барьер без уведомления (BACKLOG A2: «+ сообщение пользователю») |
+| stale latch → release без BUSY_MAX_MS (#267) | ✅ | `_dropStaleControlPlaneLocks` L3489–3523; тесты «releases a stale latch id…», «drops only the stale ids…», «treats a profile-mismatched acceptance record as a stale latch», «exposes busy latch requestIds and userTaskIds in /debug» |
 | identity-проверка canary, хэшированные busyRequestIds/launchKeys | 🔍 A4 | IN_REVIEW, tg-bot PR #640 |
 | приёмка canary без логов | 🔍 A7 | TODO |
 

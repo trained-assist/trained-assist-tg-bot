@@ -1898,6 +1898,58 @@ describe('existing collector control-plane ownership', () => {
     expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).toBe(true);
   });
 
+  it('releases a stale latch id without an acceptance record instead of polling until BUSY_MAX_MS (#267)', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', ['ghost-request']);
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(await storage.getAlarm()).toBeUndefined();
+    expect(request).not.toHaveBeenCalled();
+    expect((await storage.get('cp-acceptance:ghost-request'))).toMatchObject({ stale: true,
+      reconciliationFailure: { stage: 'acceptance', errorName: 'StaleControlPlaneLatch' } });
+  });
+
+  it('drops only the stale ids and keeps reconciling live latch ids (#267)', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', ['ghost-request', receipt.requestId]);
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
+    expect((await storage.get('cp-acceptance:ghost-request'))).toMatchObject({ stale: true });
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).terminal).toBe(true);
+  });
+
+  it('treats a profile-mismatched acceptance record as a stale latch (#267)', async () => {
+    const { owner, storage } = fixture();
+    await storage.put(`cp-acceptance:${receipt.requestId}`,
+      { receipt: { ...receipt, profileId: 'foreign-profile' } });
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect((await storage.get(`cp-acceptance:${receipt.requestId}`)).stale).toBe(true);
+  });
+
+  it('exposes busy latch requestIds and userTaskIds in /debug for operator reconcile (#267)', async () => {
+    const { owner, storage } = fixture();
+    await accept(owner);
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+
+    const debug = await (await owner.fetch(new Request('https://intake/debug'))).json();
+    expect(debug.controlPlaneBarrier.busyRequestCount).toBe(1);
+    expect(debug.controlPlaneBarrier.busyRequests).toEqual([{ requestId: receipt.requestId,
+      userTaskId: receipt.userTaskId, terminal: false, outcomeUnknown: false, stale: false }]);
+  });
+
   it('keeps the barrier on CP 500 during status poll (A1: limited retries)', async () => {
     const { owner, storage } = fixture();
     await accept(owner);
