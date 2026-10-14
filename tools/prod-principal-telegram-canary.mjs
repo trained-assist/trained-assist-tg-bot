@@ -149,6 +149,10 @@ async function workerRequest(path, body) {
       ? payload.error.toLowerCase() : 'failed';
     const innerStatus = Number.isSafeInteger(payload.status) ? `webhook_${payload.status}` : null;
     const suffix = [innerStatus, safeCode].filter(Boolean).join('_');
+    if (path === '/operator/test-update') await checkpoint('test_update_rejected', {
+      failedPhase: canaryProgress.phase, failureReasonCode: safeError,
+      requestShape: summarizeTestUpdateRequest(body),
+    });
     throw new Error(`worker_${path.replaceAll('/', '_').toLowerCase()}_${response.status}_${safeError}${suffix ? `_${suffix}` : ''}`);
   }
 }
@@ -157,6 +161,22 @@ export function shouldRetryTestUpdate(status, error, body) {
   if (status !== 409) return false;
   if (error === 'sandbox_test_api_not_ready') return true;
   return body?.type === 'callback' && ['no_current_button_message', 'no_current_button_revision'].includes(error);
+}
+
+export function summarizeTestUpdateRequest(body = {}) {
+  const text = typeof body.text === 'string' ? body.text : '';
+  const command = /^\/(adduser|login)(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+  return {
+    requestType: ['message', 'callback'].includes(body.type) ? body.type : 'other',
+    delivery: ['capture', 'telegram'].includes(body.delivery) ? body.delivery : 'other',
+    targetMatches: body.target === TARGET,
+    chatMatchesPinnedIdentity: body.chatId === 1714048,
+    userMatchesPinnedIdentity: body.userId === 1714048,
+    updateIdIsSafeInteger: Number.isSafeInteger(body.updateId) && body.updateId >= 0,
+    textLengthBucket: text.length === 0 ? 'empty' : text.length <= 256 ? 'short' : text.length <= 2048 ? 'medium' : 'long',
+    command,
+    callbackDataRecognized: body.callbackData === 'auto',
+  };
 }
 
 async function send(text, extra = {}) {
@@ -352,12 +372,14 @@ async function main() {
   const username = `prod_principal_${randomBytes(6).toString('hex')}`;
   let task = null;
   try {
+    await checkpoint('creating_test_profile');
     const created = await capture(`/adduser ${username} Production E2E`, { admin: true });
     assert.equal(created.ok, true, 'prod_principal_canary_profile_create_failed');
     const text = (created.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
     const password = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(text)?.[1];
     assert(password, 'prod_principal_canary_profile_password_missing');
 
+    await checkpoint('authenticating_test_profile');
     const login = await send(`/login ${username} ${password}`);
     assert.equal(login.admission?.authenticated, true, 'prod_principal_canary_login_failed');
     await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
@@ -366,6 +388,7 @@ async function main() {
     const startedAt = Date.now();
     // Use a concrete user task so Communication routing cannot reasonably
     // classify an echo-only probe as the deterministic system-health quick answer.
+    await checkpoint('submitting_first_turn');
     const question = await send(`Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`);
     assert.equal(question.ok, true, 'prod_principal_canary_question_rejected');
     await checkpoint('first_turn_accepted', { turns: [{ accepted: true,
@@ -373,6 +396,7 @@ async function main() {
     assert.equal(question.collector?.pendingCount, 1, 'prod_principal_canary_input_not_buffered');
 
     const { userId } = identity();
+    await checkpoint('launching_first_turn');
     const launched = await pressCurrentLaunchButton();
     assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
     const launchState = launched.collector ?? {};
@@ -414,6 +438,7 @@ async function main() {
     // Verify session context across separate Telegram turns. The follow-up
     // intentionally omits the nonce; only the preceding conversation contains it.
     const followupStartedAt = Date.now();
+    await checkpoint('submitting_followup_turn');
     const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
     assert.equal(followupInput.ok, true, 'prod_principal_canary_followup_rejected');
     await checkpoint('followup_turn_accepted', { turns: [firstTurnSummary,
@@ -424,6 +449,7 @@ async function main() {
     const followupBarrier = controlPlaneBarrierCounts(followupInput.collector);
     assert.equal(followupBarrier.busyRequestCount, 0, 'prod_principal_canary_followup_busy_request_present');
     assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'prod_principal_canary_followup_unresolved_launch_present');
+    await checkpoint('launching_followup_turn');
     const followupLaunch = await pressCurrentLaunchButton();
     assert.equal(followupLaunch.ok, true, 'prod_principal_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
