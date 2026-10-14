@@ -550,8 +550,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       const callback = await operatorRequest({ target: 'sandbox', type: 'callback', chatId: 42, userId: 7,
         callbackData: 'auto', updateId: 91003, messageId: 501 });
       const callbackBody = await callback.json();
-      expect(callbackBody).toMatchObject({ ok: true, callbackData: 'ws|auto|1', admission: { ok: true } });
-      expect(callbackBody.admission).not.toHaveProperty('unsupported');
+      expect(callback.status).toBe(409);
+      expect(callbackBody).toEqual({ error: 'callback_not_currently_owned' });
       return;
     }
     const password = 'test-profile-password';

@@ -678,6 +678,17 @@ app.post('/operator/test-update', async context => {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
       message, chat_instance: 'sandbox-test', data: callbackData },
   };
+  let callbackOwnedBeforeDispatch = null;
+  if (source.type === 'callback') {
+    const session = await getSession(env.SESSIONS, chatId, null);
+    const ownerResponse = await intake.fetch('https://intake/callback-owner', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messageId, callbackData, username: session?.username }) });
+    const owner = await ownerResponse.json().catch(() => ({}));
+    callbackOwnedBeforeDispatch = ownerResponse.ok && owner.owned === true;
+    if (!callbackOwnedBeforeDispatch) return context.json({ error: 'callback_not_currently_owned' }, 409,
+      { 'cache-control': 'no-store' });
+  }
   if (source.fixtureFile === true) {
     if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER?.fetch || !String(env.INGRESS_BUFFER_TOKEN ?? '').trim()) {
       return context.json({ error: 'sandbox_file_fixture_not_ready' }, 409);
@@ -757,6 +768,7 @@ app.post('/operator/test-update', async context => {
   }];
   return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
     admin: source.admin === true, callbackData: source.type === 'callback' ? callbackData : undefined,
+    callbackOwnedBeforeDispatch: source.type === 'callback' ? callbackOwnedBeforeDispatch : undefined,
     admission, transcript, collector });
 });
 

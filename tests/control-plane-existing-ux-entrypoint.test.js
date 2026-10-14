@@ -115,6 +115,7 @@ describe('signed existing-UX ingress', () => {
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
       intakeCalls.push({ name, path: new URL(url).pathname });
       if (new URL(url).pathname === '/debug') return Response.json(collectorState);
+      if (new URL(url).pathname === '/callback-owner') return Response.json({ owned: true });
       return Response.json({ ok: true, appended: true });
     } }) };
     const request = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
@@ -153,7 +154,8 @@ describe('signed existing-UX ingress', () => {
     Object.assign(collectorState, { collectorMsgId: 90, collectorDraftRevision: 4 });
     const configuredChatCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
       chatId: 1001, updateId: 91010, messageId: 90 });
-    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001, callbackData: 'ws|auto|4' });
+    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001,
+      callbackOwnedBeforeDispatch: true, callbackData: 'ws|auto|4' });
     expect(callbackChatId('sandbox-test-91010')).toBe(1001);
     expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'ws|auto|4', message: expect.objectContaining({
       message_id: 90, chat: { id: 1001, type: 'private', is_forum: false },
