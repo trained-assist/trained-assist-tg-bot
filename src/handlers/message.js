@@ -7,6 +7,7 @@ import { PROJECT_COMMAND_RE } from '../lib/project-command.js';
 import { openProjectChoice } from '../lib/project-choice.js';
 import { Buffer } from 'node:buffer';
 import { prepareIntake } from '../intake-preflight.js';
+import { cpMediaSupported } from '../media-jobs.js';
 import { transcribeAudio } from '../lib/speech.js';
 import { sendMessage, sendMessageWithKeyboard, sendDocument } from '../lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from '../conversation-context.js';
@@ -113,7 +114,7 @@ export async function handleMessage(msg, env, opts = {}) {
     if (env.EXECUTION_BACKEND === 'control-plane' && (msg.intakeItems || [{ msg }]).some(item => {
       const source = item.msg ?? {};
       const hasMedia = source.photo || source.document || source.voice || source.audio || source.video;
-      return hasMedia && !item.artifactManifest && !source.artifactManifest;
+      return hasMedia && !item.artifactManifest && !source.artifactManifest && !cpMediaSupported(env);
     })) {
       throw new Error('Вложения сохранены; передача новому исполнителю ещё не подключена.');
     }

@@ -7,6 +7,7 @@ export const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const hex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 export const digest = async bytes => hex(await crypto.subtle.digest('SHA-256', bytes));
 export const mediaEnabled = env => env.MEDIA_PIPELINE === 'r2' && env.MEDIA_JOBS && env.MEDIA_BUCKET;
+export const cpMediaSupported = env => mediaEnabled(env) || (env.MEDIA_PIPELINE === 'ingress-buffer' && env.INGRESS_BUFFER && typeof env.INGRESS_BUFFER.fetch === 'function' && String(env.INGRESS_BUFFER_TOKEN ?? '').trim().length > 0);
 export function mediaOf(msg) {
   return msg.voice || msg.audio || msg.video || msg.photo?.at(-1) || msg.document;
 }
