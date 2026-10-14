@@ -17,7 +17,6 @@ const baseEnv = {
 it('admits the ordinary production lane (productionMode) for a production bot on control-plane', () => {
   const config = readTgSliceConfig(baseEnv);
   expect(config.productionMode).toBe(true);
-  expect(config.productionE2eMode).toBe(false);
   expect(config.principalId).toBe('gateway');
   expect(config.profileId).toBe('trained-assist-production');
   expect(config.principalSignature).toBe('a'.repeat(64));

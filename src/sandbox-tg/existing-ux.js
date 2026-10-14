@@ -164,89 +164,6 @@ app.get('/operator/test-evidence', async context => {
   } }, response.status, { 'cache-control': 'no-store' });
 });
 
-// Wake only the alarm for one already accepted, queued task in the isolated
-// production E2E lane. This never creates a task or calls CP directly; the DO
-// alarm reconciles the saved acceptance through the ordinary route and delivery path.
-app.post('/operator/test-wake-pending-task', async context => {
-  const env = executionEnv(context.env);
-  const target = sandboxOperatorLane(env);
-  const token = sandboxOperatorToken(env, target);
-  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  // Keep the wake endpoint pinned to the isolated production E2E lane, while
-  // returning a bounded reason for each failed precondition. A single generic
-  // identity error made live recovery failures impossible to distinguish from
-  // a lane misconfiguration without exposing any configuration values.
-  if (target !== 'prod-principal') return context.json({ error: 'prod_principal_lane_mismatch' }, 409);
-  if (env.TG_SANDBOX_TEST_API_ENABLED !== 'true') return context.json({ error: 'test_api_disabled' }, 409);
-  if (env.TG_SLICE_INGRESS_PAUSED === 'true') return context.json({ error: 'test_ingress_paused' }, 409);
-  if (env.TG_SLICE_DELIVERY_PAUSED !== 'false') return context.json({ error: 'test_delivery_paused' }, 409);
-  if (!env.INTAKE) return context.json({ error: 'intake_binding_unavailable' }, 409);
-  const source = await context.req.json().catch(() => null);
-  if (!source || source.target !== target || Object.keys(source).some(key => !['target', 'taskId', 'requestId', 'retryRoute'].includes(key)) ||
-      typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||
-      typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId) ||
-      source.retryRoute !== undefined && typeof source.retryRoute !== 'boolean') {
-    return context.json({ error: 'invalid_test_recovery' }, 400);
-  }
-  const chatId = sandboxOperatorResetChat(env, target);
-  const intake = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, null)));
-  const response = await intake.fetch('https://intake/_sandbox-test/wake-pending-task', {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ taskId: source.taskId, requestId: source.requestId,
-      ...(source.retryRoute === true ? { retryRoute: true } : {}) }),
-  });
-  if (response.status === 404) return context.json({ error: 'intake_recovery_endpoint_not_found' }, 502,
-    { 'cache-control': 'no-store' });
-  const result = await response.json().catch(() => ({}));
-  return context.json(result, response.status, { 'cache-control': 'no-store' });
-});
-
-// Clear only this pinned Telegram chat's Intake DO, login session, and optional
-// generated test user. CP history/workspaces, broad KV state, and other chats
-// are intentionally outside this path.
-app.post('/operator/test-cleanup', async context => {
-  const env = executionEnv(context.env);
-  const target = sandboxOperatorLane(env);
-  const token = sandboxOperatorToken(env, target);
-  if (!token || context.req.header('authorization') !== `Bearer ${token}`) return context.json({ error: 'unauthorized' }, 401);
-  if (target !== 'prod-principal' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !env.INTAKE) {
-    return context.json({ error: 'sandbox_identity_mismatch' }, 409);
-  }
-  const source = await context.req.json().catch(() => null);
-  if (!source || source.target !== target || source.confirm !== 'CLEAN_PINNED_TEST_CHAT' ||
-      Object.keys(source).some(key => !['target', 'confirm', 'username'].includes(key)) ||
-      source.username !== undefined && !/^prod_principal_[a-z0-9]{12}$/.test(source.username)) {
-    return context.json({ error: 'explicit_test_cleanup_required' }, 400);
-  }
-  const chatId = sandboxOperatorResetChat(env, target);
-  const namespaces = [['intake', env.INTAKE], ['legacyIntake', env.LEGACY_INTAKE]].filter(([, namespace]) => namespace);
-  const inspected = [];
-  for (const [binding, namespace] of namespaces) {
-    const stub = namespace.get(namespace.idFromName(conversationKey(chatId, null)));
-    const inspect = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
-    const state = await inspect.json().catch(() => ({}));
-    if (!inspect.ok) return context.json({ error: 'test_buffer_inspect_failed', binding }, 503);
-    if (state.active === true) return context.json({ error: 'active_intake_state', binding }, 409);
-    inspected.push({ binding, stub });
-  }
-  const cleared = [];
-  for (const { binding, stub } of inspected) {
-    const response = await stub.fetch('https://intake/operator/reset-all', { method: 'POST' });
-    if (!response.ok) return context.json({ error: 'test_buffer_reset_failed', binding }, 503);
-    const verify = await stub.fetch('https://intake/operator/reset-inspect', { method: 'POST' });
-    const finalState = await verify.json().catch(() => ({}));
-    if (!verify.ok || finalState.active === true || finalState.keys !== 0) {
-      return context.json({ error: 'test_buffer_reset_verify_failed', binding }, 503);
-    }
-    cleared.push(binding);
-  }
-  await deleteSession(env.SESSIONS, Number(chatId));
-  if (source.username) await deleteUser(env.USERS, source.username);
-  return context.json({ ok: true, chatId, clearedBindings: cleared, cpHistoryTouched: false,
-    productionProfileDataTouched: false, sharedKvNamespaceReset: false,
-    testProfileDeleted: typeof source.username === 'string', loginSessionDeleted: true });
-});
-
 app.get('/collector-state', async context => {
   const env = executionEnv(context.env);
   const config = readTgSliceConfig(env);
@@ -980,10 +897,5 @@ export default {
 };
 
 export class IntakeBufferReset extends IntakeBuffer {}
-// The production E2E lane uses a dedicated DO namespace. It runs with the same
-// pinned Telegram test chat as sandbox3, so sharing IntakeBuffer would reuse
-// the sandbox3 cpScope and reject the production profile as a scope mismatch.
-export class ProductionE2eIntakeBuffer extends IntakeBuffer {}
-export class ProductionE2eTgDeliveryOwner extends TgDeliveryOwner {}
 
 export { IntakeBuffer, TgDeliveryOwner, TgDeliveryOwnerV2, SandboxAcceptOnlyStore };

@@ -442,7 +442,7 @@ export class IntakeBuffer {
     if (url.pathname === '/operator/test-evidence' && request.method === 'POST') {
 
       const lane = sandboxOperatorLane(this.env);
-      if (!['sandbox3', 'prod-principal'].includes(lane) || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
+      if (lane !== 'sandbox3' || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' ||
           this.env.EXECUTION_BACKEND !== 'control-plane') return json({ error: 'sandbox_identity_mismatch' }, 409);
       const probe = await request.clone().json().catch(() => ({}));
       const challenge = probe?.challenge;
@@ -518,116 +518,6 @@ export class IntakeBuffer {
         unresolvedLaunchCount: state.controlPlaneBarrier?.unresolvedLaunchCount ?? null,
         busyRequestCount: state.controlPlaneBarrier?.busyRequestCount ?? null,
       } });
-    }
-    if (url.pathname === '/_sandbox-test/wake-pending-task' && request.method === 'POST') {
-      const lane = sandboxOperatorLane(this.env);
-      const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();
-      const source = await request.json().catch(() => null);
-      if (lane !== 'prod-principal' || this.env.TG_SANDBOX_TEST_API_ENABLED !== 'true' || !token ||
-          request.headers.get('authorization') !== `Bearer ${token}` ||
-          !source || Object.keys(source).some(key => !['taskId', 'requestId', 'retryRoute'].includes(key)) ||
-          typeof source.taskId !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(source.taskId) ||
-          typeof source.requestId !== 'string' || !/^tgcp-[a-f0-9]{64}$/.test(source.requestId) ||
-          source.retryRoute !== undefined && typeof source.retryRoute !== 'boolean') {
-        return json({ error: 'sandbox_identity_mismatch' }, 409);
-      }
-      const profileId = controlPlaneClient(this.env).config.profileId;
-      const retryRoute = source.retryRoute === true;
-      const acceptanceKey = `cp-acceptance:${source.requestId}`;
-      const claim = retryRoute ? await this._exclusive(async () => {
-        const acceptance = await this.state.storage.get(acceptanceKey);
-        const busyRequests = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
-        const unresolved = await this.state.storage.get('cpUnresolvedLaunches') || [];
-        const launching = await this.state.storage.get('launching') || [];
-        const buf = await this.state.storage.get('buf') || [];
-        const retryBatch = await this.state.storage.get('retryBatch') || [];
-        const busy = await this.state.storage.get('busy');
-        if (acceptance?.receipt?.requestId !== source.requestId || acceptance.receipt.userTaskId !== source.taskId ||
-            acceptance.receipt.profileId !== profileId || acceptance.receipt.durable !== true || acceptance.terminal === true ||
-            JSON.stringify(busyRequests) !== JSON.stringify([source.requestId]) || unresolved.length || launching.length ||
-            busy !== true || buf.length || retryBatch.length || this.cpDispatches) return 'test_recovery_scope_mismatch';
-        const retryCount = acceptance.routingRetryCount;
-        const retryTimestampPresent = Number.isSafeInteger(acceptance.routingRetryAt) && acceptance.routingRetryAt > 0;
-        if (retryCount === 1 && retryTimestampPresent) return 'test_route_retry_already_used';
-        if (retryCount !== undefined && retryCount !== 0 && retryCount !== 1) return 'test_route_retry_state_invalid';
-        const prior = acceptance.routingOutcome;
-        if (!prior?.known || prior.publicationComplete !== true || prior.continuationRequested === true ||
-            prior.continuationIssued === true) return 'test_route_retry_not_safe';
-        if (acceptance.routingRetryClaim && acceptance.routingRetryClaim !== source.requestId) return 'test_route_retry_in_progress';
-        await this.state.storage.put(acceptanceKey, { ...acceptance, routingRetryClaim: source.requestId });
-        return null;
-      }) : null;
-      if (claim) return json({ error: claim }, 409);
-      const clearRouteRetryClaim = async () => {
-        if (!retryRoute) return;
-        await this._exclusive(async () => {
-          const current = await this.state.storage.get(acceptanceKey);
-          if (current?.routingRetryClaim === source.requestId) {
-            const { routingRetryClaim: _claim, ...rest } = current;
-            await this.state.storage.put(acceptanceKey, rest);
-          }
-        });
-      };
-      const acceptance = await this.state.storage.get(acceptanceKey);
-      const busyRequests = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
-      const unresolved = await this.state.storage.get('cpUnresolvedLaunches') || [];
-      const launching = await this.state.storage.get('launching') || [];
-      const busy = await this.state.storage.get('busy');
-      if (acceptance?.receipt?.requestId !== source.requestId || acceptance.receipt.userTaskId !== source.taskId ||
-          acceptance.receipt.profileId !== profileId || acceptance.receipt.durable !== true || acceptance.terminal === true ||
-          JSON.stringify(busyRequests) !== JSON.stringify([source.requestId]) || unresolved.length || launching.length ||
-          busy !== true || this.cpDispatches) {
-        await clearRouteRetryClaim();
-        return json({ error: 'test_recovery_scope_mismatch' }, 409);
-      }
-      let status;
-      try { status = (await controlPlaneClient(this.env).request('POST', '/status', { body: { taskId: source.taskId } })).value; }
-      catch (error) { await clearRouteRetryClaim(); return json({ error: 'control_plane_status_unavailable',
-        httpStatus: Number.isInteger(error?.status) ? error.status : null }, 503); }
-      const task = status?.taskStore ?? {};
-      const engine = status?.engine ?? {};
-      const engineError = String(engine.error?.message ?? engine.error ?? '').toLowerCase();
-      const workflowMissing = !!engine.error && /not found|no such instance/.test(engineError);
-      if (task.id !== source.taskId || task.profile_id !== profileId || task.status !== 'active' || task.stage !== 'queued' ||
-          !Array.isArray(status.runs) || status.runs.length !== 0 || !workflowMissing) {
-        await clearRouteRetryClaim();
-        return json({ error: 'test_recovery_task_not_safely_queued' }, 409);
-      }
-      const scheduledAt = Date.now() + BUSY_POLL_MS;
-      if (retryRoute) {
-        const committed = await this._exclusive(async () => {
-          const current = await this.state.storage.get(acceptanceKey);
-          const currentBusy = [...new Set(await this.state.storage.get('cpBusyRequests') || [])].sort();
-          const currentUnresolved = await this.state.storage.get('cpUnresolvedLaunches') || [];
-          const currentLaunching = await this.state.storage.get('launching') || [];
-          const currentBusyState = await this.state.storage.get('busy');
-          const currentBuf = await this.state.storage.get('buf') || [];
-          const currentRetryBatch = await this.state.storage.get('retryBatch') || [];
-          const prior = current?.routingOutcome;
-          const retryTimestampPresent = Number.isSafeInteger(current?.routingRetryAt) && current.routingRetryAt > 0;
-          if (current?.routingRetryClaim !== source.requestId ||
-              current.routingRetryCount !== undefined && current.routingRetryCount !== 0 && current.routingRetryCount !== 1 ||
-              current.routingRetryCount === 1 && retryTimestampPresent ||
-              current?.receipt?.requestId !== source.requestId || current.receipt.userTaskId !== source.taskId ||
-              current.receipt.profileId !== profileId || JSON.stringify(currentBusy) !== JSON.stringify([source.requestId]) ||
-              currentUnresolved.length || currentLaunching.length || currentBusyState !== true || currentBuf.length ||
-              currentRetryBatch.length || this.cpDispatches || !prior?.known || prior.publicationComplete !== true ||
-              prior.continuationRequested === true || prior.continuationIssued === true) return false;
-          const { routingOutcome: _oldOutcome, reconciliationFailure: _oldFailure,
-            routingRetryClaim: _claim, ...rest } = current;
-          await this.state.storage.put(acceptanceKey, { ...rest, routingRetryCount: 1, routingRetryAt: Date.now() });
-          await this.state.storage.setAlarm(scheduledAt);
-          return true;
-        });
-        if (!committed) {
-          await clearRouteRetryClaim();
-          return json({ error: 'test_route_retry_scope_changed' }, 409);
-        }
-        return json({ ok: true, taskId: source.taskId, scheduledAt, routingRetryCount: 1,
-          action: 'wake_saved_acceptance_route_retry' });
-      }
-      await this.state.storage.setAlarm(scheduledAt);
-      return json({ ok: true, taskId: source.taskId, scheduledAt, action: 'wake_saved_acceptance_reconciliation' });
     }
     if (url.pathname === '/_sandbox-test/seed-capture-collector' && request.method === 'POST') {
       const token = String(this.env.TG_SANDBOX3_OPERATOR_TOKEN ?? '').trim();

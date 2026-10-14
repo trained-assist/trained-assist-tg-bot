@@ -638,5 +638,7 @@ export default { fetch: app.fetch, scheduled };
 export { RetryQueue } from './retry-queue.js';
 
 export { MediaJob } from './media-jobs.js';
+// Keep these already-applied Durable Object migration classes available for
+// Wrangler's migration history; no current Worker binding uses them.
 export { ProductionE2eIntakeBuffer, ProductionE2eTgDeliveryOwner } from './sandbox-tg/production-e2e-classes.js';
 export { TgDeliveryOwner } from './sandbox-tg/delivery-owner.js';

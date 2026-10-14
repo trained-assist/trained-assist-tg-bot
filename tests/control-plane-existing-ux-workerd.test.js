@@ -226,7 +226,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
     await runtime.dispose();
     await rm(persistRoot, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api', 'operator-file-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();

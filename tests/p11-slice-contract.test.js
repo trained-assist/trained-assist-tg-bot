@@ -2,7 +2,6 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { MemKV, collectLogSink, makeEnv } from '../tests/helpers/p11-helpers.js';
 import { readTgSliceConfig, authScheme, PRODUCTION_BOT_USERNAMES, chatAllowed } from '../src/sandbox-tg/config.js';
 import { ControlPlaneClient } from '../src/sandbox-tg/control-plane-client.js';
-import { sandboxControlPlaneFetch } from '../src/sandbox-tg/operator-lane.js';
 import { profileForUpdate } from '../src/sandbox-tg/profile.js';
 import { TelegramEmulator } from '../src/sandbox-tg/telegram-emulator.js';
 import { FakeControlPlane } from '../src/sandbox-tg/fake-control-plane.js';
@@ -25,55 +24,20 @@ describe('config — production-bot guard + env-only', () => {
     expect(() => readTgSliceConfig(makeEnv({ CONTROL_PLANE_PRINCIPAL: '' }))).toThrow('CONTROL_PLANE_PRINCIPAL');
     expect(() => readTgSliceConfig(makeEnv({ CONTROL_PLANE_PROFILE: '' }))).toThrow('CONTROL_PLANE_PROFILE');
   });
-  it('uses a separate scoped signature for the exact production E2E sandbox lane', () => {
-    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_TEST_API_ENABLED: 'true',
-      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
+  it('refuses any sandbox bot configuration that points at production CP', () => {
+    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox',
+      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', SESSION_NAMESPACE: 'integrator-sandbox3-v1',
       CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
-      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
-      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'sandbox-signature', CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'production-e2e-signature',
-      CONTROL_PLANE_SESSION_ID: 'old-sandbox-session', TG_SLICE_CHAT_PROFILES: '1714048:integration-sandbox3-v1' });
-    expect(readTgSliceConfig(env)).toMatchObject({ principalSignature: 'production-e2e-signature', sessionId: null, chatProfiles: {} });
-    expect(() => readTgSliceConfig({ ...env, SESSION_NAMESPACE: 'integrator-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
-    expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1' })).toThrow(/pinned production E2E sandbox lane/i);
-  });
-  it('allows the real production bot only in the pinned production E2E profile and private test chat', () => {
-    const env = makeEnv({ TG_PRODUCTION_E2E_MODE: 'true', TG_ACCEPT_ONLY_ENVIRONMENT: 'production-e2e',
-      TG_SANDBOX_TEST_API_ENABLED: 'false', TG_SANDBOX_BOT_USERNAME: 'super_personal_assistant_bot',
-      SESSION_NAMESPACE: 'integrator-production-e2e-v1', CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
-      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
-      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'production-e2e-signature',
-      TG_SLICE_ALLOWED_CHATS: '1714048', TG_SLICE_ALLOWED_USERS: '1714048',
-      TG_SANDBOX_E2E_CHAT_ID: '1714048', TG_SANDBOX_E2E_USER_ID: '1714048' });
-    expect(readTgSliceConfig(env)).toMatchObject({ botUsername: 'super_personal_assistant_bot',
-      principalSignature: 'production-e2e-signature', profileId: 'production-e2e-telegram-v1',
-      allowedChats: ['1714048'], e2eUserId: '1714048', productionE2eMode: true });
-    expect(() => readTgSliceConfig({ ...env, TG_SLICE_ALLOWED_CHATS: '1714048,1714049' })).toThrow(/pinned to one private chat/i);
-    expect(() => readTgSliceConfig({ ...env, CONTROL_PLANE_PROFILE: 'another-profile' })).toThrow(/pinned production E2E sandbox lane/i);
-    expect(() => readTgSliceConfig({ ...env, TG_SANDBOX_BOT_USERNAME: 'super_recruiter_assistant_bot' })).toThrow(/pinned production E2E sandbox lane/i);
-  });
-  it('bypasses the sandbox CP service binding only for the pinned production E2E lane', () => {
-    const fetch = () => new Response('sandbox-cp');
-    const service = { fetch };
-    const productionE2e = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_TEST_API_ENABLED: 'true',
-      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot', SESSION_NAMESPACE: 'integrator-production-e2e-v1',
-      CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
-      CONTROL_PLANE_PRINCIPAL: 'production-e2e-telegram-v1', CONTROL_PLANE_PROFILE: 'production-e2e-telegram-v1',
-      EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_SERVICE: service });
-    expect(sandboxControlPlaneFetch(productionE2e)).toBeUndefined();
-    const sandbox3 = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
-      SESSION_NAMESPACE: 'integrator-sandbox3-v1',
-      CONTROL_PLANE_URL: 'https://trained-assist-cp-sandbox3.skillset-apply.workers.dev',
       CONTROL_PLANE_PRINCIPAL: 'integration-sandbox3-v1', CONTROL_PLANE_PROFILE: 'integration-sandbox3-v1',
-      EXECUTION_BACKEND: 'control-plane', CONTROL_PLANE_SERVICE: service });
-    expect(sandboxControlPlaneFetch(sandbox3)).toBeTypeOf('function');
+      EXECUTION_BACKEND: 'control-plane' }))).toThrow(/Production CP is permitted only for an ordinary production Worker/);
   });
-  it('does not treat the production CP URL as the E2E sandbox lane outside sandbox environment', () => {
-    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'production', TG_SANDBOX_TEST_API_ENABLED: 'true',
-      TG_SANDBOX_BOT_USERNAME: 'ptichka_status_bot',
+  it('uses only the ordinary production principal signature for the production CP URL', () => {
+    const env = makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'production', TG_SANDBOX_TEST_API_ENABLED: 'false',
+      TG_SANDBOX_BOT_USERNAME: 'super_personal_assistant_bot',
+      EXECUTION_BACKEND: 'control-plane',
       CONTROL_PLANE_URL: 'https://trained-assist-cp-production.skillset-apply.workers.dev',
-      CONTROL_PLANE_PRINCIPAL: 'production-telegram-v1', CONTROL_PLANE_PROFILE: 'production-profile',
-      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'normal-production-signature',
-      CONTROL_PLANE_PRODUCTION_E2E_SIGNATURE: 'must-not-be-used' });
+      CONTROL_PLANE_PRINCIPAL: 'gateway', CONTROL_PLANE_PROFILE: 'trained-assist-production',
+      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'normal-production-signature' });
     expect(readTgSliceConfig(env).principalSignature).toBe('normal-production-signature');
   });
   it('allowlist empty → no chat served (fail closed)', () => {
@@ -104,7 +68,7 @@ describe('config — production-bot guard + env-only', () => {
     expect(chatAllowed(config, 1714048)).toBe(true);
     expect(chatAllowed(config, 1714049)).toBe(false);
     expect(() => readTgSliceConfig(makeEnv({ TG_SANDBOX_E2E_CHAT_ID: '1714048' }))).toThrow(/sandbox chat/i);
-    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_E2E_USER_ID: '0' }))).toThrow(/pinned test user/i);
+    expect(() => readTgSliceConfig(makeEnv({ TG_ACCEPT_ONLY_ENVIRONMENT: 'sandbox', TG_SANDBOX_E2E_USER_ID: '0' }))).toThrow(/positive numeric pinned sandbox user/i);
   });
   it('auth scheme depends on bearer key', () => {
     expect(authScheme(readTgSliceConfig(makeEnv({ CONTROL_PLANE_API_KEY: '' })))).toBe('x-principal');

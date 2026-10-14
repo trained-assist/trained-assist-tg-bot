@@ -314,3 +314,22 @@ These are production deployment and identity checks, not a production
 user-originated question/answer scenario: `/operator/test-update` is sandbox
 only by design, so this run did not inject synthetic user input into the
 production webhook.
+# Production test account
+
+The production test account is the existing private Telegram chat/user
+`1714048`. Production E2E uses the ordinary production bot
+`@super_personal_assistant_bot`, production Worker, `gateway` principal, and
+`trained-assist-production` Control Plane profile. Run the protected
+`Production Telegram test account E2E` workflow from `main` with
+`run_e2e=true`; it verifies Worker identity, enabled ingress/delivery, idle
+Intake, and exact deployed SHA before sending two messages. The second message
+checks that the first turn's marker survives the production CP → Runner →
+France VM → Telegram delivery path. Evidence is uploaded as a workflow
+artifact.
+
+Never connect a fixed sandbox bot to the production Control Plane or deploy a
+sandbox Worker with production routing credentials. Sandbox E2E remains on the
+fixed sandbox bots and sandbox Control Plane. The production test account is
+used only through the actual production Worker and has no HTTP test/operator
+routes. Its normal account commands, including password-reset operations, are
+tested through the production Telegram flow when a scenario requires them.
