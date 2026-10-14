@@ -197,6 +197,7 @@ export function summarizeCallbackResponse(payload = {}) {
     authenticated: admission.authenticated === true,
     serviceCommand: typeof admission.serviceCommand === 'string' ? admission.serviceCommand : null,
     transcriptEntryCount: transcript.length,
+    callbackOwnedBeforeDispatch: payload.callbackOwnedBeforeDispatch === true,
     transcriptKinds: transcript.map(entry => typeof entry?.kind === 'string' && /^[a-zA-Z]{1,40}$/.test(entry.kind)
       ? entry.kind : 'other'),
     outcomeCodes,
@@ -423,6 +424,7 @@ async function main() {
     await checkpoint('launching_first_turn');
     const launched = await pressCurrentLaunchButton();
     assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
+    assert.equal(launched.callbackOwnedBeforeDispatch, true, 'prod_principal_canary_callback_not_currently_owned');
     const launchState = launched.collector ?? {};
     await checkpoint('first_turn_launch_callback', { turns: [{ accepted: true,
       launch: summarizeLaunch(launched), admissionCode: typeof launched.admission?.code === 'string'

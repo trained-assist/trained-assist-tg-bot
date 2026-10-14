@@ -37,6 +37,7 @@ describe('production canary failure evidence excludes prompts and credentials', 
       { kind: 'sendMessage', text: 'User prompt secret-token' },
     ] });
     expect(summary).toEqual({ webhookOk: true, callbackUnsupported: false, authenticated: false,
+      callbackOwnedBeforeDispatch: false,
       serviceCommand: null, transcriptEntryCount: 2, transcriptKinds: ['sendMessage', 'sendMessage'],
       outcomeCodes: ['callback_stale', 'other_message'] });
     expect(JSON.stringify(summary)).not.toContain('secret-token');
