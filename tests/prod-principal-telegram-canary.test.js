@@ -33,13 +33,15 @@ describe('production canary failure evidence excludes prompts and credentials', 
 
   it('classifies only callback outcome signals and never copies outbound text', () => {
     const summary = summarizeCallbackResponse({ admission: { ok: true, unsupported: false }, transcript: [
+      { kind: 'answerCallbackQuery', text: '✨ Выбираю подходящий способ…' },
       { kind: 'sendMessage', text: '⌛ Эта кнопка уже устарела. Черновик сохранён.' },
       { kind: 'sendMessage', text: 'User prompt secret-token' },
     ] });
     expect(summary).toEqual({ webhookOk: true, callbackUnsupported: false, authenticated: false,
       callbackOwnedBeforeDispatch: false,
-      serviceCommand: null, transcriptEntryCount: 2, transcriptKinds: ['sendMessage', 'sendMessage'],
-      outcomeCodes: ['callback_stale', 'other_message'] });
+      serviceCommand: null, transcriptEntryCount: 3,
+      transcriptKinds: ['answerCallbackQuery', 'sendMessage', 'sendMessage'],
+      outcomeCodes: ['launch_callback_ack', 'callback_stale', 'other_message'] });
     expect(JSON.stringify(summary)).not.toContain('secret-token');
   });
 });
