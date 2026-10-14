@@ -46,7 +46,9 @@ app.get('/health', context => {
   const mediaIntake = context.env.MEDIA_PIPELINE !== 'ingress-buffer' ? 'disabled'
     : context.env.INGRESS_BUFFER?.fetch && String(context.env.INGRESS_BUFFER_TOKEN ?? '').trim()
       ? 'configured' : 'not_configured';
-  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', capabilities: { mediaIntake } });
+  const bot = String(context.env.TG_SANDBOX_BOT_USERNAME ?? context.env.BOT_USERNAME ?? '').trim().replace(/^@/, '') || null;
+  return context.json({ status: 'ok', mode: 'existing-ux-control-plane', acceptance: 'pending', bot,
+    buildSha: context.env.BUILD_SHA ?? null, capabilities: { mediaIntake } });
 });
 
 app.get('/cron', async context => {
@@ -154,7 +156,8 @@ app.get('/operator/test-evidence', async context => {
   const response = await stub.fetch('https://intake/operator/test-evidence', { method: 'POST',
     body: JSON.stringify(challenge ? { challenge } : {}) });
   const evidence = await response.json().catch(() => ({}));
-  return context.json({ ...evidence, readiness: {
+  return context.json({ ...evidence, workerProfileId: env.CONTROL_PLANE_PROFILE ?? null,
+    buildSha: env.BUILD_SHA ?? null, readiness: {
     testApiEnabled: env.TG_SANDBOX_TEST_API_ENABLED === 'true',
     ingressPaused: env.TG_SLICE_INGRESS_PAUSED === 'true',
     deliveryPaused: env.TG_SLICE_DELIVERY_PAUSED !== 'false',
@@ -675,6 +678,17 @@ app.post('/operator/test-update', async context => {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
       message, chat_instance: 'sandbox-test', data: callbackData },
   };
+  let callbackOwnedBeforeDispatch = null;
+  if (source.type === 'callback') {
+    const session = await getSession(env.SESSIONS, chatId, null);
+    const ownerResponse = await intake.fetch('https://intake/callback-owner', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messageId, callbackData, username: session?.username }) });
+    const owner = await ownerResponse.json().catch(() => ({}));
+    callbackOwnedBeforeDispatch = ownerResponse.ok && owner.owned === true;
+    if (!callbackOwnedBeforeDispatch) return context.json({ error: 'callback_not_currently_owned' }, 409,
+      { 'cache-control': 'no-store' });
+  }
   if (source.fixtureFile === true) {
     if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER?.fetch || !String(env.INGRESS_BUFFER_TOKEN ?? '').trim()) {
       return context.json({ error: 'sandbox_file_fixture_not_ready' }, 409);
@@ -754,6 +768,7 @@ app.post('/operator/test-update', async context => {
   }];
   return context.json({ ok: true, updateId, messageId, chatId, userId: actorId, delivery: deliverToTelegram ? 'telegram' : 'capture',
     admin: source.admin === true, callbackData: source.type === 'callback' ? callbackData : undefined,
+    callbackOwnedBeforeDispatch: source.type === 'callback' ? callbackOwnedBeforeDispatch : undefined,
     admission, transcript, collector });
 });
 

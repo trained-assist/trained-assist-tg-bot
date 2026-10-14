@@ -97,24 +97,50 @@ export function verifyLaneIdentity(health = {}) {
 }
 
 async function verifyLiveLaneIdentity() {
-  const response = await fetch(`${WORKER}/health`, { signal: AbortSignal.timeout(15_000) });
-  const health = await response.json().catch(() => ({}));
+  return waitForLaneIdentity(async () => {
+    const response = await fetch(`${WORKER}/health`, { cache: 'no-store', headers: { 'cache-control': 'no-cache' },
+      signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error('health_not_ready');
+    return response.json().catch(() => ({}));
+  }, { expectedBuildSha: process.env.GITHUB_SHA });
+}
+
+export async function waitForLaneIdentity(readHealth, { expectedBuildSha, timeoutMs = 120_000,
+  intervalMs = 2_000, now = () => Date.now(), sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const deadline = now() + timeoutMs;
+  let health = {};
+  while (now() <= deadline) {
+    try { health = await readHealth(); } catch { health = {}; }
+    const identity = verifyLaneIdentity(health);
+    const revisionMatches = typeof expectedBuildSha === 'string' && /^[a-f0-9]{40}$/.test(expectedBuildSha)
+      && health?.buildSha === expectedBuildSha;
+    if (identity.botMatches && revisionMatches) return { ...identity, buildSha: health.buildSha };
+    if (now() >= deadline) break;
+    await sleep(Math.min(intervalMs, deadline - now()));
+  }
   const identity = verifyLaneIdentity(health);
   if (!identity.botMatches) {
     throw new Error(`prod_principal_bot_mismatch_expected_${EXPECTED_BOT_USERNAME}_got_${identity.botUsername ?? 'missing'}`);
   }
-  return identity;
+  throw new Error('prod_principal_worker_revision_not_propagated');
 }
 
 async function workerRequest(path, body) {
   const method = body === undefined ? 'GET' : 'POST';
-  const response = await fetch(`${WORKER}${path}`, { method,
-    headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`,
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(60_000) });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  const retryDeadline = Date.now() + 60_000;
+  while (true) {
+    const response = await fetch(`${WORKER}${path}`, { method, cache: 'no-store',
+      headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'cache-control': 'no-cache',
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(60_000) });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok) return payload;
+    if (path === '/operator/test-update' && shouldRetryTestUpdate(response.status, payload.error, body)
+        && Date.now() < retryDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 1_000));
+      continue;
+    }
     // Keep production canary failures actionable without logging the captured
     // transcript, which can contain temporary credentials or user input.
     const safeCode = typeof payload.code === 'string' && /^[a-z0-9_-]{1,80}$/i.test(payload.code)
@@ -123,9 +149,59 @@ async function workerRequest(path, body) {
       ? payload.error.toLowerCase() : 'failed';
     const innerStatus = Number.isSafeInteger(payload.status) ? `webhook_${payload.status}` : null;
     const suffix = [innerStatus, safeCode].filter(Boolean).join('_');
+    if (path === '/operator/test-update') await checkpoint('test_update_rejected', {
+      failedPhase: canaryProgress.phase, failureReasonCode: safeError,
+      requestShape: summarizeTestUpdateRequest(body),
+    });
     throw new Error(`worker_${path.replaceAll('/', '_').toLowerCase()}_${response.status}_${safeError}${suffix ? `_${suffix}` : ''}`);
   }
-  return payload;
+}
+
+export function shouldRetryTestUpdate(status, error, body) {
+  if (status !== 409) return false;
+  if (error === 'sandbox_test_api_not_ready') return true;
+  return body?.type === 'callback' && ['no_current_button_message', 'no_current_button_revision'].includes(error);
+}
+
+export function summarizeTestUpdateRequest(body = {}) {
+  const text = typeof body.text === 'string' ? body.text : '';
+  const command = /^\/(adduser|login)(?:\s|$)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+  return {
+    requestType: ['message', 'callback'].includes(body.type) ? body.type : 'other',
+    delivery: ['capture', 'telegram'].includes(body.delivery) ? body.delivery : 'other',
+    targetMatches: body.target === TARGET,
+    chatMatchesPinnedIdentity: body.chatId === 1714048,
+    userMatchesPinnedIdentity: body.userId === 1714048,
+    updateIdIsSafeInteger: Number.isSafeInteger(body.updateId) && body.updateId >= 0,
+    textLengthBucket: text.length === 0 ? 'empty' : text.length <= 256 ? 'short' : text.length <= 2048 ? 'medium' : 'long',
+    command,
+    callbackDataRecognized: body.callbackData === 'auto',
+  };
+}
+
+export function summarizeCallbackResponse(payload = {}) {
+  const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+  const outcomeCodes = transcript.map(entry => {
+    const text = typeof entry?.text === 'string' ? entry.text : '';
+    if (/кнопка.*устарела/i.test(text)) return 'callback_stale';
+    if (text.includes('не удалось подтвердить запуск')) return 'launch_not_confirmed';
+    if (text.includes('Передаю собранный ввод') || text.includes('Передаю задачу агенту')) return 'launch_handoff_started';
+    if (text.includes('Передача этого ввода уже обрабатывается')) return 'callback_in_flight';
+    if (text.includes('Не удалось подтвердить запуск')) return 'launch_not_confirmed';
+    return 'other_message';
+  });
+  const admission = payload.admission && typeof payload.admission === 'object' ? payload.admission : {};
+  return {
+    webhookOk: admission.ok === true,
+    callbackUnsupported: admission.unsupported === true,
+    authenticated: admission.authenticated === true,
+    serviceCommand: typeof admission.serviceCommand === 'string' ? admission.serviceCommand : null,
+    transcriptEntryCount: transcript.length,
+    callbackOwnedBeforeDispatch: payload.callbackOwnedBeforeDispatch === true,
+    transcriptKinds: transcript.map(entry => typeof entry?.kind === 'string' && /^[a-zA-Z]{1,40}$/.test(entry.kind)
+      ? entry.kind : 'other'),
+    outcomeCodes,
+  };
 }
 
 async function send(text, extra = {}) {
@@ -142,46 +218,36 @@ async function capture(text, extra = {}) {
 
 async function pressCurrentLaunchButton() {
   const { chatId, userId } = identity();
-  const deadline = Date.now() + 60_000;
-  let lastCode = 'unknown';
-  while (Date.now() < deadline) {
-    const response = await fetch(`${WORKER}/operator/test-update`, { method: 'POST',
-      headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ target: TARGET, type: 'callback', chatId, userId,
-        delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + Math.floor(Math.random() * 1000) }),
-      signal: AbortSignal.timeout(60_000) });
-    const payload = await response.json().catch(() => ({}));
-    if (response.ok) return payload;
-    const code = typeof payload.error === 'string' ? payload.error : 'failed';
-    // The Worker refuses these two states before webhook dispatch. The Intake
-    // DO emits the collector button after its debounce, so retrying this
-    // no-side-effect readiness response waits for the real user-facing button.
-    if (response.status === 409 && ['no_current_button_message', 'no_current_button_revision'].includes(code)) {
-      lastCode = code;
-      await new Promise(resolve => setTimeout(resolve, 1_000));
-      continue;
-    }
-    throw new Error(`worker_callback_${response.status}_${code}`);
-  }
-  throw new Error(`prod_principal_canary_collector_button_timeout_${lastCode}`);
+  // Keep one updateId across retries. Each retryable response is produced
+  // before the synthetic webhook is dispatched, so this remains idempotent.
+  return workerRequest('/operator/test-update', { target: TARGET, type: 'callback', chatId, userId,
+    delivery: 'telegram', callbackData: 'auto', updateId: Date.now() + Math.floor(Math.random() * 1000) });
 }
 
-async function waitForLiveLane() {
-  const deadline = Date.now() + 60_000;
+export async function waitForLiveLane(readEvidence, { expectedBuildSha, timeoutMs = 180_000, intervalMs = 2_000,
+  now = () => Date.now(), sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const deadline = now() + timeoutMs;
   let lastReadiness = null;
-  let expectedProfileObserved = false;
-  while (Date.now() < deadline) {
-    const evidence = await workerRequest('/operator/test-evidence');
-    expectedProfileObserved ||= evidence.profileId === PROFILE_ID;
+  let workerProfileObserved = false;
+  let intakeProfileObserved = false;
+  let expectedRevisionObserved = expectedBuildSha === undefined;
+  while (now() < deadline) {
+    const evidence = await readEvidence();
+    workerProfileObserved ||= evidence.workerProfileId === PROFILE_ID;
+    intakeProfileObserved ||= evidence.profileId === PROFILE_ID;
+    expectedRevisionObserved ||= evidence.buildSha === expectedBuildSha;
     lastReadiness = evidence.readiness ?? {};
-    if (liveLaneIsReady(evidence)) return evidence;
+    if (liveLaneIsReady(evidence) && evidence.workerProfileId === PROFILE_ID && evidence.profileId === PROFILE_ID
+      && (expectedBuildSha === undefined || evidence.buildSha === expectedBuildSha)) return evidence;
     // The isolated live config is deployed immediately after a paused version.
     // Some Cloudflare edges can briefly serve the prior Worker version, whose
     // profile identity differs. Poll until the intended profile and live
     // readiness are both visible; do not send messages to that old lane.
-    await new Promise(resolve => setTimeout(resolve, 2_000));
+    await sleep(Math.min(intervalMs, deadline - now()));
   }
-  if (!expectedProfileObserved) throw new Error('prod_principal_canary_profile_not_propagated');
+  if (!workerProfileObserved) throw new Error('prod_principal_canary_worker_profile_not_propagated');
+  if (!expectedRevisionObserved) throw new Error('prod_principal_canary_worker_revision_not_propagated');
+  if (!intakeProfileObserved) throw new Error('prod_principal_canary_intake_profile_not_propagated');
   throw new Error(`prod_principal_canary_lane_not_ready_test_api_${lastReadiness?.testApiEnabled ? 'on' : 'off'}_ingress_paused_${lastReadiness?.ingressPaused ? 'yes' : 'no'}_delivery_paused_${lastReadiness?.deliveryPaused ? 'yes' : 'no'}`);
 }
 
@@ -304,7 +370,9 @@ async function main() {
   if (process.env.TG_SANDBOX_TARGET !== TARGET) throw new Error('prod_principal_canary_target_required');
   const { chatId } = identity();
   const laneIdentity = await verifyLiveLaneIdentity();
-  const before = await waitForLiveLane();
+  const before = await waitForLiveLane(() => workerRequest('/operator/test-evidence'), {
+    expectedBuildSha: process.env.GITHUB_SHA,
+  });
   if (before.buffer?.busy || before.buffer?.launching ||
       before.buffer?.unresolvedLaunchCount || before.buffer?.busyRequestCount) {
     throw new Error('prod_principal_canary_intake_not_idle');
@@ -329,12 +397,14 @@ async function main() {
   const username = `prod_principal_${randomBytes(6).toString('hex')}`;
   let task = null;
   try {
+    await checkpoint('creating_test_profile');
     const created = await capture(`/adduser ${username} Production E2E`, { admin: true });
     assert.equal(created.ok, true, 'prod_principal_canary_profile_create_failed');
     const text = (created.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
     const password = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(text)?.[1];
     assert(password, 'prod_principal_canary_profile_password_missing');
 
+    await checkpoint('authenticating_test_profile');
     const login = await send(`/login ${username} ${password}`);
     assert.equal(login.admission?.authenticated, true, 'prod_principal_canary_login_failed');
     await checkpoint('test_profile_authenticated', { loginAuthenticated: true });
@@ -343,6 +413,7 @@ async function main() {
     const startedAt = Date.now();
     // Use a concrete user task so Communication routing cannot reasonably
     // classify an echo-only probe as the deterministic system-health quick answer.
+    await checkpoint('submitting_first_turn');
     const question = await send(`Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`);
     assert.equal(question.ok, true, 'prod_principal_canary_question_rejected');
     await checkpoint('first_turn_accepted', { turns: [{ accepted: true,
@@ -350,9 +421,15 @@ async function main() {
     assert.equal(question.collector?.pendingCount, 1, 'prod_principal_canary_input_not_buffered');
 
     const { userId } = identity();
+    await checkpoint('launching_first_turn');
     const launched = await pressCurrentLaunchButton();
     assert.equal(launched.ok, true, 'prod_principal_canary_launch_callback_failed');
+    assert.equal(launched.callbackOwnedBeforeDispatch, true, 'prod_principal_canary_callback_not_currently_owned');
     const launchState = launched.collector ?? {};
+    await checkpoint('first_turn_launch_callback', { turns: [{ accepted: true,
+      launch: summarizeLaunch(launched), admissionCode: typeof launched.admission?.code === 'string'
+        ? launched.admission.code : null, callbackAccepted: launched.admission?.ok === true,
+      callbackResponse: summarizeCallbackResponse(launched) }] });
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
         !(launchState.launchingMessageIds ?? []).length &&
         !(Number(launchState.controlPlaneBarrier?.busyRequestCount) > 0) &&
@@ -388,6 +465,7 @@ async function main() {
     // Verify session context across separate Telegram turns. The follow-up
     // intentionally omits the nonce; only the preceding conversation contains it.
     const followupStartedAt = Date.now();
+    await checkpoint('submitting_followup_turn');
     const followupInput = await send('Repeat the exact token from my immediately previous message. Return only that token.');
     assert.equal(followupInput.ok, true, 'prod_principal_canary_followup_rejected');
     await checkpoint('followup_turn_accepted', { turns: [firstTurnSummary,
@@ -398,11 +476,13 @@ async function main() {
     const followupBarrier = controlPlaneBarrierCounts(followupInput.collector);
     assert.equal(followupBarrier.busyRequestCount, 0, 'prod_principal_canary_followup_busy_request_present');
     assert.equal(followupBarrier.unresolvedLaunchCount, 0, 'prod_principal_canary_followup_unresolved_launch_present');
+    await checkpoint('launching_followup_turn');
     const followupLaunch = await pressCurrentLaunchButton();
     assert.equal(followupLaunch.ok, true, 'prod_principal_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
       firstTurnSummary,
-      { accepted: true, launch: summarizeLaunch(followupLaunch) },
+      { accepted: true, launch: summarizeLaunch(followupLaunch),
+        callbackResponse: summarizeCallbackResponse(followupLaunch) },
     ] });
     assert(launchWasDispatched(followupLaunch, followupInput.collector), 'prod_principal_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);

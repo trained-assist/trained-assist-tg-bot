@@ -2,9 +2,101 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
-  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness } from '../tools/prod-principal-telegram-canary.mjs';
+  summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
+  waitForLaneIdentity, waitForLiveLane, shouldRetryTestUpdate,
+  summarizeCallbackResponse, summarizeTestUpdateRequest } from '../tools/prod-principal-telegram-canary.mjs';
+
+describe('production canary retries only pre-dispatch test endpoint readiness', () => {
+  it('retries test API propagation and callback collector readiness before webhook dispatch', () => {
+    expect(shouldRetryTestUpdate(409, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(true);
+    expect(shouldRetryTestUpdate(409, 'no_current_button_message', { type: 'callback' })).toBe(true);
+    expect(shouldRetryTestUpdate(409, 'no_current_button_revision', { type: 'callback' })).toBe(true);
+  });
+
+  it('does not retry ambiguous, unauthorized, or potentially dispatched errors', () => {
+    expect(shouldRetryTestUpdate(409, 'sandbox_test_identity_not_allowed', { type: 'callback' })).toBe(false);
+    expect(shouldRetryTestUpdate(401, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(false);
+    expect(shouldRetryTestUpdate(503, 'sandbox_test_api_not_ready', { type: 'callback' })).toBe(false);
+  });
+});
+
+describe('production canary failure evidence excludes prompts and credentials', () => {
+  it('records only safe request shape and pinned identity matches', () => {
+    const summary = summarizeTestUpdateRequest({ target: 'prod-principal', type: 'message', delivery: 'telegram',
+      chatId: 1714048, userId: 1714048, updateId: 123, text: '/login secret-user secret-password' });
+    expect(summary).toEqual({ requestType: 'message', delivery: 'telegram', targetMatches: true,
+      chatMatchesPinnedIdentity: true, userMatchesPinnedIdentity: true, updateIdIsSafeInteger: true,
+      textLengthBucket: 'short', command: 'login', callbackDataRecognized: false });
+    expect(JSON.stringify(summary)).not.toContain('secret-user');
+    expect(JSON.stringify(summary)).not.toContain('secret-password');
+  });
+
+  it('classifies only callback outcome signals and never copies outbound text', () => {
+    const summary = summarizeCallbackResponse({ admission: { ok: true, unsupported: false }, transcript: [
+      { kind: 'sendMessage', text: '⌛ Эта кнопка уже устарела. Черновик сохранён.' },
+      { kind: 'sendMessage', text: 'User prompt secret-token' },
+    ] });
+    expect(summary).toEqual({ webhookOk: true, callbackUnsupported: false, authenticated: false,
+      callbackOwnedBeforeDispatch: false,
+      serviceCommand: null, transcriptEntryCount: 2, transcriptKinds: ['sendMessage', 'sendMessage'],
+      outcomeCodes: ['callback_stale', 'other_message'] });
+    expect(JSON.stringify(summary)).not.toContain('secret-token');
+  });
+});
 
 describe('production Telegram canary launch evidence', () => {
+  it('waits through delayed profile propagation before admitting any input', async () => {
+    let now = 0;
+    let reads = 0;
+    const staleLane = { profileId: 'integration-sandbox3-v1', workerProfileId: 'integration-sandbox3-v1',
+      buildSha: 'old-build', readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } };
+    const liveLane = { profileId: 'production-e2e-telegram-v1', workerProfileId: 'production-e2e-telegram-v1',
+      buildSha: 'a'.repeat(40), readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } };
+    const evidence = await waitForLiveLane(async () => ++reads < 32 ? staleLane : liveLane, {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 180_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; },
+    });
+
+    expect(reads).toBe(32);
+    expect(now).toBe(62_000);
+    expect(evidence).toBe(liveLane);
+  });
+
+  it('fails closed when the expected profile is never observed during propagation wait', async () => {
+    let now = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1',
+      workerProfileId: 'integration-sandbox3-v1', buildSha: 'a'.repeat(40), readiness: {
+      testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+    } }), { timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } }))
+      .rejects.toThrow('prod_principal_canary_worker_profile_not_propagated');
+  });
+
+  it('distinguishes the Worker profile from a stale Durable Object profile', async () => {
+    let now = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'integration-sandbox3-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: 'a'.repeat(40), readiness: {
+        testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
+      } }), { expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } }))
+      .rejects.toThrow('prod_principal_canary_intake_profile_not_propagated');
+  });
+
+  it('waits for the exact Worker revision in operator evidence', async () => {
+    let now = 0;
+    let reads = 0;
+    await expect(waitForLiveLane(async () => ({ profileId: 'production-e2e-telegram-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: ++reads < 3 ? 'old-build' : 'a'.repeat(40),
+      readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
+    }), { expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000, now: () => now,
+      sleep: async milliseconds => { now += milliseconds; } })).resolves.toMatchObject({ buildSha: 'a'.repeat(40) });
+    expect(reads).toBe(3);
+  });
+
   it('waits for the isolated profile identity and live readiness before sending a user update', () => {
     expect(liveLaneIsReady({ profileId: 'integration-sandbox3-v1', readiness: {
       testApiEnabled: true, ingressPaused: false, deliveryPaused: false,
@@ -101,6 +193,32 @@ describe('production Telegram canary lane identity (E6)', () => {
     const identity = verifyLaneIdentity({ bot: 'ptichka_status_bot' });
     expect(identity).toMatchObject({ lane: 'prod-principal', botUsername: 'ptichka_status_bot',
       expectedBotUsername: 'ptichka_status_bot', botMatches: true });
+  });
+
+  it('waits for the exact deployed Worker revision before accepting lane identity', async () => {
+    let now = 0;
+    let reads = 0;
+    const stale = { bot: 'ptichka_status_bot', buildSha: 'b'.repeat(40) };
+    const live = { bot: '@ptichka_status_bot', buildSha: 'a'.repeat(40) };
+    const identity = await waitForLaneIdentity(async () => ++reads === 1 ? stale : live, {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 5_000, intervalMs: 2_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    });
+    expect(reads).toBe(2);
+    expect(identity).toMatchObject({ botMatches: true, buildSha: 'a'.repeat(40) });
+  });
+
+  it('does not accept missing bot identity or a mismatched source SHA', async () => {
+    let now = 0;
+    await expect(waitForLaneIdentity(async () => ({ buildSha: 'a'.repeat(40) }), {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 2_000, intervalMs: 1_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    })).rejects.toThrow('prod_principal_bot_mismatch_expected_ptichka_status_bot_got_missing');
+    now = 0;
+    await expect(waitForLaneIdentity(async () => ({ bot: 'ptichka_status_bot', buildSha: 'b'.repeat(40) }), {
+      expectedBuildSha: 'a'.repeat(40), timeoutMs: 2_000, intervalMs: 1_000,
+      now: () => now, sleep: async milliseconds => { now += milliseconds; },
+    })).rejects.toThrow('prod_principal_worker_revision_not_propagated');
   });
 
   it('no longer emits the misleading PROD-E2E nonce and labels the lane prod-principal', () => {

@@ -67,6 +67,18 @@ function configureProductionE2eOperator(env) {
 beforeEach(() => vi.clearAllMocks());
 
 describe('signed existing-UX ingress', () => {
+  it('exposes only the configured public bot identity and deployed source revision in health', async () => {
+    const { env } = fixture();
+    Object.assign(env, { TG_SANDBOX_BOT_USERNAME: '@ptichka_status_bot', BUILD_SHA: 'a'.repeat(40),
+      TG_SANDBOX_BOT_TOKEN: 'must-not-appear' });
+    const response = await worker.fetch(new Request('https://worker/health'), env);
+    expect(response.status).toBe(200);
+    const health = await response.json();
+    expect(health).toMatchObject({ status: 'ok', mode: 'existing-ux-control-plane',
+      bot: 'ptichka_status_bot', buildSha: 'a'.repeat(40) });
+    expect(JSON.stringify(health)).not.toContain('must-not-appear');
+  });
+
   it('keeps synthetic buffer-test sessions out of the shared sandbox KV', async () => {
     const state = fixture();
     const { env } = state;
@@ -103,6 +115,7 @@ describe('signed existing-UX ingress', () => {
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, options) {
       intakeCalls.push({ name, path: new URL(url).pathname });
       if (new URL(url).pathname === '/debug') return Response.json(collectorState);
+      if (new URL(url).pathname === '/callback-owner') return Response.json({ owned: true });
       return Response.json({ ok: true, appended: true });
     } }) };
     const request = (body, token = env.TG_SANDBOX_CLEANUP_TOKEN) => worker.fetch(new Request('https://worker/operator/test-update', {
@@ -141,7 +154,8 @@ describe('signed existing-UX ingress', () => {
     Object.assign(collectorState, { collectorMsgId: 90, collectorDraftRevision: 4 });
     const configuredChatCallback = await request({ target: 'sandbox', type: 'callback', callbackData: 'intake_run',
       chatId: 1001, updateId: 91010, messageId: 90 });
-    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001, callbackData: 'ws|auto|4' });
+    expect(await configuredChatCallback.json()).toMatchObject({ ok: true, chatId: 1001,
+      callbackOwnedBeforeDispatch: true, callbackData: 'ws|auto|4' });
     expect(callbackChatId('sandbox-test-91010')).toBe(1001);
     expect(handleCallbackQuery).toHaveBeenLastCalledWith(expect.objectContaining({ data: 'ws|auto|4', message: expect.objectContaining({
       message_id: 90, chat: { id: 1001, type: 'private', is_forum: false },
@@ -296,6 +310,7 @@ describe('signed existing-UX ingress', () => {
   it('returns only redacted production E2E task evidence from the pinned Telegram Intake object', async () => {
     const { env } = fixture();
     configureProductionE2eOperator(env);
+    env.BUILD_SHA = 'b'.repeat(40);
     let observed;
     env.INTAKE = { idFromName: name => name, get: name => ({ async fetch(url, init) {
       observed = { name, path: new URL(url).pathname, method: init.method,
@@ -310,6 +325,7 @@ describe('signed existing-UX ingress', () => {
     }), env);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ profileId: 'production-e2e-telegram-v1',
+      workerProfileId: 'production-e2e-telegram-v1', buildSha: 'b'.repeat(40),
       readiness: { testApiEnabled: true, ingressPaused: false, deliveryPaused: false },
       tasks: [{ userTaskId: 'ut-test', status: 'done', resultPresent: true, answerPresent: true,
         routingOutcome: { known: true, degraded: false, routeReasonCode: 'task_needs_agent',

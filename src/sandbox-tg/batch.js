@@ -11,6 +11,7 @@
 // upload ceiling (20 MiB) is refused with a clear message instead of a silent
 // drop; Cyrillic file names are preserved end to end.
 import { TELEGRAM_FILE_SIZE_LIMIT_BYTES } from './contract.js';
+import { googleDocUrlOf } from './media-intake.js';
 
 export const BATCH_STATUS = {
   collecting: 'collecting',
@@ -166,6 +167,21 @@ export function normalizeItem(item, seq) {
       tooLarge: Boolean(item.tooLarge),
     };
   }
+  if (item.type === 'google_doc') {
+    return {
+      ...base,
+      text: null,
+      url: item.url ?? null,
+      fileName: 'google-docs-link.txt',
+      fileSize: item.fileSize ?? null,
+      mimeType: 'text/plain',
+      summary: item.summary ?? (item.url ? `Ссылка Google Docs: ${item.url}` : (item.text ? `Ссылка Google Docs: ${item.text}` : 'Ссылка Google Docs')),
+      artifactRefs: [],
+      mediaPending: false,
+      mediaError: item.mediaError ?? null,
+      tooLarge: false,
+    };
+  }
   if (item.type === 'document' || item.type === 'photo') {
     return {
       ...base,
@@ -196,6 +212,15 @@ function fileSummary(item) {
  */
 export function attachmentOf(message) {
   if (!message || typeof message !== 'object') return { type: 'empty' };
+  const googleDocUrl = googleDocUrlOf(message.text || message.caption);
+  if (googleDocUrl) {
+    return {
+      type: 'google_doc',
+      url: googleDocUrl,
+      text: message.text || message.caption || googleDocUrl,
+      fileSize: (message.text || message.caption || '').length,
+    };
+  }
   if (typeof message.text === 'string' && message.text) return { type: 'text', text: message.text };
   if (message.voice) {
     return {
@@ -216,12 +241,23 @@ export function attachmentOf(message) {
     };
   }
   if (message.document) {
+    const mimeType = message.document.mime_type ?? null;
+    if (mimeType && /^(audio|video)\//i.test(mimeType)) {
+      return {
+        type: 'voice',
+        fileId: message.document.file_id,
+        durationSec: message.document.duration ?? null,
+        mimeType,
+        fileSize: message.document.file_size ?? null,
+        fileName: message.document.file_name ?? null,
+      };
+    }
     return {
       type: 'document',
       fileId: message.document.file_id,
       fileName: message.document.file_name ?? null,
       fileSize: message.document.file_size ?? null,
-      mimeType: message.document.mime_type ?? null,
+      mimeType,
     };
   }
   if (Array.isArray(message.photo) && message.photo.length) {
