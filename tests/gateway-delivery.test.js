@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const sendMessage = vi.fn();
 const sendMessageWithKeyboard = vi.fn();
+const deliveryOwner = vi.hoisted(() => ({
+  records: new Map(), enqueue: vi.fn(), drain: vi.fn(), load: vi.fn(),
+}));
 
 vi.mock('../src/lib/telegram.js', () => ({
   sendMessage: (...a) => sendMessage(...a),
@@ -35,6 +38,45 @@ vi.mock('../src/handlers/user-mgmt.js', () => ({
   isUserMgmtCommand: () => false,
 }));
 vi.mock('../src/lib/telegram-extra.js', () => ({}));
+vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
+  TgDeliveryOwner: class {},
+  TgDeliveryOwnerV2: class {},
+  TgDeliveryOwnerClient: class {
+    constructor(env) { this.env = env; }
+    async enqueue(input) {
+      deliveryOwner.enqueue(input);
+      const existing = deliveryOwner.records.get(input.deliveryId);
+      if (existing) {
+        if (JSON.stringify(existing.input) !== JSON.stringify(input)) throw new Error('delivery_id_payload_conflict');
+        return { record: existing, duplicate: true };
+      }
+      const record = { input, status: 'pending', attempts: 0 };
+      deliveryOwner.records.set(input.deliveryId, record);
+      return { record, duplicate: false };
+    }
+    async drain() {
+      deliveryOwner.drain();
+      const record = [...deliveryOwner.records.values()].find(item => item.status === 'pending');
+      if (!record) return 0;
+      record.status = 'sending';
+      record.attempts += 1;
+      try {
+        const { input } = record;
+        const result = input.replyMarkup
+          ? await sendMessageWithKeyboard(this.env.BOT_TOKEN, input.destination.chatId, input.text,
+            input.replyMarkup.inline_keyboard, input.destination.threadId ? { message_thread_id: input.destination.threadId } : {})
+          : await sendMessage(this.env.BOT_TOKEN, input.destination.chatId, input.text,
+            input.destination.threadId ? { message_thread_id: input.destination.threadId } : {});
+        if (result?.ok === false) { record.status = 'dead'; record.reason = 'provider_rejected'; }
+        else if (Number.isSafeInteger(result?.result?.message_id)) {
+          record.status = 'sent'; record.telegramMessageId = result.result.message_id;
+        } else record.status = 'unknown';
+      } catch { record.status = 'unknown'; }
+      return 1;
+    }
+    async load(deliveryId) { deliveryOwner.load(deliveryId); return deliveryOwner.records.get(deliveryId) ?? null; }
+  },
+}));
 
 const mod = await import('../src/index.js');
 const worker = mod.default;
@@ -50,13 +92,14 @@ function env() {
     SESSIONS,
     INTAKE: { idFromName: (n) => n, get: () => ({ fetch: vi.fn(async () => new Response('{}')) }) },
     USERS: SESSIONS,
+    TG_DELIVERY_OWNER: { idFromName: n => n, get: () => ({ fetch: vi.fn() }) },
   };
 }
 
 const deliver = (body) =>
   worker.fetch(new Request('https://x/deliver', {
     method: 'POST', headers: { ...AUTH, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ userTaskId: 'ut-test', taskAcceptedAt: Date.now(), ...body }),
   }), env());
 
 beforeEach(() => {
@@ -65,6 +108,10 @@ beforeEach(() => {
   SESSIONS.put.mockResolvedValue(undefined);
   sendMessage.mockResolvedValue({ ok: true, result: { message_id: 555 } });
   sendMessageWithKeyboard.mockResolvedValue({ ok: true, result: { message_id: 556 } });
+  deliveryOwner.records.clear();
+  deliveryOwner.enqueue.mockClear();
+  deliveryOwner.drain.mockClear();
+  deliveryOwner.load.mockClear();
 });
 
 describe('POST /deliver — реальный адаптер канала (arch#132 П3b)', () => {
@@ -83,16 +130,13 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     const body = await res.json();
     expect(body.providerMessageId).toBe(556);
     expect(sendMessageWithKeyboard).toHaveBeenCalledTimes(1);
-    // Адресная кнопка: тот же callback, который сливает буфер ЭТОГО чата.
-    // РЕГРЕССИЯ (найдена живой приёмкой 2026-10-04): sendMessageWithKeyboard
-    // оборачивает САМ. Сюда передаются РЯДЫ, а не готовый { inline_keyboard }.
-    // Двойная обёртка даёт от Telegram «field "inline_keyboard" must be of type
-    // Array» и доставка не происходит вовсе.
+    // The durable owner receives the Telegram keyboard rows and stable task timestamp.
     const rows = sendMessageWithKeyboard.mock.calls[0][3];
     expect(Array.isArray(rows)).toBe(true);
     expect(JSON.stringify(rows)).toContain('intake_run');
     // Адрес доставки — отрицательный id группы, он не теряется.
     expect(Number(sendMessageWithKeyboard.mock.calls[0][1])).toBe(-5496844108);
+    expect(deliveryOwner.enqueue).toHaveBeenCalledWith(expect.objectContaining({ taskAcceptedAt: expect.any(Number), type: 'launch' }));
     const event = JSON.parse(log.mock.calls.map(call => call[0]).find(line => line.includes('tg.delivery.accepted')));
     expect(event).toMatchObject({ deliveryId: 'd-1', taskId: 'ut-delivery-1', status: 'sent', providerMessageId: 556 });
     expect(JSON.stringify(event)).not.toContain('-5496844108');
@@ -110,19 +154,41 @@ describe('POST /deliver — реальный адаптер канала (arch#1
     expect(res.status).toBe(502);
     expect((await res.json()).providerMessageId).toBeUndefined();
     const event = JSON.parse(log.mock.calls.map(call => call[0]).find(line => line.includes('tg.delivery.rejected')));
-    expect(event).toMatchObject({ deliveryId: 'd-2', status: 'rejected', reasonCode: 'provider_not_accepted' });
+    expect(event).toMatchObject({ deliveryId: 'd-2', status: 'rejected', reasonCode: 'provider_rejected' });
     expect(JSON.stringify(event)).not.toContain('chat not found');
     log.mockRestore();
   });
 
-  it('канал недоступен полностью — 502, а не «успех без message_id»', async () => {
-    sendMessageWithKeyboard.mockResolvedValue({ ok: false, description: 'bot was blocked' });
-    sendMessage.mockResolvedValue({ ok: false, description: 'bot was blocked' });
+  it('неоднозначный ответ канала сохраняется как unknown', async () => {
+    sendMessageWithKeyboard.mockRejectedValue(new Error('ambiguous network failure'));
     const res = await deliver({
       deliveryId: 'd-3', channel: 'telegram', destinationId: '42',
       message: { kind: 'stuck_input', text: '⏳ жду' },
     });
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ outcome: 'unknown', status: 'unknown' });
+  });
+
+  it('повтор того же deliveryId после потери HTTP-ответа возвращает receipt без второй отправки', async () => {
+    const body = { deliveryId: 'd-replay', userTaskId: 'ut-delivery-replay', taskAcceptedAt: 1730000000000,
+      channel: 'telegram', destinationId: '42', message: { text: 'notification' } };
+    const first = await deliver(body);
+    const second = await deliver(body);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ providerMessageId: 555, duplicate: true });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('ambiguous acceptance is persisted as unknown and a retry never resends', async () => {
+    const body = { deliveryId: 'd-unknown', userTaskId: 'ut-delivery-unknown', taskAcceptedAt: 1730000000000,
+      channel: 'telegram', destinationId: '42', message: { text: 'notification' } };
+    sendMessage.mockRejectedValueOnce(new Error('socket closed after request write'));
+    const first = await deliver(body);
+    const second = await deliver(body);
+    expect((await first.json()).outcome).toBe('unknown');
+    expect((await second.json()).outcome).toBe('unknown');
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('не-Telegram канал и битый адрес — 400, до обращения к Telegram', async () => {
@@ -168,7 +234,7 @@ describe('Контракт стыка C02.1 — форма, от которой 
   });
 
   it('отказ канала — 502 и providerMessageId ОТСУТСТВУЕТ (не null, не 0)', async () => {
-    sendMessageWithKeyboard.mockResolvedValue({ ok: false, description: 'chat not found' });
+    sendMessage.mockResolvedValue({ ok: false, description: 'chat not found' });
     const res = await deliver({
       deliveryId: 'd', channel: 'telegram', destinationId: '42', message: { text: 'x' },
     });

@@ -313,6 +313,7 @@ export class TgDeliveryOwnerClient {
     return response.json();
   }
   enqueue(record) { return this.call('enqueue', record); }
+  load(deliveryId) { return this.call('load', { deliveryId }); }
   open() { return this.call('open', {
     deliveryPaused: this.env.TG_SLICE_DELIVERY_PAUSED !== 'false',
     ingressPaused: this.env.TG_SLICE_INGRESS_PAUSED === 'true',
