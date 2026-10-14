@@ -1044,6 +1044,17 @@ export class IntakeBuffer {
       const unresolvedLaunches = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
       const busyRequests = (await this.state.storage.get('cpBusyRequests')) || [];
       const stopWindow = await this.state.storage.get('cpStopWindow');
+      // #267: busyRequestCount alone is not actionable — an operator holding the
+      // AGENT_SECRET still cannot map the latch to a CP task. Export each
+      // accepted requestId with its userTaskId and outcome markers so the
+      // recovery verdict (release vs wait) is possible from the debug response
+      // alone, without internal KV access.
+      const busyRequestDetails = await Promise.all(busyRequests.map(async requestId => {
+        const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+        return { requestId, userTaskId: record?.receipt?.userTaskId ?? null,
+          terminal: record?.terminal === true, outcomeUnknown: record?.outcomeUnknown === true,
+          stale: record?.stale === true };
+      }));
       const unresolvedCheckpointMedia = await Promise.all(unresolvedLaunches.map(async key => {
         const checkpoint = await this.state.storage.get(`cp-launch:${key}`);
         const items = checkpoint?.msg?.intakeItems || (checkpoint?.msg ? [{ msg: checkpoint.msg }] : []);
@@ -1073,6 +1084,7 @@ export class IntakeBuffer {
           unresolvedLaunchCount: unresolvedLaunches.length,
           unresolvedCheckpointHasUnsupportedMedia: unresolvedCheckpointMedia.some(Boolean),
           busyRequestCount: busyRequests.length,
+          busyRequests: busyRequestDetails,
           stopPending: stopWindow?.pending === true,
         } : null,
         collectorDelivery: this.env.EXECUTION_BACKEND === 'control-plane'
@@ -3277,8 +3289,16 @@ export class IntakeBuffer {
     if (this.cpDispatches) return false;
     try { await this._recoverControlPlaneLaunch(); } catch { } // a failed recovery must not wedge the whole poll (GAP-1 class)
     if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length) return false;
-    const ids = (await this.state.storage.get('cpBusyRequests')) || [];
+    let ids = (await this.state.storage.get('cpBusyRequests')) || [];
     if (!ids.length) return false;
+    // #267: a cpBusyRequests id with no matching (current-profile, durable)
+    // acceptance record can never be reconciled — the CP task it pointed at was
+    // never admitted or its record is gone. Polling it would spin every
+    // BUSY_POLL_MS until BUSY_MAX_MS: 45 minutes of a chat that accepts input
+    // and answers nothing. Drop such stale ids up front; when none remain,
+    // release the busy window immediately instead of at the hard cap.
+    ids = await this._dropStaleControlPlaneLocks(ids, { launch });
+    if (!ids.length) return true;
     let reconcileRequestId = null;
     let reconcileStage = 'acceptance';
     try {
@@ -3459,6 +3479,48 @@ export class IntakeBuffer {
       }
       return false;
     }
+  }
+
+  // #267: retire latch ids whose cp-acceptance record is missing or no longer
+  // matches the configured profile. The sweep re-verifies the id list under
+  // _exclusive so concurrent polls cannot retire the same id twice, and when
+  // it empties the latch it releases the busy window in the same transaction —
+  // the caller then runs _afterBusyRelease (poll return value true).
+  async _dropStaleControlPlaneLocks(ids, { launch = false } = {}) {
+    const profileId = controlPlaneClient(this.env).config.profileId;
+    const stale = [];
+    for (const requestId of ids) {
+      const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+      const receipt = record?.receipt;
+      if (!receipt || receipt.requestId !== requestId || receipt.profileId !== profileId ||
+          receipt.durable !== true) stale.push(requestId);
+    }
+    if (!stale.length) return ids;
+    return this._exclusive(async () => {
+      // Another alarm tick may have retired or extended the same list between
+      // the sweep and this transaction; if so, re-read and stop.
+      const current = (await this.state.storage.get('cpBusyRequests')) || [];
+      if (JSON.stringify(current) !== JSON.stringify(ids)) return current;
+      let remaining = current;
+      for (const requestId of stale) {
+        const record = await this.state.storage.get(`cp-acceptance:${requestId}`);
+        const receipt = record?.receipt;
+        if (receipt?.requestId === requestId && receipt.durable === true &&
+            receipt.profileId === profileId) continue; // adopted since the sweep
+        remaining = remaining.filter(id => id !== requestId);
+        await this.state.storage.put(`cp-acceptance:${requestId}`, { ...record, stale: true,
+          reconciliationFailure: { stage: 'acceptance', httpStatus: null,
+            errorName: 'StaleControlPlaneLatch', at: Date.now() } });
+      }
+      await this.state.storage.put('cpBusyRequests', remaining);
+      const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      if (remaining.length || this.cpDispatches || stopPending ||
+          (await this.state.storage.get('cpUnresolvedLaunches'))?.length ||
+          !(await this.state.storage.get('busy'))) return remaining;
+      await this._releaseBusyLocked();
+      if (launch) await this.state.storage.put('launchAfterRelease', true);
+      return remaining;
+    });
   }
 
   async _pollRunFinishedIfIdle(since, { launch = false } = {}) {
