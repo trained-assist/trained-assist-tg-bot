@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { cleanupReadiness, durableTurnVerdict, intakeIsIdle, launchWasDispatched, liveLaneIsReady,
   summarizeIntakeState, summarizeLaunch, verifyLaneIdentity, waitForCleanupReadiness,
   waitForLaneIdentity, waitForLiveLane, shouldRetryTestUpdate,
-  summarizeTestUpdateRequest } from '../tools/prod-principal-telegram-canary.mjs';
+  summarizeCallbackResponse, summarizeTestUpdateRequest } from '../tools/prod-principal-telegram-canary.mjs';
 
 describe('production canary retries only pre-dispatch test endpoint readiness', () => {
   it('retries test API propagation and callback collector readiness before webhook dispatch', () => {
@@ -29,6 +29,17 @@ describe('production canary failure evidence excludes prompts and credentials', 
       textLengthBucket: 'short', command: 'login', callbackDataRecognized: false });
     expect(JSON.stringify(summary)).not.toContain('secret-user');
     expect(JSON.stringify(summary)).not.toContain('secret-password');
+  });
+
+  it('classifies only callback outcome signals and never copies outbound text', () => {
+    const summary = summarizeCallbackResponse({ admission: { ok: true, unsupported: false }, transcript: [
+      { kind: 'sendMessage', text: '⌛ Эта кнопка уже устарела. Черновик сохранён.' },
+      { kind: 'sendMessage', text: 'User prompt secret-token' },
+    ] });
+    expect(summary).toEqual({ webhookOk: true, callbackUnsupported: false, authenticated: false,
+      serviceCommand: null, transcriptEntryCount: 2, transcriptKinds: ['sendMessage', 'sendMessage'],
+      outcomeCodes: ['callback_stale', 'other_message'] });
+    expect(JSON.stringify(summary)).not.toContain('secret-token');
   });
 });
 
