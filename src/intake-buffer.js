@@ -1915,7 +1915,8 @@ export class IntakeBuffer {
         }
         return json({ flushed: true, healed: true });
       }
-      const buf = (await this.state.storage.get('retryBatch')) || (await this.state.storage.get('buf')) || [];
+      const retryBatch = (await this.state.storage.get('retryBatch')) || [];
+      const buf = retryBatch.length ? retryBatch : ((await this.state.storage.get('buf')) || []);
       if (!buf.length) return json({ empty: true });
       const pending = buf.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000));
       if (pending) {
@@ -2654,8 +2655,8 @@ export class IntakeBuffer {
       await this.state.storage.delete('gateLevel');
       await this.state.storage.delete('parkedAt');
       await this.state.storage.delete('parkReoffers');
-      const retryBatch = await this.state.storage.get('retryBatch');
-      const items = retryBatch || (await this.state.storage.get('buf')) || [];
+      const retryBatch = (await this.state.storage.get('retryBatch')) || [];
+      const items = retryBatch.length ? retryBatch : ((await this.state.storage.get('buf')) || []);
       if (!items.length) return [];
       if (items.some(i => i.mediaPending || (i.preparingAt && Date.now() - i.preparingAt < 120000))) return [];
       items.sort((a, b) => (a.msg.message_id || 0) - (b.msg.message_id || 0));
@@ -2685,7 +2686,7 @@ export class IntakeBuffer {
         await this.state.storage.setAlarm(Date.now() + BUSY_POLL_MS);
       }
       await this.state.storage.put('launching', items);
-      if (!retryBatch) await this.state.storage.delete('buf');
+      if (!retryBatch.length) await this.state.storage.delete('buf');
       await this.state.storage.delete('retryBatch');
       // Point of no return: the batch is leaving — the ↩️ tail must not outlive it
       // (the «📨 Передаю» status below is STATUS_BTN, and a stale flag would put
