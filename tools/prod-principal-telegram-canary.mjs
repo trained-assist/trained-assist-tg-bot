@@ -179,6 +179,30 @@ export function summarizeTestUpdateRequest(body = {}) {
   };
 }
 
+export function summarizeCallbackResponse(payload = {}) {
+  const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+  const outcomeCodes = transcript.map(entry => {
+    const text = typeof entry?.text === 'string' ? entry.text : '';
+    if (/кнопка.*устарела/i.test(text)) return 'callback_stale';
+    if (text.includes('не удалось подтвердить запуск')) return 'launch_not_confirmed';
+    if (text.includes('Передаю собранный ввод') || text.includes('Передаю задачу агенту')) return 'launch_handoff_started';
+    if (text.includes('Передача этого ввода уже обрабатывается')) return 'callback_in_flight';
+    if (text.includes('Не удалось подтвердить запуск')) return 'launch_not_confirmed';
+    return 'other_message';
+  });
+  const admission = payload.admission && typeof payload.admission === 'object' ? payload.admission : {};
+  return {
+    webhookOk: admission.ok === true,
+    callbackUnsupported: admission.unsupported === true,
+    authenticated: admission.authenticated === true,
+    serviceCommand: typeof admission.serviceCommand === 'string' ? admission.serviceCommand : null,
+    transcriptEntryCount: transcript.length,
+    transcriptKinds: transcript.map(entry => typeof entry?.kind === 'string' && /^[a-zA-Z]{1,40}$/.test(entry.kind)
+      ? entry.kind : 'other'),
+    outcomeCodes,
+  };
+}
+
 async function send(text, extra = {}) {
   const { chatId, userId } = identity();
   return workerRequest('/operator/test-update', { target: TARGET, type: 'message', chatId, userId,
@@ -402,7 +426,8 @@ async function main() {
     const launchState = launched.collector ?? {};
     await checkpoint('first_turn_launch_callback', { turns: [{ accepted: true,
       launch: summarizeLaunch(launched), admissionCode: typeof launched.admission?.code === 'string'
-        ? launched.admission.code : null, callbackAccepted: launched.admission?.ok === true }] });
+        ? launched.admission.code : null, callbackAccepted: launched.admission?.ok === true,
+      callbackResponse: summarizeCallbackResponse(launched) }] });
     if (launchState.pendingCount !== 0 && launchState.busy !== true &&
         !(launchState.launchingMessageIds ?? []).length &&
         !(Number(launchState.controlPlaneBarrier?.busyRequestCount) > 0) &&
@@ -454,7 +479,8 @@ async function main() {
     assert.equal(followupLaunch.ok, true, 'prod_principal_canary_followup_launch_failed');
     await checkpoint('followup_launch_callback', { turns: [
       firstTurnSummary,
-      { accepted: true, launch: summarizeLaunch(followupLaunch) },
+      { accepted: true, launch: summarizeLaunch(followupLaunch),
+        callbackResponse: summarizeCallbackResponse(followupLaunch) },
     ] });
     assert(launchWasDispatched(followupLaunch, followupInput.collector), 'prod_principal_canary_followup_launch_not_dispatched');
     const followupObserved = await waitForTask(new Set([...baselineIds, firstTask.userTaskId]), followupStartedAt, nonce);
