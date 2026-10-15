@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pingPongAnswerPresent } from '../tools/sandbox3-ping-pong-oracle.mjs';
+import { extractDeliverableAnswer, pingPongAnswerPresent } from '../tools/sandbox3-ping-pong-oracle.mjs';
 
 describe('sandbox3 build ping-pong answer oracle', () => {
   it('accepts a normal non-empty model response without exact formatting', () => {
@@ -24,5 +24,12 @@ describe('sandbox3 build ping-pong answer oracle', () => {
 
   it('does not treat ordinary discussion of errors as a failure banner', () => {
     expect(pingPongAnswerPresent('The system is working; I can explain the error handling if useful.')).toBe(true);
+  });
+
+  it('extracts only the answer production delivery would send', () => {
+    expect(extractDeliverableAnswer({ answer: 'A verbose but valid response.' })).toBe('A verbose but valid response.');
+    expect(extractDeliverableAnswer('Plain text response.')).toBe('Plain text response.');
+    expect(extractDeliverableAnswer({ metadata: 'this must not count as an answer' })).toBe('');
+    expect(extractDeliverableAnswer({ content: [{ type: 'text', text: 'not the delivery contract' }] })).toBe('');
   });
 });
