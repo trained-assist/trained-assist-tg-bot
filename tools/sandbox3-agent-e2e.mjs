@@ -349,7 +349,7 @@ async function main() {
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
       : pingPong ? `Use your shell tool to run \`printf '%s' '${nonce}'\` and tell me what it printed. You may add a brief explanation.`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
-  const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
+  const expectedLines = scenario === 'service-reply' ? ['Сервис работает! Отправляйте задание!']
     : scenario === 'capability-reply' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]

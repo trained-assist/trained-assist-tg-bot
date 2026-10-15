@@ -31,6 +31,6 @@ it('keeps named staging and secondary bot environments on the legacy entrypoint'
 it('syncs the ordinary production gateway principal credentials', () => {
   expect(ci).toContain('secrets.CONTROL_PLANE_PRINCIPAL_SIGNATURE');
   expect(ci).toContain('secrets.CONTROL_PLANE_SECRET');
-  expect(ci).toContain('wrangler secret put CONTROL_PLANE_PRINCIPAL_SIGNATURE');
-  expect(ci).toContain('wrangler secret put CONTROL_PLANE_SECRET');
+  expect(ci).toContain('node tools/deploy-main-worker.mjs');
+  expect(ci).not.toContain('wrangler secret put');
 });

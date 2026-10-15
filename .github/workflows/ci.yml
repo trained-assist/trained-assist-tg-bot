@@ -183,29 +183,6 @@ jobs:
         run: |
           echo "Deploying protected main after CI and staging gates."
           echo "deployed=true" >> "$GITHUB_OUTPUT"
-      # ADMIN_GROUP_ID is a Workers secret set once via `wrangler secret put` —
-      # it isn't declared in wrangler.toml and deploy doesn't touch it, so it
-      # silently went missing and every admin-group command (/adduser etc.)
-      # got dropped with no error (2026-09-23 incident). Re-asserting it here
-      # every deploy makes it self-healing instead of a one-off CLI step that
-      # nothing reproduces.
-      - name: Sync ADMIN_GROUP_ID secret (main)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: echo "${{ secrets.ADMIN_GROUP_ID }}" | npx wrangler secret put ADMIN_GROUP_ID
-      - name: Sync production gateway principal credentials (main)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CONTROL_PLANE_PRINCIPAL_SIGNATURE: ${{ secrets.CONTROL_PLANE_PRINCIPAL_SIGNATURE }}
-          CONTROL_PLANE_SECRET: ${{ secrets.CONTROL_PLANE_SECRET }}
-        run: |
-          set -euo pipefail
-          [[ "$CONTROL_PLANE_PRINCIPAL_SIGNATURE" =~ ^[a-f0-9]{64}$ ]]
-          [[ "$CONTROL_PLANE_SECRET" =~ ^[a-f0-9]{64}$ ]]
-          printf '%s' "$CONTROL_PLANE_PRINCIPAL_SIGNATURE" | npx wrangler secret put CONTROL_PLANE_PRINCIPAL_SIGNATURE
-          printf '%s' "$CONTROL_PLANE_SECRET" | npx wrangler secret put CONTROL_PLANE_SECRET
       # One loop instead of a hand-copied step per bot (issue #1302 §4.4):
       # adding a 4th bot is one more entry here, not another copy-pasted block.
       # BUILD_SHA is passed so the smoke step can prove the deployed revision.
@@ -218,12 +195,15 @@ jobs:
           FREELANCE_BOT_TOKEN: ${{ secrets.FREELANCE_BOT_TOKEN }}
           SALES_BOT_TOKEN: ${{ secrets.SALES_BOT_TOKEN }}
           BUILD_SHA: ${{ github.sha }}
+          ADMIN_GROUP_ID: ${{ secrets.ADMIN_GROUP_ID }}
+          CONTROL_PLANE_PRINCIPAL_SIGNATURE: ${{ secrets.CONTROL_PLANE_PRINCIPAL_SIGNATURE }}
+          CONTROL_PLANE_SECRET: ${{ secrets.CONTROL_PLANE_SECRET }}
         run: |
           set -euo pipefail
           deploy() {
             name="$1"
             if [ "$name" = "main" ]; then
-              npx wrangler deploy --var BUILD_SHA:"$BUILD_SHA"
+              node tools/deploy-main-worker.mjs
             else
               npx wrangler deploy --env "$name" --var BUILD_SHA:"$BUILD_SHA"
             fi
