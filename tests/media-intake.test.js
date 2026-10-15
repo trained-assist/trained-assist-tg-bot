@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareTelegramArtifact } from '../src/sandbox-tg/media-intake.js';
+import { prepareTelegramArtifact, transcribeIngressAudio } from '../src/sandbox-tg/media-intake.js';
 
 const profile = { profileId: 'profile-1', ingressRef: 'tg:probability_cat_bot:1001:7' };
 const attachment = { type: 'voice', fileId: 'telegram-file-secret', fileName: 'voice.ogg', mimeType: 'audio/ogg', fileSize: 5 };
 const bytes = new TextEncoder().encode('audio');
 
 describe('Telegram media intake', () => {
+  it('transcribes the exact uploaded voice bytes and fails closed on missing or empty speech service', async () => {
+    const ai = { run: vi.fn(async () => ({ text: '  Synthetic voice received.  ' })) };
+    expect(await transcribeIngressAudio(ai, bytes)).toBe('Synthetic voice received.');
+    expect(ai.run).toHaveBeenCalledWith('@cf/openai/whisper-large-v3-turbo', {
+      audio: Buffer.from(bytes).toString('base64'), task: 'transcribe',
+    });
+    await expect(transcribeIngressAudio(null, bytes)).rejects.toMatchObject({ retryable: true });
+    await expect(transcribeIngressAudio({ run: async () => ({ text: '' }) }, bytes)).rejects.toThrow('no usable text');
+  });
   it('streams only bytes and opaque identity to the buffer; never forwards Telegram file IDs', async () => {
     let request;
     const fetchImpl = vi.fn(async url => url.includes('/getFile')

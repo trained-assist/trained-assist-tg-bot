@@ -84,6 +84,11 @@ function nameForAttachment(attachment) {
 }
 
 export async function prepareTelegramArtifact({ message, attachment, profile, config, buffer, bufferToken, fetchImpl = fetch }) {
+  const { manifest } = await prepareTelegramArtifactWithBytes({ message, attachment, profile, config, buffer, bufferToken, fetchImpl });
+  return manifest;
+}
+
+export async function prepareTelegramArtifactWithBytes({ message, attachment, profile, config, buffer, bufferToken, fetchImpl = fetch }) {
   if (!buffer || !String(bufferToken ?? '').trim()) throw new MediaIntakeError('media storage is not configured', { retryable: true });
   if (!attachment?.fileId || !profile?.profileId || !profile?.ingressRef) throw new MediaIntakeError('media metadata is incomplete');
   if (attachment.fileSize != null && attachment.fileSize > TELEGRAM_FILE_SIZE_LIMIT_BYTES) throw new MediaIntakeError('media exceeds the 20 MiB limit');
@@ -145,5 +150,25 @@ export async function prepareTelegramArtifact({ message, attachment, profile, co
     throw new MediaIntakeError('media storage returned an invalid manifest');
   }
   if (await sha256Hex(bytes) !== manifest.sha256) throw new MediaIntakeError('media storage checksum mismatch');
-  return manifest;
+  return { manifest, bytes };
+}
+
+export async function transcribeIngressAudio(ai, bytes) {
+  if (!ai || typeof ai.run !== 'function') throw new MediaIntakeError('speech transcription is not configured', { retryable: true });
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > TELEGRAM_FILE_SIZE_LIMIT_BYTES) {
+    throw new MediaIntakeError('speech audio is invalid');
+  }
+  let response;
+  try {
+    response = await ai.run('@cf/openai/whisper-large-v3-turbo', {
+      audio: btoa(Array.from({ length: Math.ceil(bytes.length / 32768) }, (_, index) =>
+        String.fromCharCode(...bytes.subarray(index * 32768, (index + 1) * 32768))).join('')),
+      task: 'transcribe',
+    });
+  } catch {
+    throw new MediaIntakeError('speech transcription is temporarily unavailable', { retryable: true });
+  }
+  const transcript = typeof response?.text === 'string' ? response.text.trim() : '';
+  if (!transcript || transcript.length > 100_000) throw new MediaIntakeError('speech transcription returned no usable text');
+  return transcript;
 }
