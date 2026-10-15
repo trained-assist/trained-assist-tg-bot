@@ -34,7 +34,9 @@ const EXPECTED_BUILD_SHA = process.env.EXPECTED_BUILD_SHA ?? '';
 const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
 const POLL_MS = 5_000;
 const COLLECTOR_TIMEOUT_MS = 120_000;
-const DELIVERY_TIMEOUT_MS = 300_000;
+// Voice intake can spend three minutes in the production quiet gate before the
+// Runner and the terminal delivery begin; keep the E2E deadline beyond both.
+const DELIVERY_TIMEOUT_MS = VOICE_INGRESS ? 600_000 : 300_000;
 
 const secrets = {
   webhook: process.env.WEBHOOK_SECRET,
