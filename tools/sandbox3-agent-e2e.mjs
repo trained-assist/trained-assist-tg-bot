@@ -347,7 +347,7 @@ async function main() {
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
-      : pingPong ? `This is a simple sandbox delivery check. Briefly confirm you received request ${nonce}.`
+      : pingPong ? `Use your shell tool to run \`printf '%s' '${nonce}'\` and tell me what it printed. You may add a brief explanation.`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
     : scenario === 'capability-reply' ? ['Доступные quick answers']
@@ -567,7 +567,7 @@ async function main() {
   // require them to be adjacent lines. Markdown bullets/bold formatting from
   // the agent must not make a correct answer fail this user-facing check.
   const answerMatchesChallenge = pingPong
-    ? pingPongAnswerPresent(resultText)
+    ? pingPongAnswerPresent(resultText, nonce)
     : scenario === 'playwright-artifact'
     ? expectedLines.every(line => resultText.toLowerCase().includes(line.toLowerCase()))
     : new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
