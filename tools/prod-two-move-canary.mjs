@@ -19,7 +19,7 @@
 // BOT_TOKEN. Optional: WORKER_URL, CHAT_ID, EVIDENCE_OUT.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { verifyCompleteAnswer } from './complete-answer-oracle.mjs';
 import { controlPlaneBarrierCounts, terminalDeliveriesSince } from './e2e-oracle.mjs';
 
@@ -28,6 +28,7 @@ const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
 const LANE = 'production';
 const ARCHITECTURE = process.env.E2E_SCENARIO === 'architecture';
 const EMPTY_ANSWER_RETRY = process.env.E2E_SCENARIO === 'empty-answer-retry';
+const VOICE_INGRESS = process.env.E2E_SCENARIO === 'voice-ingress';
 const EXPECTED_BOT_USERNAME = 'super_personal_assistant_bot';
 const EXPECTED_BUILD_SHA = process.env.EXPECTED_BUILD_SHA ?? '';
 const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
@@ -133,6 +134,38 @@ async function injectTextMessage(text) {
   return updateId;
 }
 
+async function injectVoiceMessage() {
+  const bytes = await readFile(new URL('../tests/fixtures/production-voice-canary.ogg', import.meta.url));
+  assert.ok(bytes.length > 0 && bytes.length < 1024 * 1024, 'synthetic_voice_fixture_invalid');
+  const form = new FormData();
+  form.set('chat_id', String(CHAT_ID));
+  form.set('voice', new Blob([bytes], { type: 'audio/ogg' }), 'production-voice-canary.ogg');
+  const sent = await withRetry(async () => {
+    const response = await fetch(`https://api.telegram.org/bot${secrets.bot}/sendVoice`, { method: 'POST', body: form });
+    const body = await response.json();
+    if (!response.ok || body.ok !== true) throw new Error(`telegram_sendVoice_${body.error_code ?? response.status}`);
+    return body.result;
+  });
+  assert.ok(sent.voice?.file_id && sent.voice?.file_unique_id, 'telegram_voice_file_id_missing');
+  const updateId = nextUpdateId();
+  const response = await withRetry(() => fetch(`${WORKER}/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': secrets.webhook },
+    body: JSON.stringify({ update_id: updateId, message: {
+      message_id: updateId,
+      from: { id: CHAT_ID, is_bot: false, first_name: 'T', username: 'kobzevvv' },
+      chat: { id: CHAT_ID, type: 'private' },
+      date: Math.floor(Date.now() / 1000),
+      voice: { file_id: sent.voice.file_id, file_unique_id: sent.voice.file_unique_id,
+        duration: sent.voice.duration, mime_type: sent.voice.mime_type ?? 'audio/ogg',
+        file_size: sent.voice.file_size ?? bytes.length },
+    } }),
+  }));
+  const body = await response.json().catch(() => ({}));
+  assert.ok(response.ok && body.ok === true, `voice_webhook_inject_rejected_${response.status}`);
+  return { updateId, sourceMessageId: sent.message_id, bytes: bytes.length };
+}
+
 async function tapCollector(collectorMsgId, draftRevision) {
   const callbackId = `cb-b1-${randomBytes(4).toString('hex')}`;
   const res = await withRetry(() => fetch(`${WORKER}/webhook`, {
@@ -200,9 +233,10 @@ async function readDeliveredText(providerMessageId) {
   }
 }
 
-async function runMove({ label, askText, nonce }) {
+async function runMove({ label, askText, nonce, voice = false }) {
   const startedAt = Date.now();
-  await injectTextMessage(askText);
+  const voiceSource = voice ? await injectVoiceMessage() : null;
+  if (!voice) await injectTextMessage(askText);
   const collector = await waitForCollector();
   await tapCollector(collector.collectorMsgId, collector.collectorDraftRevision);
   const { delivery } = await waitForTerminalDelivery(startedAt);
@@ -237,7 +271,7 @@ async function runMove({ label, askText, nonce }) {
     move.answerSha256 = createHash('sha256').update(answerText).digest('hex');
   }
   evidence.moves.push(move);
-  return { move, answerText };
+  return { move, answerText, voiceSource };
 }
 
 async function preflight() {
@@ -265,6 +299,25 @@ async function preflight() {
 async function main() {
   const baseline = await preflight();
   await checkpoint('preflight_passed', { baseline: baseline.intakeSummary });
+
+  if (VOICE_INGRESS) {
+    assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');
+    assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required');
+    await checkpoint('voice_ingress_starting', { scenario: 'voice-ingress' });
+    const result = await runMove({ label: 'synthetic-voice', voice: true, nonce: null });
+    assert.equal(result.move.status, 'sent', 'voice_answer_not_sent');
+    assert.equal(result.move.reason, 'provider_accepted', 'voice_answer_not_provider_accepted');
+    assert.ok(result.answerText.trim().length > 0, 'voice_answer_empty');
+    const finalIntake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    assert.equal(finalIntake.busy, false, 'voice_intake_busy_at_final');
+    assert.equal(finalIntake.stranded, false, 'voice_intake_stranded_at_final');
+    assert.deepEqual(controlPlaneBarrierCounts(finalIntake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'voice_barrier_not_clean_at_final');
+    await checkpoint('passed', { ok: true, scenario: 'voice-ingress', voiceBytes: result.voiceSource.bytes,
+      voiceSourceMessageId: result.voiceSource.sourceMessageId, finalIntake: summarizeIntake(finalIntake),
+      deliveredAnswerCharacters: result.answerText.length, deliveredAnswerSha256: result.move.answerSha256 });
+    console.log(`PASS voice-ingress task=${result.move.userTaskId} bytes=${result.voiceSource.bytes} answerDigest=${result.move.answerSha256}`);
+    return;
+  }
 
   if (EMPTY_ANSWER_RETRY) {
     assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');

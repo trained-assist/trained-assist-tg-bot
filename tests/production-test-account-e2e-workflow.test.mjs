@@ -25,11 +25,19 @@ it('checks production bot identity, routing availability, clean Intake, and exac
 });
 
 it('limits the no-answer retry scenario to the fixed production test account and requires delivered text', () => {
-  expect(workflow).toContain('options: [context, architecture, empty-answer-retry]');
+  expect(workflow).toContain('options: [context, architecture, empty-answer-retry, voice-ingress]');
   expect(script).toContain("const EMPTY_ANSWER_RETRY = process.env.E2E_SCENARIO === 'empty-answer-retry'");
   expect(script).toContain("assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required')");
   expect(script).toContain("assert.ok(result.answerText.trim().length > 0, 'retry_answer_empty')");
   expect(script).toContain('last time you completed without outcome');
   expect(script).toContain('retry_returned_empty_result_placeholder');
   expect(script).toContain('deliveredAnswerSha256: result.move.answerSha256');
+});
+
+it('voice canary uploads a synthetic Opus fixture and injects only into the fixed production test account', () => {
+  expect(script).toContain("const VOICE_INGRESS = process.env.E2E_SCENARIO === 'voice-ingress'");
+  expect(script).toContain("new URL('../tests/fixtures/production-voice-canary.ogg', import.meta.url)");
+  expect(script).toContain('sendVoice');
+  expect(script).toContain("assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required')");
+  expect(script).toContain("assert.equal(result.move.status, 'sent', 'voice_answer_not_sent')");
 });
