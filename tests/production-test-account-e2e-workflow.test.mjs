@@ -8,7 +8,8 @@ it('runs only from main, with fixed production bot URL and the existing test acc
   expect(workflow).toContain("github.ref == 'refs/heads/main'");
   expect(workflow).toContain('WORKER_URL: https://trained-assist-tg-bot.skillset-apply.workers.dev');
   expect(workflow).toContain("CHAT_ID: '1714048'");
-  expect(workflow).toContain('EXPECTED_BUILD_SHA: ${{ github.sha }}');
+  expect(workflow).toContain('EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha || github.sha }}');
+  expect(workflow).toContain('Exact deployed production bot SHA (defaults to this workflow revision)');
   expect(workflow).toContain('secrets.BOT_TOKEN');
   expect(workflow).not.toContain('TG_SANDBOX_BOT_USERNAME');
   expect(workflow).not.toContain('CONTROL_PLANE_URL');
