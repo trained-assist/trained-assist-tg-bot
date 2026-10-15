@@ -8,7 +8,7 @@ export function extractDeliverableAnswer(result) {
   return '';
 }
 
-export function pingPongAnswerPresent(resultText) {
+export function pingPongAnswerPresent(resultText, expectedMarker = null) {
   if (typeof resultText !== 'string') return false;
 
   const answer = resultText.trim();
@@ -17,5 +17,6 @@ export function pingPongAnswerPresent(resultText) {
   // The task delivery path renders these explicit terminal failures as the
   // user-facing answer. Reject those, while allowing verbose or otherwise
   // unconstrained model prose (including discussion of errors).
-  return !/^(?:❌\s*)?(?:задача завершилась ошибкой(?:\.|$)|ошибка исполнителя(?:\.|\s*:|$)|ошибка настройки исполнителя\b)/iu.test(answer);
+  const explicitFailure = /^(?:❌\s*)?(?:задача завершилась ошибкой(?:\.|$)|ошибка исполнителя(?:\.|\s*:|$)|ошибка настройки исполнителя\b)/iu.test(answer);
+  return !explicitFailure && (typeof expectedMarker !== 'string' || answer.includes(expectedMarker));
 }

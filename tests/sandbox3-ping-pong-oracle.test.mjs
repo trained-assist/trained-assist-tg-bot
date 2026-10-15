@@ -7,7 +7,13 @@ describe('sandbox3 build ping-pong answer oracle', () => {
   });
 
   it('accepts a long answer; verbosity is not a task failure', () => {
-    expect(pingPongAnswerPresent('The sandbox path is working. '.repeat(9))).toBe(true);
+    const marker = 'PING-123';
+    expect(pingPongAnswerPresent(`The sandbox path is working. ${'Here is more detail. '.repeat(9)}${marker}`, marker)).toBe(true);
+  });
+
+  it('requires the unique harmless challenge marker somewhere in the answer', () => {
+    expect(pingPongAnswerPresent('The request was received.', 'PING-123')).toBe(false);
+    expect(pingPongAnswerPresent('I printed PING-123 successfully.', 'PING-123')).toBe(true);
   });
 
   it('rejects a missing or whitespace-only answer', () => {
