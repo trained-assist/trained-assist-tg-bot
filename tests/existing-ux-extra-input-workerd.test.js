@@ -82,6 +82,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
         needsExecutor: true, continuation: { owner: 'output', requested: true, issued: true,
           runId: 'run-offline-extra-input' } });
     }
+    if (url.hostname === 'cp.test' && url.pathname === '/agent-inputs') return Response.json({ taskId: url.searchParams.get('taskId'), inputs: [] });
     if (url.hostname === 'cp.test' && url.pathname === '/status') {
       expect(body.taskId).toBe(accepted.taskId);
       return Response.json({ taskStore: { id: accepted.taskId, profile_id: env.CONTROL_PLANE_PROFILE,

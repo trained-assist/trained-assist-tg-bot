@@ -228,7 +228,7 @@ it.each(['idle', 'stop-disabled', 'busy'])('cold SQLite cleanup preserves a real
   }
 }, 15_000);
 
-it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api', 'operator-file-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
+it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 'collector-cleanup', 'stop-unconfirmed-new', 'unknown-run', 'failed-task', 'pending-unsupported-cold', 'pending-unsupported-launching', 'pending-unsupported-launching-lost-busy', 'pending-stop-no-launch', 'operator-stop-window-recovery', 'operator-stop-window-recovery-lost-busy', 'operator-stop-window-inspect-cp-unavailable', 'operator-stop-window-release-terminal', 'operator-stop-window-release-active-refusal', 'operator-stop-window-reconcile-task-terminal-runs', 'operator-stop-window-reconcile-task-active-run-refusal', 'operator-stop-window-reconcile-task-live-lease-refusal', 'operator-stop-window-reconcile-task-scope-mismatch', 'operator-stop-window-reconcile-task-status-unavailable', 'operator-test-api', 'operator-file-test-api'])('real signed workerd SQLite existing UX scenario: %s', async boundary => {
   const script = existingUxWorkerdBundle();
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-existing-ux-workerd-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test',
@@ -278,6 +278,10 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       cutoverAt: 1791190000000, oldTaskIds: [], deliveries: [] });
   }
   const providerMessages = [];
+  const providerDocuments = [];
+  const inputDocumentBytes = new TextEncoder().encode(JSON.stringify({ input: { inlinePrompt: 'Original complete task' }, instructions: 'Saved history and work style' }));
+  const inputDocumentSha256 = [...new Uint8Array(await webcrypto.subtle.digest('SHA-256', inputDocumentBytes))].map(value => value.toString(16).padStart(2, '0')).join('');
+  let inputDocumentUnavailable = true;
   const providerEdits = [];
   const telegramTimeline = [];
   const cpIntakes = [];
@@ -299,8 +303,15 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
   const outboundService = async request => {
     const url = new URL(request.url);
     if (url.hostname === 'trained-assist-cp-sandbox3.skillset-apply.workers.dev') url.hostname = 'cp.test';
-    const body = request.method === 'POST' ? await request.json() : null;
+    const body = request.method === 'POST' && !url.pathname.endsWith('/sendDocument') ? await request.json() : null;
     if (url.hostname === 'api.telegram.org') {
+      if (url.pathname.endsWith('/sendDocument')) {
+        const form = await request.formData();
+        providerDocuments.push({ chatId: form.get('chat_id'), caption: form.get('caption'),
+          name: form.get('document').name, bytes: new Uint8Array(await form.get('document').arrayBuffer()) });
+        return reply({ ok: true, result: { message_id: 900 + providerDocuments.length } });
+      }
+
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/sendMessage`) {
         if (body.chat_id === 99) return reply({ ok: true, result: { message_id: 499, date: 1791190800 } });
         providerMessages.push(body);
@@ -314,6 +325,18 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
         return reply({ ok: true, result: { message_id: body.message_id } });
       }
       if (url.pathname === `/bot${env.TG_SANDBOX_BOT_TOKEN}/answerCallbackQuery`) return reply({ ok: true });
+    }
+    if (url.hostname === 'cp.test' && url.pathname === '/agent-inputs') {
+      const taskId = url.searchParams.get('taskId');
+      if (boundary === 'agent-input' && inputDocumentUnavailable) return reply({ error: 'temporarily unavailable' }, 503);
+      return reply({ taskId, inputs: boundary === 'agent-input' ? [{ runId: 'run_123', generation: 1,
+        artifact: { ref: 'cp-agent-input:run_123', name: 'agent-input-g1-run_123.json', sizeBytes: inputDocumentBytes.length,
+          sha256: inputDocumentSha256, contentType: 'application/json' } }] : [] });
+    }
+    if (url.hostname === 'cp.test' && url.pathname === '/artifact' && url.searchParams.get('ref') === 'cp-agent-input:run_123') {
+      return new Response(inputDocumentBytes, { headers: { 'content-type': 'application/json',
+        'content-disposition': 'attachment; filename="agent-input-g1-run_123.json"',
+        'content-length': String(inputDocumentBytes.length), 'x-artifact-sha256': inputDocumentSha256 } });
     }
     if (url.hostname === 'cp.test' && url.pathname === '/intake') {
       const envelope = body;
@@ -900,7 +923,7 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
     const before = await state();
     expect(before.get('busy')).toBe(true);
     const accepted = before.get(`cp-acceptance:${admitted.requestId}`);
-    if (boundary === 'vertical' || boundary === 'collector-cleanup') {
+    if (boundary === 'vertical' || boundary === 'collector-cleanup' || boundary === 'agent-input') {
       expect(accepted.receipt.userTaskId).toBe('ut-workerd-scenario');
       expect(cpRoutes).toEqual([{ taskId: 'ut-workerd-scenario', continue: true }]);
       expect(dispatchCount).toBe(1);
@@ -917,12 +940,35 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       expect(reconciled.status).toBe(200);
       await workerdWaitFor(() => providerMessages.some(item => item.text === 'Offline engine fixture completed.'));
       await terminalProof();
+      if (boundary === 'agent-input') {
+        await state(true);
+        expect(providerDocuments).toHaveLength(0);
+        expect((await state()).get('cpInputPublishRequests')).toEqual([admitted.requestId]);
+        expect((await state()).get('busy')).toBeUndefined();
+        await runtime.dispose();
+        inputDocumentUnavailable = false;
+        runtime = new Miniflare(runtimeOptions);
+        await state(true);
+        await runtime.dispatchFetch('https://worker.test/scenario-reconcile', { headers: { 'x-scenario-probe': 'offline-probe' } });
+        await workerdWaitFor(() => providerDocuments.length === 1);
+        expect(providerDocuments[0]).toMatchObject({ chatId: '42', name: 'agent-input-g1-run_123.json' });
+        expect(providerDocuments[0].bytes).toEqual(inputDocumentBytes);
+        const deliveryView = await runtime.dispatchFetch('https://worker.test/deliveries/ut-workerd-scenario?includeArtifacts=true', {
+          headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
+        });
+        expect((await deliveryView.json()).artifacts).toEqual([]);
+        expect(providerDocuments[0].caption).toContain('Ввод принят на запуск');
+        await state(true);
+        await runtime.dispatchFetch('https://worker.test/scenario-reconcile', { headers: { 'x-scenario-probe': 'offline-probe' } });
+        expect(providerDocuments).toHaveLength(1);
+        expect(providerMessages.some(item => item.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('input_')))).toBe(false);
+      }
       if (boundary === 'collector-cleanup') {
         await state(true);
         const finalized = providerEdits.filter(edit => edit.message_id === collectorId
           && edit.text === '✅ Готово. Результат отправлен отдельным сообщением.');
         expect(finalized).toHaveLength(1);
-        expect(finalized[0].reply_markup).toEqual({ inline_keyboard: [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] });
+        expect(finalized[0].reply_markup).toEqual({ inline_keyboard: [] });
         const terminal = await terminalProof();
         await runtime.dispose();
         runtime = new Miniflare(runtimeOptions);

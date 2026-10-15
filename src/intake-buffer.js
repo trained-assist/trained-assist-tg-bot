@@ -1,3 +1,4 @@
+import { publishAgentInputDocuments } from './lib/agent-input-document.js';
 import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
@@ -123,7 +124,6 @@ function workStyleKeyboard(revision, { busy = false, stopEnabled = true, discard
     styles.push([{ text: '⚡ Параллельно', callback_data: 'intake_parallel' }]);
     if (stopEnabled) styles.push([{ text: '🛑 Стоп и запуск с добавкой', callback_data: 'intake_stopsupp' },
       { text: '⛔ Стоп → новая задача', callback_data: 'intake_stopnew' }]);
-    styles.push([{ text: '📋 Посмотреть input', callback_data: 'input_draft' }]);
   }
   if (discardLabel !== false) styles.push([{ text: discardLabel, callback_data: `intake_discard|${revision}` }]);
   return styles;
@@ -2392,7 +2392,7 @@ export class IntakeBuffer {
         : (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
         : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
-        : (cpMode ? `✓ Получил ${n} сообщений. Всё собрано в один input. Выбери, как начать.` : collectorText(n)) + (resumedHeld ? resumedNote(Math.min(resumedHeld, n)) : ''));
+        : (cpMode ? `✓ Получил ${n} сообщений. Всё собрано в один input. Выбери, как начать.` : collectorText(n)) + (resumedHeld ? (cpMode ? ` В том числе ${Math.min(resumedHeld, n)} — отложенные до ⛔ Стоп.` : resumedNote(Math.min(resumedHeld, n))) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
       // so «задачу забрал» can be walked back. Otherwise launch button under every
       // status that is not "the batch is taken" (issue #303).
@@ -2416,7 +2416,7 @@ export class IntakeBuffer {
       // not hide controls for this distinct, still-unlaunched draft.
       const draftOnlyDiscard = stopPending && (await this.state.storage.get('buf') || []).length > 0;
       const keyboard = (queued || stopLaunch) && !canLaunchIndependently ? CANCEL_BTN
-        : TOOK_IT.test(override || '') ? STATUS_BTN
+        : TOOK_IT.test(override || '') ? (cpMode ? [] : STATUS_BTN)
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
           ? workStyleKeyboard(draftRevision, { discardLabel: stopPending
@@ -3229,6 +3229,46 @@ export class IntakeBuffer {
     await this._recoverControlPlaneCollectorCleanup();
   }
 
+  async _queueControlPlaneInputDocuments(requestId, receipt) {
+    const snapshot = await this._readSnapshot(requestId);
+    const envelope = snapshot?.body?.controlPlaneEnvelope;
+    const message = snapshot?.items?.at(-1)?.msg;
+    if (envelope?.requestId !== requestId || envelope.profileId !== receipt.profileId ||
+        !Number.isSafeInteger(message?.chat?.id) || !envelope.conversationRef) return;
+    const intent = { requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId,
+      taskAcceptedAt: receipt.providerAcceptedAt,
+      conversationId: `${envelope.conversationRef}-b${requestId.slice(-24)}`,
+      destination: { chatId: message.chat.id, threadId: threadIdOf(message) } };
+    await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      await tx.put(`cp-input-publish:${requestId}`, intent);
+      await tx.put('cpInputPublishRequests', [...new Set([...(await tx.get('cpInputPublishRequests') || []), requestId])]);
+    }));
+    await this._recoverControlPlaneInputDocuments([requestId]);
+  }
+
+  async _recoverControlPlaneInputDocuments(requestIds = null) {
+    const pending = (await this.state.storage.get('cpInputPublishRequests')) || [];
+    const batch = requestIds ? requestIds.filter(id => pending.includes(id)) : pending.slice(0, 2);
+    // Bound network work and rotate failures so a slow task cannot starve later documents.
+    if (batch.length) await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      const current = (await tx.get('cpInputPublishRequests')) || [];
+      await tx.put('cpInputPublishRequests', [...current.filter(id => !batch.includes(id)), ...batch.filter(id => current.includes(id))]);
+    }));
+    for (const requestId of batch) {
+      try {
+        const intent = await this.state.storage.get(`cp-input-publish:${requestId}`);
+        const client = controlPlaneClient(this.env);
+        if (!intent || intent.profileId !== client.config.profileId) continue;
+        await publishAgentInputDocuments(client, new TgDeliveryOwnerClient(this.env), intent);
+        await this._exclusive(async () => this.state.storage.transaction(async tx => {
+          await tx.put('cpInputPublishRequests', ((await tx.get('cpInputPublishRequests')) || []).filter(id => id !== requestId));
+          await tx.delete(`cp-input-publish:${requestId}`);
+        }));
+      } catch { /* Keep the immutable destination and retry after restart, independently of task completion. */ }
+    }
+    await this._ensureControlPlaneCollectorCleanupAlarm();
+  }
+
   async _recoverControlPlaneCollectorCleanup() {
     const previous = this.uiMutation;
     let release;
@@ -3247,7 +3287,7 @@ export class IntakeBuffer {
         if (intent?.state !== 'pending' || intent.profileId !== controlPlaneClient(this.env).config.profileId
             || await this.state.storage.get(`input-message:${intent.messageId}`) !== requestId) continue;
         const result = await editMessage(this.env.BOT_TOKEN, intent.chatId, intent.messageId, intent.text,
-          { reply_markup: { inline_keyboard: STATUS_BTN } }).catch(() => null);
+          { reply_markup: { inline_keyboard: [] } }).catch(() => null);
         if (!result?.ok && !(result?.error_code === 400 && /message is not modified|message to edit not found/i.test(result.description || ''))) continue;
         await this._exclusive(async () => this.state.storage.transaction(async tx => {
           const current = await tx.get(key);
@@ -3263,7 +3303,8 @@ export class IntakeBuffer {
 
   async _ensureControlPlaneCollectorCleanupAlarm() {
     if (this.env.EXECUTION_BACKEND !== 'control-plane'
-        || !((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length) return;
+        || (!((await this.state.storage.get('cpCollectorCleanupRequests')) || []).length
+          && !((await this.state.storage.get('cpInputPublishRequests')) || []).length)) return;
     await this._ensureAlarmBy(Date.now() + BUSY_POLL_MS);
   }
 
@@ -3318,6 +3359,7 @@ export class IntakeBuffer {
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
         const runs = Array.isArray(value?.runs) ? value.runs : [];
+        if (runs.length) await this._queueControlPlaneInputDocuments(requestId, receipt);
         const settledRuns = runs.every(run => ['done', 'failed', 'cancelled', 'unknown'].includes(run?.status));
         const outcomeUnknown = (row.status === 'unknown' ||
           (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
@@ -3573,6 +3615,7 @@ export class IntakeBuffer {
     if (this.env.EXECUTION_BACKEND === 'control-plane') {
       await this._recoverMedia();
       await this._recoverControlPlaneCollectorCleanup();
+      await this._recoverControlPlaneInputDocuments();
       // Resume an independent parallel admission before reconciling a pending
       // stop. The stop barrier must not strand work explicitly launched beside
       // the stopped run; _recoverControlPlaneLaunch filters by the frozen scope.
