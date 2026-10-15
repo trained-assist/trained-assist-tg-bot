@@ -8,9 +8,12 @@ export function verifyCompleteAnswer(delivery, parts) {
   assert.ok(delivery.providerMessageIds.every(id => Number.isSafeInteger(id) && id > 0));
   assert.equal(new Set(delivery.providerMessageIds).size, delivery.partCount);
   assert.ok(parts.every(text => typeof text === 'string' && text.length > 0 && text.length <= 2000));
-  const text = parts.join('');
-  assert.ok(text.length > 2000 && text.includes('\n\n'));
-  assert.equal(text.length, delivery.textCharacterCount);
-  assert.equal(createHash('sha256').update(text).digest('hex'), delivery.textSha256);
+  // Telegram may remove a paragraph separator at a message edge. Restore
+  // only a uniform boundary separator, and accept it solely if the entire
+  // original source length AND cryptographic digest match exactly.
+  const text = ['', '\n\n', '\n', ' '].map(separator => parts.join(separator)).find(candidate =>
+    candidate.length === delivery.textCharacterCount &&
+    createHash('sha256').update(candidate).digest('hex') === delivery.textSha256);
+  assert.ok(text && text.length > 2000 && text.includes('\n\n'), 'complete_source_digest_mismatch');
   return text;
 }

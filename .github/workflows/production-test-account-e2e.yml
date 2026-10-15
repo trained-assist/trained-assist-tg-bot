@@ -16,6 +16,15 @@ on:
         default: context
         required: true
 
+      verify_delivery_id:
+        description: Optional existing terminal delivery to verify without submitting another task
+        type: string
+        default: ''
+      expected_end_marker:
+        description: Required ARCH marker when verifying an existing architecture delivery
+        type: string
+        default: ''
+
 permissions:
   contents: read
 
@@ -48,6 +57,8 @@ jobs:
 
       - name: Run two-move production test through the real Worker, CP, Runner, and Telegram delivery
         env:
+          VERIFY_DELIVERY_ID: ${{ inputs.verify_delivery_id }}
+          EXPECTED_END_MARKER: ${{ inputs.expected_end_marker }}
           E2E_SCENARIO: ${{ inputs.scenario }}
           WORKER_URL: https://trained-assist-tg-bot.skillset-apply.workers.dev
           CHAT_ID: '1714048'
