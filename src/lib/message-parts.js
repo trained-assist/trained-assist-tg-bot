@@ -1,8 +1,8 @@
 export const MESSAGE_PART_LIMIT = 2000;
 export const COMPLETE_ANSWER_LIMIT = 100000;
 
-// Plain text (the delivery owner's existing parse_mode=null contract). Keep
-// every source character; the parts can be joined verbatim to reconstruct it.
+// Split visible message text at safe Unicode/paragraph boundaries. Keep every
+// character so the parts can be joined verbatim for delivery proof.
 export function messageParts(text, limit = MESSAGE_PART_LIMIT) {
   if (!Number.isSafeInteger(limit) || limit < 2) throw new Error('invalid_message_limit');
   if (text.length <= limit) return [text];

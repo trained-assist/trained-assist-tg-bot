@@ -454,6 +454,72 @@ describe('sandbox durable single delivery owner', () => {
 });
 
 describe('complete multipart reply ownership', () => {
+  it('sends styled answers as visible text plus Telegram entities and keeps the raw source proof', async () => {
+    const { client } = await emptyFixture();
+    const raw = '# Отчёт\n\n🧪 **Готово**: [ссылка](https://example.com).';
+    let sent;
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return Response.json({ ok: true, result: { message_id: 301 } });
+    }));
+    await client.enqueue({ deliveryId: 'terminal:styled:g1', userTaskId: 'styled', destination: { chatId: 1001 },
+      type: 'message', text: raw, taskAcceptedAt: Date.now() });
+    await client.drain();
+    expect(sent.text).toBe('Отчёт\n\n🧪 Готово: ссылка.');
+    expect(sent.parse_mode).toBeUndefined();
+    expect(sent.entities).toEqual(expect.arrayContaining([
+      { type: 'bold', offset: 0, length: 5 },
+      { type: 'text_link', offset: sent.text.indexOf('ссылка'), length: 6, url: 'https://example.com' },
+    ]));
+    const proof = (await client.read('styled')).terminal;
+    expect(proof.displayTextCharacterCount).toBe(sent.text.length);
+    expect(proof.displayTextSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(proof.textSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(proof.textSha256).not.toBe(proof.displayTextSha256);
+  });
+
+  it('falls back to the same visible text after an explicit entity rejection', async () => {
+    const { client } = await emptyFixture();
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      if (requests.length === 1) return Response.json({ ok: false, error_code: 400,
+        description: "Bad Request: can't parse entities" }, { status: 400 });
+      return Response.json({ ok: true, result: { message_id: 302 } });
+    }));
+    await client.enqueue({ deliveryId: 'terminal:entity-fallback:g1', userTaskId: 'entity-fallback', destination: { chatId: 1001 },
+      type: 'message', text: '**Готово**', taskAcceptedAt: Date.now() });
+    await client.drain();
+    expect(requests).toHaveLength(2);
+    expect(requests.map(request => request.text)).toEqual(['Готово', 'Готово']);
+    expect(requests[0].entities).toHaveLength(1);
+    expect(requests[1].entities).toBeUndefined();
+    expect((await client.read('entity-fallback')).terminal.status).toBe('sent');
+  });
+
+  it('keeps styled multipart offsets within each sent part and proves the visible whole', async () => {
+    const { client } = await emptyFixture();
+    const source = `# Длинный ответ\n\n${'**важно** и текст 🧪. '.repeat(260)}`;
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return Response.json({ ok: true, result: { message_id: 400 + requests.length } });
+    }));
+    const { record } = await client.enqueue({ deliveryId: 'terminal:styled-long:g1', userTaskId: 'styled-long',
+      destination: { chatId: 1001 }, type: 'message', text: source, taskAcceptedAt: Date.now() });
+    for (let index = 0; index < record.partCount; index++) await client.drain();
+    const visible = requests.map(request => request.text).join('');
+    expect(record.partCount).toBeGreaterThan(1);
+    expect(visible).toContain('Длинный ответ\n\nважно и текст');
+    expect(visible).not.toContain('**');
+    expect(requests.every(request => request.text.length <= 2000 && request.entities.every(entity =>
+      entity.offset >= 0 && entity.offset + entity.length <= request.text.length))).toBe(true);
+    const proof = (await client.read('styled-long')).terminal;
+    expect(proof.displayTextCharacterCount).toBe(visible.length);
+    expect(proof.textCharacterCount).toBe(source.length);
+    expect(proof.displayTextSha256).not.toBe(proof.textSha256);
+  });
+
   it('acknowledges only all parts, preserves paragraphs, and replay never resends acknowledged text', async () => {
     const { client } = await emptyFixture();
     const text = ['First paragraph. '.repeat(65), 'Second paragraph. '.repeat(65), 'Last paragraph. '.repeat(65)].join('\n\n');

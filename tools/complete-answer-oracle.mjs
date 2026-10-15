@@ -10,10 +10,13 @@ export function verifyCompleteAnswer(delivery, parts) {
   assert.ok(parts.every(text => typeof text === 'string' && text.length > 0 && text.length <= 2000));
   // Telegram may remove a paragraph separator at a message edge. Restore
   // only a uniform boundary separator, and accept it solely if the entire
-  // original source length AND cryptographic digest match exactly.
+  // expected visible length AND cryptographic digest match exactly. The
+  // owner's raw source digest remains available separately for audit.
+  const expectedLength = delivery.displayTextCharacterCount ?? delivery.textCharacterCount;
+  const expectedDigest = delivery.displayTextSha256 ?? delivery.textSha256;
   const text = ['', '\n\n', '\n', ' '].map(separator => parts.join(separator)).find(candidate =>
-    candidate.length === delivery.textCharacterCount &&
-    createHash('sha256').update(candidate).digest('hex') === delivery.textSha256);
+    candidate.length === expectedLength &&
+    createHash('sha256').update(candidate).digest('hex') === expectedDigest);
   assert.ok(text && text.length > 2000 && text.includes('\n\n'), 'complete_source_digest_mismatch');
   return text;
 }

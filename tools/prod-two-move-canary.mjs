@@ -285,7 +285,7 @@ async function runMove({ label, askText, nonce, voice = false }) {
     answerLength: answerText.length,
     answerContainsNonce: nonce ? answerText.includes(nonce) : null,
     answerSha256: null,
-    ...(ARCHITECTURE ? { providerCharacters: parts.join('').length, restoredBoundaryWhitespace: answerText.length - parts.join('').length, parts: ids.length, providerMessageIds: ids, sourceDigestMatches: true } : {}),
+    ...(ARCHITECTURE ? { providerCharacters: parts.join('').length, restoredBoundaryWhitespace: answerText.length - parts.join('').length, parts: ids.length, providerMessageIds: ids, displayDigestMatches: true } : {}),
     elapsedMs: Date.now() - startedAt,
   };
   if (answerText) {
@@ -381,7 +381,7 @@ async function main() {
       const { createHash } = await import('node:crypto');
       await checkpoint('passed', { ok: true, scenario: 'production-complete-architecture-document',
         verifiedExistingDelivery: true, userTaskId: delivery.userTaskId, parts: parts.length,
-        providerMessageIds: delivery.providerMessageIds, sourceCharacters: answer.length,
+        providerMessageIds: delivery.providerMessageIds, displayCharacters: answer.length,
         providerCharacters: parts.join('').length, restoredBoundaryWhitespace: answer.length - parts.join('').length,
         sourceSha256: createHash('sha256').update(answer).digest('hex'), endMarkerPresent: true });
       console.log(`PASS existing architecture parts=${parts.length} chars=${answer.length}`);
