@@ -898,4 +898,7 @@ export default {
 
 export class IntakeBufferReset extends IntakeBuffer {}
 
+// Compatibility-only exports preserve namespaces provisioned by the retired
+// production E2E canary. No binding in this Worker uses these classes.
+export { ProductionE2eIntakeBuffer, ProductionE2eTgDeliveryOwner } from './production-e2e-classes.js';
 export { IntakeBuffer, TgDeliveryOwner, TgDeliveryOwnerV2, SandboxAcceptOnlyStore };
