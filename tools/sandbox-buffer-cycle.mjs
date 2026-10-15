@@ -31,7 +31,9 @@ export function isResetLock409(path, payload) {
 }
 
 async function workerRequest(path, body) {
-  const readyDeadline = Date.now() + 60_000;
+  // A completed reset can leave a stale KV lock visible for up to 240 seconds.
+  // Wait past that bound when another scenario just released the shared lane.
+  const readyDeadline = Date.now() + (path === '/operator/reset-sandbox-state' ? 300_000 : 60_000);
   while (true) {
     const response = await fetch(`${TG_ORIGIN}${path}`, {
       method: 'POST', headers: { authorization: `Bearer ${required(OPERATOR_TOKEN_NAME)}`, 'content-type': 'application/json' },
