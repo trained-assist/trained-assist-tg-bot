@@ -14,6 +14,7 @@ const artifactSourceFailureCode = error => {
   }
   return ['TimeoutError', 'AbortError', 'TypeError'].includes(error?.name) ? error.name : 'operation_failed';
 };
+const documentDelivery = record => ['artifact', 'input-document'].includes(record.type);
 const key = id => `delivery:${id}`;
 const generation = record => Number(record.deliveryId.match(/:g(\d+)$/)?.[1] ?? 0);
 const summary = record => record ? {
@@ -207,8 +208,8 @@ export class TgDeliveryOwner {
   async enqueue(input, config) {
     const deliveryId = input.deliveryId ?? input.userTaskId;
     if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !chatAllowed(config, input.destination?.chatId) ||
-        !['message', 'launch', 'artifact'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
-    if (input.type === 'artifact') {
+        !['message', 'launch', 'artifact', 'input-document'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+    if (documentDelivery(input)) {
       const item = input.artifact;
       if (!item || typeof item !== 'object' || !artifactReference(item.ref)
         || typeof item.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$/.test(item.name)
@@ -219,7 +220,7 @@ export class TgDeliveryOwner {
     const payload = { deliveryId, userTaskId: input.userTaskId, conversationId: input.conversationId ?? null,
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
       requestId: input.requestId ?? deliveryId, type: input.type, text: input.text, replyMarkup: input.replyMarkup ?? null,
-      taskAcceptedAt: input.taskAcceptedAt ?? null, ...(input.type === 'artifact' ? { artifact: input.artifact } : {}) };
+      taskAcceptedAt: input.taskAcceptedAt ?? null, ...(documentDelivery(input) ? { artifact: input.artifact } : {}) };
     const fingerprint = JSON.stringify(payload);
     return this.state.storage.transaction(async storage => {
       const existing = await storage.get(key(deliveryId));
@@ -255,7 +256,7 @@ export class TgDeliveryOwner {
     let providerCalled = false;
     try {
       let result;
-      if (claim.type === 'artifact') {
+      if (documentDelivery(claim)) {
         const client = new ControlPlaneClient(config, { fetchImpl: sandboxControlPlaneFetch(this.env) });
         const downloaded = await client.artifact(claim.userTaskId, claim.artifact.ref);
         const actualSha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', downloaded.body))]
@@ -270,7 +271,7 @@ export class TgDeliveryOwner {
         }
         providerCalled = true;
         result = await api.sendDocument({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-          document: downloaded.body, filename: claim.artifact.name, caption: `📎 ${claim.artifact.name}`,
+          document: downloaded.body, filename: claim.artifact.name, caption: claim.type === 'input-document' ? claim.text : `📎 ${claim.artifact.name}`,
           contentType: downloaded.contentType ?? claim.artifact.contentType });
       } else {
         providerCalled = true;
@@ -282,9 +283,9 @@ export class TgDeliveryOwner {
     } catch (error) {
       const rejected = error instanceof TelegramApiError && error.payloadVerified === true && error.payload?.ok === false;
       const rateLimited = rejected && error.status === 429 && error.payload.error_code === 429;
-      const permanentArtifactFailure = claim.type === 'artifact' && error instanceof ControlPlaneError
+      const permanentArtifactFailure = documentDelivery(claim) && error instanceof ControlPlaneError
         && [400, 404, 409, 413].includes(error.status);
-      const retryArtifactRead = claim.type === 'artifact' && !providerCalled && !permanentArtifactFailure;
+      const retryArtifactRead = documentDelivery(claim) && !providerCalled && !permanentArtifactFailure;
       const artifactSourceFailure = retryArtifactRead || permanentArtifactFailure ? artifactSourceFailureCode(error) : null;
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
       completion = { ...claim,

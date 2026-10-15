@@ -53,22 +53,14 @@ beforeEach(() => {
 });
 
 describe('CP source-message ownership', () => {
-  it('CP snapshot preview names frozen CP input and never fetches legacy model prompt', async () => {
+  it.each(['input_draft', 'input_run', 'input_run|42'])('stale CP %s never sends a draft as agent input', async data => {
     const { env, fetch } = environment();
-    fetch.mockResolvedValue(Response.json({ state: 'snapshot', id: 'cp-request', body: { task: 'fixture task' }, items: [] }));
-    await handleCallbackQuery(callback('input_run'), env);
+    await handleCallbackQuery(callback(data), env);
+    expect(fetch).not.toHaveBeenCalled();
     expect(fetchRunInput).not.toHaveBeenCalled();
-    expect(sendDocument).toHaveBeenCalledWith('fixture-token', 7, 'input-snapshot.txt', expect.any(String),
-      'Зафиксированный ввод Control Plane — cp-request. Это не полный prompt модели.', null);
-  });
-
-  it('CP draft preview does not promise future model input', async () => {
-    const { env, fetch } = environment();
-    fetch.mockResolvedValue(Response.json({ state: 'draft', task: 'fixture task', items: [], pending: false }));
-    await handleCallbackQuery(callback('input_draft'), env);
-    expect(fetchRunInput).not.toHaveBeenCalled();
-    expect(sendDocument.mock.calls[0][4]).toContain('Черновик ввода Control Plane');
-    expect(sendDocument.mock.calls[0][4]).not.toContain('агент');
+    expect(sendDocument).not.toHaveBeenCalled();
+    expect(answerCallbackQuery).toHaveBeenCalledWith('fixture-token', 'fixture-callback',
+      'Документ отправляется после передачи на запуск. Для старых задач сохранённый ввод может быть недоступен.');
   });
 
   for (const data of ['input_journal', 'input_journal|42|legacy-session']) it(`unsupported CP ${data} never builds legacy journal link`, async () => {

@@ -618,6 +618,10 @@ export async function handleCallbackQuery(cq, env) {
   // буфера (десинк «ушло не на то», #530 §B). Теперь ведёт в тот же flush — один источник.
   if (['input_draft', 'input_run', 'input_journal'].includes(data?.split('|')[0])) {
     if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    if (env.EXECUTION_BACKEND === 'control-plane' && ['input_draft', 'input_run'].includes(data.split('|')[0])) {
+      await answerCallbackQuery(env.BOT_TOKEN, id, 'Документ отправляется после передачи на запуск. Для старых задач сохранённый ввод может быть недоступен.');
+      return;
+    }
     if (env.EXECUTION_BACKEND === 'control-plane' && data.split('|')[0] === 'input_journal') {
       await answerCallbackQuery(env.BOT_TOKEN, id, 'Журнал Control Plane пока недоступен.');
       return;
