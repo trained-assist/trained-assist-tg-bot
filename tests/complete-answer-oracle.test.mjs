@@ -16,3 +16,8 @@ it.each([
 ])('rejects partial, duplicated, reordered, clipped or oversized delivery', (receipt, messages) => {
   expect(() => verifyCompleteAnswer(receipt, messages)).toThrow();
 });
+
+it('restores only provider-trimmed message-edge separators with an exact source digest', () => {
+  expect(verifyCompleteAnswer(record, [parts[0].trimEnd(), parts[1]])).toBe(parts.join(''));
+  expect(() => verifyCompleteAnswer(record, [parts[0].slice(1).trimEnd(), parts[1]])).toThrow();
+});
