@@ -833,6 +833,12 @@ async function main() {
     console.log(JSON.stringify({ scenario: 'active-task-stop-and-next-task', ...stopEvidence }));
   }
 
+  const serviceRouteEvidence = deterministicScenario ? {
+    route: routing.decision?.route ?? null,
+    capabilityId: routing.decision?.capabilityId ?? null,
+    replyAllowed: routing.decision?.replyAllowed === true,
+    runnerExecutionCount: executions.length,
+  } : null;
   const report = {
     ok: true,
     scenario: `sandbox3-profile-login-question-runner-answer-${deliveryMode}`,
