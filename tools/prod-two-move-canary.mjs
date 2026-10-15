@@ -20,11 +20,13 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
+import { verifyCompleteAnswer } from './complete-answer-oracle.mjs';
 import { controlPlaneBarrierCounts, terminalDeliveriesSince } from './e2e-oracle.mjs';
 
 const WORKER = process.env.WORKER_URL ?? 'https://trained-assist-tg-bot.skillset-apply.workers.dev';
 const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
 const LANE = 'production';
+const ARCHITECTURE = process.env.E2E_SCENARIO === 'architecture';
 const EXPECTED_BOT_USERNAME = 'super_personal_assistant_bot';
 const EXPECTED_BUILD_SHA = process.env.EXPECTED_BUILD_SHA ?? '';
 const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
@@ -203,7 +205,16 @@ async function runMove({ label, askText, nonce }) {
   const collector = await waitForCollector();
   await tapCollector(collector.collectorMsgId, collector.collectorDraftRevision);
   const { delivery } = await waitForTerminalDelivery(startedAt);
-  const answerText = await readDeliveredText(delivery.providerMessageId);
+  const ids = ARCHITECTURE ? delivery.providerMessageIds : [delivery.providerMessageId];
+  if (ARCHITECTURE) {
+    assert.ok(delivery.partCount > 1 && delivery.sentParts === delivery.partCount, 'all_parts_not_confirmed');
+    assert.equal(ids?.length, delivery.partCount, 'provider_receipts_missing');
+    assert.equal(new Set(ids).size, ids.length, 'duplicate_provider_receipt');
+  }
+  const parts = [];
+  for (const id of ids) parts.push(await readDeliveredText(id));
+  const answerText = parts.join('');
+  if (ARCHITECTURE) verifyCompleteAnswer(delivery, parts);
   const move = {
     label,
     nonce,
@@ -217,6 +228,7 @@ async function runMove({ label, askText, nonce }) {
     answerLength: answerText.length,
     answerContainsNonce: nonce ? answerText.includes(nonce) : null,
     answerSha256: null,
+    ...(ARCHITECTURE ? { parts: ids.length, providerMessageIds: ids, sourceDigestMatches: true } : {}),
     elapsedMs: Date.now() - startedAt,
   };
   if (answerText) {
@@ -253,6 +265,22 @@ async function main() {
   const baseline = await preflight();
   await checkpoint('preflight_passed', { baseline: baseline.intakeSummary });
 
+  if (ARCHITECTURE) {
+    assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');
+    assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required');
+    const nonce = `ARCH-${randomBytes(5).toString('hex')}`;
+    await checkpoint('architecture_task_starting', { scenario: 'production-complete-architecture-document' });
+    const result = await runMove({ label: 'complete-architecture', nonce,
+      askText: `Спроектируй MVP сервиса обработки PDF для 100 команд и 5000 документов в день. Нужны загрузка, асинхронное извлечение текста, резюме, поиск, изоляция команд, удаление, повторные попытки без дубликатов и лимиты затрат. Дай конкретные компоненты, схему данных, API, жизненный цикл задания, отказы и этапы MVP. Ответ на русском: 400–500 слов, 7 содержательных абзацев, отделённых пустой строкой. Это только проектный документ: без инструментов, поиска, файлов и развёртывания. В конце напиши метку ${nonce}.` });
+    assert.equal(result.move.reason, 'provider_accepted', 'architecture_not_provider_accepted');
+    assert.equal(result.move.answerContainsNonce, true, 'architecture_end_marker_missing');
+    const finalIntake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    assert.equal(finalIntake.busy, false, 'intake_busy_at_final');
+    assert.deepEqual(controlPlaneBarrierCounts(finalIntake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'barrier_not_clean_at_final');
+    await checkpoint('passed', { ok: true, finalIntake: summarizeIntake(finalIntake) });
+    console.log(`PASS architecture parts=${result.move.parts} chars=${result.move.answerLength} digest=${result.move.answerSha256}`);
+    return;
+  }
   const nonce1 = `B1-${randomBytes(5).toString('hex')}`;
   const first = await runMove({
     label: 'move-1-store-context',

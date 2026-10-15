@@ -4,10 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       run_e2e:
-        description: Send two verification tasks through the ordinary production bot and CP route
+        description: Send verification tasks through the ordinary production bot and CP route
         required: true
         type: boolean
         default: false
+
+      scenario:
+        description: Verification scenario for the fixed private test account
+        type: choice
+        options: [context, architecture]
+        default: context
+        required: true
 
 permissions:
   contents: read
@@ -41,6 +48,7 @@ jobs:
 
       - name: Run two-move production test through the real Worker, CP, Runner, and Telegram delivery
         env:
+          E2E_SCENARIO: ${{ inputs.scenario }}
           WORKER_URL: https://trained-assist-tg-bot.skillset-apply.workers.dev
           CHAT_ID: '1714048'
           EXPECTED_BUILD_SHA: ${{ github.sha }}
