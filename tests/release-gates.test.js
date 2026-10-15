@@ -45,6 +45,7 @@ it('production deploy runs from protected main after CI and staging, with dispat
 it('protected-main production deploy waits for a real isolated sandbox agent ping-pong', () => {
   const graph = jobs();
   expect(graph.get('sandbox3-ping-pong')).toContain('needs: [ci, staging-gate]');
+  expect(graph.get('sandbox3-ping-pong')).toContain('if: always()');
   expect(graph.get('sandbox3-ping-pong')).toContain('scenario: ping-pong');
   expect(graph.get('sandbox3-ping-pong')).toContain('delivery_mode: telegram');
   expect(graph.get('sandbox3-ping-pong')).toContain('secrets: inherit');

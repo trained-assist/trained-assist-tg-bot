@@ -157,7 +157,7 @@ jobs:
 
   sandbox3-ping-pong:
     needs: [ci, staging-gate]
-    if: github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
+    if: always() && github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
     uses: ./.github/workflows/sandbox3-worker-e2e.yml
     with:
       run_e2e: true
