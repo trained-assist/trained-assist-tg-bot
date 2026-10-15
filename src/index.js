@@ -650,6 +650,16 @@ async function scheduled(event, env, ctx) {
   if (env.PREVIEW_ONLY === 'true') return;
   ctx.waitUntil(processDueRetries(env));
   ctx.waitUntil(processExpiredUI(env));
+  ctx.waitUntil((async () => {
+    try {
+      const owner = new TgDeliveryOwnerClient(env);
+      for (let count = 0; count < 10; count += 1) {
+        if (await owner.drain() === 0) break;
+      }
+    } catch (error) {
+      console.error('[delivery] scheduled drain failed:', error?.message ?? error);
+    }
+  })());
 }
 
 export { RunOutbox } from './run-outbox.js';
