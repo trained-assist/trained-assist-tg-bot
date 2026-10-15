@@ -1,3 +1,4 @@
+import { COMPLETE_ANSWER_LIMIT } from './lib/message-parts.js';
 import { serveMedia } from './media-jobs.js';
 import { transcribeAudio } from './lib/speech.js';
 import { resolveBotContext, envForBot } from './lib/bot-context.js';
@@ -110,7 +111,8 @@ app.post('/deliver', async c => {
 
   const message = body?.message && typeof body.message === 'object' ? body.message : {};
   const kind = typeof message.kind === 'string' ? message.kind : 'text';
-  const text = typeof message.text === 'string' && message.text ? message.text.slice(0, 4000) : null;
+  const text = typeof message.text === 'string' && message.text ? message.text : null;
+  if (text && text.length > COMPLETE_ANSWER_LIMIT) return c.json({ error: 'message text exceeds result limit' }, 413);
   if (!text) return c.json({ error: 'missing message text' }, 400);
 
   const threadId = Number.isInteger(Number(body?.threadId)) && Number(body?.threadId) > 0
