@@ -1,5 +1,11 @@
 # User end-to-end test
 
+For the account login handoff from an authenticated Telegram session to the
+website, use the dedicated [Telegram → web login E2E runbook](https://github.com/trained-assist/trained-assist-identity/blob/main/docs/TELEGRAM-WEB-LOGIN-E2E.md).
+That is a real private-chat/browser flow and is separate from the synthetic
+Worker test API scenarios below. Never send `/web_authorization` in a group or
+include its one-time code in evidence.
+
 Use the Worker test API for routine sandbox user scenarios. It submits a
 Telegram-shaped update through the deployed sandbox Worker's signed webhook
 handler, using the test account's real `chatId` and `userId`. With
