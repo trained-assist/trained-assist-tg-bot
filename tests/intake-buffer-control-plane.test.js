@@ -341,7 +341,7 @@ describe('existing collector control-plane ownership', () => {
       : status === 'failed' ? '❌ Задача завершилась ошибкой. Подробности отправлены отдельным сообщением.'
         : '⛔ Задача отменена. Статус отправлен отдельным сообщением.';
     expect(edit).toHaveBeenCalledWith(restarted.env.BOT_TOKEN, 42, 99, text,
-      { reply_markup: { inline_keyboard: [[{ text: '📋 Посмотреть input', callback_data: 'input_run' }]] } });
+      { reply_markup: { inline_keyboard: [] } });
     expect(await restarted._readSnapshot(receipt.requestId)).toEqual(frozen);
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(send).not.toHaveBeenCalled();
@@ -586,8 +586,9 @@ describe('existing collector control-plane ownership', () => {
     const keyboard = send.mock.calls.at(-1)[3].flat();
     const buttons = keyboard.map(button => button.callback_data.split('|')[0]);
     expect(keyboard.map(button => button.callback_data)).toEqual(expect.arrayContaining([
-      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_parallel', 'input_draft',
+      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_parallel',
     ]));
+    expect(buttons).not.toContain('input_draft');
     expect(buttons.includes('intake_stopsupp')).toBe(stopEnabled === 'true');
     expect(buttons.includes('intake_stopnew')).toBe(stopEnabled === 'true');
   });
@@ -2016,5 +2017,34 @@ describe('existing collector control-plane ownership', () => {
     const restarted = new IntakeBuffer({ storage }, env);
     expect(await (await restarted.fetch(rpc('/cp-session', { requestId, sessionId: 'third-session' }))).json()).toEqual({ sessionId: 'first-session' });
     expect((await restarted.fetch(rpc('/cp-session', { requestId: 'arbitrary', sessionId: 'session' }))).status).toBe(400);
+  });
+});
+
+
+describe('receipt-backed input document recovery', () => {
+  it('retains publication after terminal release and cold restart, using the original topic', async () => {
+    const { owner, storage, env } = fixture();
+    const topicItems = [{ ...items[0], msg: { ...items[0].msg, message_thread_id: 7, is_topic_message: true } }];
+    await accept(owner, receipt, topicItems);
+    request.mockImplementation(async (_method, path) => {
+      if (path === '/agent-inputs') throw new Error('snapshot read unavailable');
+      return { value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId, status: 'done', generation: 1,
+        result: { answer: 'Completed' } }, runs: [{ id: 'attempt', status: 'done' }] } };
+    });
+    expect(await owner._pollControlPlaneTasks()).toBe(true);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpInputPublishRequests')).toEqual([receipt.requestId]);
+    expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
+    const artifact = { ref: 'cp-agent-input:run_123', name: 'agent-input.json', sizeBytes: 123,
+      sha256: 'a'.repeat(64), contentType: 'application/json' };
+    request.mockResolvedValue({ value: { taskId: receipt.userTaskId, inputs: [{ runId: 'run_123', generation: 1, artifact }] } });
+    const restarted = new IntakeBuffer({ storage }, env);
+    await restarted.alarm();
+    expect(await storage.get('cpInputPublishRequests')).toEqual([]);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: 'input-document', artifact,
+      destination: { chatId: 42, threadId: 7 }, userTaskId: receipt.userTaskId }));
+    const count = enqueue.mock.calls.length;
+    await restarted.alarm();
+    expect(enqueue).toHaveBeenCalledTimes(count);
   });
 });
