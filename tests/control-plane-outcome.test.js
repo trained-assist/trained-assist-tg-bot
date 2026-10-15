@@ -18,4 +18,10 @@ describe('CP failure delivery', () => {
     }
     expect(controlPlaneFailureText({ generation: 1, runs: [] })).toBe('Ошибка исполнителя.');
   });
+  it('explains when a follow-up cannot safely restore its prior OpenCode session', () => {
+    expect(controlPlaneRunFailureCode({ error_class: 'opencode_resume_checkpoint_unavailable' }))
+      .toBe('OPENCODE_RESUME_CHECKPOINT_UNAVAILABLE');
+    expect(controlPlaneFailureText({ generation: 2, runs: [{ generation: 2, status: 'failed',
+      error_class: 'opencode_resume_checkpoint_unavailable' }] })).toContain('/new_dialog');
+  });
 });
