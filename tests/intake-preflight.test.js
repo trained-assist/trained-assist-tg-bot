@@ -124,7 +124,12 @@ describe('preflight before collector', () => {
         mediaType: headers.get('content-type'), name: decodeURIComponent(headers.get('x-artifact-name')),
         sizeBytes: bytes.byteLength } }, { status: 201 });
     } };
-    env.AI = { run: vi.fn(async () => ({ text: 'Голосовая задача распознана' })) };
+    env.DEEPGRAM_API_KEY = 'test-deepgram-key';
+    fetch.mockImplementation(async (url, init) => String(url).includes('api.deepgram.com')
+      ? Response.json({ results: { channels: [{ alternatives: [{ transcript: 'Голосовая задача распознана' }] }] } })
+      : String(url).includes('/getFile')
+        ? Response.json({ ok: true, result: { file_path: 'test/voice.ogg', file_size: bytes.byteLength } })
+        : new Response(bytes, { headers: { 'content-length': String(bytes.byteLength) } }));
     const prepared = await prepareIntake({ ...msg, text: undefined, voice: {
       file_id: 'telegram-private-file-id', file_unique_id: 'telegram-private-unique-id',
       mime_type: 'audio/ogg', file_size: bytes.byteLength,
@@ -133,7 +138,7 @@ describe('preflight before collector', () => {
     expect(prepared.artifactManifest.ownerProfileId).toBe('trained-assist-production');
     expect(prepared.voice).toEqual({ mime_type: 'audio/ogg', file_size: bytes.byteLength });
     expect(JSON.stringify(prepared)).not.toContain('telegram-private-file-id');
-    expect(env.AI.run).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('api.deepgram.com'))).toBe(true);
     expect(mocks.stt).not.toHaveBeenCalled();
   });
   it('failed transcription retains original voice for retry at launch', async () => {

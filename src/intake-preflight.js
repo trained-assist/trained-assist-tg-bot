@@ -29,7 +29,7 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
       fetchImpl,
     });
     const transcript = attachment.type === 'voice' && config.profileId === 'trained-assist-production'
-      ? await transcribeIngressAudio(env.AI, bytes) : null;
+      ? await transcribeIngressAudio(env.DEEPGRAM_API_KEY, bytes, attachment.mimeType ?? 'audio/ogg') : null;
     const safePart = part => {
       if (!part || typeof part !== 'object') return part;
       const { file_id: _fileId, file_unique_id: _fileUniqueId, ...metadata } = part;

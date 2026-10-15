@@ -153,22 +153,28 @@ export async function prepareTelegramArtifactWithBytes({ message, attachment, pr
   return { manifest, bytes };
 }
 
-export async function transcribeIngressAudio(ai, bytes) {
-  if (!ai || typeof ai.run !== 'function') throw new MediaIntakeError('speech transcription is not configured', { retryable: true });
+export async function transcribeIngressAudio(apiKey, bytes, mimeType = 'audio/ogg', fetchImpl = fetch) {
+  if (typeof apiKey !== 'string' || !apiKey.trim()) throw new MediaIntakeError('speech transcription is not configured', { retryable: true });
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > TELEGRAM_FILE_SIZE_LIMIT_BYTES) {
     throw new MediaIntakeError('speech audio is invalid');
   }
+  const contentType = /^audio\/[a-z0-9.+-]+$/i.test(mimeType) ? mimeType : 'application/octet-stream';
   let response;
   try {
-    response = await ai.run('@cf/openai/whisper-large-v3-turbo', {
-      audio: btoa(Array.from({ length: Math.ceil(bytes.length / 32768) }, (_, index) =>
-        String.fromCharCode(...bytes.subarray(index * 32768, (index + 1) * 32768))).join('')),
-      task: 'transcribe',
+    response = await fetchImpl('https://api.deepgram.com/v1/listen?model=nova-3&language=multi&smart_format=true', {
+      method: 'POST',
+      headers: { Authorization: `Token ${apiKey}`, 'Content-Type': contentType },
+      body: bytes,
+      signal: AbortSignal.timeout(120_000),
     });
   } catch {
     throw new MediaIntakeError('speech transcription is temporarily unavailable', { retryable: true });
   }
-  const transcript = typeof response?.text === 'string' ? response.text.trim() : '';
+  if (!response.ok) throw new MediaIntakeError('speech transcription was refused', {
+    retryable: response.status === 429 || response.status >= 500,
+  });
+  const result = await response.json().catch(() => null);
+  const transcript = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim() ?? '';
   if (!transcript || transcript.length > 100_000) throw new MediaIntakeError('speech transcription returned no usable text');
   return transcript;
 }
