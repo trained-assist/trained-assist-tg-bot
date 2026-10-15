@@ -7,6 +7,12 @@ const record = { status: 'sent', partCount: 2, sentParts: 2, providerMessageIds:
 it('compares all actual provider messages to the complete source digest', () => {
   expect(verifyCompleteAnswer(record, parts)).toBe(parts.join(''));
 });
+it('compares formatted provider text to its display digest while retaining a different source digest', () => {
+  const visible = parts.join('');
+  const styled = { ...record, textSha256: createHash('sha256').update(`**${visible}**`).digest('hex'),
+    displayTextCharacterCount: visible.length, displayTextSha256: createHash('sha256').update(visible).digest('hex') };
+  expect(verifyCompleteAnswer(styled, parts)).toBe(visible);
+});
 it.each([
   [{ ...record, sentParts: 1 }, parts],
   [{ ...record, providerMessageIds: [11, 11] }, parts],

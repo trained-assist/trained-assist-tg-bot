@@ -89,7 +89,7 @@ export class TelegramApi {
     });
   }
 
-  sendMessage({ chatId, text, threadId = null, replyToMessageId = null, replyMarkup = null, parseMode = null }) {
+  sendMessage({ chatId, text, threadId = null, replyToMessageId = null, replyMarkup = null, parseMode = null, entities = null }) {
     return this.call('sendMessage', {
       chat_id: chatId,
       message_thread_id: threadId ?? undefined,
@@ -97,6 +97,7 @@ export class TelegramApi {
       reply_to_message_id: replyToMessageId ?? undefined,
       reply_markup: replyMarkup ?? undefined,
       parse_mode: parseMode ?? undefined,
+      entities: entities?.length ? entities : undefined,
     });
   }
 
