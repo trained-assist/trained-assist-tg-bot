@@ -23,6 +23,16 @@ storage = "sqlite"
 type = "durable-object"
 storage = "sqlite"
 
+# Retain the provisioned namespaces from the retired production canary. They
+# are compatibility exports only: sandbox3 does not bind or use them.
+[exports.ProductionE2eTgDeliveryOwner]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ProductionE2eIntakeBuffer]
+type = "durable-object"
+storage = "sqlite"
+
 [[durable_objects.bindings]]
 name = "TG_DELIVERY_OWNER"
 class_name = "TgDeliveryOwner"
