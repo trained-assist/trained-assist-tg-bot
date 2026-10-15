@@ -2,7 +2,7 @@ import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia, cpMediaSupported } from './media-jobs.js';
-import { getSession } from './lib/kv.js';
+import { getSession, setSession } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
@@ -10,6 +10,7 @@ import { controlPlaneClient, publishRoutingDegradation } from './lib/control-pla
 import { isTerminalTaskStatus } from './sandbox-tg/contract.js';
 import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 import { sandboxOperatorLane } from './sandbox-tg/operator-lane.js';
+import { assistantMessageFromEvent, liveRunProgress } from './lib/live-run-progress.js';
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -3318,6 +3319,10 @@ export class IntakeBuffer {
         const row = value?.taskStore;
         if (row?.id !== receipt.userTaskId || row?.profile_id !== profileId) return false;
         const runs = Array.isArray(value?.runs) ? value.runs : [];
+        const snapshotForLive = await this._readSnapshot(requestId);
+        await this._rememberControlPlaneTask(snapshotForLive, receipt.userTaskId).catch(() => {});
+        await this._publishControlPlaneProgress(requestId, receipt, row, runs, snapshotForLive).catch(() => {});
+        await this._consumeControlPlaneEvents(client, requestId, receipt, snapshotForLive);
         const settledRuns = runs.every(run => ['done', 'failed', 'cancelled', 'unknown'].includes(run?.status));
         const outcomeUnknown = (row.status === 'unknown' ||
           (runs.length > 0 && runs.some(run => run?.status === 'unknown'))) && settledRuns &&
@@ -3470,6 +3475,81 @@ export class IntakeBuffer {
         })).catch(() => {});
       }
       return false;
+    }
+  }
+
+  async _publishControlPlaneProgress(requestId, receipt, row, runs, snapshot) {
+    if (!snapshot || !['accepted', 'queued', 'admitted', 'active', 'running', 'waiting', 'awaiting_input'].includes(row?.status)) return;
+    const message = snapshot.items?.at(-1)?.msg;
+    const messageId = snapshot.body?.initialMsgId;
+    if (!Number.isSafeInteger(message?.chat?.id) || !Number.isSafeInteger(messageId) || messageId <= 0) return;
+    const activeRun = [...runs].reverse().find(run => ['running', 'waiting', 'awaiting_input', 'retrying', 'retry_pending', 'unknown', 'queued', 'starting'].includes(run?.status));
+    const acceptance = await this.state.storage.get(`cp-acceptance:${requestId}`) ?? {};
+    const startedAt = Number.isFinite(activeRun?.started_at) ? activeRun.started_at : null;
+    const text = liveRunProgress({ taskStatus: row.status, runStatus: activeRun?.status, startedAt });
+    if (!text || acceptance.progressText === text) return;
+    const edited = await editMessage(this.env.BOT_TOKEN, message.chat.id, messageId, text,
+      { reply_markup: { inline_keyboard: STATUS_BTN } }).catch(() => null);
+    if (!edited?.ok && !(edited?.error_code === 400 && /message is not modified/i.test(edited.description || ''))) return;
+    await this._exclusive(async () => this.state.storage.transaction(async tx => {
+      const key = `cp-acceptance:${requestId}`;
+      const current = await tx.get(key);
+      if (current?.receipt?.userTaskId !== receipt.userTaskId || current.terminal === true) return;
+      await tx.put(key, { ...current, progressText: text });
+    }));
+  }
+
+  async _rememberControlPlaneTask(snapshot, taskId) {
+    const message = snapshot?.items?.at(-1)?.msg;
+    const chatId = message?.chat?.id;
+    if (!Number.isSafeInteger(chatId) || typeof taskId !== 'string' || !taskId) return;
+    const threadId = threadIdOf(message);
+    const session = await getSession(this.env.SESSIONS, chatId, threadId);
+    if (!session || session.lastTaskId === taskId) return;
+    await setSession(this.env.SESSIONS, chatId, { ...session, lastTaskId: taskId }, threadId);
+  }
+
+  async _consumeControlPlaneEvents(client, requestId, receipt, snapshot) {
+    if (!snapshot || typeof client?.events !== 'function') return;
+    const message = snapshot.items?.at(-1)?.msg;
+    if (!Number.isSafeInteger(message?.chat?.id)) return;
+    const conversationRef = snapshot.body?.controlPlaneEnvelope?.conversationRef;
+    if (typeof conversationRef !== 'string' || !conversationRef) return;
+    const conversationId = `${conversationRef}-b${requestId.slice(-24)}`;
+    const key = `cp-acceptance:${requestId}`;
+    const acceptance = await this.state.storage.get(key);
+    let cursor = Number.isSafeInteger(acceptance?.eventCursor) ? acceptance.eventCursor : 0;
+    for (let pageNo = 0; pageNo < 4; pageNo++) {
+      const page = await client.events(receipt.userTaskId, cursor, 100);
+      for (const event of page.events) {
+        if (Number.isSafeInteger(event.sequence) && event.sequence <= cursor) continue;
+        const assistant = assistantMessageFromEvent(event);
+        if (assistant) {
+          const deliveryId = `assistant:${receipt.userTaskId}:${assistant.runId}:${assistant.eventId}`;
+          const outbox = new TgDeliveryOwnerClient(this.env);
+          const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
+            conversationId, userTaskId: receipt.userTaskId,
+            destination: { chatId: message.chat.id, threadId: threadIdOf(message) },
+            requestId: deliveryId, type: 'message', text: assistant.text });
+          if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return;
+          if (['pending', 'retrying'].includes(queued.record.status)) await outbox.drain().catch(() => {});
+          const delivered = await outbox.load(deliveryId).catch(() => null);
+          // Keep the cursor on this event until delivery is confirmed. An
+          // ambiguous send must not let a later answer overtake this one.
+          if (delivered?.status !== 'sent') return;
+        }
+        const next = Number.isSafeInteger(event.sequence) ? event.sequence : cursor;
+        if (next > cursor) {
+          cursor = next;
+          await this._exclusive(async () => this.state.storage.transaction(async tx => {
+            const current = await tx.get(key);
+            if (current?.receipt?.userTaskId !== receipt.userTaskId || current.terminal === true) return;
+            await tx.put(key, { ...current, eventCursor: Math.max(Number.isSafeInteger(current.eventCursor) ? current.eventCursor : 0, cursor) });
+          }));
+        }
+      }
+      if (!page.hasMore || !Number.isSafeInteger(page.nextCursor) || page.nextCursor <= cursor) break;
+      cursor = page.nextCursor;
     }
   }
 

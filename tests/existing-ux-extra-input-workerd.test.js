@@ -82,6 +82,9 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
         needsExecutor: true, continuation: { owner: 'output', requested: true, issued: true,
           runId: 'run-offline-extra-input' } });
     }
+    if (url.hostname === 'cp.test' && url.pathname === '/events') {
+      return Response.json({ events: [], nextCursor: Number(url.searchParams.get('after') ?? 0), hasMore: false });
+    }
     if (url.hostname === 'cp.test' && url.pathname === '/status') {
       expect(body.taskId).toBe(accepted.taskId);
       return Response.json({ taskStore: { id: accepted.taskId, profile_id: env.CONTROL_PLANE_PROFILE,

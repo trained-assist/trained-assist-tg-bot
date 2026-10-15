@@ -367,6 +367,8 @@ it.each(['vertical', 'route', 'intake', 'stop', 'stop-disabled', 'collector-clea
       unresolved: true, stopConfirmed: false, reason: 'native_stop_unknown',
     });
     if (url.hostname === 'cp.test' && url.pathname === '/stop') return reply({ killed: 0 });
+    if (url.hostname === 'cp.test' && url.pathname === '/events') return reply({ events: [],
+      nextCursor: Number(url.searchParams.get('after') ?? 0), hasMore: false });
     if (url.hostname === 'cp.test' && url.pathname === '/status' && boundary === 'operator-stop-window-inspect-cp-unavailable') {
       return reply({ error: 'injected offline status refusal' }, 503);
     }

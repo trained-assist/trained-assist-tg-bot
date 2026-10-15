@@ -3,6 +3,8 @@ import { sendMessage, sendMessageWithKeyboard, pinChatMessage, unpinChatMessage,
 import { getSession, setSession, deleteSession, newSessionId } from '../lib/kv.js';
 import { getUser, listUsernames } from '../lib/kv.js';
 import { getAgentHealth, getSessions, getFiles, runTask, getSkills, reportBugOrFeature } from '../lib/agent-client.js';
+import { controlPlaneClient } from '../lib/control-plane-execution.js';
+import { liveRunProgress } from '../lib/live-run-progress.js';
 import { verifyPassword } from '../lib/auth.js';
 import { setUserToken } from '../lib/agent-client.js';
 import { resolveAudience } from '../lib/audience.js';
@@ -90,6 +92,8 @@ export async function handleCommand(msg, env) {
     case '/logout':   return cmdLogout(chatId, env, threadId);
     case '/profile':  return cmdProfile(chatId, env, threadId);
     case '/status':  return cmdStatus(chatId, env, threadId);
+    case '/logs':
+    case '/лог': return cmdRunLogs(chatId, env, threadId);
     case '/version': return cmdVersion(chatId, env, threadId);
     case '/privacy':          return cmdPrivacy(chatId, env, threadId);
     case '/settoken':          return cmdSetToken(msg, env);
@@ -296,10 +300,86 @@ async function cmdStatus(chatId, env, threadId = null) {
 
   const agentOk = await getAgentHealth(env);
 
+  let taskLine = '';
+  if (env.EXECUTION_BACKEND === 'control-plane' && session.lastTaskId) {
+    try {
+      const status = await controlPlaneClient(env).status(session.lastTaskId);
+      const active = [...(status.runs || [])].reverse().find(run => ['running', 'waiting', 'awaiting_input', 'retrying', 'retry_pending', 'unknown', 'queued', 'starting'].includes(run.status));
+      const latest = [...(status.runs || [])].reverse()[0];
+      const progress = liveRunProgress({ taskStatus: status.status, runStatus: active?.status ?? latest?.status,
+        startedAt: active?.started_at ?? latest?.started_at, finishedAt: latest?.finished_at });
+      taskLine = progress ? `\nПоследняя задача: ${progress}`
+        : `\nПоследняя задача: ${status.status === 'done' ? 'завершена' : status.status}.`;
+    } catch { taskLine = '\nСтатус последней задачи временно недоступен.'; }
+  }
+
   return sendIn(env, chatId, threadId,
     `📊 <b>${session.name}</b>\n` +
-    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}`
+    `Агент: ${agentOk ? '✅ онлайн' : '❌ офлайн'}${taskLine}`
   );
+}
+
+export function summarizeRunEvent(event) {
+  const payload = event?.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+    ? event.payload : {};
+  const nested = payload.payload && typeof payload.payload === 'object' && !Array.isArray(payload.payload)
+    ? payload.payload : {};
+  const type = typeof payload.type === 'string' ? payload.type : event?.type;
+  if (type === 'assistant_message' || event?.type === 'assistant_message') {
+    const message = typeof nested.text === 'string' ? nested.text : typeof payload.text === 'string' ? payload.text : '';
+    return message.trim() ? `💬 Ответил пользователю: ${message.trim().slice(0, 350)}` : null;
+  }
+  if (type === 'assistant_question' || event?.type === 'assistant_question') {
+    const question = nested.questions?.[0]?.question ?? payload.questions?.[0]?.question;
+    return typeof question === 'string' && question.trim() ? `❔ Задал вопрос: ${question.trim().slice(0, 300)}` : '❔ Запросил уточнение';
+  }
+  if (type === 'log') {
+    const raw = typeof nested.message === 'string' ? nested.message : typeof payload.message === 'string' ? payload.message : '';
+    if (!raw.trim()) return null;
+    const opencode = /^\[opencode ([a-z0-9_-]+)\]\s*(.*)$/is.exec(raw.trim());
+    if (opencode) {
+      let detail = '';
+      try {
+        const parsed = JSON.parse(opencode[2]);
+        const tool = parsed?.part?.tool ?? parsed?.part?.name ?? parsed?.tool?.name;
+        if (typeof tool === 'string' && /^[a-z0-9_.-]{1,60}$/i.test(tool)) detail = ` (${tool})`;
+      } catch { /* Keep only the event type; the raw event can contain private tool input. */ }
+      return `⚙️ OpenCode: ${opencode[1]}${detail}`;
+    }
+    return `⚙️ ${raw.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 300)}`;
+  }
+  const labels = { accepted: 'Запрос принят', queued: 'В очереди', started: 'OpenCode начал работу', waiting: 'Ожидает ввода',
+    attempt_failed: 'Попытка завершилась ошибкой', result_ready: 'Результат сформирован', stopped: 'Остановлено', error: 'Ошибка' };
+  return labels[event?.type] ?? null;
+}
+
+async function cmdRunLogs(chatId, env, threadId = null) {
+  const session = await getSession(env.SESSIONS, chatId, threadId);
+  if (!session) return sendIn(env, chatId, threadId, '⚠️ Ты не авторизован. /login username password');
+  if (!session.lastTaskId) return sendIn(env, chatId, threadId, 'Пока нет сохранённого запуска.');
+  if (env.EXECUTION_BACKEND !== 'control-plane') {
+    return sendIn(env, chatId, threadId, 'Журнал действий последнего запуска пока доступен только для задач через Control Plane.');
+  }
+  try {
+    const client = controlPlaneClient(env);
+    let cursor = 0;
+    const lines = [];
+    for (let pageNo = 0; pageNo < 3; pageNo++) {
+      const page = await client.events(session.lastTaskId, cursor, 100);
+      for (const event of page.events) {
+        const line = summarizeRunEvent(event);
+        if (line) lines.push(line);
+      }
+      if (!page.hasMore || page.nextCursor === null || page.nextCursor <= cursor) break;
+      cursor = page.nextCursor;
+    }
+    const unique = [...new Set(lines)].slice(-20);
+    return sendIn(env, chatId, threadId, unique.length
+      ? `🧾 <b>Действия последнего запуска</b>\nЗадача: <code>${session.lastTaskId.slice(0, 18)}</code>\n\n${unique.join('\n')}`
+      : `Для последнего запуска пока нет записей.\nЗадача: <code>${session.lastTaskId.slice(0, 18)}</code>`);
+  } catch {
+    return sendIn(env, chatId, threadId, 'Не удалось прочитать журнал запуска. Попробуй чуть позже.');
+  }
 }
 
 async function cmdVersion(chatId, env, threadId = null) {
