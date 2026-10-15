@@ -354,14 +354,19 @@ describe('signed existing-UX ingress', () => {
       const body = await request.json();
       calls.push({ path: new URL(request.url).pathname, body });
       return Response.json({ receipt: null, terminal: { deliveryId: 'terminal:task-1:g1', userTaskId: body.taskId,
-        status: 'sent', attempts: 1, providerMessageId: 123, generation: 1, chatId: 1714048, threadId: null } });
+        status: 'sent', attempts: 1, providerMessageId: 123, generation: 1, chatId: 1714048, threadId: null,
+        type: 'message', text: 'A real, verbose answer.' } });
     } }) };
     const response = await worker.fetch(new Request('https://worker/operator/test-delivery/task-1', {
       headers: { authorization: `Bearer ${env.TG_SANDBOX3_OPERATOR_TOKEN}` },
     }), env);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ taskId: 'task-1', terminal: { status: 'sent', chatId: 1714048,
-      providerMessageId: 123 } });
+    const payload = await response.json();
+    const digest = await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode('A real, verbose answer.'));
+    const expectedSha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    expect(payload).toMatchObject({ taskId: 'task-1', terminal: { status: 'sent', chatId: 1714048,
+      providerMessageId: 123, textCharacterCount: 'A real, verbose answer.'.length, textSha256: expectedSha256 } });
+    expect(payload.terminal).not.toHaveProperty('text');
     expect(calls).toEqual([{ path: '/read', body: { taskId: 'task-1' } }]);
     env.TG_DELIVERY_OWNER.get = () => ({ fetch: async () => Response.json({ receipt: null, terminal: {
       status: 'sent', chatId: -1001234567890,

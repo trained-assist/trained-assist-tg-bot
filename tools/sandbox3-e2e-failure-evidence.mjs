@@ -64,6 +64,10 @@ export function summarizeSandbox3E2eFailure(value = {}) {
     };
   }
 
+  if (value.failure && typeof value.failure === 'object') {
+    summary.failure = { code: text(value.failure.code) };
+  }
+
   if (value.artifactExport && typeof value.artifactExport === 'object') {
     summary.artifactExport = {
       expectedFileExportsPresent: typeof value.artifactExport.expectedFileExportsPresent === 'boolean'

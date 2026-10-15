@@ -1,6 +1,13 @@
 // A ping-pong acceptance test proves that this task got a real answer. Task,
 // Runner and delivery IDs are validated separately; the model need not obey an
 // exact-output formatting request for the system path to be healthy.
+export function extractDeliverableAnswer(result) {
+  if (typeof result === 'string') return result;
+  if (result && typeof result === 'object' && !Array.isArray(result)
+      && typeof result.answer === 'string') return result.answer;
+  return '';
+}
+
 export function pingPongAnswerPresent(resultText) {
   if (typeof resultText !== 'string') return false;
 
