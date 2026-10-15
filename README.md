@@ -88,11 +88,12 @@ Retiring GCP VM is not a development or fallback target. Use the own Agent Run A
 ### Complete answer delivery (architecture #276)
 
 New durable text replies accept the complete result up to 100000 UTF-16 code
-units. The delivery owner splits them into plain-text messages of at most 2000
-units, preferring paragraphs, then lines or whitespace, and retaining Unicode
-boundaries. Source text is never trimmed or summarized; joining the parts
-reconstructs it exactly. The existing delivery renderer uses no parse mode, so
-Markdown/code/link characters remain unchanged.
+units. The delivery owner renders Markdown styling into visible text plus
+Telegram entities, then splits that text into messages of at most 2000 units,
+preferring paragraphs, lines, or whitespace and retaining Unicode boundaries.
+The raw source and its digest remain in the delivery record; a separate digest
+verifies the complete visible text. Plain answers without styling retain their
+source text exactly.
 
 One parent delivery ID owns ordered parts stored below individual DO value
 limits. Each accepted provider message is checkpointed; explicit 429 rejection

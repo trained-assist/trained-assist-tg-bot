@@ -1,4 +1,5 @@
 import { messageParts, COMPLETE_ANSWER_LIMIT } from '../lib/message-parts.js';
+import { formattedAnswerParts } from '../lib/telegram-answer-format.js';
 import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
 import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
@@ -31,6 +32,8 @@ const summary = record => record ? {
   legacyStatus: record.legacyStatus ?? null,
   ...(record.partCount ? { partCount: record.partCount, sentParts: record.nextPart, providerMessageIds: record.telegramMessageIds ?? [],
     textCharacterCount: record.textCharacterCount, textSha256: record.textSha256 } : {}),
+  ...(record.displayTextSha256 ? { displayTextSha256: record.displayTextSha256,
+    displayTextCharacterCount: record.displayTextCharacterCount } : {}),
 } : null;
 
 function productionEmptyCutoverManifest(botUsername) {
@@ -225,11 +228,14 @@ export class TgDeliveryOwner {
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
       requestId: input.requestId ?? deliveryId, type: input.type, text: input.text, replyMarkup: input.replyMarkup ?? null,
       taskAcceptedAt: input.taskAcceptedAt ?? null, ...(documentDelivery(input) ? { artifact: input.artifact } : {}) };
-    const parts = documentDelivery(input) ? [input.text] : messageParts(input.text);
+    const parts = input.type === 'message' ? formattedAnswerParts(input.text)
+      : (documentDelivery(input) ? [input.text] : messageParts(input.text)).map(text => ({ text, entities: [] }));
     const multipart = parts.length > 1;
     const legacyFingerprint = JSON.stringify(payload);
     const fingerprint = multipart ? `sha256:${await digest(legacyFingerprint)}` : legacyFingerprint;
     const textSha256 = multipart ? await digest(payload.text) : null;
+    const displayText = input.type === 'message' ? parts.map(part => part.text).join('') : null;
+    const displayTextSha256 = displayText !== null ? await digest(displayText) : null;
     return this.state.storage.transaction(async storage => {
       const existing = await storage.get(key(deliveryId));
       if (existing) {
@@ -243,8 +249,10 @@ export class TgDeliveryOwner {
       const eligible = !await storage.get(`old-task:${payload.userTaskId}`) && Number.isSafeInteger(payload.taskAcceptedAt) && payload.taskAcceptedAt >= cutoverAt && payload.taskAcceptedAt <= Date.now();
       const record = { ...payload, ...(multipart ? { text: '', partCount: parts.length, nextPart: 0, partAttempts: 0, telegramMessageIds: [],
         textCharacterCount: payload.text.length, textSha256 } : {}), fingerprint, status: eligible ? 'pending' : 'quarantined',
+        ...(displayText !== null ? { displayTextCharacterCount: displayText.length,
+          displayTextSha256, ...(!multipart ? { rendered: parts[0] } : {}) } : {}),
         attempts: 0, createdAt: Date.now(), ...(!eligible ? { reason: 'precutover_or_unproven_task' } : {}) };
-      if (multipart) for (const [index, text] of parts.entries()) await storage.put(partKey(deliveryId, index), text);
+      if (multipart) for (const [index, part] of parts.entries()) await storage.put(partKey(deliveryId, index), part);
       await storage.put(key(deliveryId), record);
       return { record, duplicate: false };
     });
@@ -286,14 +294,27 @@ export class TgDeliveryOwner {
           document: downloaded.body, filename: claim.artifact.name, caption: claim.type === 'input-document' ? claim.text : `📎 ${claim.artifact.name}`,
           contentType: downloaded.contentType ?? claim.artifact.contentType });
       } else {
-        const text = claim.partCount ? await this.state.storage.get(partKey(claim.deliveryId, claim.nextPart)) : claim.text;
-        if (typeof text !== 'string') {
+        const stored = claim.partCount ? await this.state.storage.get(partKey(claim.deliveryId, claim.nextPart)) : claim.rendered ?? claim.text;
+        const prepared = typeof stored === 'string' ? { text: stored, entities: [] } : stored;
+        if (typeof prepared?.text !== 'string' || !Array.isArray(prepared.entities)) {
           await this.state.storage.put(key(claim.deliveryId), { ...claim, status: 'dead', reason: 'message_part_missing', finishedAt: Date.now() });
           return 1;
         }
         providerCalled = true;
-        result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-          text, replyMarkup: !claim.partCount || claim.nextPart === claim.partCount - 1 ? claim.replyMarkup : null });
+        const send = entities => api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
+          text: prepared.text, entities,
+          replyMarkup: !claim.partCount || claim.nextPart === claim.partCount - 1 ? claim.replyMarkup : null });
+        try {
+          result = await send(prepared.entities);
+        } catch (error) {
+          // A verified 400 means Telegram rejected the formatting before
+          // delivery. Retry this same visible text without entities once.
+          const entityRejected = prepared.entities.length > 0 && error instanceof TelegramApiError
+            && error.payloadVerified && error.status === 400 && error.payload?.error_code === 400
+            && /entit(?:y|ies)/i.test(String(error.payload.description ?? ''));
+          if (!entityRejected) throw error;
+          result = await send([]);
+        }
       }
       if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new Error();
       if (claim.partCount) {
