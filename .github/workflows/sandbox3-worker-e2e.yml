@@ -23,6 +23,7 @@ on:
           - file-intake
           - artifact-export
           - playwright-artifact
+          - ping-pong
         default: basic
       delivery_mode:
         description: Capture Worker output without sending Telegram messages, or verify actual Telegram delivery
@@ -32,6 +33,35 @@ on:
           - capture
           - telegram
         default: capture
+  workflow_call:
+    inputs:
+      run_e2e:
+        required: false
+        type: boolean
+        default: false
+      scenario:
+        required: false
+        type: string
+        default: ping-pong
+      delivery_mode:
+        required: false
+        type: string
+        default: telegram
+    secrets:
+      CF_API_TOKEN:
+        required: true
+      CF_ACCOUNT_ID:
+        required: true
+      TG_SANDBOX3_CHAT_ID:
+        required: true
+      TG_STAGING_TEST_USER_ID:
+        required: true
+      TG_SANDBOX3_OPERATOR_TOKEN:
+        required: true
+      INGRESS_BUFFER_TOKEN_SANDBOX3:
+        required: true
+      GH_PAT:
+        required: true
 
 permissions:
   contents: read
@@ -246,6 +276,7 @@ jobs:
         run: node tools/sandbox-buffer-cycle.mjs inspect | tee sandbox3-preflight-empty.json
 
       - name: Test real Worker help, status and anonymous-login prompt
+        if: ${{ inputs.scenario != 'ping-pong' }}
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
@@ -256,6 +287,7 @@ jobs:
         run: node tools/sandbox-buffer-cycle.mjs test-user-entry | tee sandbox3-user-entry.json
 
       - name: Test fresh input aggregation in the real sandbox3 Intake DO
+        if: ${{ inputs.scenario != 'ping-pong' }}
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3

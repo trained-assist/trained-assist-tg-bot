@@ -155,10 +155,20 @@ jobs:
           raise SystemExit('No successful staging deployment and smoke for this revision')
           PY
 
+  sandbox3-ping-pong:
+    needs: [ci, staging-gate]
+    if: github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
+    uses: ./.github/workflows/sandbox3-worker-e2e.yml
+    with:
+      run_e2e: true
+      scenario: ping-pong
+      delivery_mode: telegram
+    secrets: inherit
+
   deploy:
     runs-on: ubuntu-latest
-    needs: [ci, staging-gate]
-    if: always() && github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success'
+    needs: [ci, staging-gate, sandbox3-ping-pong]
+    if: always() && github.ref_name == 'main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true)) && needs.ci.result == 'success' && needs.staging-gate.result == 'success' && needs.sandbox3-ping-pong.result == 'success'
     outputs:
       deployed: ${{ steps.deploy.outputs.deployed }}
     steps:
