@@ -216,6 +216,20 @@ async function waitForTerminalDelivery(since) {
   throw new Error(`delivery_timeout_after_${DELIVERY_TIMEOUT_MS}ms:${JSON.stringify(last?.slice(0, 3) ?? [])}`);
 }
 
+async function waitForCleanIntake() {
+  const deadline = Date.now() + 180_000;
+  let intake;
+  while (Date.now() < deadline) {
+    intake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    const barrier = controlPlaneBarrierCounts(intake);
+    if (intake.busy === false && intake.stranded === false &&
+        (intake.buf ?? []).length === 0 && (intake.retryBatch ?? []).length === 0 &&
+        barrier.busyRequestCount === 0 && barrier.unresolvedLaunchCount === 0) return intake;
+    await sleep(POLL_MS);
+  }
+  throw new Error(`intake_cleanup_timeout:${JSON.stringify(summarizeIntake(intake))}`);
+}
+
 function summarizeIntake(intake) {
   return {
     busy: intake?.busy === true,
@@ -310,7 +324,7 @@ async function main() {
     assert.equal(result.move.status, 'sent', 'voice_answer_not_sent');
     assert.equal(result.move.reason, 'provider_accepted', 'voice_answer_not_provider_accepted');
     assert.ok(result.answerText.trim().length > 0, 'voice_answer_empty');
-    const finalIntake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    const finalIntake = await waitForCleanIntake();
     assert.equal(finalIntake.busy, false, 'voice_intake_busy_at_final');
     assert.equal(finalIntake.stranded, false, 'voice_intake_stranded_at_final');
     assert.deepEqual(controlPlaneBarrierCounts(finalIntake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'voice_barrier_not_clean_at_final');
