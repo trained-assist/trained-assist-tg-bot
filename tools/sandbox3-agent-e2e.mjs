@@ -325,14 +325,22 @@ async function main() {
   if (process.env.CLOUDFLARE_ACCOUNT_ID !== ACCOUNT_ID) throw new Error('sandbox3_account_mismatch');
   const scenario = process.env.SANDBOX3_E2E_SCENARIO ?? 'basic';
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
+  const fileFixtures = {
+    'file-intake': { kind: 'text', name: 'sandbox-intake-fixture.txt', expected: 'LANTERN', prompt: 'Read the attached file and reply with only the secret word written in it.' },
+    'image-intake': { kind: 'photo', name: 'sandbox-intake-photo.jpg', expected: 'red', prompt: 'Look at the attached photo and reply with only its main color in English.' },
+    'pdf-intake': { kind: 'pdf', name: 'sandbox-intake-fixture.pdf', expected: 'ORBIT', prompt: 'Read the attached PDF and reply with only the secret word written in it.' },
+    'docx-intake': { kind: 'docx', name: 'sandbox-intake-fixture.docx', expected: 'MAPLE', prompt: 'Read the attached Word document and reply with only the secret word written in it.' },
+    'csv-intake': { kind: 'csv', name: 'sandbox-intake-fixture.csv', expected: 'PLUM', prompt: 'Read the attached CSV and reply with only the secret value in its data row.' },
+  };
+  const fileFixture = fileFixtures[scenario] ?? null;
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
-  assert(deliveryMode !== 'capture' || ['file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
-  assert(['basic', 'ping-pong', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(deliveryMode !== 'capture' || fileFixture || ['artifact-export', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
+  assert(['basic', 'ping-pong', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'artifact-export', 'playwright-artifact'].includes(scenario) || fileFixture, 'sandbox3_scenario_invalid');
   const pingPong = scenario === 'ping-pong';
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
-  const prompt = scenario === 'file-intake'
-    ? 'sandbox3-file-test Read the attached file and reply with only the secret word written in it.'
+  const prompt = fileFixture
+    ? `sandbox3-file-test ${fileFixture.prompt}`
     : scenario === 'artifact-export'
     ? `Use your shell tool to create outputs/agent-note.md containing this exact marker and nothing else: ${nonce}. Export outputs/agent-note.md as a task artifact. Do not commit or publish it. Reply with exactly this marker: ${nonce}`
     : scenario === 'playwright-artifact'
@@ -353,7 +361,7 @@ async function main() {
     : scenario === 'capability-reply' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
-    : scenario === 'history' ? ['READY'] : scenario === 'file-intake' ? ['LANTERN']
+    : scenario === 'history' ? ['READY'] : fileFixture ? [fileFixture.expected]
     : scenario === 'playwright-artifact' ? ['Example Domain', nonce] : [nonce];
   const username = `e2e_${randomBytes(6).toString('hex')}`;
   let updateId = Date.now();
@@ -397,7 +405,7 @@ async function main() {
   const questionUpdate = {
     target: 'sandbox3', type: 'message', chatId, userId, delivery: deliveryMode,
     updateId: questionUpdateId, text: prompt,
-    ...(scenario === 'file-intake' ? { fixtureFile: true } : {}),
+    ...(fileFixture ? { fixtureFile: true, fixtureKind: fileFixture.kind } : {}),
   };
   const question = await workerRequest('/operator/test-update', questionUpdate);
   // The message is acknowledged by the Intake Durable Object, which runs in a
@@ -406,13 +414,13 @@ async function main() {
   // answer through the delivery owner below.
   assert.equal(question.ok, true, 'sandbox_question_not_accepted');
   assert.equal(question.collector?.pendingCount, 1, 'question_not_in_intake_buffer');
-  if (scenario === 'file-intake') {
+  if (fileFixture) {
     const artifact = question.collector?.artifacts?.[0];
     assert.equal(artifact?.manifestPresent, true, 'sandbox_file_manifest_missing_from_intake');
     assert.equal(artifact?.ownerProfileId, PROFILE_ID, 'sandbox_file_manifest_profile_mismatch');
-    assert.equal(artifact?.name, 'sandbox-intake-fixture.txt', 'sandbox_file_name_missing');
+    assert.equal(artifact?.name, fileFixture.name, 'sandbox_file_name_missing');
     console.log(JSON.stringify({ scenario: 'sandbox-file-intake', manifestPresentInIntake: true,
-      telegramFileIdPersisted: false, fileName: 'sandbox-intake-fixture.txt' }));
+      telegramFileIdPersisted: false, fileName: fileFixture.name }));
   }
   const replay = await workerRequest('/operator/test-update', questionUpdate);
   assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
@@ -452,14 +460,14 @@ async function main() {
   const task = await waitForTask();
   const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply';
   const taskGoalPresent = typeof task.goal === 'string' && task.goal.trim().length > 0;
-  const goalContainsExpectedInput = scenario === 'file-intake' ? null : taskGoalPresent
+  const goalContainsExpectedInput = fileFixture ? null : taskGoalPresent
     && (deterministicScenario ? task.goal.includes(prompt) : task.goal.includes(nonce));
   failureDiagnostics = { stage: 'task_persisted', task: {
     id: task.id, status: task.status, generation: task.generation,
     goalContainsExpectedInput,
   } };
   assert(taskGoalPresent, 'sandbox3_task_goal_missing');
-  if (scenario !== 'file-intake') assert(goalContainsExpectedInput, 'sandbox3_input_not_persisted');
+  if (!fileFixture) assert(goalContainsExpectedInput, 'sandbox3_input_not_persisted');
   let storedUserValue;
   try { storedUserValue = JSON.parse(task.user_value ?? 'null'); } catch { storedUserValue = null; }
   const storedInputItems = Array.isArray(storedUserValue?.inputItems) ? storedUserValue.inputItems : [];
@@ -467,9 +475,9 @@ async function main() {
     .map(item => item && typeof item.text === 'string' ? item.text : '')
     .filter(Boolean)
     .join('\n');
-  if (scenario === 'file-intake') {
+  if (fileFixture) {
     const artifacts = storedInputItems.flatMap(item => Array.isArray(item?.artifacts) ? item.artifacts : []);
-    const manifest = artifacts.find(item => item?.name === 'sandbox-intake-fixture.txt'
+    const manifest = artifacts.find(item => item?.name === fileFixture.name
       && item.ownerProfileId === PROFILE_ID);
     const manifestPersisted = Boolean(manifest && /^[a-f0-9]{64}$/.test(manifest.ref ?? '')
       && /^[a-f0-9]{64}$/.test(manifest.version ?? '') && manifest.sha256 === manifest.version);
