@@ -27,6 +27,17 @@ async function emptyFixture(overrides = {}) {
 }
 
 describe('sandbox durable single delivery owner', () => {
+  it('exposes only a length and digest for delivered message text to the sandbox verifier', async () => {
+    const { client } = await fixture();
+    const result = await client.read('task');
+    const terminal = result.terminal;
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('private result'));
+    const expectedSha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+
+    expect(terminal).toMatchObject({ textCharacterCount: 'private result'.length, textSha256: expectedSha256 });
+    expect(terminal).not.toHaveProperty('text');
+  });
+
   it('downloads a task-scoped artifact, verifies size and digest, then sends it as a Telegram document', async () => {
     const { client } = await emptyFixture();
     const bytes = new TextEncoder().encode('E2E-DOC');

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 import { summarizeStopDiagnostics } from './sandbox3-stop-diagnostics.mjs';
 import { summarizeSandbox3E2eFailure } from './sandbox3-e2e-failure-evidence.mjs';
 import { launchWasDispatched } from './e2e-oracle.mjs';
-import { pingPongAnswerPresent } from './sandbox3-ping-pong-oracle.mjs';
+import { extractDeliverableAnswer, pingPongAnswerPresent } from './sandbox3-ping-pong-oracle.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -558,7 +558,10 @@ async function main() {
   const uniqueResultArtifactManifests = [...new Map(resultArtifactManifests
     .filter(item => typeof item.ref === 'string' && typeof item.name === 'string')
     .map(item => [`${item.ref}\0${item.name}`, item])).values()];
-  const resultText = answerParts.join('\n');
+  // For ping-pong, mirror the production delivery contract exactly. Recursive
+  // traversal is useful for artifact manifests, but strings in arbitrary
+  // metadata must never count as the user's answer.
+  const resultText = pingPong ? extractDeliverableAnswer(resultValue) : answerParts.join('\n');
   const escapedLines = expectedLines.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   // Playwright asks for the title and marker in the reply, but does not
   // require them to be adjacent lines. Markdown bullets/bold formatting from
@@ -632,6 +635,11 @@ async function main() {
   const terminal = deliveryMode === 'telegram'
     ? await waitForDelivery(task.id, chatId)
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
+  if (pingPong && deliveryMode === 'telegram') {
+    const answerSha256 = createHash('sha256').update(resultText, 'utf8').digest('hex');
+    assert.equal(terminal.textCharacterCount, resultText.length, 'telegram_delivery_answer_length_mismatch');
+    assert.equal(terminal.textSha256, answerSha256, 'telegram_delivery_answer_hash_mismatch');
+  }
   let artifactDeliveryEvidence = null;
   if (artifactExportEvidence && deliveryMode === 'telegram') {
     const expectedNames = scenario === 'artifact-export' ? ['agent-note.md'] : ['browser-check.md', 'browser-proof.png'];
@@ -640,6 +648,7 @@ async function main() {
   failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
     status: terminal.status, attempts: terminal.attempts,
     providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
+    ...(pingPong && deliveryMode === 'telegram' ? { answerMatchesDelivery: true } : {}),
   } };
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
   failureDiagnostics.delivery = { ...failureDiagnostics.delivery,
@@ -855,6 +864,8 @@ async function main() {
 main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
   const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
+  const code = typeof error?.code === 'string' && /^[A-Z0-9_:-]{1,80}$/.test(error.code) ? error.code : null;
+  if (code) failureDiagnostics = { ...failureDiagnostics, failure: { code } };
   if (!failureEvidenceWritten) {
     const diagnostics = summarizeSandbox3E2eFailure(failureDiagnostics);
     await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic',

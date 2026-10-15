@@ -167,7 +167,13 @@ export class TgDeliveryOwner {
           const receipt = records.find(record => record.deliveryId.startsWith('receipt:')) ?? records.find(record => record.deliveryId === body.taskId);
           const terminal = records.filter(record => record.deliveryId.startsWith('terminal:')).sort((first, second) => generation(second) - generation(first))[0];
           if (records.some(record => !chatAllowed(config, record.destination.chatId))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
-          const response = { receipt: summary(receipt), terminal: summary(terminal) };
+          const terminalSummary = summary(terminal);
+          if (terminalSummary && terminal?.type === 'message' && typeof terminal.text === 'string') {
+            const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(terminal.text));
+            terminalSummary.textCharacterCount = terminal.text.length;
+            terminalSummary.textSha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+          }
+          const response = { receipt: summary(receipt), terminal: terminalSummary };
           if (body.includeArtifacts === true) response.artifacts = records
             .filter(record => record.type === 'artifact')
             .map(summary)

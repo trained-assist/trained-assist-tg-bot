@@ -133,7 +133,23 @@ app.get('/operator/test-delivery/:taskId', async context => {
     const records = [result.receipt, result.terminal, ...(result.artifacts ?? [])].filter(Boolean);
     if (records.some(record => String(record.chatId) !== String(chatId)))
       return context.json({ error: 'sandbox_test_delivery_identity_mismatch' }, 409);
-    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal: result.terminal,
+    const answerEvidence = async record => {
+      if (!record || record.type !== 'message') return null;
+      if (Number.isSafeInteger(record.textCharacterCount) && typeof record.textSha256 === 'string'
+          && /^[a-f0-9]{64}$/.test(record.textSha256)) {
+        return { textCharacterCount: record.textCharacterCount, textSha256: record.textSha256 };
+      }
+      if (typeof record.text !== 'string') return null;
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(record.text));
+      const textSha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      return { textCharacterCount: record.text.length, textSha256 };
+    };
+    let terminal = null;
+    if (result.terminal) {
+      const { text: _privateText, ...metadata } = result.terminal;
+      terminal = { ...metadata, ...(await answerEvidence(result.terminal)) };
+    }
+    return context.json({ taskId, chatId: String(chatId), receipt: result.receipt, terminal,
       ...(includeArtifacts ? { artifacts: result.artifacts ?? [] } : {}) });
   } catch {
     return context.json({ error: 'sandbox_test_delivery_unavailable' }, 503);
