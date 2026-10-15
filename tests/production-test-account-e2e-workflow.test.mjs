@@ -40,4 +40,5 @@ it('voice canary uploads a synthetic Opus fixture and injects only into the fixe
   expect(script).toContain('sendVoice');
   expect(script).toContain("assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required')");
   expect(script).toContain("assert.equal(result.move.status, 'sent', 'voice_answer_not_sent')");
+  expect(script).toContain('voice_transcript_missing_from_intake');
 });
