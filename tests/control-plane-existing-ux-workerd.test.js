@@ -953,8 +953,10 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
         await workerdWaitFor(() => providerDocuments.length === 1);
         expect(providerDocuments[0]).toMatchObject({ chatId: '42', name: 'agent-input-g1-run_123.json' });
         expect(providerDocuments[0].bytes).toEqual(inputDocumentBytes);
-        const deliveryView = await runtime.dispatchFetch('https://worker.test/deliveries/ut-workerd-scenario?includeArtifacts=true', {
-          headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
+        const deliveryNamespace = await runtime.getDurableObjectNamespace('TG_DELIVERY_OWNER');
+        const deliveryOwner = deliveryNamespace.get(deliveryNamespace.idFromName('sandbox-delivery-v1:probability_cat_bot'));
+        const deliveryView = await deliveryOwner.fetch('https://delivery-owner.internal/read', {
+          method: 'POST', body: JSON.stringify({ taskId: 'ut-workerd-scenario', includeArtifacts: true }),
         });
         expect((await deliveryView.json()).artifacts).toEqual([]);
         expect(providerDocuments[0].caption).toContain('Ввод принят на запуск');
