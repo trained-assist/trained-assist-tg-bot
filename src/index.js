@@ -10,7 +10,7 @@ import { handleCallbackQuery } from './handlers/callbacks.js';
 import { getSession } from './lib/kv.js';
 import { isAdminGroupChat, isAdminOnlyCommand, isAdminLocalCommand, adminOnlyHint } from './lib/admin-group.js';
 import { initTestMode, isTestChat, realChatId, rememberCallback } from './lib/test-mode.js';
-import { sendMessage, sendMessageWithKeyboard, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
+import { sendMessage, ensureCommandsRegisteredOnce, getRegisteredCommands } from './lib/telegram.js';
 import { conversationKey, threadExtra, threadIdOf } from './conversation-context.js';
 import { recordGroupMessage } from './group-history.js';
 import { shouldDebounce, hasIntakeContent, FORCE_RUN_RE, AUTO_LAUNCH_RE } from './intake-routing.js';
@@ -116,37 +116,56 @@ app.post('/deliver', async c => {
   const threadId = Number.isInteger(Number(body?.threadId)) && Number(body?.threadId) > 0
     ? Number(body.threadId)
     : null;
-  const extra = threadId ? { message_thread_id: threadId } : {};
 
   // Кнопка запуска: адресная. `intake_run` сливает буфер ЭТОГО чата, а проверка
   // актуальности и защита от второго запуска живут в нём же (пустой буфер → ответ
   // «нечего запускать», идущий ран → «уже идёт»), поэтому повторное нажатие или
   // гонка с начавшейся работой не создают второй запуск.
-  // sendMessageWithKeyboard takes the ROWS ARRAY and wraps it into reply_markup
-  // itself. Passing a pre-wrapped { inline_keyboard } double-wraps it and Telegram
-  // rejects the send with «field "inline_keyboard" must be of type Array» —
-  // found by the first live acceptance run of the C02.1 seam (2026-10-04).
+  // Persist and send through the same durable owner as terminal production
+  // answers. In particular, never fall back to a second Telegram send after an
+  // ambiguous provider error: the owner records `unknown` and fences retries.
+  const userTaskId = typeof body?.userTaskId === 'string' ? body.userTaskId : null;
+  const taskAcceptedAt = Number.isSafeInteger(body?.taskAcceptedAt) ? body.taskAcceptedAt : null;
+  if (!userTaskId || taskAcceptedAt == null) return c.json({ error: 'missing stable task acceptance time' }, 400);
   const keyboard = kind === 'stuck_input'
-    ? [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]]
-    : undefined;
+    ? { inline_keyboard: [[{ text: '▶️ Запустить проработку', callback_data: 'intake_run' }]] }
+    : null;
 
-  const result = await sendMessageWithKeyboard(c.env.BOT_TOKEN, chatId, text, keyboard, extra)
-    .catch(async () => sendMessage(c.env.BOT_TOKEN, chatId, text, extra));
-
-  const providerMessageId = result?.result?.message_id;
-  if (!providerMessageId) {
-    // Канал не принял: это НЕ доставка. Честный отказ, чтобы control plane
-    // повторил, а не записал «успех».
-    logLifecycleEvent({ event: 'tg.delivery.rejected', component: 'gateway', deliveryId,
-      ...(typeof body?.userTaskId === 'string' ? { taskId: body.userTaskId } : {}),
-      status: 'rejected', reasonCode: 'provider_not_accepted' }, c.env);
-    return c.json({ error: 'channel did not accept', description: result?.description || null }, 502);
+  let owner;
+  let record;
+  let duplicate = false;
+  try {
+    owner = new TgDeliveryOwnerClient(c.env);
+    const admitted = await owner.enqueue({ deliveryId, userTaskId, conversationId: body?.conversationId ?? null,
+      destination: { chatId, threadId }, requestId: deliveryId,
+      type: keyboard ? 'launch' : 'message', text, replyMarkup: keyboard, taskAcceptedAt });
+    duplicate = admitted.duplicate === true;
+    await owner.drain();
+    record = await owner.load(deliveryId);
+  } catch (error) {
+    logLifecycleEvent({ event: 'tg.delivery.owner_unavailable', component: 'gateway', deliveryId,
+      taskId: userTaskId, status: 'pending', reasonCode: error?.variable || 'delivery_owner_unavailable' }, c.env);
+    return c.json({ error: 'durable delivery owner unavailable' }, 503);
   }
-  await recordGatewaySent(c.env, chatId, providerMessageId);
-  logLifecycleEvent({ event: 'tg.delivery.accepted', component: 'gateway', deliveryId,
-    ...(typeof body?.userTaskId === 'string' ? { taskId: body.userTaskId } : {}),
-    status: 'sent', providerMessageId }, c.env);
-  return c.json({ providerMessageId, kind, deliveryId });
+
+  if (record?.status === 'sent' && Number.isSafeInteger(record.telegramMessageId)) {
+    const providerMessageId = record.telegramMessageId;
+    await recordGatewaySent(c.env, chatId, providerMessageId);
+    logLifecycleEvent({ event: 'tg.delivery.accepted', component: 'gateway', deliveryId,
+      taskId: userTaskId, status: 'sent', providerMessageId }, c.env);
+    return c.json({ providerMessageId, kind, deliveryId, duplicate });
+  }
+  if (record?.status === 'unknown') {
+    logLifecycleEvent({ event: 'tg.delivery.unknown', component: 'gateway', deliveryId,
+      taskId: userTaskId, status: 'unknown', attempt: record.attempts }, c.env);
+    return c.json({ deliveryId, outcome: 'unknown', status: record.status }, 200);
+  }
+  if (record?.status === 'pending' || record?.status === 'retrying' || record?.status === 'sending') {
+    return c.json({ deliveryId, outcome: 'pending', status: record.status }, 503);
+  }
+  logLifecycleEvent({ event: 'tg.delivery.rejected', component: 'gateway', deliveryId,
+    taskId: userTaskId, status: 'rejected', reasonCode: record?.reason || 'provider_not_accepted' }, c.env);
+  return c.json({ error: 'channel did not accept', deliveryId, outcome: 'rejected', status: record?.status || 'missing' }, 502);
 });
 
 // Agent → gateway: messages the user sent AFTER the current run started (live inbox,
