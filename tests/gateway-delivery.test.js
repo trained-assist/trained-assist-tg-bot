@@ -82,7 +82,7 @@ const mod = await import('../src/index.js');
 const worker = mod.default;
 
 const AUTH = { Authorization: 'Bearer test-secret' };
-const SESSIONS = { get: vi.fn(async () => null), put: vi.fn(async () => {}) };
+const SESSIONS = { get: vi.fn(async () => null), put: vi.fn(async () => {}), list: vi.fn(async () => ({ keys: [], list_complete: true })) };
 
 function env() {
   return {
@@ -112,6 +112,20 @@ beforeEach(() => {
   deliveryOwner.enqueue.mockClear();
   deliveryOwner.drain.mockClear();
   deliveryOwner.load.mockClear();
+});
+
+it('scheduled tick delivers queued messages after the original request has ended', async () => {
+  for (const deliveryId of ['queued-1', 'queued-2']) {
+    deliveryOwner.records.set(deliveryId, {
+      input: { deliveryId, destination: { chatId: 42, threadId: null }, text: deliveryId },
+      status: 'pending', attempts: 0,
+    });
+  }
+  const jobs = [];
+  await worker.scheduled({}, env(), { waitUntil: promise => jobs.push(promise) });
+  await Promise.all(jobs);
+  expect([...deliveryOwner.records.values()].map(record => record.status)).toEqual(['sent', 'sent']);
+  expect(sendMessage).toHaveBeenCalledTimes(2);
 });
 
 describe('POST /deliver — реальный адаптер канала (arch#132 П3b)', () => {
