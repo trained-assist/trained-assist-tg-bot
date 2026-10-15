@@ -347,7 +347,7 @@ async function main() {
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
-      : pingPong ? `This is a simple sandbox delivery check. Briefly confirm you received request ${nonce}.`
+      : pingPong ? `Use your shell tool to run \`printf '%s' '${nonce}'\` and tell me what it printed. You may add a brief explanation.`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
     : scenario === 'capability-reply' ? ['Доступные quick answers']
@@ -567,7 +567,7 @@ async function main() {
   // require them to be adjacent lines. Markdown bullets/bold formatting from
   // the agent must not make a correct answer fail this user-facing check.
   const answerMatchesChallenge = pingPong
-    ? pingPongAnswerPresent(resultText)
+    ? pingPongAnswerPresent(resultText, nonce)
     : scenario === 'playwright-artifact'
     ? expectedLines.every(line => resultText.toLowerCase().includes(line.toLowerCase()))
     : new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
@@ -637,6 +637,13 @@ async function main() {
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
   if (pingPong && deliveryMode === 'telegram') {
     const answerSha256 = createHash('sha256').update(resultText, 'utf8').digest('hex');
+    failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_answer_comparison', deliveryAnswer: {
+      answerCharacterCount: resultText.length,
+      deliveredCharacterCount: Number.isSafeInteger(terminal.textCharacterCount) ? terminal.textCharacterCount : null,
+      answerLengthMatches: terminal.textCharacterCount === resultText.length,
+      answerHashMatches: terminal.textSha256 === answerSha256,
+      deliveryMessageType: typeof terminal.type === 'string' && /^[a-z0-9_-]{1,40}$/i.test(terminal.type) ? terminal.type : null,
+    } };
     assert.equal(terminal.textCharacterCount, resultText.length, 'telegram_delivery_answer_length_mismatch');
     assert.equal(terminal.textSha256, answerSha256, 'telegram_delivery_answer_hash_mismatch');
   }
@@ -648,7 +655,6 @@ async function main() {
   failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
     status: terminal.status, attempts: terminal.attempts,
     providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
-    ...(pingPong && deliveryMode === 'telegram' ? { answerMatchesDelivery: true } : {}),
   } };
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
   failureDiagnostics.delivery = { ...failureDiagnostics.delivery,
@@ -827,6 +833,12 @@ async function main() {
     console.log(JSON.stringify({ scenario: 'active-task-stop-and-next-task', ...stopEvidence }));
   }
 
+  const serviceRouteEvidence = deterministicScenario ? {
+    route: routing.decision?.route ?? null,
+    capabilityId: routing.decision?.capabilityId ?? null,
+    replyAllowed: routing.decision?.replyAllowed === true,
+    runnerExecutionCount: executions.length,
+  } : null;
   const report = {
     ok: true,
     scenario: `sandbox3-profile-login-question-runner-answer-${deliveryMode}`,
@@ -865,7 +877,8 @@ main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
   const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
   const code = typeof error?.code === 'string' && /^[A-Z0-9_:-]{1,80}$/.test(error.code) ? error.code : null;
-  if (code) failureDiagnostics = { ...failureDiagnostics, failure: { code } };
+  const name = typeof error?.name === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(error.name) ? error.name : null;
+  if (code || name) failureDiagnostics = { ...failureDiagnostics, failure: { code, name } };
   if (!failureEvidenceWritten) {
     const diagnostics = summarizeSandbox3E2eFailure(failureDiagnostics);
     await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic',
