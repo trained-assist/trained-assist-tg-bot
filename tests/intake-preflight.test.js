@@ -101,6 +101,41 @@ describe('preflight before collector', () => {
     expect(JSON.stringify(prepared)).not.toContain('telegram-private-file-id');
     expect(JSON.stringify(prepared)).not.toContain('telegram-private-unique-id');
   });
+  it('attaches a transcript to production voice while retaining its immutable artifact', async () => {
+    const { env } = world();
+    Object.assign(env, {
+      EXECUTION_BACKEND: 'control-plane', MEDIA_PIPELINE: 'ingress-buffer',
+      BOT_USERNAME: 'super_personal_assistant_bot', BOT_TOKEN: 'fixture-bot-token',
+      CONTROL_PLANE_URL: 'https://cp.example.test', CONTROL_PLANE_PRINCIPAL: 'gateway',
+      CONTROL_PLANE_PRINCIPAL_SIGNATURE: 'fixture-signature',
+      CONTROL_PLANE_PROFILE: 'trained-assist-production', TELEGRAM_WEBHOOK_SECRET: 'fixture-webhook',
+      INGRESS_BUFFER_TOKEN: 'fixture-buffer-token',
+    });
+    const bytes = new TextEncoder().encode('synthetic-opus');
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const sha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    fetch.mockImplementation(async url => String(url).includes('/getFile')
+      ? Response.json({ ok: true, result: { file_path: 'test/voice.ogg', file_size: bytes.byteLength } })
+      : new Response(bytes, { headers: { 'content-length': String(bytes.byteLength) } }));
+    env.INGRESS_BUFFER = { fetch: async (_url, init) => {
+      const headers = new Headers(init.headers);
+      return Response.json({ manifest: { contractVersion: 1, ref: headers.get('x-artifact-ref'),
+        version: sha256, sha256, ownerProfileId: headers.get('x-artifact-owner-profile-id'),
+        mediaType: headers.get('content-type'), name: decodeURIComponent(headers.get('x-artifact-name')),
+        sizeBytes: bytes.byteLength } }, { status: 201 });
+    } };
+    env.AI = { run: vi.fn(async () => ({ text: 'Голосовая задача распознана' })) };
+    const prepared = await prepareIntake({ ...msg, text: undefined, voice: {
+      file_id: 'telegram-private-file-id', file_unique_id: 'telegram-private-unique-id',
+      mime_type: 'audio/ogg', file_size: bytes.byteLength,
+    } }, env, { username: 'alice' });
+    expect(prepared.transcript).toBe('Голосовая задача распознана');
+    expect(prepared.artifactManifest.ownerProfileId).toBe('trained-assist-production');
+    expect(prepared.voice).toEqual({ mime_type: 'audio/ogg', file_size: bytes.byteLength });
+    expect(JSON.stringify(prepared)).not.toContain('telegram-private-file-id');
+    expect(env.AI.run).toHaveBeenCalledTimes(1);
+    expect(mocks.stt).not.toHaveBeenCalled();
+  });
   it('failed transcription retains original voice for retry at launch', async () => {
     const { io, map } = world(); mocks.stt.mockResolvedValue({ error: 'unavailable' });
     await ingest(io, { ...msg, text: undefined, voice: { file_id: 'v' } });

@@ -45,6 +45,11 @@ TG_SLICE_ALLOWED_USERS = ""
 binding = "INGRESS_BUFFER"
 service = "trained-assist-ingress-buffer-production"
 
+# Transcribe production voice/audio before agent launch while preserving the
+# immutable original file in INGRESS_BUFFER.
+[ai]
+binding = "AI"
+
 [[durable_objects.bindings]]
 name = "INTAKE"
 class_name = "IntakeBuffer"

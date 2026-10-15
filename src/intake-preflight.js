@@ -6,7 +6,7 @@ import { storeTelegramFile, storeTranscript, releaseBufferPins } from './lib/int
 import { transcribeVoice } from './handlers/message.js';
 import { attachmentOf } from './sandbox-tg/batch.js';
 import { readTgSliceConfig } from './sandbox-tg/config.js';
-import { prepareTelegramArtifact } from './sandbox-tg/media-intake.js';
+import { prepareTelegramArtifactWithBytes, transcribeIngressAudio } from './sandbox-tg/media-intake.js';
 import { mediaOf } from './media-jobs.js';
 
 
@@ -22,18 +22,20 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
       // immutable object without persisting Telegram's file_id in the draft.
       ingressRef: `${config.botUsername}:${msg.chat.id}:${threadId ?? ''}:${msg.message_id}`,
     };
-    const artifactManifest = await prepareTelegramArtifact({
+    const { manifest: artifactManifest, bytes } = await prepareTelegramArtifactWithBytes({
       message: msg, attachment, profile, config,
       buffer: env.INGRESS_BUFFER,
       bufferToken: env.INGRESS_BUFFER_TOKEN,
       fetchImpl,
     });
+    const transcript = attachment.type === 'voice' && config.profileId === 'trained-assist-production'
+      ? await transcribeIngressAudio(env.AI, bytes) : null;
     const safePart = part => {
       if (!part || typeof part !== 'object') return part;
       const { file_id: _fileId, file_unique_id: _fileUniqueId, ...metadata } = part;
       return metadata;
     };
-    const safeMessage = { ...msg, artifactManifest };
+    const safeMessage = { ...msg, artifactManifest, ...(transcript ? { transcript } : {}) };
     for (const key of ['voice', 'audio', 'video', 'document']) {
       if (safeMessage[key]) safeMessage[key] = safePart(safeMessage[key]);
     }
