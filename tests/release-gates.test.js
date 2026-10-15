@@ -1,6 +1,8 @@
 import { it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+const sandbox3Workflow = readFileSync(new URL('../.github/workflows/sandbox3-worker-e2e.yml', import.meta.url), 'utf8');
+const sandbox3Config = readFileSync(new URL('../wrangler.sandbox-tg-sandbox3.toml', import.meta.url), 'utf8');
 function jobs() {
   const entries = [...source.matchAll(/^  ([a-z][a-z0-9-]*):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]*:\n|$(?![\s\S]))/gm)];
   const result = new Map();
@@ -27,17 +29,28 @@ it('release graph has unique jobs, valid dependencies and no cycles', () => {
 });
 it('production deploy runs from protected main after CI and staging, with dispatch reserved for recovery', () => {
   const graph = jobs();
-  expect(graph.get('deploy')).toContain('needs: [ci, staging-gate]');
+  expect(graph.get('deploy')).toContain('needs: [ci, staging-gate, sandbox3-ping-pong]');
   expect(graph.get('deploy')).toContain("github.event_name == 'push'");
   expect(graph.get('deploy')).toContain("github.event_name == 'workflow_dispatch' && inputs.recovery_deploy == true");
   expect(graph.get('deploy')).toContain('deployed: ${{ steps.deploy.outputs.deployed }}');
   expect(graph.get('deploy')).toContain('deployed=true');
   expect(graph.get('deploy')).toContain("needs.ci.result == 'success'");
   expect(graph.get('deploy')).toContain("needs.staging-gate.result == 'success'");
+  expect(graph.get('deploy')).toContain("needs.sandbox3-ping-pong.result == 'success'");
   expect(graph.get('deploy')).toContain('if: always()');
   expect(source).toContain('recovery_deploy:');
   expect(source).toContain('default: false');
   expect(source).toContain('type: boolean');
+});
+it('protected-main production deploy waits for a real isolated sandbox agent ping-pong', () => {
+  const graph = jobs();
+  expect(graph.get('sandbox3-ping-pong')).toContain('needs: [ci, staging-gate]');
+  expect(graph.get('sandbox3-ping-pong')).toContain('scenario: ping-pong');
+  expect(graph.get('sandbox3-ping-pong')).toContain('delivery_mode: telegram');
+  expect(graph.get('sandbox3-ping-pong')).toContain('secrets: inherit');
+  expect(source).toContain('scenario: ping-pong');
+  expect(sandbox3Config).toContain('trained-assist-cp-sandbox3');
+  expect(sandbox3Config).not.toContain('trained-assist-cp-production');
 });
 it('production smoke runs only after successful protected-main deployment', () => {
   const graph = jobs();
