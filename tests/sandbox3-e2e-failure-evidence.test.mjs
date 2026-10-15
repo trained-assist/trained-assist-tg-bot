@@ -63,4 +63,15 @@ describe('sandbox3 E2E failure evidence', () => {
         errorClass: 'runner_rejected', runnerErrorCode: null },
     ] } });
   });
+
+  it('keeps answer-delivery comparison facts without answer text', () => {
+    expect(summarizeSandbox3E2eFailure({ stage: 'delivery_answer_comparison',
+      deliveryAnswer: { answerCharacterCount: 38, deliveredCharacterCount: 30,
+        answerLengthMatches: false, answerHashMatches: false, deliveryMessageType: 'message' },
+      failure: { code: 'ERR_ASSERTION', name: 'AssertionError' },
+      privateAnswer: 'must not be copied' })).toEqual({ stage: 'delivery_answer_comparison',
+      deliveryAnswer: { answerCharacterCount: 38, deliveredCharacterCount: 30,
+        answerLengthMatches: false, answerHashMatches: false, deliveryMessageType: 'message' },
+      failure: { code: 'ERR_ASSERTION', name: 'AssertionError' } });
+  });
 });

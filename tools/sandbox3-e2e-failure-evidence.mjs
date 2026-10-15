@@ -65,7 +65,19 @@ export function summarizeSandbox3E2eFailure(value = {}) {
   }
 
   if (value.failure && typeof value.failure === 'object') {
-    summary.failure = { code: text(value.failure.code) };
+    summary.failure = { code: text(value.failure.code), name: text(value.failure.name) };
+  }
+
+  if (value.deliveryAnswer && typeof value.deliveryAnswer === 'object') {
+    summary.deliveryAnswer = {
+      answerCharacterCount: integer(value.deliveryAnswer.answerCharacterCount),
+      deliveredCharacterCount: integer(value.deliveryAnswer.deliveredCharacterCount),
+      answerLengthMatches: typeof value.deliveryAnswer.answerLengthMatches === 'boolean'
+        ? value.deliveryAnswer.answerLengthMatches : null,
+      answerHashMatches: typeof value.deliveryAnswer.answerHashMatches === 'boolean'
+        ? value.deliveryAnswer.answerHashMatches : null,
+      deliveryMessageType: text(value.deliveryAnswer.deliveryMessageType),
+    };
   }
 
   if (value.artifactExport && typeof value.artifactExport === 'object') {
