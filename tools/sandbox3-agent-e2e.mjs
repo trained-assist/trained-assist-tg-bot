@@ -637,6 +637,13 @@ async function main() {
     : { status: 'suppressed', attempts: 0, providerMessageId: null };
   if (pingPong && deliveryMode === 'telegram') {
     const answerSha256 = createHash('sha256').update(resultText, 'utf8').digest('hex');
+    failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_answer_comparison', deliveryAnswer: {
+      answerCharacterCount: resultText.length,
+      deliveredCharacterCount: Number.isSafeInteger(terminal.textCharacterCount) ? terminal.textCharacterCount : null,
+      answerLengthMatches: terminal.textCharacterCount === resultText.length,
+      answerHashMatches: terminal.textSha256 === answerSha256,
+      deliveryMessageType: typeof terminal.type === 'string' && /^[a-z0-9_-]{1,40}$/i.test(terminal.type) ? terminal.type : null,
+    } };
     assert.equal(terminal.textCharacterCount, resultText.length, 'telegram_delivery_answer_length_mismatch');
     assert.equal(terminal.textSha256, answerSha256, 'telegram_delivery_answer_hash_mismatch');
   }
@@ -648,7 +655,6 @@ async function main() {
   failureDiagnostics = { ...failureDiagnostics, stage: 'delivery_validation', delivery: {
     status: terminal.status, attempts: terminal.attempts,
     providerMessageIdPresent: Number.isSafeInteger(terminal.providerMessageId),
-    ...(pingPong && deliveryMode === 'telegram' ? { answerMatchesDelivery: true } : {}),
   } };
   const cpDelivery = await verifyGatewayOwnedDelivery(task.id, task.delivery_state);
   failureDiagnostics.delivery = { ...failureDiagnostics.delivery,
@@ -865,7 +871,8 @@ main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
   const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
   const code = typeof error?.code === 'string' && /^[A-Z0-9_:-]{1,80}$/.test(error.code) ? error.code : null;
-  if (code) failureDiagnostics = { ...failureDiagnostics, failure: { code } };
+  const name = typeof error?.name === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(error.name) ? error.name : null;
+  if (code || name) failureDiagnostics = { ...failureDiagnostics, failure: { code, name } };
   if (!failureEvidenceWritten) {
     const diagnostics = summarizeSandbox3E2eFailure(failureDiagnostics);
     await writeEvidence({ ok: false, inputScenario: process.env.SANDBOX3_E2E_SCENARIO ?? 'basic',
