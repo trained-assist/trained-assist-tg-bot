@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
-import { controlPlaneBarrierCounts } from './e2e-oracle.mjs';
+import { controlPlaneBarrierCounts, terminalDeliveriesSince } from './e2e-oracle.mjs';
 
 const WORKER = process.env.WORKER_URL ?? 'https://trained-assist-tg-bot.skillset-apply.workers.dev';
 const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
@@ -168,9 +168,7 @@ async function waitForTerminalDelivery(since) {
   while (Date.now() < deadline) {
     const { deliveries } = await workerGet(`/debug/deliveries?chatId=${CHAT_ID}`, secrets.agent);
     last = deliveries ?? [];
-    const fresh = last
-      .filter(d => Number.isSafeInteger(d.createdAt) && d.createdAt >= since)
-      .sort((a, b) => a.createdAt - b.createdAt);
+    const fresh = terminalDeliveriesSince(last, since);
     const sent = fresh.find(d => d.status === 'sent' && Number.isSafeInteger(d.providerMessageId));
     if (sent) return { delivery: sent, deliveries: last };
     const terminalFailure = fresh.find(d => ['failed', 'dead', 'gave_up'].includes(d.status));
