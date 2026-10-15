@@ -326,7 +326,8 @@ async function main() {
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
   assert(deliveryMode !== 'capture' || ['file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
-  assert(['basic', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
+  assert(['basic', 'ping-pong', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'file-intake', 'artifact-export', 'playwright-artifact'].includes(scenario), 'sandbox3_scenario_invalid');
+  const pingPong = scenario === 'ping-pong';
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
   const prompt = scenario === 'file-intake'
@@ -345,6 +346,7 @@ async function main() {
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
+      : pingPong ? `Reply with exactly this unique token and no other text: ${nonce}`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
     : scenario === 'capability-reply' ? ['Доступные quick answers']
@@ -361,19 +363,20 @@ async function main() {
 
   const [tasksBeforeServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
   assert.equal(Number(tasksBeforeServiceCommands.n), 0, 'sandbox3_service_route_preflight_task_store_not_empty');
-  // Exercise separate HTTP requests through the live Worker with the same
-  // pinned chat. A module-level TEST_CHAT_IDS cache from a prior request must
-  // never suppress a later real delivery.
-  const help = await sendMessage('/help');
-  assertDelivery(help, 'help', deliveryMode);
-  const status = await sendMessage('/status');
-  assertDelivery(status, 'status-after-help', deliveryMode);
-  const [tasksAfterServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
-  assert.equal(Number(tasksAfterServiceCommands.n), 0, 'sandbox3_service_reply_created_control_plane_task');
-  const serviceRouteEvidence = { helpDelivered: true, statusDelivered: true,
-    taskCountBefore: Number(tasksBeforeServiceCommands.n), taskCountAfter: Number(tasksAfterServiceCommands.n) };
-  console.log(JSON.stringify({ scenario: 'cross-request-real-delivery',
-    ...serviceRouteEvidence, statusDeliveredAfterSeparateWorkerRequest: true }));
+  if (!pingPong) {
+    // Exercise separate HTTP requests through the live Worker with the same
+    // pinned chat. A module-level TEST_CHAT_IDS cache from a prior request must
+    // never suppress a later real delivery.
+    const help = await sendMessage('/help');
+    assertDelivery(help, 'help', deliveryMode);
+    const status = await sendMessage('/status');
+    assertDelivery(status, 'status-after-help', deliveryMode);
+    const [tasksAfterServiceCommands] = await d1('SELECT count(*) AS n FROM durable_tasks WHERE profile_id = ?', [PROFILE_ID]);
+    assert.equal(Number(tasksAfterServiceCommands.n), 0, 'sandbox3_service_reply_created_control_plane_task');
+    console.log(JSON.stringify({ scenario: 'cross-request-real-delivery', helpDelivered: true,
+      statusDelivered: true, taskCountBefore: Number(tasksBeforeServiceCommands.n),
+      taskCountAfter: Number(tasksAfterServiceCommands.n), statusDeliveredAfterSeparateWorkerRequest: true }));
+  }
 
   // Keep the generated password inside the Actions process; never send it to
   // the shared test chat. The actual login reply and task answer use Telegram.
@@ -385,8 +388,8 @@ async function main() {
   const passwordMatch = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(createdText);
   assert(passwordMatch?.[1], 'sandbox_test_password_not_returned');
 
-  const login = await sendMessage(`/login ${username} ${passwordMatch[1]}`);
-  assertDelivery(login, 'login', deliveryMode);
+  const login = await sendMessage(`/login ${username} ${passwordMatch[1]}`, pingPong ? { delivery: 'capture' } : {});
+  assertDelivery(login, 'login', pingPong ? 'capture' : deliveryMode);
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
   const questionUpdateId = updateId++;
@@ -559,7 +562,9 @@ async function main() {
   // Playwright asks for the title and marker in the reply, but does not
   // require them to be adjacent lines. Markdown bullets/bold formatting from
   // the agent must not make a correct answer fail this user-facing check.
-  const answerMatchesChallenge = scenario === 'playwright-artifact'
+  const answerMatchesChallenge = pingPong
+    ? resultText.trim() === nonce
+    : scenario === 'playwright-artifact'
     ? expectedLines.every(line => resultText.toLowerCase().includes(line.toLowerCase()))
     : new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
   failureDiagnostics = { ...failureDiagnostics, stage: 'answer_validation', answer: {
