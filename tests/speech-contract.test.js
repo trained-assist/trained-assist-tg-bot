@@ -2,17 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Контракт Ф4 (trained-assist-tg-bot#319): у шлюза ОДИН путь распознавания речи —
-// sibling-скил speech_transcribe через POST /action агента.
+// У production CP intake один прямой клиент Deepgram. Старый agent backend
+// продолжает использовать sibling-скил speech_transcribe через POST /action.
 //
 // До #319 у боя были три копии прямых вызовов Deepgram (media-jobs / transcribeVoice /
 // debug-роут): свой ключ в env воркера, свои ретраи, свой таймаут, своё определение
 // формата. Каждая копия жила своим жизнью и ломалась по-своему. Этот тест — та самая
 // «дыра в классе»: убрать одну копию недостаточно, если ничто не мешает вернуть её.
 //
-// Правило: в src/** не должно остаться ни адреса Deepgram, ни ссылки на ключ из
-// переменных окружения воркера. Любой новый инлайн-вызов → красный CI, и его надо
-// провести через src/lib/speech.js, а не оставить второй точкой правки.
+// Новые прямые клиенты или дополнительные чтения ключа возвращают прежнюю
+// проблему расхождения ретраев и форматов, поэтому они запрещены.
 
 const SRC = new URL('../src', import.meta.url).pathname;
 
@@ -34,21 +33,17 @@ const code = f => readFileSync(f, 'utf8')
   .filter(line => !line.trim().startsWith('//'))
   .join('\n');
 
-describe('контракт Ф4: один клиент распознавания речи (#319)', () => {
-  it('в src нет прямых вызовов Deepgram', () => {
-    const offenders = files.filter(f => /api\.deepgram\.com/.test(code(f)));
-    expect(offenders,
-      `Прямой вызов Deepgram вернулся в шлюз: ${offenders.join(', ')}\n` +
-      'Проведи распознавание через src/lib/speech.js (PUT /intake-files + POST /action).')
-      .toEqual([]);
+describe('контракт распознавания речи', () => {
+  it('Deepgram вызывается только из единого клиента CP media intake', () => {
+    const callers = files.filter(f => /api\.deepgram\.com/.test(code(f))).map(f => f.split('/src/')[1]);
+    expect(callers).toEqual(['sandbox-tg/media-intake.js']);
   });
 
-  it('в src нет ссылки на ключ Deepgram в переменных окружения воркера', () => {
-    const offenders = files.filter(f => /DEEPGRAM_API_KEY/.test(code(f)));
+  it('ключ Deepgram читается только при подготовке CP intake', () => {
+    const offenders = files.filter(f => /DEEPGRAM_API_KEY/.test(code(f))).map(f => f.split('/src/')[1]);
     expect(offenders,
-      `env.DEEPGRAM_API_KEY снова читается из кода: ${offenders.join(', ')}\n` +
-      'Ключ живёт на агенте (скил speech), у воркера он больше не нужен.')
-      .toEqual([]);
+      `Найдено дополнительное чтение Deepgram key: ${offenders.join(', ')}`)
+      .toEqual(['intake-preflight.js']);
   });
 
   it('POST /action зовётся только из адаптера и speech.js', () => {

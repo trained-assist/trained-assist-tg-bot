@@ -7,13 +7,15 @@ const bytes = new TextEncoder().encode('audio');
 
 describe('Telegram media intake', () => {
   it('transcribes the exact uploaded voice bytes and fails closed on missing or empty speech service', async () => {
-    const ai = { run: vi.fn(async () => ({ text: '  Synthetic voice received.  ' })) };
-    expect(await transcribeIngressAudio(ai, bytes)).toBe('Synthetic voice received.');
-    expect(ai.run).toHaveBeenCalledWith('@cf/openai/whisper-large-v3-turbo', {
-      audio: Buffer.from(bytes).toString('base64'), task: 'transcribe',
-    });
+    const fetchImpl = vi.fn(async () => Response.json({ results: { channels: [{ alternatives: [{ transcript: '  Synthetic voice received.  ' }] }] } }));
+    expect(await transcribeIngressAudio('test-deepgram-key', bytes, 'audio/ogg', fetchImpl)).toBe('Synthetic voice received.');
+    const [url, request] = fetchImpl.mock.calls[0];
+    expect(url).toBe('https://api.deepgram.com/v1/listen?model=nova-3&language=multi&smart_format=true');
+    expect(request).toMatchObject({ method: 'POST', headers: { Authorization: 'Token test-deepgram-key', 'Content-Type': 'audio/ogg' }, body: bytes });
     await expect(transcribeIngressAudio(null, bytes)).rejects.toMatchObject({ retryable: true });
-    await expect(transcribeIngressAudio({ run: async () => ({ text: '' }) }, bytes)).rejects.toThrow('no usable text');
+    await expect(transcribeIngressAudio('test-deepgram-key', bytes, 'audio/ogg', async () => Response.json({ results: { channels: [{ alternatives: [{ transcript: '' }] }] } }))).rejects.toThrow('no usable text');
+    await expect(transcribeIngressAudio('test-deepgram-key', bytes, 'audio/ogg', async () => new Response('', { status: 429 }))).rejects.toMatchObject({ retryable: true });
+    await expect(transcribeIngressAudio('test-deepgram-key', bytes, 'audio/ogg', async () => new Response('', { status: 401 }))).rejects.toMatchObject({ retryable: false });
   });
   it('streams only bytes and opaque identity to the buffer; never forwards Telegram file IDs', async () => {
     let request;
