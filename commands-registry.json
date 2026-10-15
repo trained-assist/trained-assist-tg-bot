@@ -202,6 +202,20 @@
       "description": "Статус агента (и RU-агента)"
     },
     {
+      "command": "/logs",
+      "aliases": [
+        "/лог"
+      ],
+      "handler": "local",
+      "audiences": [
+        "default",
+        "sales",
+        "recruiter",
+        "freelance"
+      ],
+      "description": "Действия последнего запуска"
+    },
+    {
       "command": "/version",
       "aliases": [],
       "handler": "local",

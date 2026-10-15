@@ -24,7 +24,7 @@ export function newSessionId(chatId) {
 // returns/ writes EXACTLY the single chat record as before (hard guard: private chats
 // and non-forum groups are byte-for-byte unchanged).
 export const THREAD_SESSION_FIELDS = new Set([
-  'lastSessionId', 'activeSessionId', 'activeSessionIsNew', 'lastMessageAt',
+  'lastSessionId', 'lastTaskId', 'activeSessionId', 'activeSessionIsNew', 'lastMessageAt',
   'projectId', 'projectPicked', 'projectSelectionSessionId', 'pendingNewProject',
   'contextFromSession', 'pinnedMsgId',
   'pendingMessage', 'pendingMessageAt', 'pendingOriginalMessage', 'pendingOriginalOpts',

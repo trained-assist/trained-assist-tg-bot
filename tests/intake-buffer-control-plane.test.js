@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
+const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, events, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
   handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), start: vi.fn(), send: vi.fn(), edit: vi.fn(),
+  events: vi.fn(),
   stopTargets: vi.fn(),
   publishRoutingDegradation: vi.fn(),
   enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets, events }),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -53,22 +54,23 @@ const receipt = { userTaskId: 'ut-test', requestId: 'scoped-request', profileId:
 const rpc = (path, body) => new Request(`https://intake${path}`, body === undefined ? undefined
   : { method: 'POST', body: JSON.stringify(body) });
 
-async function snapshot(owner, inputReceipt = receipt, inputItems = items) {
+async function snapshot(owner, inputReceipt = receipt, inputItems = items, bodyExtra = {}) {
   return owner.fetch(rpc('/snapshot', {
-    body: { username: 'test-profile', requestId: inputReceipt.requestId,
+    body: { username: 'test-profile', requestId: inputReceipt.requestId, ...bodyExtra,
       controlPlaneEnvelope: { requestId: inputReceipt.requestId, profileId: inputReceipt.profileId, conversationRef: 'tg-42-ssaved' } },
     items: inputItems,
   }));
 }
 
-async function accept(owner, inputReceipt = receipt, inputItems = items) {
-  await snapshot(owner, inputReceipt, inputItems);
+async function accept(owner, inputReceipt = receipt, inputItems = items, bodyExtra = {}) {
+  await snapshot(owner, inputReceipt, inputItems, bodyExtra);
   return owner.fetch(rpc('/cp-acceptance', { requestId: inputReceipt.requestId, receipt: inputReceipt }));
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   route.mockResolvedValue({});
+  events.mockResolvedValue({ events: [], nextCursor: 0, hasMore: false });
   start.mockResolvedValue({ taskId: receipt.userTaskId, instanceId: receipt.userTaskId, created: true, instanceCreated: true, generation: 1, runId: 'run-start' });
   stopTargets.mockImplementation(async input => ({ snapshotId: 'snapshot-test', profileId: 'test-profile',
     conversationId: input.conversationId, tasks: [{ requestId: receipt.requestId, userTaskId: receipt.userTaskId,
@@ -992,6 +994,38 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.getAlarm()).toBeGreaterThan(Date.now());
     expect(route).toHaveBeenCalledWith(receipt.userTaskId);
     expect(request).toHaveBeenCalledWith('POST', '/status', { body: { taskId: receipt.userTaskId } });
+  });
+
+  it('delivers a completed OpenCode message while the task is still running and advances its durable event cursor once', async () => {
+    const { owner, storage } = fixture();
+    const sessions = new Map([['42', JSON.stringify({ username: 'test-user' })]]);
+    owner.env.SESSIONS = { get: async key => sessions.get(key) ?? null, put: async (key, value) => sessions.set(key, value) };
+    await accept(owner, receipt, items, { initialMsgId: 99 });
+    await storage.put('busy', true);
+    await storage.put('cpBusyRequests', [receipt.requestId]);
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'running', generation: 1 }, runs: [{ id: 'run-live', status: 'running', generation: 1, started_at: Date.now() - 65_000 }] } });
+    events.mockResolvedValue({ events: [{
+      eventId: null, sequence: 7, type: 'progress', runId: 'run-live',
+      payload: { runId: 'run-live', eventId: 'evt-live-1', type: 'assistant_message',
+        payload: { sessionId: 'ses_live', messageId: 'msg_live', text: 'Сначала проверю проект.' } },
+    }], nextCursor: 7, hasMore: false });
+
+    expect(await owner._pollControlPlaneTasks()).toBe(false);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      deliveryId: 'assistant:ut-test:run-live:evt-live-1',
+      text: 'Сначала проверю проект.',
+      destination: { chatId: 42, threadId: null },
+    }));
+    expect(edit).toHaveBeenCalledWith('test-bot-token', 42, 99, expect.stringMatching(/OpenCode работает.*⏱ 1 мин/),
+      expect.objectContaining({ reply_markup: { inline_keyboard: expect.any(Array) } }));
+    expect(await storage.get('cp-acceptance:scoped-request')).toMatchObject({ eventCursor: 7 });
+    expect(JSON.parse(sessions.get('42'))).toMatchObject({ lastTaskId: receipt.userTaskId });
+
+    events.mockClear();
+    await owner._pollControlPlaneTasks();
+    expect(events).toHaveBeenCalledWith(receipt.userTaskId, 7, 100);
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('releases intake after an unknown executor outcome without retrying or terminalizing the task', async () => {

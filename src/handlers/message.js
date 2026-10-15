@@ -295,6 +295,7 @@ async function handleText(chatId, session, text, env, opts = {}) {
     await setSession(env.SESSIONS, chatId, {
       ...session,
       lastSessionId: sessionId,
+      ...(typeof result?.taskId === 'string' ? { lastTaskId: result.taskId } : {}),
       projectId: route.projectChosen ? route.projectId : (session.projectId || null),
       lastMessageAt: Date.now(),
       pendingMessage: null,
