@@ -304,7 +304,7 @@ async function cmdStatus(chatId, env, threadId = null) {
   if (env.EXECUTION_BACKEND === 'control-plane' && session.lastTaskId) {
     try {
       const status = await controlPlaneClient(env).status(session.lastTaskId);
-      const active = [...(status.runs || [])].reverse().find(run => ['running', 'waiting', 'awaiting_input'].includes(run.status));
+      const active = [...(status.runs || [])].reverse().find(run => ['running', 'waiting', 'awaiting_input', 'retrying', 'retry_pending', 'unknown', 'queued', 'starting'].includes(run.status));
       const latest = [...(status.runs || [])].reverse()[0];
       const progress = liveRunProgress({ taskStatus: status.status, runStatus: active?.status ?? latest?.status,
         startedAt: active?.started_at ?? latest?.started_at, finishedAt: latest?.finished_at });

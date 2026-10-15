@@ -3479,11 +3479,11 @@ export class IntakeBuffer {
   }
 
   async _publishControlPlaneProgress(requestId, receipt, row, runs, snapshot) {
-    if (!snapshot || !['accepted', 'queued', 'admitted', 'running', 'waiting', 'awaiting_input'].includes(row?.status)) return;
+    if (!snapshot || !['accepted', 'queued', 'admitted', 'active', 'running', 'waiting', 'awaiting_input'].includes(row?.status)) return;
     const message = snapshot.items?.at(-1)?.msg;
     const messageId = snapshot.body?.initialMsgId;
     if (!Number.isSafeInteger(message?.chat?.id) || !Number.isSafeInteger(messageId) || messageId <= 0) return;
-    const activeRun = [...runs].reverse().find(run => ['running', 'waiting', 'awaiting_input'].includes(run?.status));
+    const activeRun = [...runs].reverse().find(run => ['running', 'waiting', 'awaiting_input', 'retrying', 'retry_pending', 'unknown', 'queued', 'starting'].includes(run?.status));
     const acceptance = await this.state.storage.get(`cp-acceptance:${requestId}`) ?? {};
     const startedAt = Number.isFinite(activeRun?.started_at) ? activeRun.started_at : null;
     const text = liveRunProgress({ taskStatus: row.status, runStatus: activeRun?.status, startedAt });

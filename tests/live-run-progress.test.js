@@ -14,6 +14,9 @@ describe('live OpenCode progress projections', () => {
     expect(liveRunProgress({ taskStatus: 'done' })).toBe('✅ Выполнено');
     expect(liveRunProgress({ taskStatus: 'done', startedAt: 10_000, finishedAt: 82_000 }))
       .toBe('✅ Выполнено · ⏱ 1 мин 12 сек');
+    expect(liveRunProgress({ taskStatus: 'active', runStatus: 'retrying' })).toBe('🔄 Повторяю запуск');
+    expect(liveRunProgress({ taskStatus: 'active', runStatus: 'unknown' })).toBe('🔎 Проверяю состояние запуска');
+    expect(liveRunProgress({ taskStatus: 'active' })).toBe('⏳ Подготавливаю или проверяю запуск');
   });
 
   it('accepts the CP event projection but rejects malformed or uncorrelated messages', () => {

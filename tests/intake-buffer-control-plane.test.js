@@ -1004,7 +1004,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('busy', true);
     await storage.put('cpBusyRequests', [receipt.requestId]);
     request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
-      status: 'running', generation: 1 }, runs: [{ id: 'run-live', status: 'running', generation: 1, started_at: Date.now() - 65_000 }] } });
+      status: 'active', generation: 1 }, runs: [{ id: 'run-live', status: 'running', generation: 1, started_at: Date.now() - 65_000 }] } });
     events.mockResolvedValue({ events: [{
       eventId: null, sequence: 7, type: 'progress', runId: 'run-live',
       payload: { runId: 'run-live', eventId: 'evt-live-1', type: 'assistant_message',

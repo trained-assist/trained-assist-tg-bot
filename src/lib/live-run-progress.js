@@ -15,9 +15,12 @@ export function liveRunProgress({ taskStatus, runStatus, startedAt, finishedAt, 
   if (['failed', 'error'].includes(taskStatus)) return `❌ Завершилось с ошибкой${timer}`;
   if (['cancelled', 'canceled', 'stopped'].includes(taskStatus)) return `⏹ Остановлено${timer}`;
   if (taskStatus === 'awaiting_input' || runStatus === 'awaiting_input') return `❔ Жду вашего ответа${timer}`;
+  if (['retrying', 'retry_pending'].includes(runStatus)) return `🔄 Повторяю запуск${timer}`;
+  if (runStatus === 'unknown') return '🔎 Проверяю состояние запуска';
   if (taskStatus === 'waiting' || runStatus === 'waiting') return `⏳ Ожидаю следующий шаг${timer}`;
   if (taskStatus === 'running' || runStatus === 'running') return `⚙️ OpenCode работает${timer}`;
   if (taskStatus === 'queued' || taskStatus === 'accepted' || taskStatus === 'admitted') return '📨 Задача принята, запуск ожидает';
+  if (taskStatus === 'active') return '⏳ Подготавливаю или проверяю запуск';
   return null;
 }
 
