@@ -327,7 +327,8 @@ async function main() {
   const deliveryMode = process.env.SANDBOX3_E2E_DELIVERY_MODE ?? 'telegram';
   const fileFixtures = {
     'file-intake': { kind: 'text', name: 'sandbox-intake-fixture.txt', expected: 'LANTERN', prompt: 'Read the attached file and reply with only the secret word written in it.' },
-    'image-intake': { kind: 'photo', name: 'sandbox-intake-photo.jpg', expected: 'red', prompt: 'Look at the attached photo and reply with only its main color in English.' },
+    // Telegram photo sizes do not carry file_name; media intake assigns photo.jpg.
+    'image-intake': { kind: 'photo', name: 'photo.jpg', expected: 'red', prompt: 'Look at the attached photo and reply with only its main color in English.' },
     'pdf-intake': { kind: 'pdf', name: 'sandbox-intake-fixture.pdf', expected: 'ORBIT', prompt: 'Read the attached PDF and reply with only the secret word written in it.' },
     'docx-intake': { kind: 'docx', name: 'sandbox-intake-fixture.docx', expected: 'MAPLE', prompt: 'Read the attached Word document and reply with only the secret word written in it.' },
     'csv-intake': { kind: 'csv', name: 'sandbox-intake-fixture.csv', expected: 'PLUM', prompt: 'Read the attached CSV and reply with only the secret value in its data row.' },
@@ -403,6 +404,7 @@ async function main() {
   assertDelivery(login, 'login', pingPong ? 'capture' : deliveryMode);
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
 
+  failureDiagnostics = { stage: 'submitting_test_input' };
   const questionUpdateId = updateId++;
   const questionUpdate = {
     target: 'sandbox3', type: 'message', chatId, userId, delivery: deliveryMode,
