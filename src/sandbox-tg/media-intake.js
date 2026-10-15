@@ -161,7 +161,9 @@ export async function transcribeIngressAudio(ai, bytes) {
   let response;
   try {
     response = await ai.run('@cf/openai/whisper-large-v3-turbo', {
-      audio: Buffer.from(bytes).toString('base64'), task: 'transcribe',
+      audio: btoa(Array.from({ length: Math.ceil(bytes.length / 32768) }, (_, index) =>
+        String.fromCharCode(...bytes.subarray(index * 32768, (index + 1) * 32768))).join('')),
+      task: 'transcribe',
     });
   } catch {
     throw new MediaIntakeError('speech transcription is temporarily unavailable', { retryable: true });
