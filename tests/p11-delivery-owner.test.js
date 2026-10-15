@@ -452,3 +452,83 @@ describe('sandbox durable single delivery owner', () => {
     expect(storage.data.size).toBe(0);
   });
 });
+
+describe('complete multipart reply ownership', () => {
+  it('acknowledges only all parts, preserves paragraphs, and replay never resends acknowledged text', async () => {
+    const { client } = await emptyFixture();
+    const text = ['First paragraph. '.repeat(65), 'Second paragraph. '.repeat(65), 'Last paragraph. '.repeat(65)].join('\n\n');
+    const record = { deliveryId: 'terminal:long:g1', userTaskId: 'long', destination: { chatId: 1001 },
+      type: 'message', text, taskAcceptedAt: Date.now(), replyMarkup: { inline_keyboard: [[{ text: 'Done', callback_data: 'done' }]] } };
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);requests.push(body);
+      return Response.json({ ok: true, result: { message_id: 100 + requests.length } });
+    }));
+    const admitted = await client.enqueue(record);
+    expect(admitted.record.partCount).toBeGreaterThan(1);
+    await client.drain();
+    expect(await client.load(record.deliveryId)).toMatchObject({ status: 'pending', nextPart: 1 });
+    expect(requests[0].reply_markup).toBeUndefined();
+    expect((await client.enqueue(record)).duplicate).toBe(true);
+    for (let i = 1; i < admitted.record.partCount; i++) await client.drain();
+    expect(await client.load(record.deliveryId)).toMatchObject({ status: 'sent', nextPart: admitted.record.partCount });
+    expect(requests.map(body => body.text).join('')).toBe(text);
+    expect(requests.every(body => body.text.length <= 2000)).toBe(true);
+    expect(requests.at(-1).reply_markup).toEqual(record.replyMarkup);
+    await client.enqueue(record);expect(await client.drain()).toBe(0);
+    const report = (await client.read('long')).terminal;
+    expect(report).toMatchObject({ status: 'sent', partCount: requests.length, sentParts: requests.length, textCharacterCount: text.length });
+    expect(report.providerMessageIds).toHaveLength(requests.length);
+    expect(report.textSha256).toHaveLength(64);
+    expect(report).not.toHaveProperty('text');
+  });
+
+  it('retries an explicitly rejected part without repeating confirmed parts', async () => {
+    const { client } = await emptyFixture({ TG_SLICE_DELIVERY_RETRY_BASE_MS: '100' });
+    const record = { deliveryId: 'terminal:rate:g1', userTaskId: 'rate', destination: { chatId: 1001 },
+      type: 'message', text: ['A','B','C','D','E'].map(letter => letter.repeat(1500)).join('\n\n'), taskAcceptedAt: Date.now() };
+    const requests = [];
+    let reject = true;
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);requests.push(body.text);
+      if (requests.length === 4 && reject) { reject = false;return Response.json({ ok: false, error_code: 429, parameters: { retry_after: 1 } }, { status: 429 }); }
+      return Response.json({ ok: true, result: { message_id: requests.length + 200 } });
+    }));
+    await client.enqueue(record);for (let i = 0; i < 4; i++) await client.drain();
+    expect(await client.load(record.deliveryId)).toMatchObject({ status: 'retrying', nextPart: 3 });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+    await client.drain();await client.drain();
+    expect(await client.load(record.deliveryId)).toMatchObject({ status: 'sent', nextPart: 5 });
+    expect(requests[3]).toBe(requests[4]);
+    expect(requests.filter(text => text.startsWith('A'))).toHaveLength(1);
+  });
+
+  it('fences an ambiguous middle-part send across owner restart', async () => {
+    const { client, env, owner } = await emptyFixture();
+    const record = { deliveryId: 'terminal:unknown-part:g1', userTaskId: 'unknown-part', destination: { chatId: 1001 },
+      type: 'message', text: ['A'.repeat(1500), 'B'.repeat(1500), 'C'.repeat(1500)].join('\n\n'), taskAcceptedAt: Date.now() };
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => { calls++; if (calls === 2) throw new Error('network response lost');return Response.json({ ok: true, result: { message_id: 301 } }); }));
+    await client.enqueue(record);await client.drain();await client.drain();
+    expect(await client.load(record.deliveryId)).toMatchObject({ status: 'unknown', nextPart: 1, telegramMessageIds: [301] });
+    const recovered = new TgDeliveryOwner(ownerState(owner.state.storage), env);
+    await recovered.ready;
+    expect(await recovered.drain((await import('../src/sandbox-tg/config.js')).readTgSliceConfig(env))).toBe(0);
+    expect(calls).toBe(2);
+  });
+});
+
+
+it('replays a legacy confirmed 2001..4096-character record without resending or re-splitting it', async () => {
+  const { client, owner } = await emptyFixture();
+  const record = { deliveryId: 'terminal:legacy:g1', userTaskId: 'legacy', conversationId: null,
+    destination: { chatId: 1001, threadId: null }, requestId: 'terminal:legacy:g1', type: 'message',
+    text: 'legacy '.repeat(400), replyMarkup: null, taskAcceptedAt: Date.now() };
+  await owner.state.storage.put(`delivery:${record.deliveryId}`, { ...record, fingerprint: JSON.stringify(record),
+    status: 'sent', attempts: 1, telegramMessageId: 401, createdAt: Date.now() });
+  const fetcher = vi.fn();vi.stubGlobal('fetch', fetcher);
+  expect((await client.enqueue(record)).duplicate).toBe(true);
+  expect(await client.drain()).toBe(0);
+  expect(await client.load(record.deliveryId)).toMatchObject({ status: 'sent', telegramMessageId: 401 });
+  expect(fetcher).not.toHaveBeenCalled();
+});

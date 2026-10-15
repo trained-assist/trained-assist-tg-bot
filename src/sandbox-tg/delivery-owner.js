@@ -1,3 +1,4 @@
+import { messageParts, COMPLETE_ANSWER_LIMIT } from '../lib/message-parts.js';
 import { readTgSliceConfig, TgSliceConfigError, chatAllowed } from './config.js';
 import { TelegramApi, TelegramApiError } from './telegram.js';
 import { ControlPlaneClient, ControlPlaneError } from './control-plane-client.js';
@@ -16,6 +17,8 @@ const artifactSourceFailureCode = error => {
 };
 const documentDelivery = record => ['artifact', 'input-document'].includes(record.type);
 const key = id => `delivery:${id}`;
+const partKey = (id, index) => `message-part:${id}:${index}`;
+const digest = async text => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
 const generation = record => Number(record.deliveryId.match(/:g(\d+)$/)?.[1] ?? 0);
 const summary = record => record ? {
   deliveryId: record.deliveryId, userTaskId: record.userTaskId, status: record.status,
@@ -26,6 +29,8 @@ const summary = record => record ? {
   ...(record.type === 'artifact' && record.artifactSourceFailure ? { artifactSourceFailure: record.artifactSourceFailure } : {}),
   threadId: record.destination.threadId ?? null,
   legacyStatus: record.legacyStatus ?? null,
+  ...(record.partCount ? { partCount: record.partCount, sentParts: record.nextPart, providerMessageIds: record.telegramMessageIds ?? [],
+    textCharacterCount: record.textCharacterCount, textSha256: record.textSha256 } : {}),
 } : null;
 
 function productionEmptyCutoverManifest(botUsername) {
@@ -170,9 +175,8 @@ export class TgDeliveryOwner {
           if (records.some(record => !chatAllowed(config, record.destination.chatId))) return Response.json({ error: 'chat_not_allowed' }, { status: 403 });
           const terminalSummary = summary(terminal);
           if (terminalSummary && terminal?.type === 'message' && typeof terminal.text === 'string') {
-            const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(terminal.text));
-            terminalSummary.textCharacterCount = terminal.text.length;
-            terminalSummary.textSha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+            terminalSummary.textCharacterCount = terminal.textCharacterCount ?? terminal.text.length;
+            terminalSummary.textSha256 = terminal.textSha256 ?? await digest(terminal.text);
           }
           const response = { receipt: summary(receipt), terminal: terminalSummary };
           if (body.includeArtifacts === true) response.artifacts = records
@@ -208,7 +212,7 @@ export class TgDeliveryOwner {
   async enqueue(input, config) {
     const deliveryId = input.deliveryId ?? input.userTaskId;
     if (!reference(deliveryId) || !reference(input.userTaskId) || !Number.isSafeInteger(Number(input.destination?.chatId)) || !chatAllowed(config, input.destination?.chatId) ||
-        !['message', 'launch', 'artifact', 'input-document'].includes(input.type) || typeof input.text !== 'string' || input.text.length > 4096) throw new Error();
+        !['message', 'launch', 'artifact', 'input-document'].includes(input.type) || typeof input.text !== 'string' || input.text.length > (documentDelivery(input) ? 4096 : COMPLETE_ANSWER_LIMIT)) throw new Error();
     if (documentDelivery(input)) {
       const item = input.artifact;
       if (!item || typeof item !== 'object' || !artifactReference(item.ref)
@@ -221,11 +225,15 @@ export class TgDeliveryOwner {
       destination: { chatId: Number(input.destination.chatId), threadId: input.destination.threadId ?? null },
       requestId: input.requestId ?? deliveryId, type: input.type, text: input.text, replyMarkup: input.replyMarkup ?? null,
       taskAcceptedAt: input.taskAcceptedAt ?? null, ...(documentDelivery(input) ? { artifact: input.artifact } : {}) };
-    const fingerprint = JSON.stringify(payload);
+    const parts = documentDelivery(input) ? [input.text] : messageParts(input.text);
+    const multipart = parts.length > 1;
+    const legacyFingerprint = JSON.stringify(payload);
+    const fingerprint = multipart ? `sha256:${await digest(legacyFingerprint)}` : legacyFingerprint;
+    const textSha256 = multipart ? await digest(payload.text) : null;
     return this.state.storage.transaction(async storage => {
       const existing = await storage.get(key(deliveryId));
       if (existing) {
-        if (existing.fingerprint !== null && existing.fingerprint !== fingerprint) throw new Error();
+        if (existing.fingerprint !== null && existing.fingerprint !== fingerprint && existing.fingerprint !== legacyFingerprint) throw new Error();
         if (existing.userTaskId !== payload.userTaskId || existing.conversationId !== payload.conversationId
           || existing.type !== payload.type || String(existing.destination.chatId) !== String(payload.destination.chatId)
           || existing.destination.threadId !== payload.destination.threadId) throw new Error();
@@ -233,8 +241,10 @@ export class TgDeliveryOwner {
       }
       const cutoverAt = await storage.get('cutoverAt');
       const eligible = !await storage.get(`old-task:${payload.userTaskId}`) && Number.isSafeInteger(payload.taskAcceptedAt) && payload.taskAcceptedAt >= cutoverAt && payload.taskAcceptedAt <= Date.now();
-      const record = { ...payload, fingerprint, status: eligible ? 'pending' : 'quarantined',
+      const record = { ...payload, ...(multipart ? { text: '', partCount: parts.length, nextPart: 0, partAttempts: 0, telegramMessageIds: [],
+        textCharacterCount: payload.text.length, textSha256 } : {}), fingerprint, status: eligible ? 'pending' : 'quarantined',
         attempts: 0, createdAt: Date.now(), ...(!eligible ? { reason: 'precutover_or_unproven_task' } : {}) };
+      if (multipart) for (const [index, text] of parts.entries()) await storage.put(partKey(deliveryId, index), text);
       await storage.put(key(deliveryId), record);
       return { record, duplicate: false };
     });
@@ -246,7 +256,8 @@ export class TgDeliveryOwner {
       const record = records.find(item => ['pending', 'retrying'].includes(item.status) && (item.nextAttemptAt ?? 0) <= Date.now());
       if (!record) return null;
       if (!chatAllowed(config, record.destination.chatId)) throw new Error();
-      const claimed = { ...record, status: 'sending', attempts: record.attempts + 1, dispatchedAt: Date.now() };
+      const claimed = { ...record, status: 'sending', attempts: record.attempts + 1,
+        ...(record.partCount ? { partAttempts: (record.partAttempts ?? 0) + 1 } : {}), dispatchedAt: Date.now() };
       await storage.put(key(record.deliveryId), claimed);
       return claimed;
     });
@@ -266,7 +277,8 @@ export class TgDeliveryOwner {
           || downloaded.sha256?.toLowerCase() !== expectedSha256 || actualSha256 !== expectedSha256
           || downloaded.body.byteLength !== claim.artifact.sizeBytes) {
           completion = { ...claim, status: 'dead', reason: 'artifact_integrity_rejected', finishedAt: Date.now() };
-          await this.state.storage.put(key(claim.deliveryId), completion);
+          if (completion.status === 'pending' || completion.status === 'sent') delete completion.nextAttemptAt;
+    await this.state.storage.put(key(claim.deliveryId), completion);
           return 1;
         }
         providerCalled = true;
@@ -274,12 +286,22 @@ export class TgDeliveryOwner {
           document: downloaded.body, filename: claim.artifact.name, caption: claim.type === 'input-document' ? claim.text : `📎 ${claim.artifact.name}`,
           contentType: downloaded.contentType ?? claim.artifact.contentType });
       } else {
+        const text = claim.partCount ? await this.state.storage.get(partKey(claim.deliveryId, claim.nextPart)) : claim.text;
+        if (typeof text !== 'string') {
+          await this.state.storage.put(key(claim.deliveryId), { ...claim, status: 'dead', reason: 'message_part_missing', finishedAt: Date.now() });
+          return 1;
+        }
         providerCalled = true;
         result = await api.sendMessage({ chatId: claim.destination.chatId, threadId: claim.destination.threadId,
-          text: claim.text, replyMarkup: claim.replyMarkup });
+          text, replyMarkup: !claim.partCount || claim.nextPart === claim.partCount - 1 ? claim.replyMarkup : null });
       }
       if (!Number.isSafeInteger(result?.message_id) || result.message_id <= 0) throw new Error();
-      completion = { ...claim, status: 'sent', telegramMessageId: result.message_id, sentAt: Date.now(), reason: 'provider_accepted' };
+      if (claim.partCount) {
+        const nextPart = claim.nextPart + 1;
+        completion = { ...claim, nextPart, partAttempts: 0, telegramMessageIds: [...claim.telegramMessageIds, result.message_id],
+          status: nextPart === claim.partCount ? 'sent' : 'pending', telegramMessageId: claim.telegramMessageId ?? result.message_id,
+          ...(nextPart === claim.partCount ? { sentAt: Date.now() } : {}), reason: 'provider_accepted' };
+      } else completion = { ...claim, status: 'sent', telegramMessageId: result.message_id, sentAt: Date.now(), reason: 'provider_accepted' };
     } catch (error) {
       const rejected = error instanceof TelegramApiError && error.payloadVerified === true && error.payload?.ok === false;
       const rateLimited = rejected && error.status === 429 && error.payload.error_code === 429;
@@ -290,12 +312,13 @@ export class TgDeliveryOwner {
       const delay = Math.min(3600000, Math.max(config.deliveryRetryBaseMs, (error?.retryAfterSec ?? 1) * 1000));
       completion = { ...claim,
         status: permanentArtifactFailure ? 'dead' : retryArtifactRead || rateLimited
-          ? (claim.attempts >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
+          ? ((claim.partCount ? claim.partAttempts : claim.attempts) >= config.deliveryMaxAttempts ? 'dead' : 'retrying') : 'unknown',
         reason: permanentArtifactFailure ? 'artifact_source_rejected' : retryArtifactRead ? 'artifact_source_unavailable'
           : rateLimited ? 'explicit_provider_429' : 'provider_outcome_unknown',
         ...(artifactSourceFailure ? { artifactSourceFailure } : {}),
         ...(!permanentArtifactFailure && (retryArtifactRead || rateLimited) ? { nextAttemptAt: Date.now() + delay } : {}) };
     }
+    if (completion.status === 'pending' || completion.status === 'sent') delete completion.nextAttemptAt;
     await this.state.storage.put(key(claim.deliveryId), completion);
     return 1;
   }

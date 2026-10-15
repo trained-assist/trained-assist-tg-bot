@@ -1,0 +1,39 @@
+name: Verify complete paragraph delivery to the production test account
+on:
+  workflow_dispatch:
+    inputs:
+      run_smoke:
+        description: Send one fixed synthetic long result to the existing private production test account
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: production-paragraph-delivery-smoke
+  cancel-in-progress: false
+jobs:
+  smoke:
+    if: inputs.run_smoke == true && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify one complete reply under a stable delivery ID
+        env:
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
+          EVIDENCE_OUT: paragraph-delivery-smoke-report.json
+        run: node tools/paragraph-delivery-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paragraph-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: paragraph-delivery-smoke-report.json
+          if-no-files-found: warn
