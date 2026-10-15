@@ -266,6 +266,9 @@ async function runMove({ label, askText, nonce, voice = false }) {
   const parts = [];
   for (const id of ids) parts.push(await readDeliveredText(id));
   const answerText = ARCHITECTURE ? verifyCompleteAnswer(delivery, parts) : parts.join('');
+  // The delivery owner may send the answer before the intake alarm observes
+  // the terminal task. A second move must start only after that hold clears.
+  await waitForCleanIntake();
   const move = {
     label,
     nonce,
