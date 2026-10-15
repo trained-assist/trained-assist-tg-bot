@@ -89,6 +89,14 @@ const runFinishedReq = requestId => new Request('https://intake/run-finished', {
 });
 
 describe('IntakeBuffer — smart debounce with completeness gate', () => {
+  it('reports transcript presence in debug without exposing transcript text', async () => {
+    const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
+    await state.storage.put('buf', [{ msg: { message_id: 7, transcript: 'private speech' }, mediaPending: false }]);
+    const debug = await (await io.fetch(new Request('https://intake/debug'))).json();
+    expect(debug.buf[0].hasTranscript).toBe(true);
+    expect(JSON.stringify(debug)).not.toContain('private speech');
+  });
+
   it('a burst has one delayed receipt; a later burst edits that same collector', async () => {
     const state = makeState(); const io = new IntakeBuffer(state, { BOT_TOKEN: 't' });
     for (let n = 0; n < 10; n++) await io.fetch(appendReq(`part ${n}`));

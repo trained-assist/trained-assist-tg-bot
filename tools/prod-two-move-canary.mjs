@@ -255,8 +255,7 @@ async function runMove({ label, askText, nonce, voice = false }) {
   if (!voice) await injectTextMessage(askText);
   const collector = await waitForCollector();
   if (voice) {
-    const transcript = (collector.buf ?? []).map(item => item?.msg?.transcript).find(value => typeof value === 'string');
-    assert.match(transcript ?? '', /synthetic audio ingress test/i, 'voice_transcript_missing_from_intake');
+    assert.ok((collector.buf ?? []).some(item => item.hasTranscript === true), 'voice_transcript_missing_from_intake');
   }
   await tapCollector(collector.collectorMsgId, collector.collectorDraftRevision);
   const { delivery } = await waitForTerminalDelivery(startedAt);
