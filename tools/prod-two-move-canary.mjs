@@ -266,6 +266,9 @@ async function runMove({ label, askText, nonce, voice = false }) {
   const parts = [];
   for (const id of ids) parts.push(await readDeliveredText(id));
   const answerText = ARCHITECTURE ? verifyCompleteAnswer(delivery, parts) : parts.join('');
+  // The delivery owner may send the answer before the intake alarm observes
+  // the terminal task. A second move must start only after that hold clears.
+  await waitForCleanIntake();
   const move = {
     label,
     nonce,
@@ -398,7 +401,7 @@ async function main() {
   const first = await runMove({
     label: 'move-1-store-context',
     nonce: nonce1,
-    askText: `Кодовая метка канарейки: ${nonce1}. Запомни её, ничего больше не делай.`,
+    askText: `Контрольная метка для следующего вопроса: ${nonce1}. Ответь «Принято». Не сохраняй метку в долговременную память.`,
   });
   assert.equal(first.move.status, 'sent', 'move1_not_sent');
   assert.equal(first.move.reason, 'provider_accepted', 'move1_not_provider_accepted');
@@ -408,7 +411,7 @@ async function main() {
   const second = await runMove({
     label: 'move-2-recall-context',
     nonce: null,
-    askText: 'Какую кодовую метку я просил запомнить? Ответь только меткой.',
+    askText: 'Какая контрольная метка была в моём непосредственно предыдущем сообщении? Ответь только меткой из истории этой беседы. Не ищи её в долговременной памяти.',
   });
   assert.equal(second.move.status, 'sent', 'move2_not_sent');
   assert.equal(second.move.reason, 'provider_accepted', 'move2_not_provider_accepted');
