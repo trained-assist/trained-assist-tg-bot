@@ -6,6 +6,13 @@ export function controlPlaneBarrierCounts(collector) {
   };
 }
 
+export function terminalDeliveriesSince(deliveries, since) {
+  return (deliveries ?? [])
+    .filter(delivery => /^terminal:[^:]+:g[1-9]\d*$/.test(delivery.deliveryId ?? '') &&
+      Number.isSafeInteger(delivery.createdAt) && delivery.createdAt >= since)
+    .sort((first, second) => first.createdAt - second.createdAt);
+}
+
 export function summarizeLaunch(launch) {
   const collector = launch?.collector ?? {};
   const barrier = controlPlaneBarrierCounts(collector);
