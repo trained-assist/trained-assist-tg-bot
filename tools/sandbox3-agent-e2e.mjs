@@ -389,6 +389,7 @@ async function main() {
 
   // Keep the generated password inside the Actions process; never send it to
   // the shared test chat. The actual login reply and task answer use Telegram.
+  failureDiagnostics = { stage: 'creating_test_profile' };
   const created = await sendMessage(`/adduser ${username} Sandbox E2E`, { admin: true, delivery: 'capture' });
   assert.equal(created.ok, true, 'sandbox_test_profile_not_created');
   assert.equal(created.delivery, 'capture', 'sandbox_test_profile_creation_must_stay_private');
@@ -397,6 +398,7 @@ async function main() {
   const passwordMatch = /Пароль:\s*<code>([^<]+)<\/code>/i.exec(createdText);
   assert(passwordMatch?.[1], 'sandbox_test_password_not_returned');
 
+  failureDiagnostics = { stage: 'logging_in_test_profile' };
   const login = await sendMessage(`/login ${username} ${passwordMatch[1]}`, pingPong ? { delivery: 'capture' } : {});
   assertDelivery(login, 'login', pingPong ? 'capture' : deliveryMode);
   assert.equal(login.admission?.authenticated, true, 'sandbox_test_login_failed');
@@ -883,7 +885,10 @@ async function main() {
 
 main().catch(async error => {
   const message = error instanceof Error ? error.message : '';
-  const safe = /^[a-z0-9_:.-]+$/.test(message) ? message : 'sandbox3_agent_e2e_failed';
+  // Node's AssertionError appends a multiline value diff to explicit messages.
+  // Preserve only the first machine-readable code; never log compared values.
+  const firstLine = message.split('\n', 1)[0];
+  const safe = /^[a-z0-9_:.-]+$/.test(firstLine) ? firstLine : 'sandbox3_agent_e2e_failed';
   const code = typeof error?.code === 'string' && /^[A-Z0-9_:-]{1,80}$/.test(error.code) ? error.code : null;
   const name = typeof error?.name === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(error.name) ? error.name : null;
   if (code || name) failureDiagnostics = { ...failureDiagnostics, failure: { code, name } };

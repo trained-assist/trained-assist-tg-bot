@@ -207,12 +207,19 @@ jobs:
           // is actually observed; proceeding on a stale lane risks real traffic.
           const deadline = Date.now() + 120_000;
           while (Date.now() < deadline) {
-            const response = await fetch(url, {
-              headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
-              signal: AbortSignal.timeout(10_000),
-            });
-            responseOk = response.ok;
-            state = await response.json().catch(() => ({}));
+            try {
+              const response = await fetch(url, {
+                headers: { authorization: `Bearer ${process.env.TG_SANDBOX3_OPERATOR_TOKEN}` },
+                signal: AbortSignal.timeout(10_000),
+              });
+              responseOk = response.ok;
+              state = await response.json().catch(() => ({}));
+            } catch {
+              // A brief edge reset during rollout is inconclusive. Keep polling
+              // until the paused revision is observed or the deadline expires.
+              responseOk = false;
+              state = {};
+            }
             if (responseOk && state.ready === true && state.paused === true && state.ingressPaused === true) break;
             await new Promise(resolve => setTimeout(resolve, 2_000));
           }
