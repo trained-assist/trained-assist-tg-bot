@@ -84,3 +84,19 @@ Deployment/webhook изменяет только владелец соответ
 Ветка и PR обязательны; проверяйте `.githooks/` через `scripts/install-git-hooks.sh`. Открытые PR не изменяются чужой сессией. Status/evidence — в [Integrator #140](https://github.com/trained-assist/trained-agent-architecture/issues/140) и issue задачи; общий контракт — [архитектура](https://github.com/trained-assist/trained-agent-architecture/blob/main/ARCHITECTURE.md).
 
 Retiring GCP VM is not a development or fallback target. Use the own Agent Run API and serverless by default; a necessary persistent service belongs on the existing French VM. Other Google services remain allowed. Exit coordination: https://github.com/trained-assist/trained-agent-architecture/issues/145.
+
+### Complete answer delivery (architecture #276)
+
+New durable text replies accept the complete result up to 100000 UTF-16 code
+units. The delivery owner splits them into plain-text messages of at most 2000
+units, preferring paragraphs, then lines or whitespace, and retaining Unicode
+boundaries. Source text is never trimmed or summarized; joining the parts
+reconstructs it exactly. The existing delivery renderer uses no parse mode, so
+Markdown/code/link characters remain unchanged.
+
+One parent delivery ID owns ordered parts stored below individual DO value
+limits. Each accepted provider message is checkpointed; explicit 429 rejection
+retries only the current part, with its own retry budget. Lost/ambiguous provider
+responses stay unknown and are not automatically resent. The parent is sent
+only after all parts are confirmed. Controls appear on the final part. Legacy
+receipts retain their original acknowledgements without re-splitting/resending.
