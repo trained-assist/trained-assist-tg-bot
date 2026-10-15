@@ -18,6 +18,7 @@ import acceptOnlyWorker, { SandboxAcceptOnlyStore } from './accept-only.js';
 import { sandboxControlPlaneFetch, sandboxOperatorChatAllowed, sandboxOperatorLane, sandboxOperatorPinnedTestLane, sandboxOperatorResetChat, sandboxOperatorToken, sandboxOperatorUserAllowed } from './operator-lane.js';
 import { mediaOf } from '../media-jobs.js';
 import { prepareIntake } from '../intake-preflight.js';
+import { sandboxMediaFixture } from './test-fixtures.js';
 
 const app = new Hono();
 
@@ -544,8 +545,9 @@ app.post('/operator/test-update', async context => {
   }
   const source = await context.req.json().catch(() => null);
   if (!source || source.target !== target || !['message', 'callback'].includes(source.type) ||
-      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin', 'fixtureFile'].includes(key)) ||
+      Object.keys(source).some(key => !['target', 'type', 'text', 'callbackData', 'updateId', 'messageId', 'chatId', 'userId', 'delivery', 'admin', 'fixtureFile', 'fixtureKind'].includes(key)) ||
       (source.fixtureFile !== undefined && (target !== 'sandbox3' || source.fixtureFile !== true)) ||
+      (source.fixtureKind !== undefined && (source.fixtureFile !== true || !sandboxMediaFixture(source.fixtureKind))) ||
       (source.delivery !== undefined && !['capture', 'telegram'].includes(source.delivery)) ||
       (source.admin !== undefined && typeof source.admin !== 'boolean') ||
       (source.userId !== undefined && (!Number.isSafeInteger(source.userId) || source.userId < 1)) ||
@@ -605,7 +607,8 @@ app.post('/operator/test-update', async context => {
     chat: { id: chatId, type: chatId > 0 ? 'private' : 'supergroup', is_forum: false },
     from: { id: actorId, is_bot: false, first_name: 'Sandbox test' },
     ...(source.type === 'message' ? { text: source.text } : {}) };
-  const fixtureBytes = new TextEncoder().encode('The secret word in this file is LANTERN.\n');
+  const fixture = sandboxMediaFixture(source.fixtureKind);
+  const fixtureBytes = fixture.bytes;
   const fixtureToken = `sandbox3-fixture-${updateId}`;
   const update = source.type === 'message' ? { update_id: updateId, message } : {
     update_id: updateId, callback_query: { id: `sandbox-test-${updateId}`, from: message.from,
@@ -626,8 +629,10 @@ app.post('/operator/test-update', async context => {
     if (env.MEDIA_PIPELINE !== 'ingress-buffer' || !env.INGRESS_BUFFER?.fetch || !String(env.INGRESS_BUFFER_TOKEN ?? '').trim()) {
       return context.json({ error: 'sandbox_file_fixture_not_ready' }, 409);
     }
-    message.document = { file_id: fixtureToken, file_unique_id: fixtureToken,
-      file_name: 'sandbox-intake-fixture.txt', mime_type: 'text/plain', file_size: fixtureBytes.byteLength };
+    const part = { file_id: fixtureToken, file_unique_id: fixtureToken,
+      file_name: fixture.name, mime_type: fixture.mime, file_size: fixtureBytes.byteLength };
+    if (fixture.photo) message.photo = [part];
+    else message.document = part;
     message.caption = message.text;
     delete message.text;
   }
@@ -650,7 +655,7 @@ app.post('/operator/test-update', async context => {
       const fileFetch = async (input, init) => {
         const requestUrl = String(input);
         if (requestUrl.includes('/getFile?')) return Response.json({ ok: true, result: {
-          file_path: `sandbox3-fixtures/${fixtureToken}.txt`, file_size: fixtureBytes.byteLength,
+          file_path: `sandbox3-fixtures/${fixtureToken}/${fixture.name}`, file_size: fixtureBytes.byteLength,
         } });
         if (requestUrl.includes('/file/bot')) return new Response(fixtureBytes, {
           headers: { 'content-length': String(fixtureBytes.byteLength) },
