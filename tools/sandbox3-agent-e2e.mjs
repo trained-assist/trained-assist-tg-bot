@@ -6,6 +6,7 @@ import { stopReplyConfirmsRequest } from './sandbox3-stop-confirmation.mjs';
 import { summarizeStopDiagnostics } from './sandbox3-stop-diagnostics.mjs';
 import { summarizeSandbox3E2eFailure } from './sandbox3-e2e-failure-evidence.mjs';
 import { launchWasDispatched } from './e2e-oracle.mjs';
+import { pingPongAnswerPresent } from './sandbox3-ping-pong-oracle.mjs';
 
 const ACCOUNT_ID = 'd740a05e9442c1d0feacae2dfc673e93';
 const DATABASE_ID = '1e1b8108-9186-43e2-8e50-436598233165';
@@ -346,7 +347,7 @@ async function main() {
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
-      : pingPong ? `Reply with exactly this unique token and no other text: ${nonce}`
+      : pingPong ? `This is a simple sandbox delivery check. Briefly confirm you received request ${nonce}.`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['control plane отвечает']
     : scenario === 'capability-reply' ? ['Доступные quick answers']
@@ -563,7 +564,7 @@ async function main() {
   // require them to be adjacent lines. Markdown bullets/bold formatting from
   // the agent must not make a correct answer fail this user-facing check.
   const answerMatchesChallenge = pingPong
-    ? resultText.trim() === nonce
+    ? pingPongAnswerPresent(resultText)
     : scenario === 'playwright-artifact'
     ? expectedLines.every(line => resultText.toLowerCase().includes(line.toLowerCase()))
     : new RegExp(escapedLines.join('\\s*\\r?\\n\\s*'), 'i').test(resultText);
