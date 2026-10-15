@@ -350,6 +350,25 @@ describe('existing collector control-plane ownership', () => {
     expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
+  it('does not report success in either Telegram message when CP says done without an answer', async () => {
+    const { owner, storage, env } = fixture();
+    await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
+      controlPlaneEnvelope: { requestId: receipt.requestId, profileId: receipt.profileId, conversationRef: 'tg-42-ssaved' } }, items }));
+    await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt }));
+    request.mockResolvedValue({ value: { taskStore: { id: receipt.userTaskId, profile_id: receipt.profileId,
+      status: 'done', generation: 1, result: { answer: '   ' } } } });
+
+    expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'message',
+      text: '❌ Исполнитель завершил задачу без текстового ответа. Результат не подтверждён; проверьте задачу перед повторным запуском.',
+    }));
+    expect(edit).toHaveBeenCalledWith(owner.env.BOT_TOKEN, 42, 99,
+      '⚠️ Ответ не получен. Статус задачи отправлен отдельным сообщением.',
+      { reply_markup: { inline_keyboard: [] } });
+    expect(await storage.get('busy')).toBeUndefined();
+  });
+
   it('lost edit ACK releases the task and cold retry edits identical collector without terminal resend', async () => {
     const { owner, storage, env } = fixture();
     await owner.fetch(rpc('/snapshot', { body: { username: 'test-profile', requestId: receipt.requestId, initialMsgId: 99,
@@ -380,7 +399,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('preparingMsgId', 100);
     await storage.put('buf', items);
     expect(await owner._pollRunFinishedIfIdle(0)).toBe(true);
-    expect(edit.mock.calls.some(call => call[2] === 99 && call[3].startsWith('✅'))).toBe(true);
+    expect(edit.mock.calls.some(call => call[2] === 99 && call[3] === '⚠️ Ответ не получен. Статус задачи отправлен отдельным сообщением.')).toBe(true);
     expect(edit.mock.calls.some(call => call[2] === 100 && call[3].startsWith('✅'))).toBe(false);
     expect(await storage.get('preparingMsgId')).toBe(100);
     expect(await storage.get('buf')).toEqual(items);
@@ -1041,7 +1060,8 @@ describe('existing collector control-plane ownership', () => {
   it.each([
     ['done', 'actual answer', 'actual answer'],
     ['done', { answer: 'native answer' }, 'native answer'],
-    ['done', '   ', 'Готово. Текст результата отсутствует.'],
+    ['done', '   ', '❌ Исполнитель завершил задачу без текстового ответа. Результат не подтверждён; проверьте задачу перед повторным запуском.'],
+    ['done', { answer: '  ' }, '❌ Исполнитель завершил задачу без текстового ответа. Результат не подтверждён; проверьте задачу перед повторным запуском.'],
     ['failed', { answer: 'not a successful answer' }, 'Ошибка исполнителя.'],
     ['cancelled', null, 'Отменено.'],
   ])('uses the controller terminal identity and payload for %s with result %j', async (status, result, text) => {
