@@ -11,6 +11,11 @@ import { controlPlaneClient, publishRoutingDegradation } from './lib/control-pla
 import { isTerminalTaskStatus } from './sandbox-tg/contract.js';
 import { TgDeliveryOwnerClient } from './sandbox-tg/delivery-owner.js';
 import { sandboxOperatorLane } from './sandbox-tg/operator-lane.js';
+
+function taskAnswer(row) {
+  const answer = typeof row?.result === 'string' ? row.result : row?.result?.answer;
+  return typeof answer === 'string' && answer.trim() ? answer : null;
+}
 // Durable Object: per-chat intake buffer.
 //
 // Automatic launch needs a quiet period AND an actionable request. The judge sets
@@ -3213,9 +3218,11 @@ export class IntakeBuffer {
     const messageId = snapshot.body.initialMsgId;
     if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
     const message = snapshot.items.at(-1)?.msg;
+    const hasAnswer = taskAnswer(row) !== null;
     const intent = { requestId, userTaskId: receipt.userTaskId, profileId: receipt.profileId,
       generation: row.generation, messageId, chatId: message.chat.id,
-      text: row.status === 'done' ? '✅ Готово. Результат отправлен отдельным сообщением.'
+      text: row.status === 'done' && hasAnswer ? '✅ Готово. Результат отправлен отдельным сообщением.'
+        : row.status === 'done' ? '⚠️ Ответ не получен. Статус задачи отправлен отдельным сообщением.'
         : row.status === 'failed' ? '❌ Задача завершилась ошибкой. Подробности отправлены отдельным сообщением.'
           : '⛔ Задача отменена. Статус отправлен отдельным сообщением.' };
     await this._exclusive(async () => this.state.storage.transaction(async tx => {
@@ -3454,8 +3461,8 @@ export class IntakeBuffer {
             typeof envelope.conversationRef !== 'string' || !envelope.conversationRef ||
             !Number.isSafeInteger(message?.chat?.id) || !message.chat.id) return false;
         const deliveryId = `terminal:${receipt.userTaskId}:g${row.generation}`;
-        const answer = typeof row.result === 'string' ? row.result : row.result?.answer;
-        const label = row.status === 'done' ? 'Готово. Текст результата отсутствует.'
+        const answer = taskAnswer(row);
+        const label = row.status === 'done' ? '❌ Исполнитель завершил задачу без текстового ответа. Результат не подтверждён; проверьте задачу перед повторным запуском.'
           : row.status === 'failed' ? controlPlaneFailureText({ generation: row.generation, runs }) : 'Отменено.';
         const outbox = new TgDeliveryOwnerClient(this.env);
         const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
@@ -3463,7 +3470,7 @@ export class IntakeBuffer {
           userTaskId: receipt.userTaskId,
           destination: { chatId: message.chat.id, threadId: threadIdOf(message) },
           requestId: deliveryId, type: 'message',
-          text: row.status === 'done' && typeof answer === 'string' && answer.trim() ? answer : label });
+          text: row.status === 'done' && answer ? answer : label });
         if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') return false;
         const deliveryIndependent = row.status === 'failed' || row.status === 'cancelled';
         try { await outbox.drain(); } catch { if (!deliveryIndependent) return false; }

@@ -205,6 +205,7 @@ async function runMove({ label, askText, nonce }) {
   const collector = await waitForCollector();
   await tapCollector(collector.collectorMsgId, collector.collectorDraftRevision);
   const { delivery } = await waitForTerminalDelivery(startedAt);
+  if (ARCHITECTURE) await checkpoint('architecture_delivery_observed', { deliveryId: delivery.deliveryId, userTaskId: delivery.userTaskId });
   const ids = ARCHITECTURE ? delivery.providerMessageIds : [delivery.providerMessageId];
   if (ARCHITECTURE) {
     assert.ok(delivery.partCount > 1 && delivery.sentParts === delivery.partCount, 'all_parts_not_confirmed');
@@ -213,8 +214,7 @@ async function runMove({ label, askText, nonce }) {
   }
   const parts = [];
   for (const id of ids) parts.push(await readDeliveredText(id));
-  const answerText = parts.join('');
-  if (ARCHITECTURE) verifyCompleteAnswer(delivery, parts);
+  const answerText = ARCHITECTURE ? verifyCompleteAnswer(delivery, parts) : parts.join('');
   const move = {
     label,
     nonce,
@@ -228,7 +228,7 @@ async function runMove({ label, askText, nonce }) {
     answerLength: answerText.length,
     answerContainsNonce: nonce ? answerText.includes(nonce) : null,
     answerSha256: null,
-    ...(ARCHITECTURE ? { parts: ids.length, providerMessageIds: ids, sourceDigestMatches: true } : {}),
+    ...(ARCHITECTURE ? { providerCharacters: parts.join('').length, restoredBoundaryWhitespace: answerText.length - parts.join('').length, parts: ids.length, providerMessageIds: ids, sourceDigestMatches: true } : {}),
     elapsedMs: Date.now() - startedAt,
   };
   if (answerText) {
@@ -268,6 +268,28 @@ async function main() {
   if (ARCHITECTURE) {
     assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');
     assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required');
+    if (process.env.VERIFY_DELIVERY_ID) {
+      const id = process.env.VERIFY_DELIVERY_ID;
+      const nonce = process.env.EXPECTED_END_MARKER;
+      assert.match(id, /^terminal:ut-[a-f0-9]+:g[1-9]\d*$/);
+      assert.match(nonce ?? '', /^ARCH-[0-9a-f]{10}$/);
+      const { deliveries } = await workerGet(`/debug/deliveries?chatId=${CHAT_ID}&limit=100`, secrets.agent);
+      const delivery = deliveries?.find(item => item.deliveryId === id);
+      assert.ok(delivery, 'existing_delivery_missing');
+      await checkpoint('verifying_existing_delivery', { deliveryId: id, userTaskId: delivery.userTaskId });
+      const parts = [];
+      for (const providerId of delivery.providerMessageIds ?? []) parts.push(await readDeliveredText(providerId));
+      const answer = verifyCompleteAnswer(delivery, parts);
+      assert.ok(answer.includes(nonce), 'architecture_end_marker_missing');
+      const { createHash } = await import('node:crypto');
+      await checkpoint('passed', { ok: true, scenario: 'production-complete-architecture-document',
+        verifiedExistingDelivery: true, userTaskId: delivery.userTaskId, parts: parts.length,
+        providerMessageIds: delivery.providerMessageIds, sourceCharacters: answer.length,
+        providerCharacters: parts.join('').length, restoredBoundaryWhitespace: answer.length - parts.join('').length,
+        sourceSha256: createHash('sha256').update(answer).digest('hex'), endMarkerPresent: true });
+      console.log(`PASS existing architecture parts=${parts.length} chars=${answer.length}`);
+      return;
+    }
     const nonce = `ARCH-${randomBytes(5).toString('hex')}`;
     await checkpoint('architecture_task_starting', { scenario: 'production-complete-architecture-document' });
     const result = await runMove({ label: 'complete-architecture', nonce,
