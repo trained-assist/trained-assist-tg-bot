@@ -965,6 +965,7 @@ export class IntakeBuffer {
       }));
       const summarize = items => (items || []).map(i => ({
         messageId: i.msg?.message_id, hasText: !!i.text, mediaPending: !!i.mediaPending,
+        hasTranscript: typeof i.msg?.transcript === 'string' && i.msg.transcript.trim().length > 0,
         mediaJob: i.msg?.mediaJob, fileRefStorage: i.msg?.fileRef?.storage,
         preparingAt: i.preparingAt, enqueueFailures: i.enqueueFailures || 0,
       }));
