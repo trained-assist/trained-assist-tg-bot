@@ -27,6 +27,7 @@ const WORKER = process.env.WORKER_URL ?? 'https://trained-assist-tg-bot.skillset
 const CHAT_ID = Number(process.env.CHAT_ID ?? 1714048);
 const LANE = 'production';
 const ARCHITECTURE = process.env.E2E_SCENARIO === 'architecture';
+const EMPTY_ANSWER_RETRY = process.env.E2E_SCENARIO === 'empty-answer-retry';
 const EXPECTED_BOT_USERNAME = 'super_personal_assistant_bot';
 const EXPECTED_BUILD_SHA = process.env.EXPECTED_BUILD_SHA ?? '';
 const EVIDENCE_PATH = process.env.EVIDENCE_OUT ?? 'prod-two-move-canary-evidence.json';
@@ -264,6 +265,27 @@ async function preflight() {
 async function main() {
   const baseline = await preflight();
   await checkpoint('preflight_passed', { baseline: baseline.intakeSummary });
+
+  if (EMPTY_ANSWER_RETRY) {
+    assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');
+    assert.equal(CHAT_ID, 1714048, 'fixed_test_account_required');
+    await checkpoint('empty_answer_retry_starting', { scenario: 'empty-answer-retry' });
+    const result = await runMove({ label: 'retry-empty-answer', nonce: null,
+      askText: 'Гитхаб токен подключен? Second try, last time you completed without outcome. Please answer clearly. This is read-only; do not change credentials.' });
+    assert.equal(result.move.status, 'sent', 'retry_answer_not_sent');
+    assert.equal(result.move.reason, 'provider_accepted', 'retry_answer_not_provider_accepted');
+    assert.ok(result.answerText.trim().length > 0, 'retry_answer_empty');
+    assert.doesNotMatch(result.answerText, /^(?:Готово\.?\s*)?Текст результата отсутствует\.?$/i, 'retry_returned_empty_result_placeholder');
+    const finalIntake = await workerGet(`/debug/intake/${CHAT_ID}`, secrets.agent);
+    assert.equal(finalIntake.busy, false, 'intake_busy_at_final');
+    assert.deepEqual(controlPlaneBarrierCounts(finalIntake), { busyRequestCount: 0, unresolvedLaunchCount: 0 }, 'barrier_not_clean_at_final');
+    assert.equal(finalIntake.stranded, false, 'intake_stranded_at_final');
+    await checkpoint('passed', { ok: true, scenario: 'empty-answer-retry',
+      finalIntake: summarizeIntake(finalIntake), deliveredAnswerCharacters: result.answerText.length,
+      deliveredAnswerSha256: result.move.answerSha256 });
+    console.log(`PASS empty-answer-retry chars=${result.answerText.length} digest=${result.move.answerSha256}`);
+    return;
+  }
 
   if (ARCHITECTURE) {
     assert.equal(WORKER, 'https://trained-assist-tg-bot.skillset-apply.workers.dev', 'fixed_worker_required');
