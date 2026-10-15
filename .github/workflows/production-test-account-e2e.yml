@@ -12,12 +12,16 @@ on:
       scenario:
         description: Verification scenario for the fixed private test account
         type: choice
-        options: [context, architecture]
+        options: [context, architecture, empty-answer-retry]
         default: context
         required: true
 
       verify_delivery_id:
         description: Optional existing terminal delivery to verify without submitting another task
+        type: string
+        default: ''
+      expected_build_sha:
+        description: Exact deployed production bot SHA (defaults to this workflow revision)
         type: string
         default: ''
       expected_end_marker:
@@ -62,7 +66,7 @@ jobs:
           E2E_SCENARIO: ${{ inputs.scenario }}
           WORKER_URL: https://trained-assist-tg-bot.skillset-apply.workers.dev
           CHAT_ID: '1714048'
-          EXPECTED_BUILD_SHA: ${{ github.sha }}
+          EXPECTED_BUILD_SHA: ${{ inputs.expected_build_sha || github.sha }}
           WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
