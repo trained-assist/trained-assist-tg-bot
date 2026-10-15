@@ -12,7 +12,7 @@ on:
       scenario:
         description: Verification scenario for the fixed private test account
         type: choice
-        options: [context, architecture, empty-answer-retry]
+        options: [context, architecture, empty-answer-retry, voice-ingress]
         default: context
         required: true
 
