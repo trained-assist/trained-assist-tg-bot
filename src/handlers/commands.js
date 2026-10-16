@@ -20,6 +20,7 @@ import { isTestChat, suppress, testChatList } from '../lib/test-mode.js';
 function sendIn(env, chatId, threadId, text, extra = {}) {
   return sendMessage(env.BOT_TOKEN, chatId, text, { ...extra, ...threadExtra(threadId) });
 }
+const escapeTelegramHtml = value => String(value).replace(/[&<>\"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
 function sendKbIn(env, chatId, threadId, text, keyboard, extra = {}, lifecycleEnv = env) {
   return sendMessageWithKeyboard(env.BOT_TOKEN, chatId, text, keyboard, { ...extra, ...threadExtra(threadId) }, lifecycleEnv);
 }
@@ -85,8 +86,9 @@ export async function handleCommand(msg, env) {
 
   switch (cmd) {
     case '/restart': return cmdRestart(msg, env);
-    case '/start':   return cmdStart(chatId, env, threadId);
+    case '/start':   return cmdStart(msg, env);
     case '/login':   return cmdLogin(msg, env);
+    case '/web_authorization': return cmdWebAuthorization(msg, env);
     case '/logout':   return cmdLogout(chatId, env, threadId);
     case '/profile':  return cmdProfile(chatId, env, threadId);
     case '/status':  return cmdStatus(chatId, env, threadId);
@@ -132,7 +134,57 @@ export async function handleCommand(msg, env) {
   }
 }
 
-async function cmdStart(chatId, env, threadId = null) {
+async function cmdStart(msg, env) {
+  const { chat, from } = msg;
+  const chatId = chat.id;
+  const threadId = threadIdOf(msg);
+  const signupRef = /^\/start(?:@\w+)?\s+signup_([A-Za-z0-9_-]{40,50})\s*$/i.exec(msg.text || '')?.[1];
+  if (signupRef) {
+    if (chat.type !== 'private' || !from?.id || String(chat.id) !== String(from.id)) {
+      return sendIn(env, chatId, threadId, 'Для регистрации открой бота в личном чате и повтори переход с сайта.');
+    }
+    if (!env.IDENTITY_API_URL || !env.IDENTITY_ISSUER_TOKEN) {
+      return sendIn(env, chatId, threadId, 'Регистрация временно недоступна. Вернись на сайт и попробуй позже.');
+    }
+    let endpoint;
+    try {
+      const origin = new URL(env.IDENTITY_API_URL);
+      if (origin.protocol !== 'https:' || origin.username || origin.password) throw new Error('untrusted identity URL');
+      endpoint = new URL('/v1/signups/telegram/complete', origin);
+    } catch {
+      return sendIn(env, chatId, threadId, 'Регистрация временно недоступна. Вернись на сайт и попробуй позже.');
+    }
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.IDENTITY_ISSUER_TOKEN}` },
+        body: JSON.stringify({ reference: signupRef, telegram_user_id: String(from.id),
+          telegram_username: typeof from.username === 'string' ? from.username : null }),
+      });
+    } catch {
+      return sendIn(env, chatId, threadId, 'Не удалось подтвердить регистрацию. Вернись на сайт и попробуй ещё раз.');
+    }
+    if (!response.ok) {
+      return sendIn(env, chatId, threadId, response.status === 409
+        ? 'Эта ссылка уже использована или данные регистрации заняты. Вернись на сайт и начни заново.'
+        : 'Ссылка регистрации устарела или недействительна. Вернись на сайт и начни заново.');
+    }
+    const account = await response.json().catch(() => null);
+    if (!account?.user_id || !/^[A-Za-z][A-Za-z0-9_-]{2,31}$/.test(account.nickname || '')
+        || typeof account.display_name !== 'string') {
+      return sendIn(env, chatId, threadId, 'Не удалось завершить регистрацию. Вернись на сайт и попробуй позже.');
+    }
+    await setSession(env.SESSIONS, chatId, {
+      username: account.nickname, name: account.display_name, telegramUserId: from.id,
+      identityUserId: account.user_id,
+      ...(env.CONTROL_PLANE_PROFILE ? { controlPlaneProfile: env.CONTROL_PLANE_PROFILE } : {}),
+    }, threadId);
+    return sendIn(env, chatId, threadId,
+      `✅ Telegram подтверждён, ${escapeTelegramHtml(account.display_name)}. Профиль <b>@${account.nickname}</b> связан с этим аккаунтом.\n\n` +
+      'Вернись на сайт — там завершится вход. Здесь уже можно написать задачу агенту.'
+    );
+  }
   const session = await getSession(env.SESSIONS, chatId, threadId);
   if (!session) {
     return sendIn(env, chatId, threadId,
@@ -251,6 +303,60 @@ export async function cmdLogin(msg, env) {
       : `✅ Добро пожаловать, ${user.name}!\n\n` + (env.EXECUTION_BACKEND === 'control-plane'
         ? 'Просто пиши задачи — я передам их на обработку.'
         : 'Просто пиши задачи — я передам их Claude Code.')
+  );
+}
+
+export async function cmdWebAuthorization(msg, env) {
+  const threadId = threadIdOf(msg);
+  const { chat, from } = msg;
+  if (chat.type !== 'private') {
+    return sendIn(env, chat.id, threadId, 'Для безопасности запроси код в личном чате с ботом.');
+  }
+  const session = await getSession(env.SESSIONS, chat.id, threadId);
+  if (!session?.username || !session.telegramUserId || String(session.telegramUserId) !== String(from?.id)) {
+    return sendIn(env, chat.id, threadId, 'Сначала войди в личном чате командой /login.');
+  }
+  if (!env.IDENTITY_API_URL || !env.IDENTITY_ISSUER_TOKEN) {
+    return sendIn(env, chat.id, threadId, 'Вход на сайт пока не настроен. Попробуй позже.');
+  }
+
+  let endpoint;
+  try {
+    const origin = new URL(env.IDENTITY_API_URL);
+    if (origin.protocol !== 'https:' || origin.username || origin.password) throw new Error('untrusted identity URL');
+    endpoint = new URL('/v1/links/telegram/challenges', origin);
+  } catch {
+    return sendIn(env, chat.id, threadId, 'Сервис входа на сайт временно недоступен.');
+  }
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${env.IDENTITY_ISSUER_TOKEN}` },
+      body: JSON.stringify({
+        telegram_user_id: String(from.id),
+        telegram_username: typeof from.username === 'string' ? from.username : null,
+        agent_username: session.username,
+      }),
+    });
+  } catch {
+    return sendIn(env, chat.id, threadId, 'Не удалось связаться с сервисом входа. Попробуй позже.');
+  }
+  if (response.status === 429) {
+    return sendIn(env, chat.id, threadId, 'Код уже выдавался недавно. Подожди минуту и попробуй ещё раз.');
+  }
+  if (!response.ok) {
+    return sendIn(env, chat.id, threadId, 'Не удалось создать код входа. Попробуй позже.');
+  }
+  let result;
+  try { result = await response.json(); } catch { result = null; }
+  if (!/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{12}$/.test(result?.code || '')) {
+    return sendIn(env, chat.id, threadId, 'Сервис входа вернул некорректный ответ. Попробуй позже.');
+  }
+  return sendIn(env, chat.id, threadId,
+    `Код для входа на сайт (действует 10 минут):\n\n<code>${result.code}</code>\n\n` +
+    'Открой страницу входа, выбери «Войти через Telegram-код» и введи его. Не пересылай код другим.'
   );
 }
 
