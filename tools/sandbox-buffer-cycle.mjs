@@ -16,8 +16,12 @@ const CP_STATE_TABLES = [
   'durable_tasks', 'conversations', 'executions', 'task_events', 'task_signals', 'awaiting_inputs',
   'deliveries', 'task_artifacts', 'credential_completions', 'pending_inputs', 'gtd_records', 'gtd_outcomes',
   'gtd_progressions', 'gtd_conditions', 'schedule_occurrences', 'schedules', 'cp_stop_windows',
-  'stuck_input_alerts', 'watchdog_health',
+  'stuck_input_alerts',
 ];
+// watchdog_health is operational heartbeat telemetry, written by the live
+// watchdog independently of E2E tasks. It is intentionally neither part of
+// the empty task-state gate nor cleared by sandbox cleanup.
+const CP_REQUIRED_TABLES = [...CP_STATE_TABLES, 'watchdog_health'];
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -103,7 +107,7 @@ async function inspect() {
   assert.equal(healthBody.mode, 'existing-ux-control-plane');
   await assertSandboxScope();
   const tableNames = new Set((await d1("SELECT name FROM sqlite_master WHERE type='table'")).map(row => row.name));
-  for (const table of CP_STATE_TABLES) assert(tableNames.has(table), `CP state table missing: ${table}`);
+  for (const table of CP_REQUIRED_TABLES) assert(tableNames.has(table), `CP state table missing: ${table}`);
   const [cpCounts] = await d1(`SELECT ${CP_STATE_TABLES.map(name => `(SELECT COUNT(*) FROM "${name}") AS "${name}"`).join(', ')}`);
   const tg = await workerRequest('/operator/reset-sandbox-state', { target: TARGET, mode: 'inspect' });
   return { cp: cpCounts, tg };
@@ -148,7 +152,6 @@ async function reset() {
     'DELETE FROM schedules',
     'DELETE FROM cp_stop_windows',
     'DELETE FROM stuck_input_alerts',
-    'DELETE FROM watchdog_health',
   ];
   for (const sql of statements) await d1(sql);
   await inspectUntilEmpty();
