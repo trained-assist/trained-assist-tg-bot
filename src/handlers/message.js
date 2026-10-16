@@ -140,10 +140,10 @@ export async function handleMessage(msg, env, opts = {}) {
     throw Object.assign(new Error(error?.message || 'Attachment preparation failed', { cause: error }), { code: 'INTAKE_PREPARATION_FAILED', intakeMessageId: error?.intakeMessageId });
   }
 
-  // prepareIntake already notified the user for oversized files; skip agent dispatch.
-  if (msg.fileTooLarge) return;
+  // prepareIntake already notified the user for oversized files or failed transcription; skip agent dispatch.
+  if (msg.fileTooLarge || msg.transcriptionFailed) return;
   if (msg.intakeItems) {
-    const validItems = msg.intakeItems.filter(i => !i.msg?.fileTooLarge);
+    const validItems = msg.intakeItems.filter(i => !i.msg?.fileTooLarge && !i.msg?.transcriptionFailed);
     if (!validItems.length) return;
     msg = { ...msg, intakeItems: validItems };
   }
