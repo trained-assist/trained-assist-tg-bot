@@ -28,23 +28,37 @@ export async function prepareIntake(msg, env, session, checkpoint = async () => 
       bufferToken: env.INGRESS_BUFFER_TOKEN,
       fetchImpl,
     });
-    const transcript = attachment.type === 'voice' && config.profileId === 'trained-assist-production'
-      ? await transcribeIngressAudio(env.DEEPGRAM_API_KEY, bytes, attachment.mimeType ?? 'audio/ogg') : null;
     const safePart = part => {
       if (!part || typeof part !== 'object') return part;
       const { file_id: _fileId, file_unique_id: _fileUniqueId, ...metadata } = part;
       return metadata;
     };
-    const safeMessage = { ...msg, artifactManifest, ...(transcript ? { transcript } : {}) };
+    const baseMessage = { ...msg, artifactManifest };
     for (const key of ['voice', 'audio', 'video', 'document']) {
-      if (safeMessage[key]) safeMessage[key] = safePart(safeMessage[key]);
+      if (baseMessage[key]) baseMessage[key] = safePart(baseMessage[key]);
     }
-    if (Array.isArray(safeMessage.photo)) safeMessage.photo = safeMessage.photo.map(safePart);
-    delete safeMessage.attachmentKey;
-    delete safeMessage.fileRef;
-    delete safeMessage.transcriptRef;
-    delete safeMessage.mediaJob;
-    return safeMessage;
+    if (Array.isArray(baseMessage.photo)) baseMessage.photo = baseMessage.photo.map(safePart);
+    delete baseMessage.attachmentKey;
+    delete baseMessage.fileRef;
+    delete baseMessage.transcriptRef;
+    delete baseMessage.mediaJob;
+    if (attachment.type === 'voice' && config.profileId === 'trained-assist-production') {
+      let transcript;
+      try {
+        transcript = await transcribeIngressAudio(env.DEEPGRAM_API_KEY, bytes, attachment.mimeType ?? 'audio/ogg');
+      } catch (error) {
+        await sendMessage(env.BOT_TOKEN, msg.chat.id,
+          `🎤 Не удалось распознать речь: ${error?.message || 'ошибка распознавания'}`,
+          { reply_to_message_id: msg.message_id, allow_sending_without_reply: true, ...threadExtra(threadIdOf(msg)) });
+        return { ...baseMessage, transcriptionFailed: true };
+      }
+      if (transcript) return { ...baseMessage, transcript };
+      await sendMessage(env.BOT_TOKEN, msg.chat.id,
+        '🎤 Не удалось распознать речь в голосовом сообщении.',
+        { reply_to_message_id: msg.message_id, allow_sending_without_reply: true, ...threadExtra(threadIdOf(msg)) });
+      return { ...baseMessage, transcriptionFailed: true };
+    }
+    return baseMessage;
   }
   if (msg.fileRef?.storage === 'r2') return msg;
   if (msg.mediaJob) throw new Error('Файл ещё обрабатывается');
