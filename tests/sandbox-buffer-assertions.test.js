@@ -13,6 +13,15 @@ describe('sandbox buffer empty assertion', () => {
     )).not.toThrow();
   });
 
+  it('does not treat live watchdog heartbeat telemetry as buffered sandbox work', () => {
+    expect(() => assertSandboxStateEmpty(
+      { durable_tasks: 0, conversations: 0, watchdog_health: 1 },
+      { sessionAndRetryKeys: 0, sandboxUserKeys: 0, intakeBuffers: 0,
+        durableObjectKeys: 0, acceptOnlyKeys: 0, active: false },
+      tables,
+    )).not.toThrow();
+  });
+
   it('still rejects stored state in any inspected Intake Durable Object', () => {
     expect(() => assertSandboxStateEmpty(
       { durable_tasks: 0, conversations: 0 },
