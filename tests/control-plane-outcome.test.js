@@ -18,4 +18,12 @@ describe('CP failure delivery', () => {
     }
     expect(controlPlaneFailureText({ generation: 1, runs: [] })).toBe('Ошибка исполнителя.');
   });
+
+  it('treats a failed run with no visible outcome as an empty result, not a generic task failure (Ddd)', () => {
+    const status = { generation: 1, status: 'failed', result: { answer: null, reason: 'no_user_visible_outcome' },
+      runs: [{ generation: 1, status: 'failed', error_class: 'runner_rejected', error_text: 'no_user_visible_outcome' }] };
+    const text = controlPlaneFailureText(status);
+    expect(text).not.toBe('Ошибка исполнителя.');
+    expect(text).toContain('без текстового ответа');
+  });
 });
