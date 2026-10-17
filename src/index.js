@@ -294,6 +294,40 @@ app.get('/debug/deliveries', async c => {
   }
 });
 
+// Durable webhook inbox inspection/retry. Payloads are intentionally omitted;
+// an operator sees only update IDs and lifecycle state.
+app.get('/debug/telegram-updates/:chatId', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  if (!c.env.TELEGRAM_UPDATE_INBOX?.idFromName || !c.env.TELEGRAM_UPDATE_INBOX?.get) return c.json({ error: 'durable inbox unavailable' }, 503);
+  const chatId = Number(c.req.param('chatId'));
+  const threadId = c.req.query('threadId') == null ? null : Number(c.req.query('threadId'));
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) {
+    return c.json({ error: 'invalid conversation' }, 400);
+  }
+  const inboxId = `${c.env.BOT_USERNAME}:${chatId}:${threadId ?? ''}`;
+  const inbox = c.env.TELEGRAM_UPDATE_INBOX.get(c.env.TELEGRAM_UPDATE_INBOX.idFromName(inboxId));
+  const requestedLimit = Number(c.req.query('limit') ?? 100);
+  const limit = Number.isSafeInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 500)) : 100;
+  return inbox.fetch(`https://telegram-inbox/status?limit=${limit}`);
+});
+
+app.post('/debug/telegram-updates/:chatId/retry', async c => {
+  if (!c.env.AGENT_SECRET || c.req.header('Authorization') !== `Bearer ${c.env.AGENT_SECRET}`) return c.json({ error: 'unauthorized' }, 401);
+  if (!c.env.TELEGRAM_UPDATE_INBOX?.idFromName || !c.env.TELEGRAM_UPDATE_INBOX?.get) return c.json({ error: 'durable inbox unavailable' }, 503);
+  const chatId = Number(c.req.param('chatId'));
+  const threadId = c.req.query('threadId') == null ? null : Number(c.req.query('threadId'));
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || threadId != null && (!Number.isSafeInteger(threadId) || threadId <= 0)) {
+    return c.json({ error: 'invalid conversation' }, 400);
+  }
+  const input = await c.req.json().catch(() => null);
+  if (!Number.isSafeInteger(input?.updateId) || input.updateId < 0) return c.json({ error: 'invalid updateId' }, 400);
+  const inboxId = `${c.env.BOT_USERNAME}:${chatId}:${threadId ?? ''}`;
+  const inbox = c.env.TELEGRAM_UPDATE_INBOX.get(c.env.TELEGRAM_UPDATE_INBOX.idFromName(inboxId));
+  return inbox.fetch('https://telegram-inbox/retry', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ updateId: input.updateId }),
+  });
+});
+
 // Debug: POST raw audio bytes, get back what speech_transcribe returned (or the
 // error). Isolates the transcription leg of transcribeVoice from Telegram getFile,
 // so an "Не удалось подготовить вложение" report can be narrowed to a specific
@@ -349,7 +383,8 @@ async function handleWebhook(c, pathBotId) {
   // must never reach dispatch. FAIL CLOSED: a bot with no secret configured is
   // rejected too. The old "unset = accept" default let anyone POST a forged
   // update (any chat.id, incl. ADMIN_GROUP_ID) to main/recruiter (audit 2026-09-25).
-  // Durable ACK is deliberately not implemented (issue #1302 §4.3).
+  // Ordinary task messages use a Durable Object ACK path below; legacy commands
+  // and callbacks still use waitUntil until their effects are replay-fenced.
   if (!bot.webhookSecret) {
     console.error('[webhook] TELEGRAM_WEBHOOK_SECRET not configured — rejecting update (fail closed)');
     return c.json({ error: 'webhook secret not configured' }, 401);
@@ -381,7 +416,36 @@ async function handleWebhook(c, pathBotId) {
     env = { ...env, TEST_CHAT_IDS: incomingChatId == null ? '' : String(incomingChatId) };
   }
 
-  // Fire-and-forget — Telegram expects 200 within 5s
+  // Production task messages are durably admitted before Telegram receives its
+  // 200 ACK. The inbox alarm dispatches them after the request has returned;
+  // message_id deduplication in IntakeBuffer makes recovery after a lost
+  // completion marker safe. Commands and callbacks retain their established
+  // handlers until their side effects have equivalent replay fencing.
+  const message = update?.message;
+  const messageText = typeof message?.text === 'string' ? message.text : '';
+  const ordinaryMessage = message && message.from?.is_bot !== true &&
+    Number.isSafeInteger(update.update_id) && update.update_id >= 0 &&
+    Number.isSafeInteger(message.message_id) && message.message_id > 0 &&
+    Number.isSafeInteger(message.chat?.id) && message.chat.id !== 0 &&
+    !/^\s*\/[^\s@]+(?:@\w+)?(?:\s|$)/.test(messageText);
+  if (ordinaryMessage && env.TELEGRAM_UPDATE_INBOX?.idFromName && env.TELEGRAM_UPDATE_INBOX?.get) {
+    const threadId = threadIdOf(message);
+    const inboxId = `${bot.username}:${message.chat.id}:${threadId ?? ''}`;
+    const inbox = env.TELEGRAM_UPDATE_INBOX.get(env.TELEGRAM_UPDATE_INBOX.idFromName(inboxId));
+    const admitted = await inbox.fetch('https://telegram-inbox/admit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ updateId: update.update_id, update }),
+    });
+    if (!admitted.ok) {
+      logLifecycleEvent({ event: 'tg.webhook.admission_failed', component: 'gateway',
+        correlationId: String(update.update_id), status: 'rejected', reasonCode: `inbox_http_${admitted.status}` }, env);
+      return c.json({ error: 'update not durably admitted' }, 503);
+    }
+    return c.json({ ok: true, queued: true, ...(await admitted.json().catch(() => ({}))) });
+  }
+
+  // Legacy commands/callbacks remain unchanged until their handler effects have
+  // update-scoped replay protection.
   c.executionCtx.waitUntil(dispatch(update, env));
   // Register the Telegram command menu once per isolate (commands-registry.json
   // is the single source of truth — see lib/telegram.js#registerBotCommands).
@@ -669,6 +733,7 @@ export default { fetch: app.fetch, scheduled };
 export { RetryQueue } from './retry-queue.js';
 
 export { MediaJob } from './media-jobs.js';
+export { TelegramUpdateInbox } from './telegram-inbox.js';
 // Keep these already-applied Durable Object migration classes available for
 // Wrangler's migration history; no current Worker binding uses them.
 export { ProductionE2eIntakeBuffer, ProductionE2eTgDeliveryOwner } from './sandbox-tg/production-e2e-classes.js';
