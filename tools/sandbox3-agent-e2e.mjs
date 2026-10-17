@@ -188,9 +188,14 @@ async function failedTaskEvidence(task) {
       stage: safeCode(details.stage) ?? null,
       errorClass: safeCode(details.errorClass) ?? null,
       where: safeCode(details.where) ?? null,
+      outcome: safeCode(details.outcome) ?? null,
+      exitReason: safeCode(details.exitReason) ?? null,
+      error: typeof details.error === 'string' ? details.error.slice(0, 500) : null,
+      failure: details.failure && typeof details.failure === 'object' ? details.failure : null,
     };
   });
   return {
+    taskId: safeEvidenceId(task.id),
     status: safeCode(task.status) ?? 'unknown',
     generation: Number.isSafeInteger(task.generation) ? task.generation : null,
     executions: executions.map(row => ({
@@ -200,6 +205,7 @@ async function failedTaskEvidence(task) {
       errorClass: safeCode(row.error_class),
       runnerErrorCode: typeof row.error_text === 'string'
         ? safeCode(/^([A-Z][A-Z0-9_]{0,79}):/.exec(row.error_text)?.[1]) : null,
+      errorText: typeof row.error_text === 'string' ? row.error_text.slice(0, 1000) : null,
     })),
     events: safeEvents,
   };
