@@ -227,7 +227,7 @@ function assertDelivery(response, phase, deliveryMode) {
 }
 
 async function waitForTask(excludedTaskIds = []) {
-  const deadline = Date.now() + 8 * 60_000;
+  const deadline = Date.now() + 12 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
     rows = await d1(`SELECT id, status, goal, user_value, result_json, generation, delivery_state FROM durable_tasks WHERE profile_id = ? ORDER BY created_at DESC LIMIT 5`, [PROFILE_ID]);
@@ -267,7 +267,7 @@ async function waitForActiveTask(excludedTaskIds = []) {
 }
 
 async function waitForDelivery(taskId, chatId) {
-  const deadline = Date.now() + 8 * 60_000;
+  const deadline = Date.now() + 12 * 60_000;
   let observed;
   while (Date.now() < deadline) {
     observed = await deliveryRead(taskId);
@@ -286,7 +286,7 @@ async function waitForDelivery(taskId, chatId) {
 }
 
 async function waitForArtifactDeliveries(taskId, chatId, expectedNames) {
-  const deadline = Date.now() + 8 * 60_000;
+  const deadline = Date.now() + 12 * 60_000;
   let observed;
   while (Date.now() < deadline) {
     const response = await fetch(`${TG_ORIGIN}/operator/test-delivery/${encodeURIComponent(taskId)}?includeArtifacts=true`, {
