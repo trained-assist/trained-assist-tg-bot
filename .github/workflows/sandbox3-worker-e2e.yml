@@ -115,6 +115,7 @@ jobs:
           set -euo pipefail
           sha="$(git -C control-plane rev-parse HEAD)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "EXPECTED_CP_SHA=$sha" >> "$GITHUB_ENV"
           echo "Pinned Control Plane revision: $sha"
 
       - uses: actions/setup-node@v4
