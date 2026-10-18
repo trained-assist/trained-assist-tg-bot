@@ -108,11 +108,14 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: control-plane
           persist-credentials: false
-          sparse-checkout: tools/sandbox3-lane-preflight.mjs
 
       - name: Pin reviewed Control Plane revision for this test
         id: cp-revision
-        run: echo "sha=$(git -C control-plane rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          sha="$(git -C control-plane rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinned Control Plane revision: $sha"
 
       - uses: actions/setup-node@v4
         with:
