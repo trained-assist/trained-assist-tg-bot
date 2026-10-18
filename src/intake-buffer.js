@@ -121,6 +121,7 @@ const RECEIPT_MS = 1500;
 const COLLECTOR_UNKNOWN_RETRY_MS = 30_000;
 const LAUNCH_BTN = [[{ text: '▶️ Запустить агента', callback_data: 'intake_run' },
   { text: '📋 Посмотреть input', callback_data: 'input_draft' }]];
+const READY_BTN = [[{ text: 'Готово', callback_data: 'intake_ready' }]];
 const WORK_STYLES = ['explore', 'answer', 'auto'];
 function workStyleKeyboard(revision, { busy = false, stopEnabled = true, discardLabel = '🧹 Очистить весь ввод' } = {}) {
   const labels = { explore: '🧭 Изучи и задай вопросы', answer: '📝 Дай полный ответ', auto: '✨ На твоё усмотрение' };
@@ -1391,6 +1392,31 @@ export class IntakeBuffer {
       return json({ busy: true, busySince: (await this.state.storage.get('busySince')) || null, items: buf.map(heldView) });
     }
 
+    if (url.pathname === '/ready-check' && request.method === 'POST') {
+      const source = await request.json().catch(() => ({}));
+      const retryBatch = (await this.state.storage.get('retryBatch')) || [];
+      const buf = retryBatch.length ? retryBatch : ((await this.state.storage.get('buf')) || []);
+      const revision = (await this.state.storage.get('draftRevision')) || 1;
+      const chatId = source.chatId ?? buf[0]?.msg?.chat?.id ?? null;
+      const threadId = source.threadId ?? (buf[0]?.msg ? threadIdOf(buf[0].msg) : null);
+      const intent = coalescedIntent(buf);
+      const verdict = await checkCompleteness(this.env, { text: intent, username: source.username, chatId, threadId });
+      return json({ level: verdict?.level ?? 'error', revision, count: buf.length });
+    }
+
+    if (url.pathname === '/show-styles' && request.method === 'POST') {
+      const source = await request.json().catch(() => ({}));
+      await this.state.storage.put('collectorShowStyles', true);
+      const retryBatch = (await this.state.storage.get('retryBatch')) || [];
+      const buf = retryBatch.length ? retryBatch : ((await this.state.storage.get('buf')) || []);
+      const n = buf.length;
+      const chatId = source.chatId ?? buf[0]?.msg?.chat?.id ?? null;
+      const threadId = source.threadId ?? (buf[0]?.msg ? threadIdOf(buf[0].msg) : null);
+      const messageId = source.messageId;
+      if (chatId) await this._showCollector(chatId, n, messageId ?? await this.state.storage.get('collectorMsgId'), threadId, null);
+      return json({ shown: true });
+    }
+
     if (url.pathname === '/run-finished' && request.method === 'POST') {
       if (this.env.EXECUTION_BACKEND === 'control-plane') {
         const released = await this._pollRunFinishedIfIdle(0);
@@ -2398,7 +2424,7 @@ export class IntakeBuffer {
         : (stopLaunch && !TOOK_IT.test(override || '')) ? stopLaunchText(n, stopLaunch.mode)
         : override || (queued ? queuedText(n)
         : stopped ? stoppedText(n)
-        : (cpMode ? `✓ Получил ${n} сообщений. Всё собрано в один input. Выбери, как начать.` : collectorText(n)) + (resumedHeld ? (cpMode ? ` В том числе ${Math.min(resumedHeld, n)} — отложенные до ⛔ Стоп.` : resumedNote(Math.min(resumedHeld, n))) : ''));
+        : (cpMode ? `получено: ${n} ${'✉️ '.repeat(n).trim()}` : collectorText(n)) + (resumedHeld ? (cpMode ? ` В том числе ${Math.min(resumedHeld, n)} — отложенные до ⛔ Стоп.` : resumedNote(Math.min(resumedHeld, n))) : ''));
       // Priority: a queued tap owns the screen (↩️ undo) — even under the 📥 status,
       // so «задачу забрал» can be walked back. Otherwise launch button under every
       // status that is not "the batch is taken" (issue #303).
@@ -2421,12 +2447,22 @@ export class IntakeBuffer {
       // A pending stop belongs to the old run. Its stale queue/stop action must
       // not hide controls for this distinct, still-unlaunched draft.
       const draftOnlyDiscard = stopPending && (await this.state.storage.get('buf') || []).length > 0;
+      if (cpMode) {
+        const lastReadyCount = await this.state.storage.get('collectorReadyCount');
+        if (lastReadyCount !== n) {
+          await this.state.storage.put('collectorReadyCount', n);
+          await this.state.storage.delete('collectorShowStyles');
+        }
+      }
+      const showStyles = cpMode && (await this.state.storage.get('collectorShowStyles')) === true;
       const keyboard = (queued || stopLaunch) && !canLaunchIndependently ? CANCEL_BTN
         : TOOK_IT.test(override || '') ? (cpMode ? [] : STATUS_BTN)
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
-          ? workStyleKeyboard(draftRevision, { discardLabel: stopPending
-            ? (draftOnlyDiscard ? '🧹 Очистить этот черновик' : false) : undefined })
+          ? (showStyles
+            ? workStyleKeyboard(draftRevision, { discardLabel: stopPending
+              ? (draftOnlyDiscard ? '🧹 Очистить этот черновик' : false) : undefined })
+            : READY_BTN)
         : LAUNCH_BTN;
       if (unknownDismiss) keyboard.push([{ text: '⏸ Не ждать старую задачу', callback_data: `intake_dismiss_unknown|${unknownDismiss.token}` }]);
       let prevId = await this.state.storage.get('collectorMsgId');
