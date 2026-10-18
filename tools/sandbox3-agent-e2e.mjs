@@ -111,7 +111,7 @@ async function waitForStopCompletion(chatId, taskId) {
   // The Intake DO retries an unresolved CP stop on its alarm (currently 60s).
   // Observe that durable path rather than treating the first pending response as
   // a failed stop or issuing a second cancellation from the test harness.
-  const deadline = Date.now() + 3 * 60_000;
+  const deadline = Date.now() + 5 * 60_000;
   let observed = null;
   while (Date.now() < deadline) {
     const [task] = await d1('SELECT status, generation FROM durable_tasks WHERE id = ?', [taskId]);
@@ -255,7 +255,7 @@ async function waitForTask(excludedTaskIds = []) {
 }
 
 async function waitForActiveTask(excludedTaskIds = []) {
-  const deadline = Date.now() + 3 * 60_000;
+  const deadline = Date.now() + 5 * 60_000;
   let rows = [];
   while (Date.now() < deadline) {
     rows = await d1(`SELECT t.id, t.status AS task_status, e.status AS execution_status
@@ -725,7 +725,7 @@ async function main() {
   let stopEvidence = null;
   if (scenario === 'stop') {
     const stopToken = `STOP-${randomBytes(6).toString('hex').toUpperCase()}`;
-    const stopPrompt = `Use your shell tool to run the harmless command \`sleep 120\` and wait for it to finish. Only then reply with exactly this token: ${stopToken}`;
+    const stopPrompt = `Use your shell tool to run the harmless command \`sleep 300\` and wait for it to finish. Only then reply with exactly this token: ${stopToken}`;
     const stopQuestion = await sendMessage(stopPrompt);
     assert.equal(stopQuestion.ok, true, 'sandbox_stop_question_not_accepted');
     assert.equal(stopQuestion.collector?.pendingCount, 1, 'sandbox_stop_question_not_buffered');
