@@ -64,12 +64,16 @@ curl --fail-with-body -sS https://trained-assist-tg-ux-sandbox.skillset-apply.wo
   --data '{"target":"sandbox","chatId":123456789,"type":"callback","callbackData":"auto"}'
 ```
 
-For the CP collector, `auto`, `explore`, and `answer` select the corresponding
-work-style button on the current collector message. The Worker resolves the
-shortcut to that draft's revision-bound callback (`ws|<style>|<revision>`),
-matching the real inline keyboard. `intake_run` is retained as an alias for
-`auto` for older test clients. Raw callback payloads remain available for
-testing other buttons.
+For the CP collector, first submit the currently displayed `intake_ready`
+callback (the «Готово» button). It runs the completeness check and either
+launches a clear request or replaces the keyboard with the work-style buttons.
+Only then submit `auto`, `explore`, or `answer`; the Worker resolves that
+shortcut to the current draft's revision-bound callback
+(`ws|<style>|<revision>`), matching the real inline keyboard. Calling a style
+shortcut while the collector still displays «Готово» is rejected as an
+unowned callback. `intake_run` remains an alias for `auto` for older test
+clients, but it follows the same ownership check. Raw callback payloads remain
+available for testing other buttons.
 
 In sandbox3 `capture` mode, if a pending draft has no Telegram collector message
 ID because sends are suppressed, the operator endpoint seeds a synthetic ID
