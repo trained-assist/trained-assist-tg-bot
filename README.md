@@ -25,6 +25,14 @@ Telegram gateway Trained Assist на Cloudflare Worker. Отвечает за we
 
 ## Изолированная проверка
 
+### Проверки через sandbox
+
+Для bug/feature сначала проверьте воспроизведение и acceptance в изолированной среде; production — только после успешного sandbox и по процедуре promotion. Общая карта сред, владельцев, lane claims, очистки и эскалации gaps находится в [архитектурном SANDBOX.md](https://github.com/trained-assist/trained-agent-architecture/blob/main/SANDBOX.md). Для Telegram → Control Plane → Runner → Telegram используйте workflow [`Sandbox3 Telegram worker E2E`](.github/workflows/sandbox3-worker-e2e.yml) из защищённой ветки `main`, с `run_e2e=true` и подходящим сценарием. Он проверяет bindings/principals/пустое состояние, приводит CP к SHA запуска, выполняет сценарий и в `always()` очищает sandbox и восстанавливает delivery policy; изучите run artifacts и финальный state до следующего запуска.
+
+Если preflight останавливается до сценария, не отправляйте запросы вручную и не сбрасывайте shared storage. Разберитесь с указанным несоответствием по [Control Plane sandbox-3 target/deploy guide](https://github.com/trained-assist/trained-assist-control-plane/blob/main/docs/SANDBOX-3-TARGET.md), запустите только его документированный изолированный deploy при необходимости, затем повторите E2E после нового clean preflight. Запись claim/release и результаты проверки публикуются в архитектурном issue/lane; не считайте запуск успешным, если workflow упал до тестового ввода или cleanup не подтвердил чистое состояние.
+
+Отдельно: workflow запускает реальные agent tasks и при `delivery_mode=telegram` отправляет результат в выделенный sandbox chat. Это sandbox, но не dry-run.
+
 ### Isolated Telegram sandbox (P11)
 
 Sandbox outgoing delivery now requires the [SQLite delivery owner and explicit
