@@ -891,6 +891,30 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls[0][3].flat().every(button => typeof button.callback_data === 'string')).toBe(true);
   });
 
+  it('checks readiness on the Ready action and shows styles only when the draft needs clarification', async () => {
+    const { owner, storage } = fixture();
+    checkCompleteness.mockResolvedValue({ level: 'insufficient' });
+    await storage.put('buf', items);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+    await storage.put('collectorDraftRevision', 3);
+    await storage.put('collectorReadyCount', 1);
+
+    const ready = await owner.fetch(rpc('/ready-check', { username: 'test-profile', chatId: 42,
+      threadId: null, messageId: 99 }));
+    expect(await ready.json()).toMatchObject({ level: 'insufficient', revision: 3, count: 1 });
+    expect(checkCompleteness).toHaveBeenCalledWith(owner.env, {
+      text: expect.any(String), username: 'test-profile', chatId: 42, threadId: null,
+    });
+
+    const shown = await owner.fetch(rpc('/show-styles', { username: 'test-profile', chatId: 42,
+      threadId: null, messageId: 99 }));
+    expect(await shown.json()).toEqual({ shown: true });
+    expect(edit.mock.calls.at(-1)[4].reply_markup.inline_keyboard.flat().map(button => button.callback_data)).toEqual([
+      'ws|explore|3', 'ws|answer|3', 'ws|auto|3', 'intake_discard|3',
+    ]);
+  });
+
   it('launches the selected style once from the exact current draft revision', async () => {
     const { owner, storage } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
