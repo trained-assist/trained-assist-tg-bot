@@ -1,0 +1,100 @@
+name: Quiesce Telegram sandbox3
+
+on:
+  workflow_dispatch:
+    inputs:
+      quiesce_sandbox3:
+        description: Pause sandbox3 ingress and delivery; do not clear data or stop admitted tasks
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trained-assist-sandbox3-worker-e2e
+  cancel-in-progress: false
+
+jobs:
+  quiesce:
+    if: ${{ inputs.quiesce_sandbox3 == true && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require protected main
+        env:
+          REF: ${{ github.ref }}
+        run: test "$REF" = "refs/heads/main"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify the exact Cloudflare account
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test "$CLOUDFLARE_ACCOUNT_ID" = "d740a05e9442c1d0feacae2dfc673e93"
+          npx wrangler whoami --json > "$RUNNER_TEMP/cloudflare-whoami.json"
+          node --input-type=module - "$RUNNER_TEMP/cloudflare-whoami.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const identity = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const account = (identity.accounts ?? []).find(item => item.id === 'd740a05e9442c1d0feacae2dfc673e93');
+          if (identity.loggedIn !== true || account?.name !== "Typeformowner@gmail.com's Account"
+              || identity.email && identity.email.toLowerCase() !== 'typeformowner@gmail.com') {
+            throw new Error('Cloudflare identity/account verification failed; no Worker operation is allowed');
+          }
+          console.log('Verified the sandbox Cloudflare account.');
+          NODE
+
+      - name: Validate sandbox3 Worker bundle
+        run: npx wrangler deploy --dry-run --config wrangler.sandbox-tg-sandbox3.toml
+
+      - name: Pause sandbox3 ingress and delivery
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy.ndjson
+        run: >-
+          npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
+          --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true
+          --message "sandbox3-quiesce-${GITHUB_SHA}"
+
+      - name: Verify active sandbox3 revision and liveness
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npx wrangler deployments status --name trained-assist-tg-sandbox3 --json > "$RUNNER_TEMP/deployment-status.json"
+          node --input-type=module - "$RUNNER_TEMP/deployment-status.json" <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const status = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const text = JSON.stringify(status);
+          const message = status.annotations?.['workers/message'] ?? '';
+          if (!message.includes(process.env.GITHUB_SHA) && !text.includes(process.env.GITHUB_SHA)) {
+            throw new Error('active_sandbox3_revision_mismatch');
+          }
+          NODE
+          curl --fail --silent --show-error https://trained-assist-tg-sandbox3.skillset-apply.workers.dev/health \
+            | node --input-type=module -e '
+              let input = "";
+              for await (const chunk of process.stdin) input += chunk;
+              const health = JSON.parse(input);
+              if (health.status !== "ok" || health.mode !== "existing-ux-control-plane") process.exit(1);
+              console.log(JSON.stringify({ status: health.status, mode: health.mode }));
+            '
