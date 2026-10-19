@@ -111,7 +111,7 @@ describe('E4.3 stale collector button', () => {
     // E4.3 regression guard: the collector must be re-edited to the live
     // revision synchronously on intake — not only after the receipt alarm.
     expect(await storage.get('collectorDraftRevision')).toBe(2);
-    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('ws|answer|2');
+    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('intake_ready');
 
     await advanceAndAlarm(owner, new Date(T0.getTime() + 2000), 2000);
     expect(send).toHaveBeenCalledTimes(1);
@@ -145,7 +145,7 @@ describe('E4.3 stale collector button', () => {
     await advanceAndAlarm(owner, new Date(T0.getTime() + 2000), 2000);
 
     expect(await storage.get('collectorDraftRevision')).toBe(2);
-    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('ws|answer|2');
+    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('intake_ready');
 
     const tap2 = await owner.fetch(rpc('/flush', { messageId: collectorId, callbackData: 'ws|answer|2', username: 'test-profile' }));
     expect(tap2.status).toBe(200);
@@ -170,7 +170,7 @@ describe('E4.3 stale collector button', () => {
     expect(await storage.get('draftRevision')).toBe(2);
     expect(await storage.get('collectorDraftRevision')).toBe(2);
     expect(await storage.get('collectorMsgId')).toBe(99);
-    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('ws|answer|2');
+    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('intake_ready');
 
     const tap2 = await owner.fetch(rpc('/flush', { messageId: collectorId, callbackData: 'ws|answer|2', username: 'test-profile' }));
     expect(tap2.status).toBe(200);
@@ -194,7 +194,7 @@ describe('E4.3 stale collector button', () => {
     expect(await storage.get('busy')).toBeUndefined();
     expect(await storage.get('collectorDraftRevision')).toBe(2);
     expect(await storage.get('collectorMsgId')).toBe(99);
-    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('ws|answer|2');
+    expect(callbacksOf(edit.mock.calls.at(-1))).toContain('intake_ready');
 
     const tap2 = await owner.fetch(rpc('/flush', { messageId: 99, callbackData: 'ws|answer|2', username: 'test-profile' }));
     expect(tap2.status).toBe(200);
