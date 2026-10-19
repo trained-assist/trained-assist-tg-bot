@@ -649,7 +649,7 @@ describe('existing collector control-plane ownership', () => {
     await owner._showCollector(42, 1, 2);
 
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain('ws|auto|4');
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
     expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'unknown' });
     expect(await storage.get(`cp-collector-send:${batch.batchId}:r4`)).toEqual({ state: 'sent', messageId: 99 });
     expect(await storage.get('collectorMsgId')).toBe(99);
@@ -663,7 +663,7 @@ describe('existing collector control-plane ownership', () => {
     await owner._showCollector(42, 2, 3);
 
     expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain('ws|auto|5');
+    expect(send.mock.calls.at(-1)[3].flat().map(button => button.callback_data)).toContain(`ws|answer|${await storage.get('draftRevision')}`);
     expect(await storage.get(`cp-collector-send:${batch.batchId}:r5`)).toEqual({ state: 'sent', messageId: 99 });
     expect(handleMessage).not.toHaveBeenCalled();
   });
@@ -882,7 +882,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('buf', items);
     await owner._showCollector(42, 1, 1);
     expect(send.mock.calls[0][3].flat().map(button => button.callback_data)).toEqual([
-      'ws|explore|1', 'ws|answer|1', 'ws|auto|1', 'intake_discard|1',
+      'intake_ready',
     ]);
     send.mockClear();
     const legacy = new IntakeBuffer({ storage }, { BOT_TOKEN: 'legacy-token' });
@@ -1709,6 +1709,8 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage, env } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
     await storage.put('buf', items);
+    await storage.put('collectorShowStyles', true);
+    await storage.put('collectorReadyCount', 1);
     await owner._showCollector(42, 1, 1);
     const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
     const revision = await storage.get('draftRevision');
