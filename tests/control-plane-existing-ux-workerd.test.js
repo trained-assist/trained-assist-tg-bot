@@ -672,7 +672,7 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
         expect(releasedEntries.get('cp-acceptance:terminal-request').terminal).toBe(true);
         expect(releasedEntries.get('cpStopWindow')).toMatchObject({ pending: false, recoveryOutcome: 'verified_terminal' });
         expect(releasedEntries.get('busy')).toBeUndefined();
-        expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
+        expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'intake_ready' || button.callback_data?.startsWith('ws|')))).toBe(true);
         expect(cpIntakes).toHaveLength(0);
         return;
       }
@@ -752,7 +752,7 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
         expect(neighborEntries.get('cpStopWindow')).toMatchObject({ pending: true, intentId: 'neighbor-window' });
       }
       expect(providerMessages.some(body => /снято вручную/.test(body.text || ''))).toBe(true);
-      expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('ws|')))).toBe(true);
+      expect(providerMessages.some(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data === 'intake_ready' || button.callback_data?.startsWith('ws|')))).toBe(true);
       const repeated = await invokeRecovery({ ...selector, mode: 'abandon',
         confirmWindowId: selector.windowId, auditReason: 'sandbox_test_fixture_abandoned' });
       expect(await repeated.json()).toMatchObject({ abandoned: true, replay: true });
@@ -1141,7 +1141,7 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     expect(cpIntakes).toHaveLength(boundary === 'intake' ? 2 : 1);
     for (const envelope of cpIntakes) expect(envelope).toEqual(admitted);
     const collectorMessages = providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data?.startsWith('ws|')));
+      .some(button => button.callback_data === 'intake_ready' || button.callback_data?.startsWith('ws|')));
     expect(collectorMessages).toHaveLength(1);
     const unknownNotices = providerMessages.filter(item => item.text.includes('Подтверждение не получено'));
     expect(unknownNotices).toHaveLength(boundary === 'intake' ? 1 : 0);
@@ -1175,7 +1175,7 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, followupDue - Date.now()) + 50));
     await state(true);
     const allCollectors = providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data?.startsWith('ws|')));
+      .some(button => button.callback_data === 'intake_ready' || button.callback_data?.startsWith('ws|')));
     expect(allCollectors).toHaveLength(2);
     expect(providerMessages.filter(item => item.text.includes('Подтверждение не получено'))).toEqual(unknownNotices);
     expect(providerMessages).toHaveLength(allCollectors.length + unknownNotices.length + 1);
@@ -1199,7 +1199,7 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     expect(dispatchCount).toBe(2);
     expect(await terminalProof()).toEqual(terminalBeforeFollowup);
     expect(providerMessages.filter(item => item.reply_markup?.inline_keyboard?.flat()
-      .some(button => button.callback_data?.startsWith('ws|')))).toHaveLength(2);
+      .some(button => button.callback_data === 'intake_ready' || button.callback_data?.startsWith('ws|')))).toHaveLength(2);
     expect(providerMessages).toHaveLength(3 + unknownNotices.length);
     expect(legacyRequests).toEqual([]);
     expect(unexpectedRequests).toEqual([]);

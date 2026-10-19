@@ -2459,7 +2459,7 @@ export class IntakeBuffer {
         : TOOK_IT.test(override || '') ? (cpMode ? [] : STATUS_BTN)
         : (busy && !canLaunchIndependently) ? (cpMode ? workStyleKeyboard(draftRevision, { busy: true, stopEnabled: this.env.TG_SLICE_STOP_ENABLED !== 'false' }) : QUEUE_BTN)
         : cpMode
-          ? (showStyles
+          ? (showStyles || canLaunchIndependently
             ? workStyleKeyboard(draftRevision, { discardLabel: stopPending
               ? (draftOnlyDiscard ? '🧹 Очистить этот черновик' : false) : undefined })
             : READY_BTN)

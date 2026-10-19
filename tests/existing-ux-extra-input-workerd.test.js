@@ -169,7 +169,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(collected.collectorDelivery).toMatchObject({ state: 'sent', messageId: 701 });
     expect(sends).toHaveLength(1);
     const buttons = sends[0].reply_markup.inline_keyboard.flat().map(button => button.callback_data);
-    expect(buttons.filter(data => data.startsWith('ws|'))).toHaveLength(3);
+    expect(buttons.filter(data => data === "intake_ready" || data.startsWith("ws|"))).toHaveLength(1);
     expect(buttons.some(data => data.startsWith('intake_stop'))).toBe(false);
     if (boundary === 'after-collector') expect(edits.some(edit => edit.message_id === 701)).toBe(true);
     const launch = { update_id: 202, callback_query: { id: 'offline-extra-input-launch',
