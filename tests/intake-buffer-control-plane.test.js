@@ -933,6 +933,7 @@ describe('existing collector control-plane ownership', () => {
     await storage.put('collectorMsgId', 99);
     await storage.put('draftRevision', 3);
     await storage.put('collectorDraftRevision', 3);
+    await storage.put('collectorReadyRevision', 3);
     await storage.put('collectorReadyCount', 1);
 
     const ready = await owner.fetch(rpc('/ready-check', { username: 'test-profile', chatId: 42,
@@ -1768,6 +1769,9 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage, env } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
     await storage.put('buf', items);
+    await storage.put('draftRevision', 1);
+    await storage.put('collectorDraftRevision', 1);
+    await storage.put('collectorReadyRevision', 1);
     await storage.put('collectorShowStyles', true);
     await storage.put('collectorReadyCount', 1);
     await owner._showCollector(42, 1, 1);
