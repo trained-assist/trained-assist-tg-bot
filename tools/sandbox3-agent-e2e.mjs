@@ -53,6 +53,24 @@ async function workerRequest(path, body) {
   }
 }
 
+async function launchWithStyle({ chatId, userId, delivery, updateId, beforeCollector, style = 'auto' }) {
+  // PR #777 changed the CP collector UX: users first confirm with "Готово",
+  // then choose a work style. Exercise both callbacks as the visible UI does.
+  const ready = await workerRequest('/operator/test-update', {
+    target: 'sandbox3', type: 'callback', chatId, userId, delivery,
+    callbackData: 'intake_ready', updateId: updateId++,
+  });
+  assert.equal(ready.ok, true, 'sandbox_collector_ready_callback_failed');
+  // Clear/likely input is launched by the Ready action itself. Only an
+  // incomplete or unavailable verdict leaves a draft for explicit style choice.
+  if (launchWasDispatched(ready, beforeCollector)) return { ...ready, nextUpdateId: updateId };
+  const launched = await workerRequest('/operator/test-update', {
+    target: 'sandbox3', type: 'callback', chatId, userId, delivery,
+    callbackData: style, updateId: updateId++,
+  });
+  return { ...launched, nextUpdateId: updateId };
+}
+
 async function deliveryRead(taskId) {
   const response = await fetch(`${TG_ORIGIN}/operator/test-delivery/${encodeURIComponent(taskId)}`, {
     headers: { authorization: `Bearer ${required('TG_SANDBOX3_OPERATOR_TOKEN')}` },
@@ -439,10 +457,9 @@ async function main() {
     sameUpdateReplayed: true, pendingCountBeforeReplay: question.collector.pendingCount,
     pendingCountAfterReplay: replay.collector.pendingCount }));
 
-  const launched = await workerRequest('/operator/test-update', {
-    target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
-    callbackData: 'auto', updateId: updateId++,
-  });
+  const launched = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+    beforeCollector: question.collector });
+  updateId = launched.nextUpdateId;
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
   failureDiagnostics = { stage: 'waiting_for_task' };
 
@@ -684,10 +701,9 @@ async function main() {
     const followup = await sendMessage(followupPrompt);
     assert.equal(followup.ok, true, 'sandbox_history_followup_not_accepted');
     assert.equal(followup.collector?.pendingCount, 1, 'sandbox_history_followup_not_buffered');
-    const followupLaunch = await workerRequest('/operator/test-update', {
-      target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
-      callbackData: 'auto', updateId: updateId++,
-    });
+    const followupLaunch = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+      beforeCollector: followup.collector });
+    updateId = followupLaunch.nextUpdateId;
     assert.equal(followupLaunch.ok, true, 'sandbox_history_followup_launch_failed');
     const followupTask = await waitForTask([task.id]);
     assert.notEqual(followupTask.id, task.id, 'sandbox_history_followup_reused_task_id');
@@ -729,10 +745,9 @@ async function main() {
     const stopQuestion = await sendMessage(stopPrompt);
     assert.equal(stopQuestion.ok, true, 'sandbox_stop_question_not_accepted');
     assert.equal(stopQuestion.collector?.pendingCount, 1, 'sandbox_stop_question_not_buffered');
-    const stopLaunch = await workerRequest('/operator/test-update', {
-      target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
-      callbackData: 'auto', updateId: updateId++,
-    });
+    const stopLaunch = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+      beforeCollector: stopQuestion.collector });
+    updateId = stopLaunch.nextUpdateId;
     assert.equal(stopLaunch.ok, true, 'sandbox_stop_task_launch_failed');
     const active = await waitForActiveTask([task.id]);
     const [activeExecution] = await d1('SELECT id, status, session_id, engine, generation FROM executions WHERE task_id = ? ORDER BY started_at', [active.id]);
@@ -771,10 +786,9 @@ async function main() {
       inputBufferedWhileStopPending = true;
       const stillPending = await readStopWindow(chatId);
       if (stillPending.pending) {
-        freshLaunch = await workerRequest('/operator/test-update', {
-          target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
-          callbackData: 'auto', updateId: updateId++,
-        });
+        freshLaunch = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+          beforeCollector: freshQuestion.collector });
+        updateId = freshLaunch.nextUpdateId;
         assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
         const collector = freshLaunch.collector ?? {};
         const barrier = collector.controlPlaneBarrier ?? {};
@@ -810,10 +824,9 @@ async function main() {
       assert.equal(freshQuestion.collector?.pendingCount, 1, 'sandbox_after_stop_question_not_buffered');
     }
     if (!freshLaunch) {
-      freshLaunch = await workerRequest('/operator/test-update', {
-        target: 'sandbox3', type: 'callback', chatId, userId, delivery: deliveryMode,
-        callbackData: 'auto', updateId: updateId++,
-      });
+      freshLaunch = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+        beforeCollector: freshQuestion.collector });
+      updateId = freshLaunch.nextUpdateId;
       assert.equal(freshLaunch.ok, true, 'sandbox_after_stop_launch_failed');
       const collector = freshLaunch.collector ?? {};
       const barrier = collector.controlPlaneBarrier ?? {};
