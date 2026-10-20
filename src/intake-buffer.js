@@ -879,6 +879,17 @@ export class IntakeBuffer {
     if (url.pathname === '/ready' && request.method === 'POST') {
       const source = await request.json().catch(() => ({}));
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
+      if (source.callbackData === 'intake_ready' && typeof source.callbackId === 'string' && source.callbackId) {
+        const callbackKey = `ready-callback:${await this._stableDigest(source.callbackId)}`;
+        const claimed = await this._exclusive(async () => {
+          if (await this.state.storage.get(callbackKey)) return false;
+          if (!(await this._callbackOwned(source))) return null;
+          await this.state.storage.put(callbackKey, { at: Date.now() });
+          return true;
+        });
+        if (claimed === false) return json({ kind: 'duplicate' });
+        if (claimed === null) return new Response('Callback ownership mismatch', { status: 409 });
+      }
       const styleChoice = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
       const pendingChoice = await this.state.storage.get('readyContinuationPending');
       if (source.callbackData === 'intake_ready' && pendingChoice) {

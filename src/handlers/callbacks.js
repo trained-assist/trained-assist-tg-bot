@@ -696,7 +696,7 @@ export async function handleCallbackQuery(cq, env) {
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
     const response = await stub.fetch('https://intake/ready', {
       method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id,
-        callbackData: 'intake_ready', sourceMessageId: message?.message_id }),
+        callbackData: 'intake_ready', callbackId: id, sourceMessageId: message?.message_id }),
     }).catch(err => { sendT(env, chatId, threadId, `❌ Не удалось проверить ввод: ${err.message}. Черновик сохранён; нажми «Готово» ещё раз.`); return null; });
     if (!response) return;
     const refusalBody = !response.ok ? await response.clone().text().catch(() => '') : '';

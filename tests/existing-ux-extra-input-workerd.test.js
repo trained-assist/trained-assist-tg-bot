@@ -33,7 +33,7 @@ function bundle() {
   nodePaths: [resolve('node_modules')] }).outputFiles[0].text;
 }
 
-it.each(['before-collector', 'after-collector'])('retains two-message aggregate across cold SQLite restart: %s', async boundary => {
+it.each(['before-collector', 'after-collector', 'clarify', 'required_input', 'degraded', 'malformed', 'provider-failure', 'append-race', 'clear'])('Ready signed-webhook/SQLite scenario: %s', async boundary => {
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-extra-input-offline-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test', CONTROL_PLANE_PROFILE: 'extra-input-profile',
     CONTROL_PLANE_SESSION_ID: 'extra-input-session', TG_SLICE_ALLOWED_CHATS: '42', TG_SLICE_ALLOWED_USERS: '43',
@@ -76,8 +76,15 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     }
     if (url.hostname === 'cp.test' && url.pathname === '/route') {
       routes.push(body);
-      if (body.continue === false) return Response.json({ decisionId: 'offline-extra-input-decision', generation: 1,
-        route: 'agent', continuation: { requested: false, issued: false } });
+      if (body.continue === false) {
+        if (boundary === 'provider-failure') return Response.json({ error: 'synthetic provider unavailable' }, { status: 503 });
+        if (boundary === 'malformed') return Response.json([]);
+        if (['clarify', 'required_input'].includes(boundary)) return Response.json({ route: boundary,
+          askUser: { question: 'Which date should the fixture use?' } });
+        if (boundary === 'append-race') await sendUpdate(message(204, 'Newest concurrent input: keep value 999.'));
+        return Response.json({ decisionId: 'offline-extra-input-decision', generation: 1,
+          route: 'agent', degraded: boundary === 'degraded', continuation: { requested: false, issued: false } });
+      }
       expect(body).toMatchObject({ taskId: accepted.taskId, continue: true, workStyle: 'answer',
         decisionId: 'offline-extra-input-decision', generation: 1 });
       dispatches.add(body.taskId);
@@ -181,6 +188,40 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     await sendUpdate(ready);
     expect(intakes).toHaveLength(1);
     expect(dispatches.size).toBe(0);
+    expect(intakes[0].inputItems.map(item => item.text)).toEqual([first.message.text, extra.message.text]);
+    if (['clarify', 'required_input', 'degraded', 'malformed', 'provider-failure', 'append-race'].includes(boundary)) {
+      expect(routes).toEqual([{ taskId: accepted.taskId, continue: false }]);
+      const expectedIds = boundary === 'append-race' ? [200, 201, 204] : [200, 201];
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      expect([...edits, ...sends].some(item => item.reply_markup?.inline_keyboard?.flat()
+        .some(button => button.callback_data?.startsWith('ws|')))).toBe(false);
+      if (['clarify', 'required_input'].includes(boundary)) {
+        expect([...edits, ...sends].some(item => item.text.includes('Which date should the fixture use?'))).toBe(true);
+      }
+      await runtime.dispose();
+      runtime = new Miniflare(options);
+      await sendUpdate(ready); // duplicate signed webhook after a cold restart
+      await alarm();
+      expect(routes).toHaveLength(1);
+      expect(intakes).toHaveLength(1);
+      expect(dispatches.size).toBe(0);
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      await sendUpdate({ update_id: 205, callback_query: { id: 'stale-style',
+        from: { id: 43, is_bot: false }, data: 'ws|answer|2',
+        message: { message_id: 701, chat: { id: 42, type: 'private' } } } });
+      expect(dispatches.size).toBe(0);
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      return;
+    }
+    if (boundary === 'clear') {
+      await sendUpdate({ update_id: 203, callback_query: { id: 'clear-ready',
+        from: { id: 43, is_bot: false }, data: `intake_discard|${await draftRevision()}`,
+        message: { message_id: 701, chat: { id: 42, type: 'private' } } } });
+      expect((await state()).buf).toEqual([]);
+      expect(dispatches.size).toBe(0);
+      expect(routes).toEqual([{ taskId: accepted.taskId, continue: false }]);
+      return;
+    }
     // Restart between classification and explicit choice: the task identity survives.
     await runtime.dispose();
     runtime = new Miniflare(options);
