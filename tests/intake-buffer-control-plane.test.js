@@ -126,7 +126,7 @@ describe('existing collector control-plane ownership', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ kind: 'quick_answer', delivered: true });
     expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
-    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ text: 'quick answer', deliveryId: 'quick:ut-ready:g1' }));
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ text: 'quick answer', deliveryId: 'terminal:ut-ready:g1' }));
     expect(await storage.get('busy')).toBeUndefined();
     expect(await storage.get('cpBusyRequests')).toBeUndefined();
     expect(await storage.get('buf')).toEqual([]);
