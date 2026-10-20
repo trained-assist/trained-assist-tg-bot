@@ -16,6 +16,8 @@ on:
           - basic
           - service-reply
           - capability-reply
+          - ready-quick
+          - ready-agent
           - multiline
           - history
           - stop
