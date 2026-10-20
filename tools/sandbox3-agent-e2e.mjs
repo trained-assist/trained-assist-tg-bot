@@ -76,7 +76,9 @@ async function launchWithStyle({ chatId, userId, delivery, updateId, beforeColle
     const explanationShown = readyText.includes('Не нашёл готовый ответ');
     console.log(JSON.stringify({ scenario: 'ready-agent-classification', explanationShown,
       transcript: (ready.transcript ?? []).map(item => ({ kind: item.kind,
-        text: String(item.text ?? '').slice(0, 300), telegramOk: item.telegramOk === true })),
+        text: String(item.text ?? '').slice(0, 300), telegramOk: item.telegramOk === true,
+        ...(item.kind === 'diagnostic' ? { name: item.name, detail: item.detail } : {}) })),
+      callbackOwnedBeforeDispatch: ready.callbackOwnedBeforeDispatch === true,
       collector: { pendingCount: ready.collector?.pendingCount ?? null,
         busy: ready.collector?.busy === true,
         dispatchStatus: ready.collector?.lastDispatchOutcome?.status ?? null,

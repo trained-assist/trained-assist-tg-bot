@@ -12,6 +12,7 @@ import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask,
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 import { stopChat, stopReplyText } from '../lib/stop-chat.js';
 import { controlPlaneStopDisabled } from '../lib/control-plane-stop-gate.js';
+import { captureTestDiagnostic } from '../lib/test-mode.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
 // message_thread_id so it lands in the same forum topic as its trigger. editMessage
@@ -700,6 +701,10 @@ export async function handleCallbackQuery(cq, env) {
     if (!response) return;
     const outcome = await response.json().catch(() => null);
     if (!response.ok) {
+      const refusalBody = await response.clone().text().catch(() => '');
+      captureTestDiagnostic(chatId, 'intake-ready-refused', {
+        status: response.status, response: refusalBody.slice(0, 160),
+      });
       await sendT(env, chatId, threadId, '⚠️ Черновик изменился или проверка не завершилась. Ввод сохранён; нажми «Готово» на актуальном сообщении.');
       return;
     }
