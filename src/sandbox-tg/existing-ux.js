@@ -862,7 +862,7 @@ app.post('/webhook', async context => {
     rememberCallback(update.callback_query.id, message.chat.id);
     const data = update.callback_query.data ?? '';
     const stopBlocked = data.startsWith('intake_stop') && env.TG_SLICE_STOP_ENABLED !== 'true';
-    const supported = ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew', 'input_draft', 'input_run'].includes(data)
+    const supported = ['intake_ready', 'intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew', 'input_draft', 'input_run'].includes(data)
       || /^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(data)
       || /^ws\|(explore|answer|auto)\|\d+$/.test(data)
       || /^intake_discard\|\d+$/.test(data)

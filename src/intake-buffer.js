@@ -926,11 +926,12 @@ export class IntakeBuffer {
         const msg = items.at(-1).msg;
         const profileId = controlPlaneClient(this.env).config.profileId;
         const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg));
-        if (!session?.id) return { error: 'session_missing' };
+        const sessionId = session?.id ?? session?.activeSessionId ?? session?.lastSessionId;
+        if (typeof sessionId !== 'string' || !sessionId) return { error: 'session_missing' };
         const scope = `${profileId}:${conversationKey(msg.chat.id, threadIdOf(msg))}:${items.map(item => item.msg.message_id).join(',')}`;
         const requestId = `tgready-${await this._stableDigest(scope)}`;
         const checkpoint = { msg: { ...msg, text, intakeItems: items }, initialMsgId: source.messageId,
-          profileId, botUsername: controlPlaneClient(this.env).config.botUsername,
+          profileId, sessionId, botUsername: controlPlaneClient(this.env).config.botUsername,
           requestId, revision, classificationState: 'pending', workStyle: 'auto', workStyleSource: 'default' };
         await this.state.storage.put(`cp-launch:${launchKey}`, checkpoint);
         await this.state.storage.put('collectorIntent', { requestId, revision, messageId: source.messageId,
@@ -962,7 +963,7 @@ export class IntakeBuffer {
         await this.state.storage.put('preparingMsgId', initialMsgId);
         const { runControlPlaneTask } = await import('./lib/control-plane-execution.js');
         const ack = await runControlPlaneTask(this.env, { requestId: checkpoint.requestId,
-          sessionId: (await getSession(this.env.SESSIONS, checkpoint.msg.chat.id, threadIdOf(checkpoint.msg))).id,
+          sessionId: checkpoint.sessionId,
           userId: checkpoint.msg.chat.id, threadId: threadIdOf(checkpoint.msg), username: source.username,
           initialMsgId, task: checkpoint.msg.text, inputItems: claim.items, workStyle: 'auto', workStyleSource: 'default',
           routeContinue: false, routingOnly: true });

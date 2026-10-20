@@ -39,6 +39,9 @@ on:
           - capture
           - telegram
         default: capture
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_call:
     inputs:
       run_e2e:
@@ -78,21 +81,39 @@ concurrency:
 
 jobs:
   sandbox3-e2e:
-    if: ${{ inputs.run_e2e == true && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'pull_request' || (inputs.run_e2e == true && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_call' && github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
       run:
         shell: bash
     steps:
-      - name: Require protected main
+      - name: Validate requested sandbox E2E run
         env:
-          REF: ${{ github.ref }}
-          SCENARIO: ${{ inputs.scenario }}
-          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+          SCENARIO: ${{ github.event_name == 'pull_request' && 'ready-agent' || inputs.scenario }}
+          DELIVERY_MODE: ${{ github.event_name == 'pull_request' && 'telegram' || inputs.delivery_mode }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
+          TG_STAGING_TEST_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
+          TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
+          INGRESS_BUFFER_TOKEN_SANDBOX3: ${{ secrets.INGRESS_BUFFER_TOKEN_SANDBOX3 }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          test "$REF" = "refs/heads/main"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            test "${{ github.event.pull_request.head.repo.full_name }}" = "$GITHUB_REPOSITORY"
+          fi
+          test -n "$CF_API_TOKEN"
+          test -n "$CF_ACCOUNT_ID"
+          test -n "$TG_SANDBOX3_CHAT_ID"
+          test -n "$TG_STAGING_TEST_USER_ID"
+          test -n "$TG_SANDBOX3_OPERATOR_TOKEN"
+          test -n "$INGRESS_BUFFER_TOKEN_SANDBOX3"
+          test -n "$GH_PAT"
+          echo "SANDBOX_SCENARIO=$SCENARIO" >> "$GITHUB_ENV"
+          echo "SANDBOX_DELIVERY_MODE=$DELIVERY_MODE" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_ENV"
           if [[ "$DELIVERY_MODE" == capture && "$SCENARIO" != *-intake && "$SCENARIO" != artifact-export && "$SCENARIO" != playwright-artifact ]]; then
             echo 'Capture delivery mode supports file intake and artifact scenarios.'
             exit 1
@@ -100,7 +121,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - uses: actions/checkout@v4
@@ -166,7 +187,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
-          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+          DELIVERY_MODE: ${{ env.SANDBOX_DELIVERY_MODE }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-paused.ndjson
         run: |
           set -euo pipefail
@@ -174,7 +195,7 @@ jobs:
           if [[ "$DELIVERY_MODE" == capture ]]; then TEST_CHAT_IDS="$TG_SANDBOX3_CHAT_ID"; fi
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
             --var TG_SLICE_INGRESS_PAUSED:true --var TG_SLICE_DELIVERY_PAUSED:true \
-            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-paused-${GITHUB_SHA}"
+            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-paused-${CANDIDATE_SHA}"
 
       - name: Install pinned test identity and dedicated operator secret
         env:
@@ -282,7 +303,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           TG_SANDBOX3_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
-          DELIVERY_MODE: ${{ inputs.delivery_mode }}
+          DELIVERY_MODE: ${{ env.SANDBOX_DELIVERY_MODE }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-deploy-live.ndjson
         run: |
           set -euo pipefail
@@ -290,7 +311,7 @@ jobs:
           if [[ "$DELIVERY_MODE" == capture ]]; then TEST_CHAT_IDS="$TG_SANDBOX3_CHAT_ID"; fi
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml \
             --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false \
-            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-live-${GITHUB_SHA}"
+            --var "TEST_CHAT_IDS:$TEST_CHAT_IDS" --message "sandbox3-e2e-live-${CANDIDATE_SHA}"
 
       - name: Verify exact active Worker revision and health
         env:
@@ -304,8 +325,9 @@ jobs:
           const status = JSON.parse(readFileSync(process.argv[2], 'utf8'));
           const serialized = JSON.stringify(status);
           const message = status.annotations?.['workers/message'] ?? '';
-          const expectedRevision = process.env.GITHUB_SHA.slice(0, 12);
-          if (!message.includes(expectedRevision) && !serialized.includes(process.env.GITHUB_SHA)) {
+          const expectedSha = process.env.CANDIDATE_SHA;
+          const expectedRevision = expectedSha.slice(0, 12);
+          if (!message.includes(expectedRevision) && !serialized.includes(expectedSha)) {
             throw new Error('sandbox3_active_worker_sha_mismatch');
           }
           console.log(JSON.stringify({ activeRevisionMatches: true }));
@@ -340,18 +362,18 @@ jobs:
 
 
       - name: Test real Worker help, status and anonymous-login prompt
-        if: ${{ inputs.scenario != 'ping-pong' }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scenario != 'ping-pong' && inputs.scenario != 'ready-agent' && inputs.scenario != 'ready-quick' }}
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
-          TG_SANDBOX_E2E_DELIVERY: ${{ inputs.delivery_mode }}
+          TG_SANDBOX_E2E_DELIVERY: ${{ env.SANDBOX_DELIVERY_MODE }}
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
         run: node tools/sandbox-buffer-cycle.mjs test-user-entry | tee sandbox3-user-entry.json
 
       - name: Test fresh input aggregation in the real sandbox3 Intake DO
-        if: ${{ inputs.scenario != 'ping-pong' }}
+        if: ${{ github.event_name != 'pull_request' && inputs.scenario != 'ping-pong' && inputs.scenario != 'ready-agent' && inputs.scenario != 'ready-quick' }}
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           TG_SANDBOX_TARGET: sandbox3
@@ -369,9 +391,9 @@ jobs:
           TG_SANDBOX3_OPERATOR_TOKEN: ${{ secrets.TG_SANDBOX3_OPERATOR_TOKEN }}
           TG_SANDBOX_E2E_CHAT_ID: ${{ secrets.TG_SANDBOX3_CHAT_ID }}
           TG_SANDBOX_E2E_USER_ID: ${{ secrets.TG_STAGING_TEST_USER_ID }}
-          SANDBOX3_E2E_SCENARIO: ${{ inputs.scenario }}
-          SANDBOX3_E2E_DELIVERY_MODE: ${{ inputs.delivery_mode }}
-          GITHUB_SHA: ${{ github.sha }}
+          SANDBOX3_E2E_SCENARIO: ${{ github.event_name == 'pull_request' && 'ready-agent' || inputs.scenario }}
+          SANDBOX3_E2E_DELIVERY_MODE: ${{ github.event_name == 'pull_request' && 'telegram' || inputs.delivery_mode }}
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node tools/sandbox3-agent-e2e.mjs | tee sandbox3-agent-e2e.json
 
       - name: Clear test state after terminal E2E
@@ -406,7 +428,7 @@ jobs:
           npx wrangler deploy --strict --config wrangler.sandbox-tg-sandbox3.toml
           --var TG_SLICE_INGRESS_PAUSED:false --var TG_SLICE_DELIVERY_PAUSED:false
           --var TEST_CHAT_IDS:
-          --message "sandbox3-e2e-restore-delivery-${GITHUB_SHA}"
+          --message "sandbox3-e2e-restore-delivery-${CANDIDATE_SHA}"
 
       - uses: actions/upload-artifact@v4
         if: always()

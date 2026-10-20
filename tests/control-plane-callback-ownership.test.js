@@ -89,9 +89,12 @@ describe('CP source-message ownership', () => {
     await handleCallbackQuery(callback(data, 42, 9), env);
     expect(env.INTAKE.idFromName).toHaveBeenCalledWith('7:9');
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ messageId: 42, callbackData: data, username: session.username });
-    const mutation = fetch.mock.calls.find(([url]) => url.endsWith(data === 'intake_cancel' ? '/cancel' : '/flush'));
-    expect(JSON.parse(mutation[1].body)).toEqual({ sourceMessageId: 42, callbackData: data, username: session.username,
-      ...(data === 'intake_cancel' ? {} : { parallel: data === 'intake_parallel' }) });
+    const mutation = fetch.mock.calls.find(([url]) => url.endsWith(data === 'ws|explore|7' ? '/ready'
+      : data === 'intake_cancel' ? '/cancel' : '/flush'));
+    expect(JSON.parse(mutation[1].body)).toEqual(data === 'ws|explore|7'
+      ? { sourceMessageId: 42, callbackData: data, username: session.username }
+      : { sourceMessageId: 42, callbackData: data, username: session.username,
+        ...(data === 'intake_cancel' ? {} : { parallel: data === 'intake_parallel' }) });
   });
 
   for (const status of [403, 404, 409, 500]) it(`ownership HTTP${status} fails closed`, async () => {

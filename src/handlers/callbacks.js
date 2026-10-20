@@ -713,7 +713,14 @@ export async function handleCallbackQuery(cq, env) {
       method: 'POST', body: JSON.stringify({ ...callbackSource(cq, env, session), callbackData: data }),
     }).catch(err => { sendT(env, chatId, threadIdOf(message), `❌ Не удалось запустить агента: ${err.message}`); return null; });
     if (!response) return;
-    if (!response.ok) await sendT(env, chatId, threadIdOf(message), '⚠️ Не удалось запустить агента. Черновик сохранён; нажми кнопку режима ещё раз.');
+    if (!response.ok) {
+      const refusal = await response.clone().json().catch(() => null);
+      const reasonCode = typeof refusal?.reasonCode === 'string' ? refusal.reasonCode : null;
+      if (reasonCode) console.warn(JSON.stringify({ event: 'tg.callback.launch_refused', reasonCode }));
+      await sendT(env, chatId, threadIdOf(message), reasonCode
+        ? launchRefusalText(reasonCode)
+        : '⚠️ Не удалось запустить агента. Черновик сохранён; нажми кнопку режима ещё раз.');
+    }
     return;
   }
 
