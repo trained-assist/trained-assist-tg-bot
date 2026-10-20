@@ -218,7 +218,35 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: node control-plane/tools/sandbox3-lane-preflight.mjs | tee sandbox3-lane-preflight.json
+          EXPECTED_CP_SHA: ${{ steps.cp-revision.outputs.sha }}
+        run: |
+          set -euo pipefail
+          set +e
+          node control-plane/tools/sandbox3-lane-preflight.mjs | tee sandbox3-lane-preflight.json
+          preflight_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$preflight_status" -eq 0 ]]; then exit 0; fi
+          if [[ "$preflight_status" -ne 2 ]]; then exit "$preflight_status"; fi
+          # A stale CP image is repairable here only when the independent lane,
+          # principals and D1 checks all pass and the task store is empty. Keep
+          # every other preflight failure closed before attempting deployment.
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const report = JSON.parse(readFileSync('sandbox3-lane-preflight.json', 'utf8'));
+          const { cpLiveness, ...otherChecks } = report.checks ?? {};
+          const empty = ['tasks', 'executions', 'nonterminalTasks', 'foreignProfileTasks', 'nonterminalExecutions']
+            .every(name => report.stateCounts?.[name] === 0);
+          const staleHealthyCp = report.outcome === 'BLOCKED'
+            && report.expectedCpSha === process.env.EXPECTED_CP_SHA
+            && /^[a-f0-9]{40}$/.test(report.cpBuildSha ?? '')
+            && report.cpBuildSha !== process.env.EXPECTED_CP_SHA
+            && cpLiveness === 'BLOCKED';
+          const independentChecksPass = Object.values(otherChecks).every(status => status === 'PASS');
+          if (!staleHealthyCp || !empty || !independentChecksPass) {
+            throw new Error('sandbox3_preflight_failed_beyond_stale_cp_revision');
+          }
+          console.log('Sandbox lane and task store are clean; repairing only the stale CP revision through its owner workflow.');
+          NODE
 
       - name: Read the existing sandbox3 delivery owner without sending
         env:
