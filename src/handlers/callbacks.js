@@ -699,9 +699,9 @@ export async function handleCallbackQuery(cq, env) {
         callbackData: 'intake_ready', sourceMessageId: message?.message_id }),
     }).catch(err => { sendT(env, chatId, threadId, `❌ Не удалось проверить ввод: ${err.message}. Черновик сохранён; нажми «Готово» ещё раз.`); return null; });
     if (!response) return;
+    const refusalBody = !response.ok ? await response.clone().text().catch(() => '') : '';
     const outcome = await response.json().catch(() => null);
     if (!response.ok) {
-      const refusalBody = await response.clone().text().catch(() => '');
       captureTestDiagnostic(chatId, 'intake-ready-refused', {
         status: response.status, response: refusalBody.slice(0, 160),
       });
