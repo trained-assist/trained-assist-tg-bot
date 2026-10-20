@@ -967,8 +967,6 @@ export class IntakeBuffer {
         const routed = ack.routed;
         if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
         const snap = await this._readSnapshot(ack.requestId);
-        const acceptance = { receipt, terminal: true, routingOnly: true, routed, routingComplete: true };
-        await this.state.storage.put(`cp-route:${checkpoint.requestId}`, acceptance);
         const accepted = await this.state.storage.get(`cp-route:${ack.requestId}`);
         if (!accepted?.receipt || accepted.receipt.userTaskId !== ack.taskId) throw new Error('durable_route_receipt_not_persisted');
         const status = await client.status(ack.taskId);
