@@ -84,6 +84,21 @@ beforeEach(() => {
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('keeps Ready classifier admission outside the agent busy queue until a mode is chosen', async () => {
+    const { owner, storage } = fixture();
+    await snapshot(owner);
+
+    const accepted = await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt, routingOnly: true }));
+
+    expect(accepted.status).toBe(200);
+    expect(await storage.get(`cp-route:${receipt.requestId}`)).toMatchObject({ receipt, routingOnly: true });
+    expect(await storage.get(`cp-acceptance:${receipt.requestId}`)).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await (await owner.fetch(new Request(`https://intake/cp-acceptance?requestId=${receipt.requestId}`))).json())
+      .toEqual({ receipt });
+  });
+
   it('durably queues the live buffer and lets the DO alarm admit it after the request returns', async () => {
     const { owner, storage } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };

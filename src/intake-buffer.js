@@ -901,7 +901,7 @@ export class IntakeBuffer {
           await tx.put('busyThread', threadIdOf(launch.msg));
           await tx.setAlarm(Date.now() + BUSY_POLL_MS);
         });
-        await this._retireIntentDraft(intent.launchKey, [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])], intent.requestId);
+        await this._retireIntentDraft(intent.launchKey, launch.msg.intakeItems || [], intent.requestId);
         await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, classificationState: 'launched', selectedWorkStyle: workStyle });
         return json({ kind: 'agent_started', taskId: intent.userTaskId });
       }
@@ -939,7 +939,7 @@ export class IntakeBuffer {
       if (claim.replay === 'pending') return json({ kind: 'pending', replay: true });
       if (claim.replay === 'agent') {
         await this.state.storage.put('collectorIntent', { requestId: claim.checkpoint.requestId,
-          revision: claim.revision, messageId: source.messageId, launchKey: claim.checkpoint.launchKey,
+          revision: await this.state.storage.get('draftRevision'), messageId: source.messageId, launchKey: claim.checkpoint.launchKey,
           chatId: claim.checkpoint.msg.chat.id, threadId: threadIdOf(claim.checkpoint.msg),
           userTaskId: claim.checkpoint.userTaskId });
         await this.state.storage.put('collectorShowStyles', true);
@@ -966,7 +966,7 @@ export class IntakeBuffer {
         if (!receipt?.durable || receipt.userTaskId !== ack.taskId) throw new Error('durable_receipt_missing');
         const routed = ack.routed;
         if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
-        const snap = await this._readSnapshot(checkpoint.requestId);
+        const snap = await this._readSnapshot(ack.requestId);
         const acceptance = { receipt, terminal: true, routingOnly: true, routed, routingComplete: true };
         await this.state.storage.put(`cp-route:${checkpoint.requestId}`, acceptance);
         const accepted = await this.state.storage.get(`cp-route:${ack.requestId}`);
@@ -992,7 +992,8 @@ export class IntakeBuffer {
         if (routed.route !== 'agent' || routed.continuation?.issued === true) throw new Error('intent_result_not_agent');
         await this.state.storage.put(`cp-launch:${claim.launchKey}`, { ...checkpoint, classificationState: 'agent',
           userTaskId: ack.taskId, receipt, routed, initialMsgId });
-        await this.state.storage.put('collectorIntent', { requestId: checkpoint.requestId, revision: claim.revision,
+        const menuRevision = await this.state.storage.get('draftRevision');
+        await this.state.storage.put('collectorIntent', { requestId: checkpoint.requestId, revision: menuRevision,
           launchKey: claim.launchKey, messageId: source.messageId, chatId: checkpoint.msg.chat.id,
           threadId: threadIdOf(checkpoint.msg), userTaskId: ack.taskId });
         await this.state.storage.put('collectorShowStyles', true);
