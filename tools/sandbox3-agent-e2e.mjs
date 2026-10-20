@@ -56,10 +56,19 @@ async function workerRequest(path, body) {
 async function launchWithStyle({ chatId, userId, delivery, updateId, beforeCollector, style = 'auto', scenario = null, taskMarker = null }) {
   // Confirm the full input snapshot. A quick route completes on this callback;
   // an agent route leaves the draft available for an explicit work style.
-  const ready = await workerRequest('/operator/test-update', {
-    target: 'sandbox3', type: 'callback', chatId, userId, delivery,
-    callbackData: 'intake_ready', updateId: updateId++,
-  });
+  let ready;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    ready = await workerRequest('/operator/test-update', {
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery,
+      callbackData: 'intake_ready', updateId: updateId++,
+    });
+    const transcriptText = (ready.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
+    if (!transcriptText.includes('Черновик изменился или проверка не завершилась')) break;
+    // The live Worker can rotate a collector revision between the operator's
+    // ownership read and the webhook callback. A rejected tap preserves input;
+    // emulate the user tapping Готово again on the still-current collector.
+    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
   assert.equal(ready.ok, true, 'sandbox_collector_ready_callback_failed');
   if (scenario === 'ready-agent') {
     assert.equal(launchWasDispatched(ready, beforeCollector), false, 'ready_agent_dispatched_before_style_choice');
