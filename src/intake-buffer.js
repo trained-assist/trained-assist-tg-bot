@@ -892,7 +892,12 @@ export class IntakeBuffer {
         await this.state.storage.transaction(async tx => {
           const current = await tx.get(key);
           if (!current) await tx.put(key, { receipt: routeReceipt.receipt, terminal: false,
-            routingComplete: true, routed, selectedWorkStyle: workStyle });
+            routingComplete: true, routed, selectedWorkStyle: workStyle,
+            routingOutcome: { known: true, publicationComplete: true, degraded: routed.degraded === true,
+              routeReasonCode: typeof routed.reasonCode === 'string' ? routed.reasonCode : null,
+              continuationRequested: routed.continuation?.requested === true,
+              continuationIssued: routed.continuation?.issued === true,
+              continuationRefusal: typeof routed.continuation?.refusal === 'string' ? routed.continuation.refusal : null } });
           const ids = await tx.get('cpBusyRequests') || [];
           await tx.put('cpBusyRequests', [...new Set([...ids, intent.requestId])]);
           await tx.put('busy', true);

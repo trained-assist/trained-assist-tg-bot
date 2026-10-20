@@ -152,6 +152,9 @@ describe('existing collector control-plane ownership', () => {
     expect(await launched.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
     expect(route).toHaveBeenLastCalledWith('ut-ready', { continue: true, workStyle: 'explore' });
     expect(await storage.get('cpBusyRequests')).toEqual(['cp-ready-request']);
+    expect(await storage.get('cp-acceptance:cp-ready-request')).toMatchObject({
+      routingOutcome: { known: true, publicationComplete: true, continuationIssued: true },
+    });
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('buf')).toEqual([]);
   });
