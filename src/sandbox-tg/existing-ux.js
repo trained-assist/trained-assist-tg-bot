@@ -579,7 +579,7 @@ app.post('/operator/test-update', async context => {
   const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
     ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
   let before = await readCollectorState();
-  if (callbackShortcut && source.messageId === undefined && source.delivery !== 'telegram' &&
+  if ((callbackShortcut || source.callbackData === 'intake_ready') && source.messageId === undefined && source.delivery !== 'telegram' &&
       !Number.isSafeInteger(before?.collectorMsgId)) {
     const session = await getSession(env.SESSIONS, chatId, null);
     if (!session?.username || target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') {

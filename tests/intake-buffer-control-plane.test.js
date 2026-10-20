@@ -240,6 +240,40 @@ describe('existing collector control-plane ownership', () => {
     expect(route).toHaveBeenCalledTimes(1);
   });
 
+  it('does not launch accumulated input when an old quiet timer expires', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    await storage.put('debounceExpiresAt', Date.now() - 1);
+    await storage.put('autoPolicy', 'quiet-3m-v1');
+    await owner.alarm();
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(runReady).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('reconciles an unknown continuation on the same task before admitting newer input', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } });
+    await owner.fetch(rpc('/ready', readySource));
+    route.mockRejectedValueOnce(new Error('lost continuation acknowledgement'));
+    await expect(owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }))).rejects.toThrow('lost continuation');
+    expect(await storage.get('readyContinuationPending')).toMatchObject({ workStyle: 'answer' });
+    const newest = { text: 'new input', msg: { message_id: 13, chat: { id: 42 }, text: 'new input' } };
+    await storage.put('buf', [...await storage.get('buf'), newest]);
+    await owner._bumpDraftRevisionLocked();
+    await owner._showCollector(42, 3, 13);
+    route.mockResolvedValueOnce({ continuation: { issued: false, refusal: 'existing_run_requires_reconciliation', runId: 'existing-run' } });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(await response.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
+    expect(runReady).toHaveBeenCalledTimes(1);
+    expect(route.mock.calls.slice(1).every(call => call[0] === 'ut-ready' && call[1].workStyle === 'answer')).toBe(true);
+    expect(await storage.get('buf')).toEqual([newest]);
+    expect(await storage.get('readyContinuationPending')).toBeUndefined();
+  });
+
   it('keeps Ready classifier admission outside the agent busy queue until a mode is chosen', async () => {
     const { owner, storage } = fixture();
     await snapshot(owner);
@@ -2033,17 +2067,18 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('launching')).toEqual(items);
   });
 
-  it('keeps quiet timer and dispatches whole input without legacy classifier', async () => {
+  it('keeps the whole input awaiting Ready without a quiet-time launch', async () => {
     const { owner, storage } = fixture();
     await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg }));
     expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
-    expect(await storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now() + 170_000);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
     await storage.put('receiptDue', Date.now() - 1);
     await owner.alarm();
     expect(send).toHaveBeenCalledWith('test-bot-token', 42, expect.any(String), expect.any(Array), expect.any(Object));
     await storage.put('debounceExpiresAt', Date.now() - 1);
     await owner.alarm();
-    expect(handleMessage).toHaveBeenCalledWith(expect.objectContaining({ intakeItems: items }), expect.anything(), expect.anything());
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('buf')).toEqual(items);
     expect(checkCompleteness).not.toHaveBeenCalled();
   });
 
@@ -2105,8 +2140,8 @@ describe('existing collector control-plane ownership', () => {
     await owner.alarm();
 
     const batch = await storage.get('pendingBatch');
-    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'rejected', errorCode: 404 });
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'sent', messageId: 99 });
+    expect(send).toHaveBeenCalledTimes(2);
 
     await owner.fetch(rpc('/append', { text: 'second', msg: { ...items[0].msg, message_id: 2, text: 'second' }, telegramUpdateId: 101 }));
     await storage.put('receiptDue', Date.now() - 1);

@@ -1187,17 +1187,14 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     expect(providerMessages).toHaveLength(allCollectors.length + unknownNotices.length + 1);
     expect(await terminalProof()).toEqual(terminalBeforeFollowup);
     const followupCollectorId = 501 + providerMessages.indexOf(allCollectors[1]);
-    const followupRevision = (await state()).get('draftRevision');
-    const followupLaunch = { update_id: 107, callback_query: { id: 'workerd-followup-launch',
-      from: { id: 43, is_bot: false }, data: `ws|explore|${followupRevision}`,
-      message: { message_id: followupCollectorId, chat: { id: 42, type: 'private' } } } };
+    const followupLaunch = message(107, 'запускай', 43);
     expect((await webhook(followupLaunch)).status).toBe(200);
     await state(true);
     expect(admittedTasks.size).toBe(2);
     const followup = [...admittedTasks.values()].find(task => task.taskId === 'ut-workerd-followup');
     expect(followup.envelope.requestId).not.toBe(admitted.requestId);
     expect(followup.envelope.conversationRef).toBe(admitted.conversationRef);
-    expect(followup.envelope.inputItems).toEqual([{ text: 'Continue with the same input and session', artifactRefs: [] }]);
+    expect(followup.envelope.inputItems).toEqual([{ text: 'Continue with the same input and session', artifactRefs: [] }, { text: 'запускай', artifactRefs: [] }]);
     expect(followup.envelope.sessionId).toBe(admitted.sessionId);
     expect(dispatchCount).toBe(2);
     expect((await webhook(followupLaunch)).status).toBe(200);

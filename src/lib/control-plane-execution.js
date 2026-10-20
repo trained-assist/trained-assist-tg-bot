@@ -145,6 +145,9 @@ export async function runControlPlaneTask(env, input) {
   }
   if (receipt.requestId !== requestId || receipt.profileId !== config.profileId || !receipt.userTaskId || receipt.durable !== true) throw new Error('control_plane_receipt_scope_mismatch');
   if (!routeContinue) {
+    // Initialize the same delivery owner used by ordinary admissions before
+    // returning a routing-only receipt (including after a cold restart).
+    await new TgDeliveryOwnerClient(env, config).open();
     try {
       const routed = await client.route(receipt.userTaskId, { continue: false });
       if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');

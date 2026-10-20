@@ -459,6 +459,9 @@ export class IntakeBuffer {
         action.intentId === (await this.state.storage.get('cpStopWindow'))?.intentId;
     }
     const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(data);
+    const pendingChoice = await this.state.storage.get('readyContinuationPending');
+    if (styleLaunch && pendingChoice?.source?.username === source.username &&
+        pendingChoice.source.messageId === messageId && pendingChoice.source.callbackData === data) return true;
     if (/^intake_stop(yes|no)\|(supp|new)$/.test(data || '')) {
       const confirmation = await this.state.storage.get(`cp-confirmation:${messageId}`);
       const currentRequestIds = [...new Set((await this.state.storage.get('cpBusyRequests')) || [])].sort();
@@ -609,6 +612,7 @@ export class IntakeBuffer {
         }
         await this.state.storage.put('collectorMsgId', source.messageId);
         await this.state.storage.put('collectorDraftRevision', revision);
+        await this.state.storage.put('collectorReadyRevision', revision);
         return Response.json({ seeded: true, draftRevision: revision });
       });
     }
@@ -652,6 +656,7 @@ export class IntakeBuffer {
           return { discarded: true, draftOnly: true, count: buf.length, preservedRetryCount: retry.length,
             pendingWindowPreserved: true, preservedFailedCount: failedKeys.length + failedMediaKeys.length };
         }
+        if (await this.state.storage.get('readyContinuationPending')) return { pending: true, reasonCode: 'continuation_outcome_unknown' };
         if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length ||
             (await this.state.storage.get('launching'))?.length) {
           return { pending: true, reasonCode: this.cpDispatches ? 'dispatch_in_progress' : 'unresolved_launch' };
@@ -875,6 +880,13 @@ export class IntakeBuffer {
       const source = await request.json().catch(() => ({}));
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
       const styleChoice = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
+      const pendingChoice = await this.state.storage.get('readyContinuationPending');
+      if (source.callbackData === 'intake_ready' && pendingChoice) {
+        if (!(await this._callbackOwned(source))) return new Response('Callback ownership mismatch', { status: 409 });
+        // Reconcile the exact previously authorized choice before a newer draft
+        // may be admitted. A lost response never authorizes a replacement task.
+        return this._fetch(new Request('https://intake/ready', { method: 'POST', body: JSON.stringify(pendingChoice.source) }));
+      }
       if (styleChoice && !(await this.state.storage.get('collectorIntent')) &&
           ((await this.state.storage.get('busy')) || (await this.state.storage.get('cpStopWindow'))?.pending)) {
         return this.fetch(new Request('https://intake/flush', { method: 'POST', body: JSON.stringify({ ...source,
@@ -884,6 +896,11 @@ export class IntakeBuffer {
         const workStyle = styleChoice[1];
         const choice = await this._exclusive(async () => {
           if (this.cpReadyContinuation || !(await this._callbackOwned(source))) return null;
+          if (pendingChoice) {
+            if (pendingChoice.workStyle !== workStyle) return null;
+            this.cpReadyContinuation = true;
+            return pendingChoice;
+          }
           const intent = await this.state.storage.get('collectorIntent');
           if (!intent?.userTaskId || Number(styleChoice[2]) !== intent.revision) return null;
           const launch = await this.state.storage.get(`cp-launch:${intent.launchKey}`);
@@ -892,19 +909,35 @@ export class IntakeBuffer {
               routeReceipt.receipt.userTaskId !== intent.userTaskId ||
               (launch.selectedWorkStyle && launch.selectedWorkStyle !== workStyle)) return null;
           await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, selectedWorkStyle: workStyle });
+          const selected = { intent, launch, routeReceipt, workStyle,
+            source: { ...source, messageId: source.messageId ?? source.sourceMessageId } };
+          await this.state.storage.put('readyContinuationPending', selected);
           this.cpReadyContinuation = true;
-          return { intent, launch, routeReceipt };
+          return selected;
         });
         if (!choice) return Response.json({ reasonCode: 'continuation_choice_stale_or_pending' }, { status: 409 });
         const { intent, launch, routeReceipt } = choice;
         try {
         const client = controlPlaneClient(this.env);
-        const routed = await client.route(intent.userTaskId, { continue: true, workStyle,
-          decisionId: launch.routed.decisionId, generation: launch.generation,
-          idempotencyKey: `ready:${intent.userTaskId}:${launch.generation}:${launch.routed.decisionId}` });
+        let routed;
+        try {
+          routed = await client.route(intent.userTaskId, { continue: true, workStyle,
+            decisionId: launch.routed.decisionId, generation: launch.generation,
+            idempotencyKey: `ready:${intent.userTaskId}:${launch.generation}:${launch.routed.decisionId}` });
+        } catch (error) {
+          // The original Run can have finished before a lost ACK is retried.
+          // Reconcile its authoritative receipt; never submit a replacement.
+          const observed = await client.request('POST', '/status', { body: { taskId: intent.userTaskId } }).catch(() => null);
+          const row = observed?.value?.taskStore;
+          const run = observed?.value?.runs?.find(item => item.generation === launch.generation && typeof item.id === 'string');
+          if (row?.id !== intent.userTaskId || row?.profile_id !== routeReceipt.receipt.profileId || !run) throw error;
+          routed = { continuation: { requested: true, issued: false, refusal: 'existing_run_requires_reconciliation', runId: run.id } };
+        }
         if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) return new Response('Route unavailable', { status: 503 });
         const reconciledRun = routed.continuation?.refusal === 'existing_run_requires_reconciliation' && routed.continuation?.runId;
         if (routed.continuation?.issued !== true && !reconciledRun) {
+          if (typeof routed.continuation?.refusal !== 'string') return new Response('Continuation outcome unknown', { status: 503 });
+          await this.state.storage.delete('readyContinuationPending');
           return Response.json({ reasonCode: routed.continuation?.refusal || 'continuation_not_accepted' }, { status: 409 });
         }
         const key = `cp-acceptance:${intent.requestId}`;
@@ -925,6 +958,7 @@ export class IntakeBuffer {
           await tx.put('busyThread', threadIdOf(launch.msg));
           await tx.setAlarm(Date.now() + BUSY_POLL_MS);
         });
+        await this.state.storage.delete('readyContinuationPending');
         await this._retireIntentDraft(intent.launchKey, launch.msg.intakeItems || [], intent.requestId);
         await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, classificationState: 'launched', selectedWorkStyle: workStyle });
         return json({ kind: 'agent_started', taskId: intent.userTaskId });
@@ -2561,6 +2595,9 @@ export class IntakeBuffer {
   //     idle input, and a NEW message after the release re-arms it, exactly as
   //     stoppedText promises: «новое сообщение вернёт обычный режим»).
   async _autoLaunchBlocked(buf) {
+    // SC-INTAKE-READY-01: a quiet timeout is not an explicit Ready/style choice.
+    // This also fences timers persisted by the previous collector version.
+    if (this.env.EXECUTION_BACKEND === 'control-plane') return true;
     if (await this.state.storage.get('stopLaunch')) return true;
     const items = buf || (await this.state.storage.get('buf')) || [];
     return items.length > 0 && items.every(i => i.heldWhileBusy);

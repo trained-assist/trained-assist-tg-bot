@@ -176,7 +176,7 @@ describe('E4.3 stale collector button', () => {
     expect(tap2.status).toBe(200);
   });
 
-  it('S4: debounce auto-dispatch → held message → release shows fresh-revision collector that launches', async () => {
+  it('S4: quiet timer waits for explicit dispatch → held message → release shows fresh-revision collector that launches', async () => {
     const { owner, storage } = fixture();
 
     await append(owner, 1, 'first');
@@ -184,6 +184,8 @@ describe('E4.3 stale collector button', () => {
     expect(await storage.get('collectorDraftRevision')).toBe(1);
 
     await advanceAndAlarm(owner, new Date(T0.getTime() + 2000), 3 * 60 * 1000);
+    expect(await storage.get('busy')).not.toBe(true);
+    await owner._dispatch();
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('debounceExpiresAt')).toBeUndefined();
 
