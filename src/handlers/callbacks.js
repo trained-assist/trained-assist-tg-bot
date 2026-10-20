@@ -705,6 +705,18 @@ export async function handleCallbackQuery(cq, env) {
     return;
   }
 
+  if (/^ws\|(explore|answer|auto)\|\d+$/.test(data || '') && env.EXECUTION_BACKEND === 'control-plane') {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Запускаю полноценного агента…');
+    if (!env.INTAKE) return;
+    const response = await env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadIdOf(message)))).fetch('https://intake/ready', {
+      method: 'POST', body: JSON.stringify({ ...callbackSource(cq, env, session), callbackData: data }),
+    }).catch(err => { sendT(env, chatId, threadIdOf(message), `❌ Не удалось запустить агента: ${err.message}`); return null; });
+    if (!response) return;
+    if (!response.ok) await sendT(env, chatId, threadIdOf(message), '⚠️ Не удалось запустить агента. Черновик сохранён; нажми кнопку режима ещё раз.');
+    return;
+  }
+
   if (data === 'intake_run' || data === 'intake_parallel' || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '') || data?.startsWith('workrun|')) {
     const parallel = data === 'intake_parallel';
     const style = /^ws\|(explore|answer|auto)\|\d+$/.exec(data || '')?.[1] || null;

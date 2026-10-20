@@ -56,6 +56,8 @@ export async function runControlPlaneTask(env, input) {
   }
   const scope = `${config.botUsername}:${config.profileId}:${input.userId}:${input.threadId ?? ''}`;
   const requestId = `tgcp-${await digest(`${scope}:${input.requestId}`)}`;
+  const routeContinue = input.routeContinue !== false;
+  const routingOnly = input.routingOnly === true;
   const conversationId = `tg-${input.userId}${input.threadId == null ? '' : `-t${input.threadId}`}-s${(await digest(`${scope}:${input.sessionId}`)).slice(0, 24)}`;
   const inputItems = input.inputItems?.length
     ? mediaInput.map(({ item, artifactManifest }) => ({ text: assembleInput([item], false).task,
@@ -128,7 +130,7 @@ export async function runControlPlaneTask(env, input) {
     let accepted;
     try {
       accepted = await stub.fetch('https://intake/cp-acceptance', {
-        method: 'POST', body: JSON.stringify({ requestId, receipt }),
+        method: 'POST', body: JSON.stringify({ requestId, receipt, routingOnly }),
       });
     } catch {
       logLifecycleEvent({ event: 'tg.cp.receipt_persist_failed', component: 'gateway',
@@ -142,6 +144,18 @@ export async function runControlPlaneTask(env, input) {
     }
   }
   if (receipt.requestId !== requestId || receipt.profileId !== config.profileId || !receipt.userTaskId || receipt.durable !== true) throw new Error('control_plane_receipt_scope_mismatch');
+  if (!routeContinue) {
+    try {
+      const routed = await client.route(receipt.userTaskId, { continue: false });
+      if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
+      return { taskId: receipt.userTaskId, userTaskId: receipt.userTaskId, requestId, durable: true,
+        controlPlane: true, routingPending: false, routed, receipt };
+    } catch (error) {
+      logLifecycleEvent({ event: 'tg.cp.route_pending', component: 'gateway', correlationId: requestId,
+        requestId, taskId: receipt.userTaskId, status: 'pending', reasonCode: 'route_ack_unavailable' }, env);
+      throw error;
+    }
+  }
   logLifecycleEvent({ event: 'tg.cp.task_accepted', component: 'gateway',
     correlationId: requestId, requestId, taskId: receipt.userTaskId, status: 'durable',
     duplicate: receipt.duplicate === true }, env);
