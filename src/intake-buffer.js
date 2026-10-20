@@ -2796,10 +2796,14 @@ export class IntakeBuffer {
         }
         if (claim?.state === 'sending') {
           await this.state.storage.put(claimKey, { ...claim, state: 'unknown', ts: Date.now() });
+          await this._ensureAlarmBy(Date.now() + COLLECTOR_UNKNOWN_RETRY_MS);
           return null;
         }
         if (claim?.state === 'unknown') {
-          if (Date.now() - (Number(claim.ts) || 0) < COLLECTOR_UNKNOWN_RETRY_MS) return null;
+          if (Date.now() - (Number(claim.ts) || 0) < COLLECTOR_UNKNOWN_RETRY_MS) {
+            await this._ensureAlarmBy(Number(claim.ts) + COLLECTOR_UNKNOWN_RETRY_MS);
+            return null;
+          }
           await this.state.storage.delete(claimKey);
         }
       }
@@ -2864,7 +2868,8 @@ export class IntakeBuffer {
           await this.state.storage.put('collectorStopIntentId', stopPending ? stopWindow?.intentId ?? null : null);
         }
       }
-      else if (!cpMode) await this._scheduleReceipt();
+      else if (!cpMode || sent?.ok === false) await this._scheduleReceipt();
+      else await this._ensureAlarmBy(Date.now() + COLLECTOR_UNKNOWN_RETRY_MS);
       return id || null;
     } finally { release(); }
   }

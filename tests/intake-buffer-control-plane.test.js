@@ -2132,6 +2132,22 @@ describe('existing collector control-plane ownership', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps receipt retries alive without restoring automatic task dispatch', async () => {
+    const { owner, storage } = fixture();
+    await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg }));
+    send.mockResolvedValue({ ok: false, error_code: 503 });
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
+    expect(await storage.get('buf')).toEqual(items);
+    expect(handleMessage).not.toHaveBeenCalled();
+    send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(await storage.get('collectorMsgId')).toBe(99);
+    expect(route).not.toHaveBeenCalled();
+  });
+
   it('retries a collector after Telegram explicitly rejects a send', async () => {
     const { owner, storage } = fixture();
     await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
