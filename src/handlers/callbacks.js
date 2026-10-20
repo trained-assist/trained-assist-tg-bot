@@ -33,7 +33,7 @@ async function sendJournalLink(env, chatId, threadId, { username, sessionId }) {
 }
 
 function needsControlPlaneOwnership(data) {
-  return ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
+  return ['intake_ready', 'intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew'].includes(data)
     || /^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(data || '')
     || /^intake_discard\|\d+$/.test(data || '')
     || /^ws\|(explore|answer|auto)\|\d+$/.test(data || '')
