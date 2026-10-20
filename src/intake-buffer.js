@@ -3,7 +3,7 @@ import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia, cpMediaSupported } from './media-jobs.js';
-import { getSession } from './lib/kv.js';
+import { getSession, setSession, newSessionId } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
@@ -926,8 +926,7 @@ export class IntakeBuffer {
         const msg = items.at(-1).msg;
         const profileId = controlPlaneClient(this.env).config.profileId;
         const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg));
-        const sessionId = session?.id ?? session?.activeSessionId ?? session?.lastSessionId;
-        if (typeof sessionId !== 'string' || !sessionId) return { error: 'session_missing' };
+        const sessionId = session?.id ?? session?.activeSessionId ?? session?.lastSessionId ?? newSessionId(msg.chat.id);
         const scope = `${profileId}:${conversationKey(msg.chat.id, threadIdOf(msg))}:${items.map(item => item.msg.message_id).join(',')}`;
         const requestId = `tgready-${await this._stableDigest(scope)}`;
         const checkpoint = { msg: { ...msg, text, intakeItems: items }, initialMsgId: source.messageId,
@@ -975,6 +974,12 @@ export class IntakeBuffer {
         const snap = await this._readSnapshot(ack.requestId);
         const accepted = await this.state.storage.get(`cp-route:${ack.requestId}`);
         if (!accepted?.receipt || accepted.receipt.userTaskId !== ack.taskId) throw new Error('durable_route_receipt_not_persisted');
+        const currentSession = await getSession(this.env.SESSIONS, checkpoint.msg.chat.id, threadIdOf(checkpoint.msg));
+        if (!currentSession || currentSession.username !== source.username) throw new Error('route_session_scope_changed');
+        if (currentSession.lastSessionId !== checkpoint.sessionId) {
+          await setSession(this.env.SESSIONS, checkpoint.msg.chat.id,
+            { ...currentSession, lastSessionId: checkpoint.sessionId }, threadIdOf(checkpoint.msg));
+        }
         const status = await client.status(ack.taskId);
         if (status.profile_id !== checkpoint.profileId || status.id !== ack.taskId) throw new Error('task_scope_mismatch');
         const answer = taskAnswer(status);
