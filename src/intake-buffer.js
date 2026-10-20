@@ -938,7 +938,7 @@ export class IntakeBuffer {
       if (claim.error) return Response.json({ error: claim.error }, { status: 409 });
       if (claim.replay === 'pending') return json({ kind: 'pending', replay: true });
       if (claim.replay === 'agent') {
-        await this.state.storage.put('collectorIntent', { requestId: claim.checkpoint.requestId,
+        await this.state.storage.put('collectorIntent', { requestId: claim.checkpoint.controlPlaneRequestId,
           revision: await this.state.storage.get('draftRevision'), messageId: source.messageId, launchKey: claim.checkpoint.launchKey,
           chatId: claim.checkpoint.msg.chat.id, threadId: threadIdOf(claim.checkpoint.msg),
           userTaskId: claim.checkpoint.userTaskId });
@@ -989,9 +989,9 @@ export class IntakeBuffer {
         }
         if (routed.route !== 'agent' || routed.continuation?.issued === true) throw new Error('intent_result_not_agent');
         await this.state.storage.put(`cp-launch:${claim.launchKey}`, { ...checkpoint, classificationState: 'agent',
-          userTaskId: ack.taskId, receipt, routed, initialMsgId });
+          controlPlaneRequestId: ack.requestId, userTaskId: ack.taskId, receipt, routed, initialMsgId });
         const menuRevision = await this.state.storage.get('draftRevision');
-        await this.state.storage.put('collectorIntent', { requestId: checkpoint.requestId, revision: menuRevision,
+        await this.state.storage.put('collectorIntent', { requestId: ack.requestId, revision: menuRevision,
           launchKey: claim.launchKey, messageId: source.messageId, chatId: checkpoint.msg.chat.id,
           threadId: threadIdOf(checkpoint.msg), userTaskId: ack.taskId });
         await this.state.storage.put('collectorShowStyles', true);

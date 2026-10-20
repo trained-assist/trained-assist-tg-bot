@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
+const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery, status, runReady } = vi.hoisted(() => ({
   handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), start: vi.fn(), send: vi.fn(), edit: vi.fn(),
   stopTargets: vi.fn(),
   publishRoutingDegradation: vi.fn(),
-  enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
+  enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(), status: vi.fn(), runReady: vi.fn(),
 }));
 
 vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
@@ -18,7 +18,8 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets, status }),
+  runControlPlaneTask: (...args) => runReady(...args),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -46,6 +47,20 @@ function fixture() {
   };
   const owner = new IntakeBuffer({ storage }, env);
   return { storage, env, owner };
+}
+
+async function seedReadyDraft(owner, storage) {
+  owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile', id: 'session-42' }) : null,
+    put: async () => {} };
+  owner.env.INTAKE = { idFromName: name => name, get: () => owner };
+  await storage.put('buf', [{ text: 'first request', msg: { message_id: 11, chat: { id: 42 }, text: 'first request' } },
+    { text: 'add this detail', msg: { message_id: 12, chat: { id: 42 }, text: 'add this detail' } }]);
+  await storage.put('retryBatch', []);
+  await storage.put('collectorMsgId', 99);
+  await storage.put('draftRevision', 3);
+  await storage.put('collectorDraftRevision', 3);
+  await storage.put('collectorReadyRevision', 3);
+  await storage.put('collectorReadyCount', 2);
 }
 
 const items = [{ text: 'first', msg: { message_id: 1, chat: { id: 42 }, text: 'first' } }];
@@ -78,12 +93,69 @@ beforeEach(() => {
   enqueue.mockImplementation(async record => ({ record: { ...record, status: 'pending' }, duplicate: false }));
   drain.mockResolvedValue(1);
   loadDelivery.mockImplementation(async deliveryId => ({ deliveryId, status: 'sent' }));
+  status.mockResolvedValue({ id: 'ut-ready', profile_id: receipt.profileId, status: 'queued', generation: 1 });
+  runReady.mockImplementation(async (env, input) => {
+    const requestId = 'cp-ready-request';
+    const envelope = { contractVersion: 1, requestId, profileId: 'test-profile', conversationRef: 'tg-42',
+      sessionId: input.sessionId, inputItems: input.inputItems.map(item => ({ text: item.msg.text, artifactRefs: [] })),
+      waitTimeoutSec: null, workStyle: 'auto', workStyleSource: 'default' };
+    const stub = env.INTAKE.get('42');
+    await stub.fetch(rpc('/snapshot', { items: input.inputItems,
+      body: { username: input.username, requestId, task: input.task, initialMsgId: input.initialMsgId,
+        controlPlaneEnvelope: envelope } }));
+    const readyReceipt = { userTaskId: 'ut-ready', requestId, profileId: 'test-profile', durable: true, providerAcceptedAt: 1700000000000 };
+    await stub.fetch(rpc('/cp-acceptance', { requestId, receipt: readyReceipt, routingOnly: true }));
+    const routed = await route(readyReceipt.userTaskId, { continue: false });
+    return { taskId: readyReceipt.userTaskId, requestId, receipt: readyReceipt, routed, durable: true };
+  });
   send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   edit.mockResolvedValue({ ok: true });
   handleMessage.mockResolvedValue(undefined);
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('delivers a Ready quick answer without entering the agent busy queue', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    status.mockResolvedValueOnce({ id: 'ut-ready', profile_id: 'test-profile', status: 'done', generation: 1,
+      result: 'quick answer' });
+
+    const response = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'intake_ready' }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ kind: 'quick_answer', delivered: true });
+    expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ text: 'quick answer', deliveryId: 'quick:ut-ready:g1' }));
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(await storage.get('buf')).toEqual([]);
+  });
+
+  it('shows fallback styles, then continues the same accepted task with the chosen style', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', continuation: { issued: false } })
+      .mockResolvedValueOnce({ route: 'agent', continuation: { issued: true } });
+
+    const ready = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'intake_ready' }));
+
+    expect(await ready.json()).toMatchObject({ kind: 'agent' });
+    const keyboard = edit.mock.calls.at(-1)[4].reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+    expect(keyboard).toEqual(['ws|explore|3', 'ws|answer|3', 'ws|auto|3', 'intake_discard|3']);
+    expect(await storage.get('busy')).toBeUndefined();
+
+    const launched = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'ws|explore|3' }));
+
+    expect(await launched.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
+    expect(route).toHaveBeenLastCalledWith('ut-ready', { continue: true, workStyle: 'explore' });
+    expect(await storage.get('cpBusyRequests')).toEqual(['cp-ready-request']);
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('buf')).toEqual([]);
+  });
+
   it('keeps Ready classifier admission outside the agent busy queue until a mode is chosen', async () => {
     const { owner, storage } = fixture();
     await snapshot(owner);
