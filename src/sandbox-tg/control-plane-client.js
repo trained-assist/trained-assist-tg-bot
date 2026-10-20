@@ -253,8 +253,10 @@ export class ControlPlaneClient {
     return ack;
   }
 
-  async route(userTaskId) {
-    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true },
+  async route(userTaskId, options = {}) {
+    const body = { taskId: userTaskId, continue: options.continue === true };
+    if (body.continue && ['explore', 'answer', 'auto'].includes(options.workStyle)) body.workStyle = options.workStyle;
+    const { value } = await this.request('POST', '/route', { body,
       timeoutMs: this.config.routeRequestTimeoutMs ?? 140000 });
     return value;
   }

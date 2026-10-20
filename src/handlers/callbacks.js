@@ -689,25 +689,19 @@ export async function handleCallbackQuery(cq, env) {
     if (!env.INTAKE) return;
     const threadId = threadIdOf(message);
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-    const check = await stub.fetch('https://intake/ready-check', {
-      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id }),
-    }).then(r => r.json()).catch(() => null);
-    const revision = Number.isSafeInteger(check?.revision) ? check.revision : 1;
-    const found = ['clear', 'likely', 'continue'].includes(check?.level);
-    if (found) {
-      const response = await stub.fetch('https://intake/flush', {
-        method: 'POST', body: JSON.stringify({ callbackData: `ws|auto|${revision}`, username: session.username,
-          sourceMessageId: message?.message_id, messageId: message?.message_id }),
-      }).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
-      if (!response) return;
-      const r = await response.json().catch(() => null);
-      if (r?.asynchronous) return;
-      if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё.');
+    const response = await stub.fetch('https://intake/ready', {
+      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id,
+        callbackData: 'intake_ready', sourceMessageId: message?.message_id }),
+    }).catch(err => { sendT(env, chatId, threadId, `❌ Не удалось проверить ввод: ${err.message}. Черновик сохранён; нажми «Готово» ещё раз.`); return null; });
+    if (!response) return;
+    const outcome = await response.json().catch(() => null);
+    if (!response.ok) {
+      await sendT(env, chatId, threadId, '⚠️ Черновик изменился или проверка не завершилась. Ввод сохранён; нажми «Готово» на актуальном сообщении.');
       return;
     }
-    await stub.fetch('https://intake/show-styles', {
-      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id }),
-    }).catch(() => null);
+    if (outcome?.kind === 'agent') await sendT(env, chatId, threadId,
+      '🧭 Не нашёл готовый ответ для этого запроса. Если я неверно распознал задачу, выбери режим полноценного агента:');
+    if (outcome?.kind === 'queued') await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу этот ввод после неё.');
     return;
   }
 
