@@ -76,7 +76,10 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     }
     if (url.hostname === 'cp.test' && url.pathname === '/route') {
       routes.push(body);
-      expect(body).toEqual({ taskId: accepted.taskId, continue: true });
+      if (body.continue === false) return Response.json({ decisionId: 'offline-extra-input-decision', generation: 1,
+        route: 'agent', continuation: { requested: false, issued: false } });
+      expect(body).toMatchObject({ taskId: accepted.taskId, continue: true, workStyle: 'answer',
+        decisionId: 'offline-extra-input-decision', generation: 1 });
       dispatches.add(body.taskId);
       return Response.json({ decisionId: 'offline-extra-input-decision', route: 'agent', mode: 'agent',
         needsExecutor: true, continuation: { owner: 'output', requested: true, issued: true,
@@ -172,23 +175,33 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(buttons.filter(data => data === "intake_ready" || data.startsWith("ws|"))).toHaveLength(1);
     expect(buttons.some(data => data.startsWith('intake_stop'))).toBe(false);
     if (boundary === 'after-collector') expect(edits.some(edit => edit.message_id === 701)).toBe(true);
-    const launch = { update_id: 202, callback_query: { id: 'offline-extra-input-launch',
+    const ready = { update_id: 202, callback_query: { id: 'offline-extra-input-ready',
+      from: { id: 43, is_bot: false }, data: 'intake_ready',
+      message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
+    await sendUpdate(ready);
+    expect(intakes).toHaveLength(1);
+    expect(dispatches.size).toBe(0);
+    // Restart between classification and explicit choice: the task identity survives.
+    await runtime.dispose();
+    runtime = new Miniflare(options);
+    const launch = { update_id: 203, callback_query: { id: 'offline-extra-input-launch',
       from: { id: 43, is_bot: false }, data: `ws|answer|${await draftRevision()}`,
       message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
     await sendUpdate(launch);
-    expect(intakes).toHaveLength(0);
+    expect(intakes).toHaveLength(1);
     await sendUpdate(launch);
     await alarm();
     expect(intakes).toHaveLength(1);
     expect(intakes[0].inputItems).toEqual([{ text: first.message.text, artifactRefs: [] },
       { text: extra.message.text, artifactRefs: [] }]);
-    const batchRequestId = `tg-${digest('42:200,201')}`;
-    expect(intakes[0].requestId).toBe(`tgcp-${digest(`probability_cat_bot:extra-input-profile:42::${batchRequestId}`)}`);
-    expect(routes).toHaveLength(1);
+    expect(intakes[0].requestId).toMatch(/^tgcp-[a-f0-9]{64}$/);
+    expect(routes).toHaveLength(2);
     expect(dispatches.size).toBe(1);
     completed = true;
     await alarm();
-    expect(routes).toEqual([{ taskId: accepted.taskId, continue: true }]);
+    expect(routes).toHaveLength(2);
+    expect(routes[0]).toEqual({ taskId: accepted.taskId, continue: false });
+    expect(routes[1]).toMatchObject({ taskId: accepted.taskId, continue: true, workStyle: 'answer' });
     expect(dispatches.size).toBe(1);
     const reconciledRoutes = structuredClone(routes);
     expect(sends.filter(item => item.text === answer)).toHaveLength(1);
@@ -196,7 +209,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(terminal.receipt).toBeNull();
     expect(terminal.terminal).toMatchObject({ deliveryId: `terminal:${accepted.taskId}:g1`,
       userTaskId: accepted.taskId, generation: 1, status: 'sent', attempts: 1,
-      providerMessageId: 702, chatId: 42, threadId: null });
+      providerMessageId: 703, chatId: 42, threadId: null });
     await runtime.dispose();
     runtime = new Miniflare(options);
     await sendUpdate(launch);
@@ -208,7 +221,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(intakes).toHaveLength(1);
     expect(routes).toEqual(reconciledRoutes);
     expect(dispatches.size).toBe(1);
-    expect(sends).toHaveLength(2);
+    expect(sends).toHaveLength(3);
     expect(sends.filter(item => item.text === answer)).toHaveLength(1);
     expect(unexpected).toEqual([]);
   } finally {

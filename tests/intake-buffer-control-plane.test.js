@@ -135,7 +135,7 @@ describe('existing collector control-plane ownership', () => {
   it('shows fallback styles, then continues the same accepted task with the chosen style', async () => {
     const { owner, storage } = fixture();
     await seedReadyDraft(owner, storage);
-    route.mockResolvedValueOnce({ route: 'agent', continuation: { issued: false } })
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } })
       .mockResolvedValueOnce({ route: 'agent', continuation: { issued: true } });
 
     const ready = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
@@ -150,13 +150,94 @@ describe('existing collector control-plane ownership', () => {
       messageId: 99, callbackData: 'ws|explore|3' }));
 
     expect(await launched.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
-    expect(route).toHaveBeenLastCalledWith('ut-ready', { continue: true, workStyle: 'explore' });
+    expect(route).toHaveBeenLastCalledWith('ut-ready', { continue: true, workStyle: 'explore', decisionId: 'decision-ready', generation: 1, idempotencyKey: 'ready:ut-ready:1:decision-ready' });
     expect(await storage.get('cpBusyRequests')).toEqual(['cp-ready-request']);
     expect(await storage.get('cp-acceptance:cp-ready-request')).toMatchObject({
       routingOutcome: { known: true, publicationComplete: true, continuationIssued: true },
     });
     expect(await storage.get('busy')).toBe(true);
     expect(await storage.get('buf')).toEqual([]);
+  });
+
+  const readySource = { username: 'test-profile', chatId: 42, threadId: null, messageId: 99, callbackData: 'intake_ready' };
+
+  it.each(['clarify', 'required_input'])('shows the %s question and preserves the ordered draft', async kind => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValue({ route: kind, askUser: { question: 'Какой срок?' } });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(await response.json()).toEqual({ kind });
+    expect(edit.mock.calls.at(-1)[3]).toContain('Какой срок?');
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
+  });
+
+  it.each(['degraded', 'malformed', 'timeout'])('preserves the draft after %s classification without offering agent styles', async failure => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    if (failure === 'timeout') route.mockRejectedValueOnce(new Error('timeout'));
+    else route.mockResolvedValueOnce(failure === 'degraded' ? { route: 'agent', degraded: true } : { raw: 'broken' });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(response.status).toBe(503);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('retains the same task and draft when continuation is refused', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } })
+      .mockResolvedValueOnce({ continuation: { issued: false, refusal: 'runner_not_configured' } });
+    await owner.fetch(rpc('/ready', readySource));
+    const response = await owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }));
+    expect(response.status).toBe(409);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('collectorIntent')).toMatchObject({ userTaskId: 'ut-ready' });
+    expect(edit.mock.calls.some(call => String(call[3]).includes('агент запущен'))).toBe(false);
+  });
+
+  it('serializes duplicate and conflicting style clicks while preserving an append during continuation', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } });
+    await owner.fetch(rpc('/ready', readySource));
+    let resolve;
+    let entered;
+    const started = new Promise(r => { entered = r; });
+    route.mockImplementationOnce(() => { entered(); return new Promise(r => { resolve = r; }); });
+    const launch = owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }));
+    await started;
+    for (const style of ['answer', 'explore']) {
+      expect((await owner.fetch(rpc('/ready', { ...readySource, callbackData: `ws|${style}|3` }))).status).toBe(409);
+    }
+    const newest = { text: 'new input', msg: { message_id: 13, chat: { id: 42 }, text: 'new input' } };
+    await storage.put('buf', [...await storage.get('buf'), newest]);
+    await owner._bumpDraftRevisionLocked();
+    resolve({ continuation: { issued: true } });
+    expect((await launch).status).toBe(200);
+    expect(route).toHaveBeenCalledTimes(2);
+    expect(await storage.get('buf')).toEqual([newest]);
+  });
+
+  it('does not attach an old agent decision to a concurrently appended draft', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockImplementationOnce(async () => {
+      await storage.put('buf', [...await storage.get('buf'), { text: 'new detail', msg: { message_id: 13, chat: { id: 42 }, text: 'new detail' } }]);
+      await owner._bumpDraftRevisionLocked();
+      return { route: 'agent', decisionId: 'old-decision', continuation: { issued: false } };
+    });
+    expect(await (await owner.fetch(rpc('/ready', readySource))).json()).toEqual({ kind: 'draft_changed' });
+    expect(await storage.get('buf')).toHaveLength(3);
+    expect(await storage.get('collectorIntent')).toBeUndefined();
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect((await owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|4' }))).status).toBe(409);
+    expect(route).toHaveBeenCalledTimes(1);
   });
 
   it('keeps Ready classifier admission outside the agent busy queue until a mode is chosen', async () => {

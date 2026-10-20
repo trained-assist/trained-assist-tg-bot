@@ -361,6 +361,8 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
       cpRoutes.push(body);
       const task = [...admittedTasks.values()].find(value => value.taskId === body.taskId);
       if (!task) return reply({ error: 'unknown task' }, 404);
+      if (body.continue === false) return reply({ decisionId: 'workerd-decision', generation: 1, route: 'agent',
+        continuation: { owner: 'output', requested: false, issued: false } });
       if (!dispatchedTasks.has(task.taskId)) dispatchCount += 1;
       dispatchedTasks.add(task.taskId);
       if (boundary === 'route' && lostAck) {
@@ -523,14 +525,19 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
         body: JSON.stringify({ capture: true, username: 'sandbox-file-test', messageId: 501 }),
       });
       expect(forbiddenSeed.status).toBe(404);
+      await runtime.dispatchFetch('https://worker.test/operator/test-update', {
+        method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'sandbox3', type: 'callback', chatId: 42, userId: 43,
+          callbackData: 'intake_ready', delivery: 'capture', updateId: 99002 }),
+      });
       const launch = await runtime.dispatchFetch('https://worker.test/operator/test-update', {
         method: 'POST', headers: { authorization: 'Bearer offline-operator-token', 'content-type': 'application/json' },
         body: JSON.stringify({ target: 'sandbox3', type: 'callback', chatId: 42, userId: 43,
-          callbackData: 'auto', delivery: 'capture', updateId: 99002 }),
+          callbackData: 'auto', delivery: 'capture', updateId: 99003 }),
       });
       expect(launch.status).toBe(200);
       expect(providerMessages).toHaveLength(0);
-      expect(cpIntakes).toHaveLength(0);
+      expect(cpIntakes).toHaveLength(1);
       await state(true); // The durable launch checkpoint is admitted by the background alarm.
       const finalState = await intakeStub.fetch('https://intake/debug');
       const finalStateBody = await finalState.json();
@@ -898,10 +905,9 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     await workerdWaitFor(() => providerEdits.some(edit => edit.message_id === collectorId));
     expect(providerMessages).toHaveLength(1);
     expect(cpIntakes).toHaveLength(0);
-    const launchRevision = (await state()).get('draftRevision');
-    const launch = boundary === 'vertical' ? message(105, 'запускай', 43)
-      : { update_id: 105, callback_query: { id: 'workerd-launch', from: { id: 43, is_bot: false },
-        data: `ws|auto|${launchRevision}`, message: { message_id: collectorId, chat: { id: 42, type: 'private' } } } };
+    // These recovery scenarios exercise the existing explicit text-launch path.
+    // Ready + style is verified separately with its no-run classification boundary.
+    const launch = message(105, 'запускай', 43);
     expect((await webhook(launch)).status).toBe(200);
     expect(cpIntakes).toHaveLength(0);
     const queuedLaunch = await state();
@@ -911,10 +917,10 @@ it.each(['vertical', 'agent-input', 'route', 'intake', 'stop', 'stop-disabled', 
     expect(cpIntakes).toHaveLength(1);
     expect(admitted.inputItems.map(item => item.text)).toEqual([
       'category,amount\nfood,100\nfood,50', 'travel,275', 'Write outputs/category-results.csv',
-      ...(boundary === 'vertical' ? ['запускай'] : []),
+      'запускай',
     ]);
     expect(admitted).toMatchObject({ workStyle: boundary === 'vertical' ? 'auto' : 'auto',
-      workStyleSource: boundary === 'vertical' ? 'default' : 'explicit' });
+      workStyleSource: 'default' });
     expect(admitted.sessionId).toBe('workerd-source-session');
     const snapshotResponse = await (await collector()).fetch(`https://intake/input?messageId=${collectorId}&username=workerd-user`);
     expect(snapshotResponse.status).toBe(200);

@@ -96,6 +96,8 @@ async function launchWithStyle({ chatId, userId, delivery, updateId, beforeColle
       [PROFILE_ID, `%${taskMarker}%`]);
     assert(typeof routedTask?.id === 'string' && routedTask.id.length > 0, 'ready_agent_classification_task_missing');
     readyTaskId = routedTask.id;
+    const [beforeStyle] = await d1('SELECT count(*) AS n FROM executions WHERE task_id = ?', [readyTaskId]);
+    assert.equal(Number(beforeStyle.n), 0, 'ready_agent_run_created_before_explicit_choice');
   }
   const launched = await workerRequest('/operator/test-update', {
     target: 'sandbox3', type: 'callback', chatId, userId, delivery,
@@ -521,6 +523,14 @@ async function main() {
 
   const task = await waitForTask();
   if (scenario === 'ready-agent') assert.equal(task.id, launched.readyTaskId, 'ready_agent_fallback_created_a_different_task');
+  if (scenario === 'ready-agent') {
+    const [choice] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?',
+      [`routing-continuation:${task.id}:${task.generation}`]);
+    const selected = JSON.parse(choice?.payload_json ?? 'null');
+    assert.equal(selected?.workStyle, 'auto', 'ready_agent_selected_style_not_persisted');
+    assert(typeof selected?.decisionId === 'string' && !!selected.idempotencyKey, 'ready_agent_choice_identity_missing');
+    console.log(JSON.stringify({ scenario: 'ready-agent-choice', workStyle: selected.workStyle, decisionBound: true }));
+  }
   const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply' || scenario === 'ready-quick';
   const taskGoalPresent = typeof task.goal === 'string' && task.goal.trim().length > 0;
   const goalContainsExpectedInput = fileFixture ? null : taskGoalPresent

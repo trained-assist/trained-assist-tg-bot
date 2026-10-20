@@ -875,19 +875,38 @@ export class IntakeBuffer {
       const source = await request.json().catch(() => ({}));
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
       const styleChoice = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
+      if (styleChoice && !(await this.state.storage.get('collectorIntent')) &&
+          ((await this.state.storage.get('busy')) || (await this.state.storage.get('cpStopWindow'))?.pending)) {
+        return this.fetch(new Request('https://intake/flush', { method: 'POST', body: JSON.stringify({ ...source,
+          workStyle: styleChoice[1], workStyleSource: 'explicit' }) }));
+      }
       if (styleChoice) {
-        const intent = await this.state.storage.get('collectorIntent');
-        if (!(await this._callbackOwned(source)) || !intent?.userTaskId || Number(styleChoice[2]) !== intent.revision) {
-          return new Response('Intent choice is stale', { status: 409 });
-        }
-        const launch = await this.state.storage.get(`cp-launch:${intent.launchKey}`);
-        const routeReceipt = await this.state.storage.get(`cp-route:${intent.requestId}`);
-        if (!launch || launch.classificationState !== 'agent' || !routeReceipt?.receipt ||
-            routeReceipt.receipt.userTaskId !== intent.userTaskId) return new Response('Intent task unavailable', { status: 409 });
-        const client = controlPlaneClient(this.env);
         const workStyle = styleChoice[1];
-        const routed = await client.route(intent.userTaskId, { continue: true, workStyle });
+        const choice = await this._exclusive(async () => {
+          if (this.cpReadyContinuation || !(await this._callbackOwned(source))) return null;
+          const intent = await this.state.storage.get('collectorIntent');
+          if (!intent?.userTaskId || Number(styleChoice[2]) !== intent.revision) return null;
+          const launch = await this.state.storage.get(`cp-launch:${intent.launchKey}`);
+          const routeReceipt = await this.state.storage.get(`cp-route:${intent.requestId}`);
+          if (!launch || launch.classificationState !== 'agent' || !routeReceipt?.receipt ||
+              routeReceipt.receipt.userTaskId !== intent.userTaskId ||
+              (launch.selectedWorkStyle && launch.selectedWorkStyle !== workStyle)) return null;
+          await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, selectedWorkStyle: workStyle });
+          this.cpReadyContinuation = true;
+          return { intent, launch, routeReceipt };
+        });
+        if (!choice) return Response.json({ reasonCode: 'continuation_choice_stale_or_pending' }, { status: 409 });
+        const { intent, launch, routeReceipt } = choice;
+        try {
+        const client = controlPlaneClient(this.env);
+        const routed = await client.route(intent.userTaskId, { continue: true, workStyle,
+          decisionId: launch.routed.decisionId, generation: launch.generation,
+          idempotencyKey: `ready:${intent.userTaskId}:${launch.generation}:${launch.routed.decisionId}` });
         if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) return new Response('Route unavailable', { status: 503 });
+        const reconciledRun = routed.continuation?.refusal === 'existing_run_requires_reconciliation' && routed.continuation?.runId;
+        if (routed.continuation?.issued !== true && !reconciledRun) {
+          return Response.json({ reasonCode: routed.continuation?.refusal || 'continuation_not_accepted' }, { status: 409 });
+        }
         const key = `cp-acceptance:${intent.requestId}`;
         await this.state.storage.transaction(async tx => {
           const current = await tx.get(key);
@@ -909,8 +928,10 @@ export class IntakeBuffer {
         await this._retireIntentDraft(intent.launchKey, launch.msg.intakeItems || [], intent.requestId);
         await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, classificationState: 'launched', selectedWorkStyle: workStyle });
         return json({ kind: 'agent_started', taskId: intent.userTaskId });
+        } finally { this.cpReadyContinuation = false; }
       }
       const claim = await this._exclusive(async () => {
+        if (this.cpDispatches || this.cpReadyContinuation) return { replay: 'pending' };
         if (!(await this._callbackOwned(source))) return null;
         const revision = await this.state.storage.get('draftRevision');
         const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
@@ -982,6 +1003,7 @@ export class IntakeBuffer {
         }
         const status = await client.status(ack.taskId);
         if (status.profile_id !== checkpoint.profileId || status.id !== ack.taskId) throw new Error('task_scope_mismatch');
+        if (routed.degraded === true || routed.continuation?.issued === true) throw new Error('intent_route_degraded');
         const answer = taskAnswer(status);
         if (status.status === 'done' && answer) {
           const envelope = snap?.body?.controlPlaneEnvelope;
@@ -998,10 +1020,26 @@ export class IntakeBuffer {
           await this._retireIntentDraft(claim.launchKey, claim.items, checkpoint.requestId);
           return json({ kind: 'quick_answer', delivered: true });
         }
-        if (routed.route !== 'agent' || routed.continuation?.issued === true) throw new Error('intent_result_not_agent');
+        if (['clarify', 'required_input'].includes(routed.route)) {
+          const question = routed.askUser?.question;
+          if (typeof question !== 'string' || !question.trim()) throw new Error('intent_question_missing');
+          await this.state.storage.delete('collectorShowStyles');
+          await this._showCollector(checkpoint.msg.chat.id, claim.items.length, source.messageId,
+            threadIdOf(checkpoint.msg), question);
+          return json({ kind: routed.route });
+        }
+        if (routed.route !== 'agent' || typeof routed.decisionId !== 'string' || !routed.decisionId) throw new Error('intent_result_not_agent');
         await this.state.storage.put(`cp-launch:${claim.launchKey}`, { ...checkpoint, classificationState: 'agent',
-          controlPlaneRequestId: ack.requestId, userTaskId: ack.taskId, receipt, routed, initialMsgId });
-        const menuRevision = await this.state.storage.get('draftRevision');
+          controlPlaneRequestId: ack.requestId, userTaskId: ack.taskId, receipt, routed, generation: status.generation, initialMsgId });
+        if (await this.state.storage.get('draftRevision') !== claim.revision) {
+          await this.state.storage.delete('collectorIntent');
+          await this.state.storage.delete('collectorShowStyles');
+          const pending = [...(await this.state.storage.get('retryBatch') || []), ...(await this.state.storage.get('buf') || [])];
+          await this._showCollector(checkpoint.msg.chat.id, pending.length, source.messageId, threadIdOf(checkpoint.msg),
+            'Ввод дополнен во время проверки. Нажми «Готово», чтобы проверить всю пачку.');
+          return json({ kind: 'draft_changed' });
+        }
+        const menuRevision = claim.revision;
         await this.state.storage.put('collectorIntent', { requestId: ack.requestId, revision: menuRevision,
           launchKey: claim.launchKey, messageId: source.messageId, chatId: checkpoint.msg.chat.id,
           threadId: threadIdOf(checkpoint.msg), userTaskId: ack.taskId });

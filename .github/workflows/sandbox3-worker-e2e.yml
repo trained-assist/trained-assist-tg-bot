@@ -124,10 +124,17 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Select pinned Control Plane candidate
+        id: cp-candidate
+        run: |
+          sha="$(cat tools/sandbox3-cp-candidate.txt)"
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
           repository: trained-assist/trained-assist-control-plane
-          ref: main
+          ref: ${{ steps.cp-candidate.outputs.sha }}
           token: ${{ secrets.GH_PAT }}
           path: control-plane
           persist-credentials: false
@@ -299,9 +306,16 @@ jobs:
       # revision only after the paused lane's normal cleanup confirms reusable state.
       - name: Bring sandbox Control Plane to the pinned reviewed revision
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           EXPECTED_CP_SHA: ${{ steps.cp-revision.outputs.sha }}
-        run: node tools/ensure-sandbox3-cp-revision.mjs | tee sandbox3-cp-revision.json
+        run: |
+          set -euo pipefail
+          test "$(git -C control-plane rev-parse HEAD)" = "$EXPECTED_CP_SHA"
+          npm ci --prefix control-plane
+          (cd control-plane && npx wrangler deploy --config wrangler.sandbox3.jsonc --var "BUILD_SHA:$EXPECTED_CP_SHA")
+          node control-plane/tools/deployment-smoke.mjs https://trained-assist-cp-sandbox3.skillset-apply.workers.dev "$EXPECTED_CP_SHA"
+          node -e 'console.log(JSON.stringify({expectedSha: process.env.EXPECTED_CP_SHA, matched: true, deployed: true}))' > sandbox3-cp-revision.json
 
       - name: Require exact CP revision and lane contract before enabling tests
         env:
