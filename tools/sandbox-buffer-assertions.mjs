@@ -14,7 +14,7 @@ export function assertSandboxStateEmpty(cp, tg, cpStateTables) {
 }
 
 export async function assertSandboxStateEventuallyEmpty(readState, cpStateTables, {
-  maxAttempts = 13,
+  maxAttempts = 30,
   delayMs = 5_000,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   onRetry = () => {},

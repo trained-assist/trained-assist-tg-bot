@@ -64,7 +64,15 @@ async function launchWithStyle({ chatId, userId, delivery, updateId, beforeColle
   if (scenario === 'ready-agent') {
     assert.equal(launchWasDispatched(ready, beforeCollector), false, 'ready_agent_dispatched_before_style_choice');
     const readyText = (ready.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
-    assert(readyText.includes('Не нашёл готовый ответ'), 'ready_agent_fallback_explanation_missing');
+    const explanationShown = readyText.includes('Не нашёл готовый ответ');
+    console.log(JSON.stringify({ scenario: 'ready-agent-classification', explanationShown,
+      transcript: (ready.transcript ?? []).map(item => ({ kind: item.kind,
+        text: String(item.text ?? '').slice(0, 300), telegramOk: item.telegramOk === true })),
+      collector: { pendingCount: ready.collector?.pendingCount ?? null,
+        busy: ready.collector?.busy === true,
+        dispatchStatus: ready.collector?.lastDispatchOutcome?.status ?? null,
+        dispatchReasonCode: ready.collector?.lastDispatchOutcome?.reasonCode ?? null } }));
+    assert(explanationShown, 'ready_agent_fallback_explanation_missing');
   }
   if (scenario === 'ready-quick') {
     assert.equal(launchWasDispatched(ready, beforeCollector), true, 'ready_quick_did_not_dispatch');
