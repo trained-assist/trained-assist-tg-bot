@@ -985,7 +985,7 @@ export class IntakeBuffer {
         const answer = taskAnswer(status);
         if (status.status === 'done' && answer) {
           const envelope = snap?.body?.controlPlaneEnvelope;
-          const deliveryId = `quick:${ack.taskId}:g${status.generation}`;
+          const deliveryId = `terminal:${ack.taskId}:g${status.generation}`;
           const outbox = new TgDeliveryOwnerClient(this.env, client.config);
           const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
             conversationId: `${envelope.conversationRef}-b${checkpoint.requestId.slice(-24)}`, userTaskId: ack.taskId,
