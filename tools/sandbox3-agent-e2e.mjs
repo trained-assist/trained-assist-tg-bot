@@ -482,17 +482,18 @@ async function main() {
     console.log(JSON.stringify({ scenario: 'sandbox-file-intake', manifestPresentInIntake: true,
       telegramFileIdPersisted: false, fileName: fileFixture.name }));
   }
-  const replay = await workerRequest('/operator/test-update', questionUpdate);
-  assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
-  assert.equal(replay.collector?.pendingCount, 1, 'duplicate_update_added_input_twice');
-  console.log(JSON.stringify({ scenario: 'duplicate-telegram-update-replay',
-    sameUpdateReplayed: true, pendingCountBeforeReplay: question.collector.pendingCount,
-    pendingCountAfterReplay: replay.collector.pendingCount }));
-
   const launched = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
     beforeCollector: question.collector, scenario, taskMarker: nonce });
   updateId = launched.nextUpdateId;
   assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
+  // Replay after the ready callback so duplicate delivery cannot rotate the
+  // collector while the user is pressing «Готово».
+  const replay = await workerRequest('/operator/test-update', questionUpdate);
+  assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
+  assert.equal(replay.collector?.pendingCount, 0, 'duplicate_update_reopened_intake_after_ready');
+  console.log(JSON.stringify({ scenario: 'duplicate-telegram-update-replay',
+    sameUpdateReplayed: true, pendingCountBeforeReplay: question.collector.pendingCount,
+    pendingCountAfterReplay: replay.collector.pendingCount }));
   failureDiagnostics = { stage: 'waiting_for_task' };
 
   let midRunReplayEvidence = null;
