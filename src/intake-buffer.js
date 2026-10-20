@@ -933,7 +933,7 @@ export class IntakeBuffer {
           if (row?.id !== intent.userTaskId || row?.profile_id !== routeReceipt.receipt.profileId || !run) throw error;
           routed = { continuation: { requested: true, issued: false, refusal: 'existing_run_requires_reconciliation', runId: run.id } };
         }
-        if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) return new Response('Route unavailable', { status: 503 });
+        if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return new Response('Route unavailable', { status: 503 });
         const reconciledRun = routed.continuation?.refusal === 'existing_run_requires_reconciliation' && routed.continuation?.runId;
         if (routed.continuation?.issued !== true && !reconciledRun) {
           if (typeof routed.continuation?.refusal !== 'string') return new Response('Continuation outcome unknown', { status: 503 });
@@ -1025,7 +1025,7 @@ export class IntakeBuffer {
         const receipt = ack.receipt;
         if (!receipt?.durable || receipt.userTaskId !== ack.taskId) throw new Error('durable_receipt_missing');
         const routed = ack.routed;
-        if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
+        if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
         const snap = await this._readSnapshot(ack.requestId);
         const accepted = await this.state.storage.get(`cp-route:${ack.requestId}`);
         if (!accepted?.receipt || accepted.receipt.userTaskId !== ack.taskId) throw new Error('durable_route_receipt_not_persisted');

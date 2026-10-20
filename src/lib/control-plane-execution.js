@@ -150,7 +150,7 @@ export async function runControlPlaneTask(env, input) {
     await new TgDeliveryOwnerClient(env, config).open();
     try {
       const routed = await client.route(receipt.userTaskId, { continue: false });
-      if (!routed || typeof routed !== 'object' || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
+      if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
       return { taskId: receipt.userTaskId, userTaskId: receipt.userTaskId, requestId, durable: true,
         controlPlane: true, routingPending: false, routed, receipt };
     } catch (error) {

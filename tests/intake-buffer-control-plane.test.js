@@ -174,11 +174,11 @@ describe('existing collector control-plane ownership', () => {
     expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
   });
 
-  it.each(['degraded', 'malformed', 'timeout'])('preserves the draft after %s classification without offering agent styles', async failure => {
+  it.each(['degraded', 'malformed', 'array', 'timeout'])('preserves the draft after %s classification without offering agent styles', async failure => {
     const { owner, storage } = fixture();
     await seedReadyDraft(owner, storage);
     if (failure === 'timeout') route.mockRejectedValueOnce(new Error('timeout'));
-    else route.mockResolvedValueOnce(failure === 'degraded' ? { route: 'agent', degraded: true } : { raw: 'broken' });
+    else route.mockResolvedValueOnce(failure === 'degraded' ? { route: 'agent', degraded: true } : failure === 'array' ? [] : { raw: 'broken' });
     const response = await owner.fetch(rpc('/ready', readySource));
     expect(response.status).toBe(503);
     expect(await storage.get('buf')).toHaveLength(2);
