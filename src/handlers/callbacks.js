@@ -91,7 +91,11 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   let session = await getSession(env.SESSIONS, chatId, threadId);
-  if (!(await controlPlaneCallbackOwned(cq, env, session))) {
+  // Intake ready performs its authoritative revision and ownership check
+  // inside the DO operation below. A separate preflight here followed by
+  // answerCallbackQuery could let a collector alarm rotate the revision
+  // between the two checks and reject a still-current tap.
+  if (data !== 'intake_ready' && !(await controlPlaneCallbackOwned(cq, env, session))) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⌛ Кнопка устарела или её актуальность не подтверждена — используй текущее сообщение.');
     return;
   }
