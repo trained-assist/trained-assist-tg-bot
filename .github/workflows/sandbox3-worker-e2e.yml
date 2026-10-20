@@ -478,6 +478,8 @@ jobs:
           name: sandbox3-worker-e2e-${{ github.run_id }}
           path: |
             sandbox3-lane-preflight.json
+            sandbox3-lane-preflight-pinned.json
+            sandbox3-cp-revision.json
             sandbox3-reset-before.json
             sandbox3-preflight-empty.json
             sandbox3-user-entry.json
