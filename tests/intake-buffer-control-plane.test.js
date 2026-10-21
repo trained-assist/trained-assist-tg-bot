@@ -891,6 +891,66 @@ describe('existing collector control-plane ownership', () => {
     expect(send.mock.calls[0][3].flat().every(button => typeof button.callback_data === 'string')).toBe(true);
   });
 
+  it('clears a previous style menu when a new draft has the same envelope count', async () => {
+    const { owner, storage } = fixture();
+    await storage.put('buf', items);
+    await storage.put('draftRevision', 4);
+    await storage.put('collectorReadyRevision', 3);
+    await storage.put('collectorReadyCount', 1);
+    await storage.put('collectorShowStyles', true);
+
+    await owner._showCollector(42, 1, 1);
+
+    const callbacks = send.mock.calls.at(-1)[3].flat().map(button => button.callback_data);
+    expect(callbacks).toEqual(['intake_ready']);
+    expect(await storage.get('collectorReadyRevision')).toBe(4);
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+  });
+
+  it('owns Ready only on the current collector for the current draft before styles are shown', async () => {
+    const { owner, storage } = fixture();
+    owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
+    await storage.put('buf', items);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 4);
+    await storage.put('collectorDraftRevision', 4);
+    await storage.put('collectorReadyRevision', 4);
+    await storage.put('collectorReadyCount', 1);
+    const source = { messageId: 99, callbackData: 'intake_ready', username: 'test-profile' };
+
+    expect(await owner._callbackOwned(source)).toBe(true);
+    await storage.put('collectorShowStyles', true);
+    expect(await owner._callbackOwned(source)).toBe(false);
+    await storage.delete('collectorShowStyles');
+    await storage.put('draftRevision', 5);
+    expect(await owner._callbackOwned(source)).toBe(false);
+  });
+
+  it('checks readiness on the Ready action and shows styles only when the draft needs clarification', async () => {
+    const { owner, storage } = fixture();
+    checkCompleteness.mockResolvedValue({ level: 'insufficient' });
+    await storage.put('buf', items);
+    await storage.put('collectorMsgId', 99);
+    await storage.put('draftRevision', 3);
+    await storage.put('collectorDraftRevision', 3);
+    await storage.put('collectorReadyRevision', 3);
+    await storage.put('collectorReadyCount', 1);
+
+    const ready = await owner.fetch(rpc('/ready-check', { username: 'test-profile', chatId: 42,
+      threadId: null, messageId: 99 }));
+    expect(await ready.json()).toMatchObject({ level: 'insufficient', revision: 3, count: 1 });
+    expect(checkCompleteness).toHaveBeenCalledWith(owner.env, {
+      text: expect.any(String), username: 'test-profile', chatId: 42, threadId: null,
+    });
+
+    const shown = await owner.fetch(rpc('/show-styles', { username: 'test-profile', chatId: 42,
+      threadId: null, messageId: 99 }));
+    expect(await shown.json()).toEqual({ shown: true });
+    expect(edit.mock.calls.at(-1)[4].reply_markup.inline_keyboard.flat().map(button => button.callback_data)).toEqual([
+      'ws|explore|3', 'ws|answer|3', 'ws|auto|3', 'intake_discard|3',
+    ]);
+  });
+
   it('launches the selected style once from the exact current draft revision', async () => {
     const { owner, storage } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
@@ -1709,6 +1769,9 @@ describe('existing collector control-plane ownership', () => {
     const { owner, storage, env } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
     await storage.put('buf', items);
+    await storage.put('draftRevision', 1);
+    await storage.put('collectorDraftRevision', 1);
+    await storage.put('collectorReadyRevision', 1);
     await storage.put('collectorShowStyles', true);
     await storage.put('collectorReadyCount', 1);
     await owner._showCollector(42, 1, 1);

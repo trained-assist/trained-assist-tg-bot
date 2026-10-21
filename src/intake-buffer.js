@@ -398,6 +398,16 @@ export class IntakeBuffer {
     if (session?.username !== source.username) return false;
     const data = source.callbackData;
     if (typeof data !== 'string') return false;
+    if (data === 'intake_ready') {
+      const currentRevision = await this.state.storage.get('draftRevision');
+      const collectorRevision = await this.state.storage.get('collectorDraftRevision');
+      const readyRevision = await this.state.storage.get('collectorReadyRevision');
+      const busy = await this.state.storage.get('busy');
+      const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      return messageId === await this.state.storage.get('collectorMsgId') && items.length > 0 &&
+        collectorRevision === currentRevision && readyRevision === currentRevision &&
+        (await this.state.storage.get('collectorShowStyles')) !== true && !busy && !stopPending;
+    }
     const dismissUnknown = /^intake_dismiss_unknown\|([a-f0-9-]{36})$/.exec(data);
     if (dismissUnknown) {
       if (this.env.EXECUTION_BACKEND !== 'control-plane') {
@@ -2448,8 +2458,11 @@ export class IntakeBuffer {
       // not hide controls for this distinct, still-unlaunched draft.
       const draftOnlyDiscard = stopPending && (await this.state.storage.get('buf') || []).length > 0;
       if (cpMode) {
-        const lastReadyCount = await this.state.storage.get('collectorReadyCount');
-        if (lastReadyCount !== n) {
+        const lastReadyRevision = await this.state.storage.get('collectorReadyRevision');
+        if (lastReadyRevision !== draftRevision) {
+          // The style menu belongs to the exact draft, not its envelope count.
+          // A fresh one-message draft must not inherit a previous draft's menu.
+          await this.state.storage.put('collectorReadyRevision', draftRevision);
           await this.state.storage.put('collectorReadyCount', n);
           await this.state.storage.delete('collectorShowStyles');
         }
