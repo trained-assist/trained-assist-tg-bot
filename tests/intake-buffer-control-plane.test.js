@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery } = vi.hoisted(() => ({
+const { handleMessage, checkCompleteness, route, request, start, stopTargets, send, edit, publishRoutingDegradation, enqueue, drain, loadDelivery, status, runReady } = vi.hoisted(() => ({
   handleMessage: vi.fn(), checkCompleteness: vi.fn(), route: vi.fn(), request: vi.fn(), start: vi.fn(), send: vi.fn(), edit: vi.fn(),
   stopTargets: vi.fn(),
   publishRoutingDegradation: vi.fn(),
-  enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(),
+  enqueue: vi.fn(), drain: vi.fn(), loadDelivery: vi.fn(), status: vi.fn(), runReady: vi.fn(),
 }));
 
 vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
@@ -18,7 +18,8 @@ vi.mock('../src/sandbox-tg/delivery-owner.js', () => ({
 vi.mock('../src/handlers/message.js', () => ({ handleMessage }));
 vi.mock('../src/lib/agent-client.js', () => ({ checkCompleteness }));
 vi.mock('../src/lib/control-plane-execution.js', () => ({
-  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets }),
+  controlPlaneClient: () => ({ config: { profileId: 'test-profile', botUsername: 'test-bot' }, route, request, start, stopTargets, status }),
+  runControlPlaneTask: (...args) => runReady(...args),
   publishRoutingDegradation,
 }));
 vi.mock('../src/lib/telegram.js', () => ({
@@ -46,6 +47,20 @@ function fixture() {
   };
   const owner = new IntakeBuffer({ storage }, env);
   return { storage, env, owner };
+}
+
+async function seedReadyDraft(owner, storage) {
+  owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile', id: 'session-42' }) : null,
+    put: async () => {} };
+  owner.env.INTAKE = { idFromName: name => name, get: () => owner };
+  await storage.put('buf', [{ text: 'first request', msg: { message_id: 11, chat: { id: 42 }, text: 'first request' } },
+    { text: 'add this detail', msg: { message_id: 12, chat: { id: 42 }, text: 'add this detail' } }]);
+  await storage.put('retryBatch', []);
+  await storage.put('collectorMsgId', 99);
+  await storage.put('draftRevision', 3);
+  await storage.put('collectorDraftRevision', 3);
+  await storage.put('collectorReadyRevision', 3);
+  await storage.put('collectorReadyCount', 2);
 }
 
 const items = [{ text: 'first', msg: { message_id: 1, chat: { id: 42 }, text: 'first' } }];
@@ -78,12 +93,202 @@ beforeEach(() => {
   enqueue.mockImplementation(async record => ({ record: { ...record, status: 'pending' }, duplicate: false }));
   drain.mockResolvedValue(1);
   loadDelivery.mockImplementation(async deliveryId => ({ deliveryId, status: 'sent' }));
+  status.mockResolvedValue({ id: 'ut-ready', profile_id: receipt.profileId, status: 'queued', generation: 1 });
+  runReady.mockImplementation(async (env, input) => {
+    const requestId = 'cp-ready-request';
+    const envelope = { contractVersion: 1, requestId, profileId: 'test-profile', conversationRef: 'tg-42',
+      sessionId: input.sessionId, inputItems: input.inputItems.map(item => ({ text: item.msg.text, artifactRefs: [] })),
+      waitTimeoutSec: null, workStyle: 'auto', workStyleSource: 'default' };
+    const stub = env.INTAKE.get('42');
+    await stub.fetch(rpc('/snapshot', { items: input.inputItems,
+      body: { username: input.username, requestId, task: input.task, initialMsgId: input.initialMsgId,
+        controlPlaneEnvelope: envelope } }));
+    const readyReceipt = { userTaskId: 'ut-ready', requestId, profileId: 'test-profile', durable: true, providerAcceptedAt: 1700000000000 };
+    await stub.fetch(rpc('/cp-acceptance', { requestId, receipt: readyReceipt, routingOnly: true }));
+    const routed = await route(readyReceipt.userTaskId, { continue: false });
+    return { taskId: readyReceipt.userTaskId, requestId, receipt: readyReceipt, routed, durable: true };
+  });
   send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
   edit.mockResolvedValue({ ok: true });
   handleMessage.mockResolvedValue(undefined);
 });
 
 describe('existing collector control-plane ownership', () => {
+  it('delivers a Ready quick answer without entering the agent busy queue', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    status.mockResolvedValueOnce({ id: 'ut-ready', profile_id: 'test-profile', status: 'done', generation: 1,
+      result: 'quick answer' });
+
+    const response = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'intake_ready' }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ kind: 'quick_answer', delivered: true });
+    expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ text: 'quick answer', deliveryId: 'terminal:ut-ready:g1' }));
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(await storage.get('buf')).toEqual([]);
+  });
+
+  it('shows fallback styles, then continues the same accepted task with the chosen style', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } })
+      .mockResolvedValueOnce({ route: 'agent', continuation: { issued: true } });
+
+    const ready = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'intake_ready' }));
+
+    expect(await ready.json()).toMatchObject({ kind: 'agent' });
+    const keyboard = edit.mock.calls.at(-1)[4].reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+    expect(keyboard).toEqual(['ws|explore|3', 'ws|answer|3', 'ws|auto|3', 'intake_discard|3']);
+    expect(await storage.get('busy')).toBeUndefined();
+
+    const launched = await owner.fetch(rpc('/ready', { username: 'test-profile', chatId: 42, threadId: null,
+      messageId: 99, callbackData: 'ws|explore|3' }));
+
+    expect(await launched.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
+    expect(route).toHaveBeenLastCalledWith('ut-ready', { continue: true, workStyle: 'explore', decisionId: 'decision-ready', generation: 1, idempotencyKey: 'ready:ut-ready:1:decision-ready' });
+    expect(await storage.get('cpBusyRequests')).toEqual(['cp-ready-request']);
+    expect(await storage.get('cp-acceptance:cp-ready-request')).toMatchObject({
+      routingOutcome: { known: true, publicationComplete: true, continuationIssued: true },
+    });
+    expect(await storage.get('busy')).toBe(true);
+    expect(await storage.get('buf')).toEqual([]);
+  });
+
+  const readySource = { username: 'test-profile', chatId: 42, threadId: null, messageId: 99, callbackData: 'intake_ready' };
+
+  it.each(['clarify', 'required_input'])('shows the %s question and preserves the ordered draft', async kind => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValue({ route: kind, askUser: { question: 'Какой срок?' } });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(await response.json()).toEqual({ kind });
+    expect(edit.mock.calls.at(-1)[3]).toContain('Какой срок?');
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledWith('ut-ready', { continue: false });
+  });
+
+  it.each(['degraded', 'malformed', 'array', 'timeout'])('preserves the draft after %s classification without offering agent styles', async failure => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    if (failure === 'timeout') route.mockRejectedValueOnce(new Error('timeout'));
+    else route.mockResolvedValueOnce(failure === 'degraded' ? { route: 'agent', degraded: true } : failure === 'array' ? [] : { raw: 'broken' });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(response.status).toBe(503);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('retains the same task and draft when continuation is refused', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } })
+      .mockResolvedValueOnce({ continuation: { issued: false, refusal: 'runner_not_configured' } });
+    await owner.fetch(rpc('/ready', readySource));
+    const response = await owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }));
+    expect(response.status).toBe(409);
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await storage.get('collectorIntent')).toMatchObject({ userTaskId: 'ut-ready' });
+    expect(edit.mock.calls.some(call => String(call[3]).includes('агент запущен'))).toBe(false);
+  });
+
+  it('serializes duplicate and conflicting style clicks while preserving an append during continuation', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } });
+    await owner.fetch(rpc('/ready', readySource));
+    let resolve;
+    let entered;
+    const started = new Promise(r => { entered = r; });
+    route.mockImplementationOnce(() => { entered(); return new Promise(r => { resolve = r; }); });
+    const launch = owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }));
+    await started;
+    for (const style of ['answer', 'explore']) {
+      expect((await owner.fetch(rpc('/ready', { ...readySource, callbackData: `ws|${style}|3` }))).status).toBe(409);
+    }
+    const newest = { text: 'new input', msg: { message_id: 13, chat: { id: 42 }, text: 'new input' } };
+    await storage.put('buf', [...await storage.get('buf'), newest]);
+    await owner._bumpDraftRevisionLocked();
+    resolve({ continuation: { issued: true } });
+    expect((await launch).status).toBe(200);
+    expect(route).toHaveBeenCalledTimes(2);
+    expect(await storage.get('buf')).toEqual([newest]);
+  });
+
+  it('does not attach an old agent decision to a concurrently appended draft', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockImplementationOnce(async () => {
+      await storage.put('buf', [...await storage.get('buf'), { text: 'new detail', msg: { message_id: 13, chat: { id: 42 }, text: 'new detail' } }]);
+      await owner._bumpDraftRevisionLocked();
+      return { route: 'agent', decisionId: 'old-decision', continuation: { issued: false } };
+    });
+    expect(await (await owner.fetch(rpc('/ready', readySource))).json()).toEqual({ kind: 'draft_changed' });
+    expect(await storage.get('buf')).toHaveLength(3);
+    expect(await storage.get('collectorIntent')).toBeUndefined();
+    expect(await storage.get('collectorShowStyles')).toBeUndefined();
+    expect((await owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|4' }))).status).toBe(409);
+    expect(route).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not launch accumulated input when an old quiet timer expires', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    await storage.put('debounceExpiresAt', Date.now() - 1);
+    await storage.put('autoPolicy', 'quiet-3m-v1');
+    await owner.alarm();
+    expect(await storage.get('buf')).toHaveLength(2);
+    expect(runReady).not.toHaveBeenCalled();
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('reconciles an unknown continuation on the same task before admitting newer input', async () => {
+    const { owner, storage } = fixture();
+    await seedReadyDraft(owner, storage);
+    route.mockResolvedValueOnce({ route: 'agent', decisionId: 'decision-ready', continuation: { issued: false } });
+    await owner.fetch(rpc('/ready', readySource));
+    route.mockRejectedValueOnce(new Error('lost continuation acknowledgement'));
+    await expect(owner.fetch(rpc('/ready', { ...readySource, callbackData: 'ws|answer|3' }))).rejects.toThrow('lost continuation');
+    expect(await storage.get('readyContinuationPending')).toMatchObject({ workStyle: 'answer' });
+    const newest = { text: 'new input', msg: { message_id: 13, chat: { id: 42 }, text: 'new input' } };
+    await storage.put('buf', [...await storage.get('buf'), newest]);
+    await owner._bumpDraftRevisionLocked();
+    await owner._showCollector(42, 3, 13);
+    route.mockResolvedValueOnce({ continuation: { issued: false, refusal: 'existing_run_requires_reconciliation', runId: 'existing-run' } });
+    const response = await owner.fetch(rpc('/ready', readySource));
+    expect(await response.json()).toMatchObject({ kind: 'agent_started', taskId: 'ut-ready' });
+    expect(runReady).toHaveBeenCalledTimes(1);
+    expect(route.mock.calls.slice(1).every(call => call[0] === 'ut-ready' && call[1].workStyle === 'answer')).toBe(true);
+    expect(await storage.get('buf')).toEqual([newest]);
+    expect(await storage.get('readyContinuationPending')).toBeUndefined();
+  });
+
+  it('keeps Ready classifier admission outside the agent busy queue until a mode is chosen', async () => {
+    const { owner, storage } = fixture();
+    await snapshot(owner);
+
+    const accepted = await owner.fetch(rpc('/cp-acceptance', { requestId: receipt.requestId, receipt, routingOnly: true }));
+
+    expect(accepted.status).toBe(200);
+    expect(await storage.get(`cp-route:${receipt.requestId}`)).toMatchObject({ receipt, routingOnly: true });
+    expect(await storage.get(`cp-acceptance:${receipt.requestId}`)).toBeUndefined();
+    expect(await storage.get('cpBusyRequests')).toBeUndefined();
+    expect(await storage.get('busy')).toBeUndefined();
+    expect(await (await owner.fetch(new Request(`https://intake/cp-acceptance?requestId=${receipt.requestId}`))).json())
+      .toEqual({ receipt });
+  });
+
   it('durably queues the live buffer and lets the DO alarm admit it after the request returns', async () => {
     const { owner, storage } = fixture();
     owner.env.SESSIONS = { get: async key => key === '42' ? JSON.stringify({ username: 'test-profile' }) : null, put: async () => {} };
@@ -1862,17 +2067,18 @@ describe('existing collector control-plane ownership', () => {
     expect(await storage.get('launching')).toEqual(items);
   });
 
-  it('keeps quiet timer and dispatches whole input without legacy classifier', async () => {
+  it('keeps the whole input awaiting Ready without a quiet-time launch', async () => {
     const { owner, storage } = fixture();
     await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg }));
     expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
-    expect(await storage.get('debounceExpiresAt')).toBeGreaterThan(Date.now() + 170_000);
+    expect(await storage.get('debounceExpiresAt')).toBeUndefined();
     await storage.put('receiptDue', Date.now() - 1);
     await owner.alarm();
     expect(send).toHaveBeenCalledWith('test-bot-token', 42, expect.any(String), expect.any(Array), expect.any(Object));
     await storage.put('debounceExpiresAt', Date.now() - 1);
     await owner.alarm();
-    expect(handleMessage).toHaveBeenCalledWith(expect.objectContaining({ intakeItems: items }), expect.anything(), expect.anything());
+    expect(handleMessage).not.toHaveBeenCalled();
+    expect(await storage.get('buf')).toEqual(items);
     expect(checkCompleteness).not.toHaveBeenCalled();
   });
 
@@ -1926,6 +2132,22 @@ describe('existing collector control-plane ownership', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps receipt retries alive without restoring automatic task dispatch', async () => {
+    const { owner, storage } = fixture();
+    await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg }));
+    send.mockResolvedValue({ ok: false, error_code: 503 });
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(await storage.get('receiptDue')).toBeGreaterThan(Date.now());
+    expect(await storage.get('buf')).toEqual(items);
+    expect(handleMessage).not.toHaveBeenCalled();
+    send.mockResolvedValue({ ok: true, result: { message_id: 99 } });
+    await storage.put('receiptDue', Date.now() - 1);
+    await owner.alarm();
+    expect(await storage.get('collectorMsgId')).toBe(99);
+    expect(route).not.toHaveBeenCalled();
+  });
+
   it('retries a collector after Telegram explicitly rejects a send', async () => {
     const { owner, storage } = fixture();
     await owner.fetch(rpc('/append', { text: 'first', msg: items[0].msg, telegramUpdateId: 100 }));
@@ -1934,8 +2156,8 @@ describe('existing collector control-plane ownership', () => {
     await owner.alarm();
 
     const batch = await storage.get('pendingBatch');
-    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'rejected', errorCode: 404 });
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(await storage.get(`cp-collector-send:${batch.batchId}`)).toEqual({ state: 'sent', messageId: 99 });
+    expect(send).toHaveBeenCalledTimes(2);
 
     await owner.fetch(rpc('/append', { text: 'second', msg: { ...items[0].msg, message_id: 2, text: 'second' }, telegramUpdateId: 101 }));
     await storage.put('receiptDue', Date.now() - 1);

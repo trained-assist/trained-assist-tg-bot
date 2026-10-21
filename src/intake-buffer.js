@@ -3,7 +3,7 @@ import { controlPlaneFailureText } from './lib/control-plane-outcome.js';
 import { initTestMode } from './lib/test-mode.js';
 import { assembleInput } from './input-assembly.js';
 import { mediaEnabled, mediaOf, mediaId, enqueueMedia, cpMediaSupported } from './media-jobs.js';
-import { getSession } from './lib/kv.js';
+import { getSession, setSession, newSessionId } from './lib/kv.js';
 import { checkCompleteness } from './lib/agent-client.js';
 import { applySessionNamespace } from './lib/session-namespace.js';
 import { closePendingBatch, registerPendingBatch } from './lib/pending-intake.js';
@@ -374,6 +374,41 @@ export class IntakeBuffer {
     return revision;
   }
 
+  async _stableDigest(value) {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  }
+
+  async _retireIntentDraft(launchKey, claimedItems, requestId) {
+    const ids = new Set((claimedItems || []).map(item => item.msg?.message_id).filter(Number.isSafeInteger));
+    let closedBatch = null;
+    const result = await this._exclusive(async () => {
+      const retry = await this.state.storage.get('retryBatch') || [];
+      const buf = await this.state.storage.get('buf') || [];
+      const isClaimed = item => ids.has(item.msg?.message_id);
+      await this.state.storage.put('retryBatch', retry.filter(item => !isClaimed(item)));
+      await this.state.storage.put('buf', buf.filter(item => !isClaimed(item)));
+      const remaining = [...retry, ...buf].filter(item => !isClaimed(item));
+      await this.state.storage.delete('collectorIntent');
+      await this.state.storage.delete('collectorShowStyles');
+      await this.state.storage.delete('preparingMsgId');
+      const collectorMsgId = await this.state.storage.get('collectorMsgId');
+      await this.state.storage.put('collectorMsgId', null);
+      await this._bumpDraftRevisionLocked();
+      if (!remaining.length) closedBatch = await this._nextBatchLocked(null, null);
+      return { remaining, collectorMsgId };
+    });
+    if (closedBatch) await this._closePending(this.env, closedBatch, 'launched', requestId);
+    const retiredText = (await this.state.storage.get(`cp-launch:${launchKey}`))?.classificationState === 'agent'
+      ? '✅ Полноценный агент запущен.' : '✅ Быстрый ответ отправлен.';
+    if (result.collectorMsgId) await editMessage(this.env.BOT_TOKEN,
+      (claimedItems || []).at(-1)?.msg?.chat?.id, result.collectorMsgId, retiredText,
+      { reply_markup: { inline_keyboard: [] } }).catch(() => null);
+    if (result.remaining.length) await this._showCollector(result.remaining.at(-1).msg.chat.id, result.remaining.length,
+      result.remaining.at(-1).msg.message_id, threadIdOf(result.remaining.at(-1).msg), null, { fresh: true });
+    await this.state.storage.delete(`cp-launch:${launchKey}`);
+  }
+
   async _activeUnresolvedLaunches() {
     const keys = (await this.state.storage.get('cpUnresolvedLaunches')) || [];
     const active = [];
@@ -404,9 +439,12 @@ export class IntakeBuffer {
       const readyRevision = await this.state.storage.get('collectorReadyRevision');
       const busy = await this.state.storage.get('busy');
       const stopPending = (await this.state.storage.get('cpStopWindow'))?.pending === true;
+      const checkpoint = await this.state.storage.get('collectorIntent');
+      const checkpointActive = checkpoint?.messageId === messageId && checkpoint?.revision === currentRevision &&
+        (await this.state.storage.get(`cp-acceptance:${checkpoint.requestId}`))?.receipt?.userTaskId === checkpoint.userTaskId;
       return messageId === await this.state.storage.get('collectorMsgId') && items.length > 0 &&
         collectorRevision === currentRevision && readyRevision === currentRevision &&
-        (await this.state.storage.get('collectorShowStyles')) !== true && !busy && !stopPending;
+        (checkpointActive || (await this.state.storage.get('collectorShowStyles')) !== true && !busy && !stopPending);
     }
     const dismissUnknown = /^intake_dismiss_unknown\|([a-f0-9-]{36})$/.exec(data);
     if (dismissUnknown) {
@@ -421,6 +459,9 @@ export class IntakeBuffer {
         action.intentId === (await this.state.storage.get('cpStopWindow'))?.intentId;
     }
     const styleLaunch = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(data);
+    const pendingChoice = await this.state.storage.get('readyContinuationPending');
+    if (styleLaunch && pendingChoice?.source?.username === source.username &&
+        pendingChoice.source.messageId === messageId && pendingChoice.source.callbackData === data) return true;
     if (/^intake_stop(yes|no)\|(supp|new)$/.test(data || '')) {
       const confirmation = await this.state.storage.get(`cp-confirmation:${messageId}`);
       const currentRequestIds = [...new Set((await this.state.storage.get('cpBusyRequests')) || [])].sort();
@@ -441,6 +482,10 @@ export class IntakeBuffer {
       return false;
     }
     if (messageId !== collector || !items.length) return false;
+    const intent = await this.state.storage.get('collectorIntent');
+    if (styleLaunch && intent && intent.messageId === messageId && intent.revision === await this.state.storage.get('draftRevision')) {
+      return Number(styleLaunch[2]) === intent.revision && intent.userTaskId != null;
+    }
     const queued = !!(await this.state.storage.get('launchQueued')) || !!(await this.state.storage.get('stopLaunch'));
     if (queued) return data === 'intake_cancel';
     if (/^intake_discard\|\d+$/.test(data)) return Number(data.split('|')[1]) === await this.state.storage.get('draftRevision');
@@ -567,6 +612,7 @@ export class IntakeBuffer {
         }
         await this.state.storage.put('collectorMsgId', source.messageId);
         await this.state.storage.put('collectorDraftRevision', revision);
+        await this.state.storage.put('collectorReadyRevision', revision);
         return Response.json({ seeded: true, draftRevision: revision });
       });
     }
@@ -610,6 +656,7 @@ export class IntakeBuffer {
           return { discarded: true, draftOnly: true, count: buf.length, preservedRetryCount: retry.length,
             pendingWindowPreserved: true, preservedFailedCount: failedKeys.length + failedMediaKeys.length };
         }
+        if (await this.state.storage.get('readyContinuationPending')) return { pending: true, reasonCode: 'continuation_outcome_unknown' };
         if (this.cpDispatches || (await this._activeUnresolvedLaunches()).length ||
             (await this.state.storage.get('launching'))?.length) {
           return { pending: true, reasonCode: this.cpDispatches ? 'dispatch_in_progress' : 'unresolved_launch' };
@@ -790,11 +837,12 @@ export class IntakeBuffer {
     if (url.pathname === '/cp-acceptance') {
       if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
       if (request.method === 'GET') {
-        const record = await this.state.storage.get(`cp-acceptance:${url.searchParams.get('requestId')}`);
+        const requestId = url.searchParams.get('requestId');
+        const record = await this.state.storage.get(`cp-acceptance:${requestId}`) || await this.state.storage.get(`cp-route:${requestId}`);
         return json({ receipt: record?.receipt ?? null });
       }
       if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
-      const { requestId, receipt } = await request.json();
+      const { requestId, receipt, routingOnly = false } = await request.json();
       return this._exclusive(async () => {
         const snapshot = typeof requestId === 'string' && await this._readSnapshot(requestId);
         const envelope = snapshot?.body?.controlPlaneEnvelope;
@@ -809,7 +857,7 @@ export class IntakeBuffer {
             typeof receipt?.userTaskId !== 'string' || !receipt.userTaskId || receipt.durable !== true) {
           return new Response('Acceptance scope mismatch', { status: 409 });
         }
-        const key = `cp-acceptance:${requestId}`;
+        const key = `${routingOnly ? 'cp-route' : 'cp-acceptance'}:${requestId}`;
         const existing = await this.state.storage.get(key);
         if (existing) {
           if (existing.receipt.userTaskId !== receipt.userTaskId || existing.receipt.profileId !== receipt.profileId ||
@@ -817,7 +865,8 @@ export class IntakeBuffer {
           return json({ receipt: existing.receipt });
         }
         await this.state.storage.transaction(async tx => {
-          await tx.put(key, { receipt, terminal: false });
+          await tx.put(key, { receipt, terminal: false, ...(routingOnly ? { routingOnly: true } : {}) });
+          if (routingOnly) return;
           const ids = (await tx.get('cpBusyRequests')) || [];
           await tx.put('cpBusyRequests', [...new Set([...ids, requestId])]);
           await tx.put('busy', true);
@@ -825,6 +874,233 @@ export class IntakeBuffer {
         });
         return json({ receipt });
       });
+    }
+
+    if (url.pathname === '/ready' && request.method === 'POST') {
+      const source = await request.json().catch(() => ({}));
+      if (this.env.EXECUTION_BACKEND !== 'control-plane') return new Response('Unavailable', { status: 404 });
+      if (source.callbackData === 'intake_ready' && typeof source.callbackId === 'string' && source.callbackId) {
+        const callbackKey = `ready-callback:${await this._stableDigest(source.callbackId)}`;
+        const claimed = await this._exclusive(async () => {
+          if (await this.state.storage.get(callbackKey)) return false;
+          if (!(await this._callbackOwned(source))) return null;
+          await this.state.storage.put(callbackKey, { at: Date.now() });
+          return true;
+        });
+        if (claimed === false) return json({ kind: 'duplicate' });
+        if (claimed === null) return new Response('Callback ownership mismatch', { status: 409 });
+      }
+      const styleChoice = /^ws\|(explore|answer|auto)\|(\d+)$/.exec(source.callbackData || '');
+      const pendingChoice = await this.state.storage.get('readyContinuationPending');
+      if (source.callbackData === 'intake_ready' && pendingChoice) {
+        if (!(await this._callbackOwned(source))) return new Response('Callback ownership mismatch', { status: 409 });
+        // Reconcile the exact previously authorized choice before a newer draft
+        // may be admitted. A lost response never authorizes a replacement task.
+        return this._fetch(new Request('https://intake/ready', { method: 'POST', body: JSON.stringify(pendingChoice.source) }));
+      }
+      if (styleChoice && !(await this.state.storage.get('collectorIntent')) &&
+          ((await this.state.storage.get('busy')) || (await this.state.storage.get('cpStopWindow'))?.pending)) {
+        return this.fetch(new Request('https://intake/flush', { method: 'POST', body: JSON.stringify({ ...source,
+          workStyle: styleChoice[1], workStyleSource: 'explicit' }) }));
+      }
+      if (styleChoice) {
+        const workStyle = styleChoice[1];
+        const choice = await this._exclusive(async () => {
+          if (this.cpReadyContinuation || !(await this._callbackOwned(source))) return null;
+          if (pendingChoice) {
+            if (pendingChoice.workStyle !== workStyle) return null;
+            this.cpReadyContinuation = true;
+            return pendingChoice;
+          }
+          const intent = await this.state.storage.get('collectorIntent');
+          if (!intent?.userTaskId || Number(styleChoice[2]) !== intent.revision) return null;
+          const launch = await this.state.storage.get(`cp-launch:${intent.launchKey}`);
+          const routeReceipt = await this.state.storage.get(`cp-route:${intent.requestId}`);
+          if (!launch || launch.classificationState !== 'agent' || !routeReceipt?.receipt ||
+              routeReceipt.receipt.userTaskId !== intent.userTaskId ||
+              (launch.selectedWorkStyle && launch.selectedWorkStyle !== workStyle)) return null;
+          await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, selectedWorkStyle: workStyle });
+          const selected = { intent, launch, routeReceipt, workStyle,
+            source: { ...source, messageId: source.messageId ?? source.sourceMessageId } };
+          await this.state.storage.put('readyContinuationPending', selected);
+          this.cpReadyContinuation = true;
+          return selected;
+        });
+        if (!choice) return Response.json({ reasonCode: 'continuation_choice_stale_or_pending' }, { status: 409 });
+        const { intent, launch, routeReceipt } = choice;
+        try {
+        const client = controlPlaneClient(this.env);
+        let routed;
+        try {
+          routed = await client.route(intent.userTaskId, { continue: true, workStyle,
+            decisionId: launch.routed.decisionId, generation: launch.generation,
+            idempotencyKey: `ready:${intent.userTaskId}:${launch.generation}:${launch.routed.decisionId}` });
+        } catch (error) {
+          // The original Run can have finished before a lost ACK is retried.
+          // Reconcile its authoritative receipt; never submit a replacement.
+          const observed = await client.request('POST', '/status', { body: { taskId: intent.userTaskId } }).catch(() => null);
+          const row = observed?.value?.taskStore;
+          const run = observed?.value?.runs?.find(item => item.generation === launch.generation && typeof item.id === 'string');
+          if (row?.id !== intent.userTaskId || row?.profile_id !== routeReceipt.receipt.profileId || !run) throw error;
+          routed = { continuation: { requested: true, issued: false, refusal: 'existing_run_requires_reconciliation', runId: run.id } };
+        }
+        if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) return new Response('Route unavailable', { status: 503 });
+        const reconciledRun = routed.continuation?.refusal === 'existing_run_requires_reconciliation' && routed.continuation?.runId;
+        if (routed.continuation?.issued !== true && !reconciledRun) {
+          if (typeof routed.continuation?.refusal !== 'string') return new Response('Continuation outcome unknown', { status: 503 });
+          await this.state.storage.delete('readyContinuationPending');
+          return Response.json({ reasonCode: routed.continuation?.refusal || 'continuation_not_accepted' }, { status: 409 });
+        }
+        const key = `cp-acceptance:${intent.requestId}`;
+        await this.state.storage.transaction(async tx => {
+          const current = await tx.get(key);
+          if (!current) await tx.put(key, { receipt: routeReceipt.receipt, terminal: false,
+            routingComplete: true, routed, selectedWorkStyle: workStyle,
+            routingOutcome: { known: true, publicationComplete: true, degraded: routed.degraded === true,
+              routeReasonCode: typeof routed.reasonCode === 'string' ? routed.reasonCode : null,
+              continuationRequested: routed.continuation?.requested === true,
+              continuationIssued: routed.continuation?.issued === true,
+              continuationRefusal: typeof routed.continuation?.refusal === 'string' ? routed.continuation.refusal : null } });
+          const ids = await tx.get('cpBusyRequests') || [];
+          await tx.put('cpBusyRequests', [...new Set([...ids, intent.requestId])]);
+          await tx.put('busy', true);
+          await tx.put('busySince', Date.now());
+          await tx.put('busyChatId', launch.msg.chat.id);
+          await tx.put('busyThread', threadIdOf(launch.msg));
+          await tx.setAlarm(Date.now() + BUSY_POLL_MS);
+        });
+        await this.state.storage.delete('readyContinuationPending');
+        await this._retireIntentDraft(intent.launchKey, launch.msg.intakeItems || [], intent.requestId);
+        await this.state.storage.put(`cp-launch:${intent.launchKey}`, { ...launch, classificationState: 'launched', selectedWorkStyle: workStyle });
+        return json({ kind: 'agent_started', taskId: intent.userTaskId });
+        } finally { this.cpReadyContinuation = false; }
+      }
+      const claim = await this._exclusive(async () => {
+        if (this.cpDispatches || this.cpReadyContinuation) return { replay: 'pending' };
+        if (!(await this._callbackOwned(source))) return null;
+        const revision = await this.state.storage.get('draftRevision');
+        const items = [...((await this.state.storage.get('retryBatch')) || []), ...((await this.state.storage.get('buf')) || [])];
+        if (!items.length || items.some(item => item.mediaPending || item.preparingAt)) return { error: 'draft_not_ready' };
+        const launchKey = JSON.stringify(items.map(item => item.msg?.message_id));
+        const existing = await this.state.storage.get(`cp-launch:${launchKey}`);
+        if (existing?.classificationState === 'agent') return { checkpoint: existing, items, revision, replay: 'agent' };
+        if (existing?.classificationState === 'pending' && await this.state.storage.get('cpDispatching')) {
+          return { checkpoint: existing, items, revision, replay: 'pending' };
+        }
+        const text = coalescedIntent(items);
+        if (!text) return { error: 'empty' };
+        const msg = items.at(-1).msg;
+        const profileId = controlPlaneClient(this.env).config.profileId;
+        const session = await getSession(this.env.SESSIONS, msg.chat.id, threadIdOf(msg));
+        const sessionId = session?.id ?? session?.activeSessionId ?? session?.lastSessionId ?? newSessionId(msg.chat.id);
+        const scope = `${profileId}:${conversationKey(msg.chat.id, threadIdOf(msg))}:${items.map(item => item.msg.message_id).join(',')}`;
+        const requestId = `tgready-${await this._stableDigest(scope)}`;
+        const checkpoint = { msg: { ...msg, text, intakeItems: items }, initialMsgId: source.messageId,
+          profileId, sessionId, botUsername: controlPlaneClient(this.env).config.botUsername,
+          requestId, revision, classificationState: 'pending', workStyle: 'auto', workStyleSource: 'default' };
+        await this.state.storage.put(`cp-launch:${launchKey}`, checkpoint);
+        await this.state.storage.put('collectorIntent', { requestId, revision, messageId: source.messageId,
+          launchKey, chatId: msg.chat.id, threadId: threadIdOf(msg), userTaskId: null });
+        await this.state.storage.put('cpDispatching', { requestId, launchKey });
+        this.cpDispatches++;
+        return { checkpoint, items, revision, launchKey, replay: false };
+      });
+      if (!claim) return new Response('Callback ownership mismatch', { status: 409 });
+      if (claim.error) return Response.json({ error: claim.error }, { status: 409 });
+      if (claim.replay === 'pending') return json({ kind: 'pending', replay: true });
+      if (claim.replay === 'agent') {
+        await this.state.storage.put('collectorIntent', { requestId: claim.checkpoint.controlPlaneRequestId,
+          revision: await this.state.storage.get('draftRevision'), messageId: source.messageId, launchKey: claim.checkpoint.launchKey,
+          chatId: claim.checkpoint.msg.chat.id, threadId: threadIdOf(claim.checkpoint.msg),
+          userTaskId: claim.checkpoint.userTaskId });
+        await this.state.storage.put('collectorShowStyles', true);
+        await this._showCollector(claim.checkpoint.msg.chat.id, claim.items.length, source.messageId,
+          threadIdOf(claim.checkpoint.msg));
+        return json({ kind: 'agent', replay: true });
+      }
+      const checkpoint = claim.checkpoint;
+      try {
+        const initialMsgId = await this._showCollector(checkpoint.msg.chat.id, claim.items.length,
+          checkpoint.msg.message_id, threadIdOf(checkpoint.msg), '🔎 Определяю интент по собранным сообщениям…', { fresh: true });
+        if (!initialMsgId) throw new Error('collector_status_not_published');
+        checkpoint.initialMsgId = initialMsgId;
+        await this.state.storage.put(`cp-launch:${claim.launchKey}`, checkpoint);
+        await this.state.storage.put('preparingMsgId', initialMsgId);
+        const { runControlPlaneTask } = await import('./lib/control-plane-execution.js');
+        const ack = await runControlPlaneTask(this.env, { requestId: checkpoint.requestId,
+          sessionId: checkpoint.sessionId,
+          userId: checkpoint.msg.chat.id, threadId: threadIdOf(checkpoint.msg), username: source.username,
+          initialMsgId, task: checkpoint.msg.text, inputItems: claim.items, workStyle: 'auto', workStyleSource: 'default',
+          routeContinue: false, routingOnly: true });
+        const client = controlPlaneClient(this.env);
+        const receipt = ack.receipt;
+        if (!receipt?.durable || receipt.userTaskId !== ack.taskId) throw new Error('durable_receipt_missing');
+        const routed = ack.routed;
+        if (!routed || typeof routed !== 'object' || Array.isArray(routed) || Object.hasOwn(routed, 'raw')) throw new Error('route_result_invalid');
+        const snap = await this._readSnapshot(ack.requestId);
+        const accepted = await this.state.storage.get(`cp-route:${ack.requestId}`);
+        if (!accepted?.receipt || accepted.receipt.userTaskId !== ack.taskId) throw new Error('durable_route_receipt_not_persisted');
+        const currentSession = await getSession(this.env.SESSIONS, checkpoint.msg.chat.id, threadIdOf(checkpoint.msg));
+        if (!currentSession || currentSession.username !== source.username) throw new Error('route_session_scope_changed');
+        if (currentSession.lastSessionId !== checkpoint.sessionId) {
+          await setSession(this.env.SESSIONS, checkpoint.msg.chat.id,
+            { ...currentSession, lastSessionId: checkpoint.sessionId }, threadIdOf(checkpoint.msg));
+        }
+        const status = await client.status(ack.taskId);
+        if (status.profile_id !== checkpoint.profileId || status.id !== ack.taskId) throw new Error('task_scope_mismatch');
+        if (routed.degraded === true || routed.continuation?.issued === true) throw new Error('intent_route_degraded');
+        const answer = taskAnswer(status);
+        if (status.status === 'done' && answer) {
+          const envelope = snap?.body?.controlPlaneEnvelope;
+          const deliveryId = `terminal:${ack.taskId}:g${status.generation}`;
+          const outbox = new TgDeliveryOwnerClient(this.env, client.config);
+          const queued = await outbox.enqueue({ deliveryId, taskAcceptedAt: receipt.providerAcceptedAt,
+            conversationId: `${envelope.conversationRef}-b${checkpoint.requestId.slice(-24)}`, userTaskId: ack.taskId,
+            destination: { chatId: checkpoint.msg.chat.id, threadId: threadIdOf(checkpoint.msg) },
+            requestId: deliveryId, type: 'message', text: answer });
+          if (queued?.record?.deliveryId !== deliveryId || queued.record.status === 'quarantined') throw new Error('quick_answer_delivery_rejected');
+          await outbox.drain();
+          const delivered = await outbox.load(deliveryId);
+          if (delivered?.status !== 'sent') throw new Error('quick_answer_delivery_pending');
+          await this._retireIntentDraft(claim.launchKey, claim.items, checkpoint.requestId);
+          return json({ kind: 'quick_answer', delivered: true });
+        }
+        if (['clarify', 'required_input'].includes(routed.route)) {
+          const question = routed.askUser?.question;
+          if (typeof question !== 'string' || !question.trim()) throw new Error('intent_question_missing');
+          await this.state.storage.delete('collectorShowStyles');
+          await this._showCollector(checkpoint.msg.chat.id, claim.items.length, source.messageId,
+            threadIdOf(checkpoint.msg), question);
+          return json({ kind: routed.route });
+        }
+        if (routed.route !== 'agent' || typeof routed.decisionId !== 'string' || !routed.decisionId) throw new Error('intent_result_not_agent');
+        await this.state.storage.put(`cp-launch:${claim.launchKey}`, { ...checkpoint, classificationState: 'agent',
+          controlPlaneRequestId: ack.requestId, userTaskId: ack.taskId, receipt, routed, generation: status.generation, initialMsgId });
+        if (await this.state.storage.get('draftRevision') !== claim.revision) {
+          await this.state.storage.delete('collectorIntent');
+          await this.state.storage.delete('collectorShowStyles');
+          const pending = [...(await this.state.storage.get('retryBatch') || []), ...(await this.state.storage.get('buf') || [])];
+          await this._showCollector(checkpoint.msg.chat.id, pending.length, source.messageId, threadIdOf(checkpoint.msg),
+            'Ввод дополнен во время проверки. Нажми «Готово», чтобы проверить всю пачку.');
+          return json({ kind: 'draft_changed' });
+        }
+        const menuRevision = claim.revision;
+        await this.state.storage.put('collectorIntent', { requestId: ack.requestId, revision: menuRevision,
+          launchKey: claim.launchKey, messageId: source.messageId, chatId: checkpoint.msg.chat.id,
+          threadId: threadIdOf(checkpoint.msg), userTaskId: ack.taskId });
+        await this.state.storage.put('collectorShowStyles', true);
+        await this._showCollector(checkpoint.msg.chat.id, claim.items.length, source.messageId,
+          threadIdOf(checkpoint.msg), null, { fresh: true });
+        return json({ kind: 'agent' });
+      } catch (error) {
+        await this.state.storage.put('lastDispatchOutcome', { at: Date.now(), status: 'classification_failed', reasonCode: 'intent_route_unavailable' });
+        await this._showCollector(checkpoint.msg.chat.id, claim.items.length, source.messageId, threadIdOf(checkpoint.msg),
+          '⚠️ Не удалось завершить определение интента. Ввод сохранён; нажми «Готово» ещё раз.', { fresh: true }).catch(() => null);
+        return Response.json({ error: 'intent_classification_unavailable' }, { status: 503 });
+      } finally {
+        this.cpDispatches--;
+        await this.state.storage.delete('cpDispatching');
+      }
     }
 
     // Strongly-consistent mirror of the chat's project picker (src/lib/picker-mirror.js).
@@ -2330,6 +2606,9 @@ export class IntakeBuffer {
   //     idle input, and a NEW message after the release re-arms it, exactly as
   //     stoppedText promises: «новое сообщение вернёт обычный режим»).
   async _autoLaunchBlocked(buf) {
+    // SC-INTAKE-READY-01: a quiet timeout is not an explicit Ready/style choice.
+    // This also fences timers persisted by the previous collector version.
+    if (this.env.EXECUTION_BACKEND === 'control-plane') return true;
     if (await this.state.storage.get('stopLaunch')) return true;
     const items = buf || (await this.state.storage.get('buf')) || [];
     return items.length > 0 && items.every(i => i.heldWhileBusy);
@@ -2517,10 +2796,14 @@ export class IntakeBuffer {
         }
         if (claim?.state === 'sending') {
           await this.state.storage.put(claimKey, { ...claim, state: 'unknown', ts: Date.now() });
+          await this._ensureAlarmBy(Date.now() + COLLECTOR_UNKNOWN_RETRY_MS);
           return null;
         }
         if (claim?.state === 'unknown') {
-          if (Date.now() - (Number(claim.ts) || 0) < COLLECTOR_UNKNOWN_RETRY_MS) return null;
+          if (Date.now() - (Number(claim.ts) || 0) < COLLECTOR_UNKNOWN_RETRY_MS) {
+            await this._ensureAlarmBy(Number(claim.ts) + COLLECTOR_UNKNOWN_RETRY_MS);
+            return null;
+          }
           await this.state.storage.delete(claimKey);
         }
       }
@@ -2585,7 +2868,8 @@ export class IntakeBuffer {
           await this.state.storage.put('collectorStopIntentId', stopPending ? stopWindow?.intentId ?? null : null);
         }
       }
-      else if (!cpMode) await this._scheduleReceipt();
+      else if (!cpMode || sent?.ok === false) await this._scheduleReceipt();
+      else await this._ensureAlarmBy(Date.now() + COLLECTOR_UNKNOWN_RETRY_MS);
       return id || null;
     } finally { release(); }
   }

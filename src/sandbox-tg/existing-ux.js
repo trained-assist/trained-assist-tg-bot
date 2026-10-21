@@ -579,7 +579,7 @@ app.post('/operator/test-update', async context => {
   const callbackShortcut = source.type === 'callback' && ['auto', 'explore', 'answer', 'intake_run'].includes(source.callbackData)
     ? (source.callbackData === 'intake_run' ? 'auto' : source.callbackData) : null;
   let before = await readCollectorState();
-  if (callbackShortcut && source.messageId === undefined && source.delivery !== 'telegram' &&
+  if ((callbackShortcut || source.callbackData === 'intake_ready') && source.messageId === undefined && source.delivery !== 'telegram' &&
       !Number.isSafeInteger(before?.collectorMsgId)) {
     const session = await getSession(env.SESSIONS, chatId, null);
     if (!session?.username || target !== 'sandbox3' || env.TG_SANDBOX_TEST_API_ENABLED !== 'true') {
@@ -862,7 +862,7 @@ app.post('/webhook', async context => {
     rememberCallback(update.callback_query.id, message.chat.id);
     const data = update.callback_query.data ?? '';
     const stopBlocked = data.startsWith('intake_stop') && env.TG_SLICE_STOP_ENABLED !== 'true';
-    const supported = ['intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew', 'input_draft', 'input_run'].includes(data)
+    const supported = ['intake_ready', 'intake_run', 'intake_parallel', 'intake_cancel', 'intake_stopsupp', 'intake_stopnew', 'input_draft', 'input_run'].includes(data)
       || /^intake_dismiss_unknown\|[a-f0-9-]{36}$/.test(data)
       || /^ws\|(explore|answer|auto)\|\d+$/.test(data)
       || /^intake_discard\|\d+$/.test(data)

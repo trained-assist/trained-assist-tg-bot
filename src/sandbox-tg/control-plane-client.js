@@ -253,8 +253,15 @@ export class ControlPlaneClient {
     return ack;
   }
 
-  async route(userTaskId) {
-    const { value } = await this.request('POST', '/route', { body: { taskId: userTaskId, continue: true },
+  async route(userTaskId, options = {}) {
+    const body = { taskId: userTaskId, continue: options.continue !== false };
+    if (body.continue && ['explore', 'answer', 'auto'].includes(options.workStyle)) {
+      body.workStyle = options.workStyle;
+      body.decisionId = options.decisionId;
+      body.generation = options.generation;
+      body.idempotencyKey = options.idempotencyKey;
+    }
+    const { value } = await this.request('POST', '/route', { body,
       timeoutMs: this.config.routeRequestTimeoutMs ?? 140000 });
     return value;
   }

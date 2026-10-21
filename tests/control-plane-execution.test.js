@@ -22,6 +22,7 @@ function fixture() {
       if (options.method === 'POST') {
         const value = JSON.parse(options.body);
         receipts.set(value.requestId, value.receipt);
+        if (value.routingOnly) return Response.json({ ok: true, routingOnly: true });
         return Response.json({ ok: true });
       }
       return Response.json({ receipt: receipts.get(address.searchParams.get('requestId')) ?? null });
@@ -65,6 +66,16 @@ describe('existing collector control-plane execution boundary', () => {
       { event: 'tg.cp.route_completed', requestId: ack.requestId, taskId: ack.userTaskId, status: 'completed', route: 'agent' },
     ]);
     log.mockRestore();
+  });
+
+  it('classifies the frozen aggregate without continuing into an agent run', async () => {
+    const state = fixture();
+    const ack = await runControlPlaneTask(state.env, { ...state.input, routeContinue: false, routingOnly: true });
+    expect(state.calls.map(call => call.pathname)).toEqual(['/intake', '/route']);
+    expect(state.calls[1].body).toEqual({ taskId: ack.taskId, continue: false });
+    expect(ack.routed).toMatchObject({ route: 'agent', continuation: { requested: false, issued: false } });
+    expect(state.fake.runs(ack.taskId)).toHaveLength(0);
+    expect(state.receipts.has(ack.requestId)).toBe(true);
   });
 
   it('reuses frozen input and source session after a cold adapter restart', async () => {

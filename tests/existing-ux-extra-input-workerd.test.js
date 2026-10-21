@@ -33,7 +33,7 @@ function bundle() {
   nodePaths: [resolve('node_modules')] }).outputFiles[0].text;
 }
 
-it.each(['before-collector', 'after-collector'])('retains two-message aggregate across cold SQLite restart: %s', async boundary => {
+it.each(['before-collector', 'after-collector', 'clarify', 'required_input', 'degraded', 'malformed', 'provider-failure', 'append-race', 'clear'])('Ready signed-webhook/SQLite scenario: %s', async boundary => {
   const persistRoot = await mkdtemp(join(tmpdir(), 'tg-extra-input-offline-'));
   const env = makeEnv({ CONTROL_PLANE_URL: 'https://cp.test', CONTROL_PLANE_PROFILE: 'extra-input-profile',
     CONTROL_PLANE_SESSION_ID: 'extra-input-session', TG_SLICE_ALLOWED_CHATS: '42', TG_SLICE_ALLOWED_USERS: '43',
@@ -76,7 +76,17 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     }
     if (url.hostname === 'cp.test' && url.pathname === '/route') {
       routes.push(body);
-      expect(body).toEqual({ taskId: accepted.taskId, continue: true });
+      if (body.continue === false) {
+        if (boundary === 'provider-failure') return Response.json({ error: 'synthetic provider unavailable' }, { status: 503 });
+        if (boundary === 'malformed') return Response.json([]);
+        if (['clarify', 'required_input'].includes(boundary)) return Response.json({ route: boundary,
+          askUser: { question: 'Which date should the fixture use?' } });
+        if (boundary === 'append-race') await sendUpdate(message(204, 'Newest concurrent input: keep value 999.'));
+        return Response.json({ decisionId: 'offline-extra-input-decision', generation: 1,
+          route: 'agent', degraded: boundary === 'degraded', continuation: { requested: false, issued: false } });
+      }
+      expect(body).toMatchObject({ taskId: accepted.taskId, continue: true, workStyle: 'answer',
+        decisionId: 'offline-extra-input-decision', generation: 1 });
       dispatches.add(body.taskId);
       return Response.json({ decisionId: 'offline-extra-input-decision', route: 'agent', mode: 'agent',
         needsExecutor: true, continuation: { owner: 'output', requested: true, issued: true,
@@ -172,23 +182,67 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(buttons.filter(data => data === "intake_ready" || data.startsWith("ws|"))).toHaveLength(1);
     expect(buttons.some(data => data.startsWith('intake_stop'))).toBe(false);
     if (boundary === 'after-collector') expect(edits.some(edit => edit.message_id === 701)).toBe(true);
-    const launch = { update_id: 202, callback_query: { id: 'offline-extra-input-launch',
+    const ready = { update_id: 202, callback_query: { id: 'offline-extra-input-ready',
+      from: { id: 43, is_bot: false }, data: 'intake_ready',
+      message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
+    await sendUpdate(ready);
+    expect(intakes).toHaveLength(1);
+    expect(dispatches.size).toBe(0);
+    expect(intakes[0].inputItems.map(item => item.text)).toEqual([first.message.text, extra.message.text]);
+    if (['clarify', 'required_input', 'degraded', 'malformed', 'provider-failure', 'append-race'].includes(boundary)) {
+      expect(routes).toEqual([{ taskId: accepted.taskId, continue: false }]);
+      const expectedIds = boundary === 'append-race' ? [200, 201, 204] : [200, 201];
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      expect([...edits, ...sends].some(item => item.reply_markup?.inline_keyboard?.flat()
+        .some(button => button.callback_data?.startsWith('ws|')))).toBe(false);
+      if (['clarify', 'required_input'].includes(boundary)) {
+        expect([...edits, ...sends].some(item => item.text.includes('Which date should the fixture use?'))).toBe(true);
+      }
+      await runtime.dispose();
+      runtime = new Miniflare(options);
+      await sendUpdate(ready); // duplicate signed webhook after a cold restart
+      await alarm();
+      expect(routes).toHaveLength(1);
+      expect(intakes).toHaveLength(1);
+      expect(dispatches.size).toBe(0);
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      await sendUpdate({ update_id: 205, callback_query: { id: 'stale-style',
+        from: { id: 43, is_bot: false }, data: 'ws|answer|2',
+        message: { message_id: 701, chat: { id: 42, type: 'private' } } } });
+      expect(dispatches.size).toBe(0);
+      expect((await state()).buf.map(item => item.messageId)).toEqual(expectedIds);
+      return;
+    }
+    if (boundary === 'clear') {
+      await sendUpdate({ update_id: 203, callback_query: { id: 'clear-ready',
+        from: { id: 43, is_bot: false }, data: `intake_discard|${await draftRevision()}`,
+        message: { message_id: 701, chat: { id: 42, type: 'private' } } } });
+      expect((await state()).buf).toEqual([]);
+      expect(dispatches.size).toBe(0);
+      expect(routes).toEqual([{ taskId: accepted.taskId, continue: false }]);
+      return;
+    }
+    // Restart between classification and explicit choice: the task identity survives.
+    await runtime.dispose();
+    runtime = new Miniflare(options);
+    const launch = { update_id: 203, callback_query: { id: 'offline-extra-input-launch',
       from: { id: 43, is_bot: false }, data: `ws|answer|${await draftRevision()}`,
       message: { message_id: 701, chat: { id: 42, type: 'private' } } } };
     await sendUpdate(launch);
-    expect(intakes).toHaveLength(0);
+    expect(intakes).toHaveLength(1);
     await sendUpdate(launch);
     await alarm();
     expect(intakes).toHaveLength(1);
     expect(intakes[0].inputItems).toEqual([{ text: first.message.text, artifactRefs: [] },
       { text: extra.message.text, artifactRefs: [] }]);
-    const batchRequestId = `tg-${digest('42:200,201')}`;
-    expect(intakes[0].requestId).toBe(`tgcp-${digest(`probability_cat_bot:extra-input-profile:42::${batchRequestId}`)}`);
-    expect(routes).toHaveLength(1);
+    expect(intakes[0].requestId).toMatch(/^tgcp-[a-f0-9]{64}$/);
+    expect(routes).toHaveLength(2);
     expect(dispatches.size).toBe(1);
     completed = true;
     await alarm();
-    expect(routes).toEqual([{ taskId: accepted.taskId, continue: true }]);
+    expect(routes).toHaveLength(2);
+    expect(routes[0]).toEqual({ taskId: accepted.taskId, continue: false });
+    expect(routes[1]).toMatchObject({ taskId: accepted.taskId, continue: true, workStyle: 'answer' });
     expect(dispatches.size).toBe(1);
     const reconciledRoutes = structuredClone(routes);
     expect(sends.filter(item => item.text === answer)).toHaveLength(1);
@@ -196,7 +250,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(terminal.receipt).toBeNull();
     expect(terminal.terminal).toMatchObject({ deliveryId: `terminal:${accepted.taskId}:g1`,
       userTaskId: accepted.taskId, generation: 1, status: 'sent', attempts: 1,
-      providerMessageId: 702, chatId: 42, threadId: null });
+      providerMessageId: 703, chatId: 42, threadId: null });
     await runtime.dispose();
     runtime = new Miniflare(options);
     await sendUpdate(launch);
@@ -208,7 +262,7 @@ it.each(['before-collector', 'after-collector'])('retains two-message aggregate 
     expect(intakes).toHaveLength(1);
     expect(routes).toEqual(reconciledRoutes);
     expect(dispatches.size).toBe(1);
-    expect(sends).toHaveLength(2);
+    expect(sends).toHaveLength(3);
     expect(sends.filter(item => item.text === answer)).toHaveLength(1);
     expect(unexpected).toEqual([]);
   } finally {

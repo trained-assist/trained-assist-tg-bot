@@ -199,6 +199,15 @@ export function beginTestCapture(chatId, { deliverToTelegram = false } = {}) {
   };
 }
 
+// Safe, request-scoped diagnostics for the synthetic sandbox operator API.
+// Ordinary chats have no active capture, so this never changes user messages.
+export function captureTestDiagnostic(chatId, name, detail) {
+  const capture = testCaptures.get(Number(chatId));
+  if (!capture) return false;
+  capture.entries.push({ kind: 'diagnostic', name: String(name).slice(0, 64), detail });
+  return true;
+}
+
 // In the sandbox's real-delivery mode, keep the operator transcript while
 // still sending through Telegram. This lets the E2E harness consume generated
 // credentials and callback IDs without turning the run into delivery=log.

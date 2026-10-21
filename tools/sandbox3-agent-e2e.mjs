@@ -53,22 +53,57 @@ async function workerRequest(path, body) {
   }
 }
 
-async function launchWithStyle({ chatId, userId, delivery, updateId, beforeCollector, style = 'auto' }) {
-  // PR #777 changed the CP collector UX: users first confirm with "Готово",
-  // then choose a work style. Exercise both callbacks as the visible UI does.
-  const ready = await workerRequest('/operator/test-update', {
-    target: 'sandbox3', type: 'callback', chatId, userId, delivery,
-    callbackData: 'intake_ready', updateId: updateId++,
-  });
+async function launchWithStyle({ chatId, userId, delivery, updateId, beforeCollector, style = 'auto', scenario = null, taskMarker = null }) {
+  // Confirm the full input snapshot. A quick route completes on this callback;
+  // an agent route leaves the draft available for an explicit work style.
+  let ready;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    ready = await workerRequest('/operator/test-update', {
+      target: 'sandbox3', type: 'callback', chatId, userId, delivery,
+      callbackData: 'intake_ready', updateId: updateId++,
+    });
+    const transcriptText = (ready.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
+    if (!transcriptText.includes('Черновик изменился или проверка не завершилась')) break;
+    // The live Worker can rotate a collector revision between the operator's
+    // ownership read and the webhook callback. A rejected tap preserves input;
+    // emulate the user tapping Готово again on the still-current collector.
+    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
   assert.equal(ready.ok, true, 'sandbox_collector_ready_callback_failed');
-  // Clear/likely input is launched by the Ready action itself. Only an
-  // incomplete or unavailable verdict leaves a draft for explicit style choice.
+  if (scenario === 'ready-agent') {
+    assert.equal(launchWasDispatched(ready, beforeCollector), false, 'ready_agent_dispatched_before_style_choice');
+    const readyText = (ready.transcript ?? []).map(item => String(item.text ?? '')).join('\n');
+    const explanationShown = readyText.includes('Не нашёл готовый ответ');
+    console.log(JSON.stringify({ scenario: 'ready-agent-classification', explanationShown,
+      transcript: (ready.transcript ?? []).map(item => ({ kind: item.kind,
+        text: String(item.text ?? '').slice(0, 300), telegramOk: item.telegramOk === true,
+        ...(item.kind === 'diagnostic' ? { name: item.name, detail: item.detail } : {}) })),
+      callbackOwnedBeforeDispatch: ready.callbackOwnedBeforeDispatch === true,
+      collector: { pendingCount: ready.collector?.pendingCount ?? null,
+        busy: ready.collector?.busy === true,
+        dispatchStatus: ready.collector?.lastDispatchOutcome?.status ?? null,
+        dispatchReasonCode: ready.collector?.lastDispatchOutcome?.reasonCode ?? null } }));
+    assert(explanationShown, 'ready_agent_fallback_explanation_missing');
+  }
+  if (scenario === 'ready-quick') {
+    assert.equal(launchWasDispatched(ready, beforeCollector), true, 'ready_quick_did_not_dispatch');
+  }
+  // The classifier's quick route completes here; fallback requires a style.
   if (launchWasDispatched(ready, beforeCollector)) return { ...ready, nextUpdateId: updateId };
+  let readyTaskId = null;
+  if (scenario === 'ready-agent') {
+    const [routedTask] = await d1('SELECT id FROM durable_tasks WHERE profile_id = ? AND goal LIKE ? ORDER BY created_at DESC LIMIT 1',
+      [PROFILE_ID, `%${taskMarker}%`]);
+    assert(typeof routedTask?.id === 'string' && routedTask.id.length > 0, 'ready_agent_classification_task_missing');
+    readyTaskId = routedTask.id;
+    const [beforeStyle] = await d1('SELECT count(*) AS n FROM executions WHERE task_id = ?', [readyTaskId]);
+    assert.equal(Number(beforeStyle.n), 0, 'ready_agent_run_created_before_explicit_choice');
+  }
   const launched = await workerRequest('/operator/test-update', {
     target: 'sandbox3', type: 'callback', chatId, userId, delivery,
     callbackData: style, updateId: updateId++,
   });
-  return { ...launched, nextUpdateId: updateId };
+  return { ...launched, nextUpdateId: updateId, readyTaskId };
 }
 
 async function deliveryRead(taskId) {
@@ -360,7 +395,7 @@ async function main() {
   const fileFixture = fileFixtures[scenario] ?? null;
   assert(['capture', 'telegram'].includes(deliveryMode), 'sandbox3_delivery_mode_invalid');
   assert(deliveryMode !== 'capture' || fileFixture || ['artifact-export', 'playwright-artifact'].includes(scenario), 'capture_mode_not_supported_for_scenario');
-  assert(['basic', 'ping-pong', 'service-reply', 'capability-reply', 'multiline', 'history', 'stop', 'retry-mid-run', 'artifact-export', 'playwright-artifact'].includes(scenario) || fileFixture, 'sandbox3_scenario_invalid');
+  assert(['basic', 'ping-pong', 'service-reply', 'capability-reply', 'ready-quick', 'ready-agent', 'multiline', 'history', 'stop', 'retry-mid-run', 'artifact-export', 'playwright-artifact'].includes(scenario) || fileFixture, 'sandbox3_scenario_invalid');
   const pingPong = scenario === 'ping-pong';
   const { chatId, userId } = pinnedIdentity();
   const nonce = `E2E-${randomBytes(8).toString('hex').toUpperCase()}`;
@@ -374,16 +409,17 @@ async function main() {
     ? `Use your shell tool to run the harmless command \`sleep 20\` and wait for it to finish. Only then reply with exactly this token: ${nonce}`
     : scenario === 'service-reply'
     ? 'Работает?'
-    : scenario === 'capability-reply'
+    : scenario === 'capability-reply' || scenario === 'ready-quick'
     ? 'Что ты умеешь?'
     : scenario === 'multiline'
     ? `Reply with exactly these three lines and preserve their line breaks:\n${nonce}-LINE-1\n${nonce}-LINE-2\n${nonce}-LINE-3`
     : scenario === 'history'
       ? `Remember this token for my next question: ${nonce}. Reply with exactly READY and nothing else.`
       : pingPong ? `Use your shell tool to run \`printf '%s' '${nonce}'\` and tell me what it printed. You may add a brief explanation.`
+      : scenario === 'ready-agent' ? `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`
       : `Create a concise three-step checklist for organizing a small community event. Include this unique marker exactly once: ${nonce}`;
   const expectedLines = scenario === 'service-reply' ? ['Сервис работает! Отправляйте задание!']
-    : scenario === 'capability-reply' ? ['Доступные quick answers']
+    : scenario === 'capability-reply' || scenario === 'ready-quick' ? ['Доступные quick answers']
     : scenario === 'multiline'
     ? [`${nonce}-LINE-1`, `${nonce}-LINE-2`, `${nonce}-LINE-3`]
     : scenario === 'history' ? ['READY'] : fileFixture ? [fileFixture.expected]
@@ -450,17 +486,18 @@ async function main() {
     console.log(JSON.stringify({ scenario: 'sandbox-file-intake', manifestPresentInIntake: true,
       telegramFileIdPersisted: false, fileName: fileFixture.name }));
   }
+  const launched = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
+    beforeCollector: question.collector, scenario, taskMarker: nonce });
+  updateId = launched.nextUpdateId;
+  assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
+  // Replay after the ready callback so duplicate delivery cannot rotate the
+  // collector while the user is pressing «Готово».
   const replay = await workerRequest('/operator/test-update', questionUpdate);
   assert.equal(replay.ok, true, 'sandbox_duplicate_update_not_acknowledged');
-  assert.equal(replay.collector?.pendingCount, 1, 'duplicate_update_added_input_twice');
+  assert.equal(replay.collector?.pendingCount, 0, 'duplicate_update_reopened_intake_after_ready');
   console.log(JSON.stringify({ scenario: 'duplicate-telegram-update-replay',
     sameUpdateReplayed: true, pendingCountBeforeReplay: question.collector.pendingCount,
     pendingCountAfterReplay: replay.collector.pendingCount }));
-
-  const launched = await launchWithStyle({ chatId, userId, delivery: deliveryMode, updateId,
-    beforeCollector: question.collector });
-  updateId = launched.nextUpdateId;
-  assert.equal(launched.ok, true, 'sandbox_task_launch_callback_failed');
   failureDiagnostics = { stage: 'waiting_for_task' };
 
   let midRunReplayEvidence = null;
@@ -485,7 +522,16 @@ async function main() {
   }
 
   const task = await waitForTask();
-  const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply';
+  if (scenario === 'ready-agent') assert.equal(task.id, launched.readyTaskId, 'ready_agent_fallback_created_a_different_task');
+  if (scenario === 'ready-agent') {
+    const [choice] = await d1('SELECT payload_json FROM task_events WHERE event_id = ?',
+      [`routing-continuation:${task.id}:${task.generation}`]);
+    const selected = JSON.parse(choice?.payload_json ?? 'null');
+    assert.equal(selected?.workStyle, 'auto', 'ready_agent_selected_style_not_persisted');
+    assert(typeof selected?.decisionId === 'string' && !!selected.idempotencyKey, 'ready_agent_choice_identity_missing');
+    console.log(JSON.stringify({ scenario: 'ready-agent-choice', workStyle: selected.workStyle, decisionBound: true }));
+  }
+  const deterministicScenario = scenario === 'service-reply' || scenario === 'capability-reply' || scenario === 'ready-quick';
   const taskGoalPresent = typeof task.goal === 'string' && task.goal.trim().length > 0;
   const goalContainsExpectedInput = fileFixture ? null : taskGoalPresent
     && (deterministicScenario ? task.goal.includes(prompt) : task.goal.includes(nonce));
@@ -874,8 +920,12 @@ async function main() {
     ok: true,
     scenario: `sandbox3-profile-login-question-runner-answer-${deliveryMode}`,
     inputScenario: scenario,
+    readyIntentEvidence: scenario === 'ready-quick' ? { quickAnswerDispatchedOnReady: true, styleChoiceRequired: false }
+      : scenario === 'ready-agent' ? { quickAnswerDispatchedOnReady: false, fallbackExplanationShown: true,
+        selectedStyle: 'auto', sameTaskContinued: true } : null,
     deliveryMode,
-    sourceSha: process.env.GITHUB_SHA ?? null,
+    sourceSha: process.env.CANDIDATE_SHA ?? process.env.GITHUB_SHA ?? null,
+    controlPlaneSha: process.env.EXPECTED_CP_SHA ?? null,
     communicationOutcome,
     communicationReasonCode,
     communicationProviderCode: providerCode,

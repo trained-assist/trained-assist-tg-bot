@@ -12,6 +12,7 @@ import { runTask, getSessions, readFile, archiveSessions, getProjects, stopTask,
 import { cmdFiles, timeAgo, renderSessionList } from './commands.js';
 import { stopChat, stopReplyText } from '../lib/stop-chat.js';
 import { controlPlaneStopDisabled } from '../lib/control-plane-stop-gate.js';
+import { captureTestDiagnostic } from '../lib/test-mode.js';
 
 // Topic-aware outbound helpers (issue #255): every NEW message must carry
 // message_thread_id so it lands in the same forum topic as its trigger. editMessage
@@ -91,7 +92,11 @@ export async function handleCallbackQuery(cq, env) {
   }
 
   let session = await getSession(env.SESSIONS, chatId, threadId);
-  if (!(await controlPlaneCallbackOwned(cq, env, session))) {
+  // Intake ready performs its authoritative revision and ownership check
+  // inside the DO operation below. A separate preflight here followed by
+  // answerCallbackQuery could let a collector alarm rotate the revision
+  // between the two checks and reject a still-current tap.
+  if (data !== 'intake_ready' && !(await controlPlaneCallbackOwned(cq, env, session))) {
     await answerCallbackQuery(env.BOT_TOKEN, id, '⌛ Кнопка устарела или её актуальность не подтверждена — используй текущее сообщение.');
     return;
   }
@@ -689,25 +694,42 @@ export async function handleCallbackQuery(cq, env) {
     if (!env.INTAKE) return;
     const threadId = threadIdOf(message);
     const stub = env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadId)));
-    const check = await stub.fetch('https://intake/ready-check', {
-      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id }),
-    }).then(r => r.json()).catch(() => null);
-    const revision = Number.isSafeInteger(check?.revision) ? check.revision : 1;
-    const found = ['clear', 'likely', 'continue'].includes(check?.level);
-    if (found) {
-      const response = await stub.fetch('https://intake/flush', {
-        method: 'POST', body: JSON.stringify({ callbackData: `ws|auto|${revision}`, username: session.username,
-          sourceMessageId: message?.message_id, messageId: message?.message_id }),
-      }).catch(err => { sendT(env, chatId, threadId, `❌ Ошибка: ${err.message}`); return null; });
-      if (!response) return;
-      const r = await response.json().catch(() => null);
-      if (r?.asynchronous) return;
-      if (r?.queued && !r?.preparing) await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу эти сообщения сразу после неё.');
+    const response = await stub.fetch('https://intake/ready', {
+      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id,
+        callbackData: 'intake_ready', callbackId: id, sourceMessageId: message?.message_id }),
+    }).catch(err => { sendT(env, chatId, threadId, `❌ Не удалось проверить ввод: ${err.message}. Черновик сохранён; нажми «Готово» ещё раз.`); return null; });
+    if (!response) return;
+    const refusalBody = !response.ok ? await response.clone().text().catch(() => '') : '';
+    const outcome = await response.json().catch(() => null);
+    if (!response.ok) {
+      captureTestDiagnostic(chatId, 'intake-ready-refused', {
+        status: response.status, response: refusalBody.slice(0, 160),
+      });
+      await sendT(env, chatId, threadId, '⚠️ Черновик изменился или проверка не завершилась. Ввод сохранён; нажми «Готово» на актуальном сообщении.');
       return;
     }
-    await stub.fetch('https://intake/show-styles', {
-      method: 'POST', body: JSON.stringify({ username: session.username, chatId, threadId, messageId: message?.message_id }),
-    }).catch(() => null);
+    if (outcome?.kind === 'agent') await sendT(env, chatId, threadId,
+      '🧭 Не нашёл готовый ответ для этого запроса. Если я неверно распознал задачу, выбери режим полноценного агента:');
+    if (outcome?.kind === 'queued') await sendT(env, chatId, threadId, '⏳ Идёт текущая задача. Запущу этот ввод после неё.');
+    return;
+  }
+
+  if (/^ws\|(explore|answer|auto)\|\d+$/.test(data || '') && env.EXECUTION_BACKEND === 'control-plane') {
+    if (!session) { await answerCallbackQuery(env.BOT_TOKEN, id, '⚠️ Войди: /login'); return; }
+    await answerCallbackQuery(env.BOT_TOKEN, id, '📨 Запускаю полноценного агента…');
+    if (!env.INTAKE) return;
+    const response = await env.INTAKE.get(env.INTAKE.idFromName(conversationKey(chatId, threadIdOf(message)))).fetch('https://intake/ready', {
+      method: 'POST', body: JSON.stringify({ ...callbackSource(cq, env, session), callbackData: data }),
+    }).catch(err => { sendT(env, chatId, threadIdOf(message), `❌ Не удалось запустить агента: ${err.message}`); return null; });
+    if (!response) return;
+    if (!response.ok) {
+      const refusal = await response.clone().json().catch(() => null);
+      const reasonCode = typeof refusal?.reasonCode === 'string' ? refusal.reasonCode : null;
+      if (reasonCode) console.warn(JSON.stringify({ event: 'tg.callback.launch_refused', reasonCode }));
+      await sendT(env, chatId, threadIdOf(message), reasonCode
+        ? launchRefusalText(reasonCode)
+        : '⚠️ Не удалось запустить агента. Черновик сохранён; нажми кнопку режима ещё раз.');
+    }
     return;
   }
 
