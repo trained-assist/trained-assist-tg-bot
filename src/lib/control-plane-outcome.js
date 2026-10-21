@@ -1,4 +1,9 @@
 export function controlPlaneRunFailureCode(run) {
+  // The worker crash is its own failure class: the runner reports it as
+  // `WORKER_CRASH` (the VM worker process restarted mid-run), not as a
+  // rejection of the request. It must stay distinguishable from
+  // `runner_rejected`, otherwise the crash explanation is lost.
+  if (run?.error_class === 'WORKER_CRASH') return 'WORKER_CRASH';
   if (run?.error_class !== 'runner_rejected') return null;
   if (run.failure_code === 'ENGINE_NOT_ALLOWED') return 'ENGINE_NOT_ALLOWED';
   return typeof run.error_text === 'string' && /(?:^|\s)ENGINE_NOT_ALLOWED(?:\b|:)/.test(run.error_text)
@@ -30,6 +35,15 @@ export function controlPlaneFailureText(status) {
   if (Number.isSafeInteger(generation) && generation > 0 && runs.some(run => run?.generation === generation
     && run.status === 'failed' && controlPlaneRunFailureCode(run) === 'ENGINE_NOT_ALLOWED')) {
     return 'Ошибка настройки исполнителя: выбранный движок недоступен. Ввод сохранён.';
+  }
+  // A crashed worker is an infrastructure event, not a bad request: the user
+  // needs to know the task was retried once and that their input is intact.
+  // Only the failed attempt of the current generation speaks for this task —
+  // an earlier generation's crash must not be attributed to it.
+  if (Number.isSafeInteger(generation) && generation > 0 && runs.some(run => run?.generation === generation
+    && run.status === 'failed' && controlPlaneRunFailureCode(run) === 'WORKER_CRASH')) {
+    return '❌ Исполнитель аварийно завершился во время работы — это сбой среды исполнения, а не ошибка вашего запроса. '
+      + 'Система автоматически перезапускает задачу один раз; если сбой повторился, отправьте запрос заново. Ввод сохранён.';
   }
   if (controlPlaneRunHadNoVisibleOutcome(status)) {
     return '❌ Исполнитель завершил задачу без текстового ответа. Результат не подтверждён; проверьте задачу перед повторным запуском.';
