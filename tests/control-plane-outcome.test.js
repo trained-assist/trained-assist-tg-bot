@@ -26,4 +26,32 @@ describe('CP failure delivery', () => {
     expect(text).not.toBe('Ошибка исполнителя.');
     expect(text).toContain('без текстового ответа');
   });
+
+  it('explains a worker crash instead of reporting a generic executor error', () => {
+    const crashed = { generation: 2, status: 'failed', error_class: 'WORKER_CRASH',
+      error_text: 'worker restarted while the run was active; execution outcome recorded as lost without a hidden rerun' };
+    const text = controlPlaneFailureText({ generation: 2, runs: [crashed] });
+    expect(text).not.toBe('Ошибка исполнителя.');
+    expect(text).toContain('сбой среды исполнения');
+    expect(text).toContain('Ввод сохранён');
+    expect(controlPlaneRunFailureCode(crashed)).toBe('WORKER_CRASH');
+  });
+
+  it('never attributes a crash of another generation or a running attempt to this failure', () => {
+    const crashed = { generation: 2, status: 'failed', error_class: 'WORKER_CRASH' };
+    for (const change of [{ generation: 1 }, { generation: 3 }, { status: 'running' }, { status: 'success' },
+      { error_class: 'runner_unavailable' }]) {
+      expect(controlPlaneFailureText({ generation: 2, runs: [{ ...crashed, ...change }] })).toBe('Ошибка исполнителя.');
+    }
+    expect(controlPlaneFailureText({ generation: 0, runs: [crashed] })).toBe('Ошибка исполнителя.');
+    expect(controlPlaneFailureText({ generation: 2, runs: [] })).toBe('Ошибка исполнителя.');
+  });
+
+  it('keeps the engine rejection explanation separate from the worker crash one', () => {
+    const rejected = { generation: 1, status: 'failed', error_class: 'runner_rejected',
+      error_text: 'ENGINE_NOT_ALLOWED: this API does not run engine "fixture" private-secret' };
+    const text = controlPlaneFailureText({ generation: 1, runs: [rejected] });
+    expect(text).toContain('выбранный движок недоступен');
+    expect(text).not.toContain('сбой среды исполнения');
+  });
 });
